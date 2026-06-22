@@ -433,6 +433,10 @@ class TUI:
         if not self._history or self._history[-1] != text:
             self._history.append(text)
 
+        # show the user's input immediately before any response appears
+        self._add_chat("user", text)
+        self._redraw()
+
         # handle pending y/N confirmation
         if self._pending_confirm is not None:
             action = self._pending_confirm

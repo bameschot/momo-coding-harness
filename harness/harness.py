@@ -192,7 +192,6 @@ class Harness:
     def send(self, text: str):
         """Called from the harness worker thread."""
         self.messages.append({"role": "user", "content": text})
-        self.event_queue.put(ChatEvent("user", text))
 
         tools = READ_ONLY_TOOLS if self.mode == "design" else ALL_TOOLS
         _MAX_ITERATIONS = 20
