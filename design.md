@@ -139,9 +139,15 @@ Scroll keys in the main loop manipulate `_chat_buf._scroll` directly; `_tool_buf
 
 ### Input handling
 
-The input bar uses a plain Python string `_input`. Characters in the printable ASCII range (32–126) are appended. Backspace (keycodes 127, 8, `KEY_BACKSPACE`) removes the last character. Enter (10, 13, `KEY_ENTER`) calls `_submit()`.
+The input area is 4 rows tall. State is `_input_lines: list[str]` (one entry per logical line). Characters in printable ASCII (32–126) are appended to the last element. Backspace removes the last character of the last element, or pops the element if it is empty and there is more than one. Shift+Enter appends a new empty element (new line). Enter calls `_submit()`.
 
-`_submit()` checks for a `/` prefix before sending to the harness. Slash commands are handled synchronously on the main thread (they are fast). Regular messages are dispatched to a new daemon `threading.Thread` calling `harness.send(text)`. The `_busy` flag prevents submitting a second message while the background thread is running.
+`_submit()` joins `_input_lines` with `\n`, strips the result, resets the buffer, and saves the text to `_history` (deduplicates consecutive identical submissions). Slash commands are handled synchronously on the main thread. Regular messages are dispatched to a daemon thread via `harness.send(text)`. The `_busy` flag prevents double-submit.
+
+**Command history** (`_history: list[str]`) is in-memory for the session. `↑`/`↓` navigate it. On first `↑` the current buffer is stashed in `_history_stash`; `↓` past the newest entry restores the stash. `_history_idx = -1` means "not browsing."
+
+**Shift+Enter** detection uses xterm `modifyOtherKeys` mode (escape sequence `\033[>4;2m` written to stdout before curses takes over). Two key sequences are registered with `curses.define_key`: `\033[27;2;13~` (xterm/VTE) and `\033[13;2u` (kitty), both mapped to the synthetic constant `KEY_SHIFT_ENTER = 600`. The mode is reset with `\033[>4;0m` in the `finally` block of `run_tui`. If the terminal does not support the protocol the define_key calls silently fail and Shift+Enter behaves like regular Enter.
+
+**Chat scroll** uses `PgUp`/`PgDn`. `↑`/`↓` are reserved for history navigation.
 
 ---
 

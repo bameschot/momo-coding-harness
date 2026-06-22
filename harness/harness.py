@@ -11,6 +11,8 @@ from .logger import Logger
 from .ollama_client import OllamaClient
 from .tools import READ_ONLY_TOOLS, ALL_TOOLS, dispatch
 
+_ROLES_DIR = Path(__file__).parent.parent / "roles"
+
 
 # ── TUI events ────────────────────────────────────────────────────────────────
 
@@ -48,14 +50,24 @@ class DoneEvent:
 
 # ── system prompts ────────────────────────────────────────────────────────────
 
-_DESIGN_PROMPT = (
-    "You are a software design assistant. "
-    "Explore the codebase using the available read-only tools to understand context. "
-    "Ask focused clarifying questions to build a clear specification. "
-    "Do not write or modify any code or files."
-)
+def _load_role(name: str) -> str:
+    try:
+        return (_ROLES_DIR / f"{name}.md").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+def _design_prompt() -> str:
+    return _load_role("designer") or (
+        "You are a software design assistant. "
+        "Explore the codebase using the available read-only tools to understand context. "
+        "Ask focused clarifying questions to build a clear specification. "
+        "Do not write or modify any code or files."
+    )
 
 def _coding_prompt(workdir: str) -> str:
+    raw = _load_role("coder")
+    if raw:
+        return raw.replace("{workdir}", workdir)
     return (
         "You are an expert software engineer. "
         "Use the provided tools to implement the user's request. "
@@ -93,7 +105,7 @@ class Harness:
 
         self.max_tool_result = 4000   # chars; configurable via /tool-result or --max-tool-result
         self.messages: list[dict] = [
-            {"role": "system", "content": _DESIGN_PROMPT}
+            {"role": "system", "content": _design_prompt()}
         ]
         self._token_estimate = 0
 
@@ -114,7 +126,7 @@ class Harness:
     def set_mode(self, mode: str):
         self.mode = mode
         if mode == "design":
-            self.messages[0] = {"role": "system", "content": _DESIGN_PROMPT}
+            self.messages[0] = {"role": "system", "content": _design_prompt()}
         else:
             self.messages[0] = {"role": "system", "content": _coding_prompt(str(self.workdir))}
         self._emit_status()

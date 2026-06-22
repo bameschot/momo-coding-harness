@@ -12,6 +12,9 @@ class CommandResult:
     handled: bool
     output: str | None = None
     exit_app: bool = False
+    confirm_prompt: str | None = None       # if set, TUI asks this before proceeding
+    confirm_action: "callable | None" = None  # called with no args when user answers y
+    toggle_tools: bool = False              # TUI toggles tool-pane visibility
 
 
 def handle(line: str, harness: Harness) -> CommandResult:
@@ -65,12 +68,29 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=f"Working directory: {harness.workdir}")
         p = Path(arg).expanduser().resolve()
         if not p.is_dir():
-            return CommandResult(handled=True, output=f"ERROR: not a directory: {arg}")
+            def _create():
+                try:
+                    p.mkdir(parents=True, exist_ok=True)
+                except OSError as e:
+                    return f"ERROR: could not create directory: {e}"
+                harness.workdir = p
+                if harness.mode == "coding":
+                    harness.set_mode("coding")
+                harness._emit_status()
+                return f"Created and set working directory: {p}"
+            return CommandResult(
+                handled=True,
+                confirm_prompt=f"Directory does not exist: {p}\nCreate it?",
+                confirm_action=_create,
+            )
         harness.workdir = p
         if harness.mode == "coding":
             harness.set_mode("coding")  # refresh system prompt with new workdir
         harness._emit_status()
         return CommandResult(handled=True, output=f"Working directory set to: {p}")
+
+    if cmd == "/toggle-tool-output":
+        return CommandResult(handled=True, toggle_tools=True)
 
     if cmd == "/compact":
         notice = harness.compact()
@@ -136,6 +156,7 @@ Available commands:
   /clear              Clear conversation history
   /workdir            Show current working directory
   /workdir <path>     Set working directory for file operations
+  /toggle-tool-output Toggle the tool calls pane on/off
   /compact            Compact context (remove old tool calls / messages)
   /context            Show context limit and current usage
   /context <n>        Set context token limit (e.g. /context 8192)

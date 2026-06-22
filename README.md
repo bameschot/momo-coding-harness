@@ -18,7 +18,7 @@ pip install -r requirements.txt
 ## Running
 
 ```bash
-python -m harness.main
+python momo-coding-harness.py
 ```
 
 Options:
@@ -35,7 +35,7 @@ Options:
 Example targeting a specific project and remote instance:
 
 ```bash
-python -m harness.main --workdir ~/projects/myapp --model qwen3-coder:30b --host http://192.168.1.10:11434 --max-tool-result 0
+python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b --host http://192.168.1.10:11434 --max-tool-result 0
 ```
 
 ## TUI Layout
@@ -65,7 +65,8 @@ python -m harness.main --workdir ~/projects/myapp --model qwen3-coder:30b --host
 - **Tool calls pane** — live tool call requests and results as the model works.
 - **Status bar** — current mode, model, context usage %, and working directory.
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
-- **Input bar** — type here. Press Enter to send.
+- **Input bar** — 4-row area (long messages word-wrap). Press Enter to send. `↑`/`↓` navigate command history when input is focused.
+- **Focus** — Press `Tab` to cycle focus between Chat, Tool Calls, and Input. The focused pane's right edge highlights (green = chat, yellow = tool calls, cyan prefix = input). `↑`/`↓` and `PgUp`/`PgDn` scroll whichever pane is focused.
 
 ## Modes
 
