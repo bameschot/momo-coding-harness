@@ -27,6 +27,7 @@ _C_STATUS    = 6
 _C_WARN      = 7
 _C_DANGER    = 8
 _C_BORDER    = 9
+_C_BUSY      = 10
 
 
 def _init_colors():
@@ -37,10 +38,11 @@ def _init_colors():
     curses.init_pair(_C_SYSTEM,    curses.COLOR_MAGENTA, -1)
     curses.init_pair(_C_TOOL_NAME, curses.COLOR_YELLOW,  -1)
     curses.init_pair(_C_TOOL_RES,  -1,                   -1)
-    curses.init_pair(_C_STATUS,    curses.COLOR_BLACK,   curses.COLOR_WHITE)
+    curses.init_pair(_C_STATUS,    curses.COLOR_GREEN,   -1)
     curses.init_pair(_C_WARN,      curses.COLOR_YELLOW,  -1)
     curses.init_pair(_C_DANGER,    curses.COLOR_RED,     -1)
     curses.init_pair(_C_BORDER,    curses.COLOR_WHITE,   -1)
+    curses.init_pair(_C_BUSY,      curses.COLOR_BLACK,   curses.COLOR_YELLOW)
 
 
 # ── spinner ───────────────────────────────────────────────────────────────────
@@ -141,12 +143,13 @@ class _LineBuffer:
 
 # ── layout ────────────────────────────────────────────────────────────────────
 
-_INPUT_H = 4  # fixed height of the multi-line input area
+_INPUT_H  = 4  # fixed height of the multi-line input area
+_STATUS_H = 3  # top border + text + bottom border
 
 def _compute_layout(rows: int, cols: int) -> dict:
-    chat_h   = max(4, rows - 2 - _INPUT_H)  # status(1) + input(_INPUT_H)
+    chat_h   = max(4, rows - _STATUS_H - _INPUT_H)
     status_y = chat_h
-    input_y  = chat_h + 1
+    input_y  = chat_h + _STATUS_H
     return {
         "chat_y":   0,       "chat_h": chat_h,
         "status_y": status_y,
@@ -189,7 +192,7 @@ class TUI:
         L = self._layout
         cols = L["cols"]
         self._chat_win   = curses.newwin(L["chat_h"],  cols, L["chat_y"],   0)
-        self._status_win = curses.newwin(1,             cols, L["status_y"], 0)
+        self._status_win = curses.newwin(_STATUS_H,    cols, L["status_y"], 0)
         self._input_win  = curses.newwin(L["input_h"], cols, L["input_y"],  0)
 
     def _rebuild(self):
@@ -212,15 +215,20 @@ class TUI:
         win = self._status_win
         win.erase()
         cols = self._layout["cols"]
+        border_color = self._ctx_color if self._focus == "input" else _C_BORDER
         if self._busy:
             spinner = _SPINNER[self._spinner_frame % len(_SPINNER)]
-            # status left-aligned, spinner right-aligned
-            left = self._status[:cols - 3]
-            line = left.ljust(cols - 2) + spinner
+            line = f" {spinner} thinking  {self._status}"
+            line_color = _C_BUSY
         else:
-            line = self._status.ljust(cols - 1)[:cols - 1]
+            line = f" {self._status}"
+            line_color = border_color
+        line = line[:cols - 1].ljust(cols - 1)
+        rule = "─" * (cols - 1)
         try:
-            win.addnstr(0, 0, line, cols - 1, curses.color_pair(self._ctx_color))
+            win.addnstr(0, 0, rule, cols - 1, curses.color_pair(border_color))
+            win.addnstr(1, 0, line, cols - 1, curses.color_pair(line_color))
+            win.addnstr(2, 0, rule, cols - 1, curses.color_pair(border_color))
         except curses.error:
             pass
         win.noutrefresh()
@@ -234,7 +242,7 @@ class TUI:
 
         # Hard-chunk into rows of (cols-1) chars — preserves trailing spaces
         # so the cursor advances correctly after typing a space.
-        raw = "› " + self._input
+        raw = ("⊘ " if self._busy else "› ") + self._input
         w = max(1, cols - 1)
         chunks = [raw[i:i+w] for i in range(0, len(raw), w)] or ["› "]
 

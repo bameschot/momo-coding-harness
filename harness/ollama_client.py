@@ -14,12 +14,16 @@ class OllamaClient:
     def set_model(self, model: str):
         self.model = model
 
-    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+    def chat(self, messages: list[dict], tools: list[dict],
+             options: dict | None = None, think: bool | None = None) -> dict:
         kwargs: dict = {"model": self.model, "messages": messages}
         if tools:
             kwargs["tools"] = tools
+        if options:
+            kwargs["options"] = options
+        if think is not None:
+            kwargs["think"] = think
         response = self._client.chat(**kwargs)
-        # normalise: the library returns a response object; convert to dict-like access
         return response
 
     def list_models(self) -> list[str]:

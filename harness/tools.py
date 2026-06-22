@@ -112,9 +112,14 @@ CODING_ONLY_TOOLS = [
 
 DESIGN_EXTRA_TOOLS = [
     _fn("write_file",
-        "Write content to a Markdown (.md) file. Only use this when the user explicitly "
-        "asks to write, save, or export the design (e.g. 'write', 'write design', 'save spec'). "
-        "Do NOT call this proactively.",
+        "Save the current design discussion to a Markdown (.md) file. "
+        "Call this ONLY when the user explicitly asks to persist the design that is already "
+        "being discussed — trigger phrases: 'write the design', 'write it up', 'write up the spec', "
+        "'save the design', 'save the spec', 'save it', or 'export'. "
+        "Do NOT trigger on 'write a <thing>' or 'write me a <thing>' — those are requests to "
+        "START a new design discussion, not to save an existing one. "
+        "Do NOT call list_directory, find_files, or read_file before calling this — write "
+        "based on the current conversation without prior exploration.",
         {"path":    {"type": "string", "description": "Destination path — must end with .md"},
          "content": {"type": "string", "description": "Full Markdown content to write"}},
         ["path", "content"]),

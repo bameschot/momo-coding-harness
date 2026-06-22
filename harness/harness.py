@@ -58,10 +58,9 @@ def _load_role(name: str) -> str:
 
 def _design_prompt() -> str:
     return _load_role("designer") or (
-        "You are a software design assistant. "
-        "Explore the codebase using the available read-only tools to understand context. "
-        "Ask focused clarifying questions to build a clear specification. "
-        "Do not write or modify any code or files."
+        "You are a design assistant. When the user describes something to build, "
+        "have a short conversation to clarify the design, then write it up as a "
+        "Markdown spec using write_file when asked or when you have enough information."
     )
 
 def _coding_prompt(workdir: str) -> str:
@@ -103,7 +102,7 @@ class Harness:
         self.event_queue: queue.Queue[Any] = queue.Queue()
         self._lock = threading.Lock()
 
-        self.max_tool_result = 20000   # chars; configurable via /tool-result or --max-tool-result
+        self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
         self.messages: list[dict] = [
             {"role": "system", "content": _design_prompt()}
         ]
@@ -194,9 +193,13 @@ class Harness:
         self.messages.append({"role": "user", "content": text})
 
         tools = DESIGN_TOOLS if self.mode == "design" else ALL_TOOLS
-        _MAX_ITERATIONS = 20
+        _MAX_ITERATIONS = 10 if self.mode == "design" else 20
+        _NUDGE_AFTER = 4  # consecutive tool-only turns before injecting a respond prompt
 
         iteration = 0
+        tool_only_turns = 0
+        last_tool: str | None = None
+        empty_retried = False
         while True:
             if iteration >= _MAX_ITERATIONS:
                 self.event_queue.put(ErrorEvent(f"Tool call loop exceeded {_MAX_ITERATIONS} iterations — stopping"))
@@ -218,7 +221,7 @@ class Harness:
             )
 
             try:
-                response = self.client.chat(self.messages, tools)
+                response = self.client.chat(self.messages, tools, think=False)
             except Exception as e:
                 self.event_queue.put(ErrorEvent(f"Ollama error: {e}"))
                 self.event_queue.put(DoneEvent())
@@ -238,14 +241,41 @@ class Harness:
                 bool(tool_calls),
             )
 
-            # emit assistant text
+            # emit assistant text; when tool calls follow, defer until after they run
+            # so the user never sees a sentence cut off mid-word at a tool boundary
             content = getattr(msg, "content", "") or ""
-            if content:
+            if content and not tool_calls:
+                tool_only_turns = 0
                 self.event_queue.put(ChatEvent("assistant", content))
 
             if not tool_calls:
+                if not content:
+                    if last_tool == "write_file":
+                        # Expected terminal state: write happened, no follow-up needed
+                        self.event_queue.put(ChatEvent("system",
+                            "Design written. Check the file to review it."))
+                    elif not empty_retried:
+                        # First empty — retry once; only inject a user message if the
+                        # last message is not already a user turn (prevents consecutive
+                        # user messages which confuse the model further)
+                        empty_retried = True
+                        if self.messages[-1]["role"] != "user":
+                            self.messages.append({"role": "user", "content":
+                                "Please respond with your current analysis or next question."})
+                        tool_only_turns = 0
+                        continue
+                    else:
+                        self.event_queue.put(ChatEvent("system",
+                            "No response. Please rephrase or add more detail and try again."))
+                    self._autosave()
+                    self.event_queue.put(DoneEvent())
+                    return
                 self.messages.append({"role": "assistant", "content": content})
                 break
+
+            # track consecutive tool-only turns
+            if not content:
+                tool_only_turns += 1
 
             # assistant message with tool calls
             self.messages.append({"role": "assistant", "content": content,
@@ -265,6 +295,7 @@ class Harness:
                     except Exception:
                         args = {}
 
+                last_tool = name
                 self.event_queue.put(ToolCallEvent(name, args))
                 self.logger.log_tool_call(self.mode, self.client.model, name, args)
 
@@ -276,6 +307,27 @@ class Harness:
                 self.logger.log_tool_result(self.mode, self.client.model, name, len(result))
 
                 self.messages.append({"role": "tool", "content": result})
+
+                # write_file is a terminal action — reset the counter so the nudge
+                # doesn't fire immediately after and confuse the follow-up summary
+                if name == "write_file":
+                    tool_only_turns = 0
+
+            # Emit any pre-tool-call text now that all tools have run.
+            # Deferring until here prevents the sentence from being cut off mid-word
+            # at the tool boundary (the model often ends the text just before calling
+            # a tool, leaving an incomplete sentence visible while the tool runs).
+            if content:
+                tool_only_turns = 0
+                self.event_queue.put(ChatEvent("assistant", content))
+
+            # nudge model to respond if stuck in an exploration loop
+            if tool_only_turns >= _NUDGE_AFTER:
+                self.messages.append({"role": "user", "content":
+                    "You have been calling tools for several turns without responding. "
+                    "If the user asked you to write or save the design, call write_file now with the full design. "
+                    "Otherwise stop exploring and write a text response summarising what you found."})
+                tool_only_turns = 0
 
         self._emit_status()
         self._autosave()
@@ -304,6 +356,13 @@ class Harness:
         self.workdir = Path(data.get("workdir", str(self.workdir)))
         self.context_limit = data.get("context_limit", self.context_limit)
         self.client.set_model(data.get("model", self.client.model))
+        # Always refresh the system prompt from the current role file on disk.
+        # Saved sessions carry a snapshot of the old prompt; without this the
+        # model runs stale instructions regardless of role file edits.
+        if self.messages and self.messages[0].get("role") == "system":
+            prompt = (_design_prompt() if self.mode == "design"
+                      else _coding_prompt(str(self.workdir)))
+            self.messages[0] = {"role": "system", "content": prompt}
         self._token_estimate = self._estimate()
         self._emit_status()
         return f"Session loaded: {path.name} ({len(self.messages)} messages)"

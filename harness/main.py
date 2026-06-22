@@ -3,7 +3,8 @@ import curses
 import sys
 from pathlib import Path
 
-from .harness import Harness
+from . import session as session_mod
+from .harness import Harness, ChatEvent
 from .tui import run_tui
 
 
@@ -22,9 +23,11 @@ def main():
     parser.add_argument("--context", default=100000, type=int, metavar="N",
                         help="Initial context token limit")
     parser.add_argument("--mode",    default="design", choices=["design", "coding"],
-                        help="Starting mode")
-    parser.add_argument("--max-tool-result", default=20000, type=int, metavar="N",
+                        help="Starting mode (ignored when restoring a session)")
+    parser.add_argument("--max-tool-result", default=0, type=int, metavar="N",
                         help="Max chars returned by a single tool call (0 = unlimited)")
+    parser.add_argument("--fresh", action="store_true", default=False,
+                        help="Start a new session instead of restoring the last one")
     args = parser.parse_args()
 
     workdir = Path(args.workdir).expanduser().resolve()
@@ -35,7 +38,14 @@ def main():
     harness = Harness(host=args.host, model=args.model, workdir=workdir)
     harness.context_limit = args.context
     harness.max_tool_result = args.max_tool_result
-    harness.set_mode(args.mode)
+
+    # Restore last session unless --fresh
+    sessions = session_mod.list_sessions()
+    if not args.fresh and sessions:
+        msg = harness.load_session(sessions[0])
+        harness.event_queue.put(ChatEvent("system", msg))
+    else:
+        harness.set_mode(args.mode)
 
     try:
         curses.wrapper(run_tui, harness)
