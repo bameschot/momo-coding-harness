@@ -110,7 +110,18 @@ CODING_ONLY_TOOLS = [
         ["command"]),
 ]
 
-ALL_TOOLS = READ_ONLY_TOOLS + CODING_ONLY_TOOLS
+DESIGN_EXTRA_TOOLS = [
+    _fn("write_file",
+        "Write content to a Markdown (.md) file. Only use this when the user explicitly "
+        "asks to write, save, or export the design (e.g. 'write', 'write design', 'save spec'). "
+        "Do NOT call this proactively.",
+        {"path":    {"type": "string", "description": "Destination path — must end with .md"},
+         "content": {"type": "string", "description": "Full Markdown content to write"}},
+        ["path", "content"]),
+]
+
+DESIGN_TOOLS = READ_ONLY_TOOLS + DESIGN_EXTRA_TOOLS
+ALL_TOOLS = READ_ONLY_TOOLS + DESIGN_EXTRA_TOOLS + CODING_ONLY_TOOLS
 
 
 # ── path safety ───────────────────────────────────────────────────────────────
@@ -358,6 +369,20 @@ def _create_file(path: str, content: str, *, workdir: Path) -> str:
     return "OK"
 
 
+def _write_file(path: str, content: str, *, workdir: Path) -> str:
+    if not path.endswith(".md"):
+        return "ERROR: write_file only accepts .md files in design mode"
+    p = _safe_path(path, workdir)
+    if isinstance(p, str):
+        return p
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    except OSError as e:
+        return f"ERROR: {e}"
+    return f"Written: {path}"
+
+
 def _delete_file(path: str, *, workdir: Path) -> str:
     p = _safe_path(path, workdir)
     if isinstance(p, str):
@@ -417,6 +442,7 @@ _EXECUTORS = {
     "read_file":          _read_file,
     "grep_file":          _grep_file,
     "grep_files":         _grep_files,
+    "write_file":         _write_file,
     "move_file":          _move_file,
     "append_to_file":     _append_to_file,
     "replace_all_in_file": _replace_all_in_file,

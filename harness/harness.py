@@ -9,7 +9,7 @@ from typing import Any
 from . import session as session_mod
 from .logger import Logger
 from .ollama_client import OllamaClient
-from .tools import READ_ONLY_TOOLS, ALL_TOOLS, dispatch
+from .tools import DESIGN_TOOLS, ALL_TOOLS, dispatch
 
 _ROLES_DIR = Path(__file__).parent.parent / "roles"
 
@@ -96,14 +96,14 @@ class Harness:
     def __init__(self, host: str, model: str, workdir: Path):
         self.workdir = workdir.resolve()
         self.mode = "design"
-        self.context_limit = 8192
+        self.context_limit = 100000
         self._ts = session_mod.new_timestamp()
         self.logger = Logger(self._ts)
         self.client = OllamaClient(host=host, model=model)
         self.event_queue: queue.Queue[Any] = queue.Queue()
         self._lock = threading.Lock()
 
-        self.max_tool_result = 4000   # chars; configurable via /tool-result or --max-tool-result
+        self.max_tool_result = 20000   # chars; configurable via /tool-result or --max-tool-result
         self.messages: list[dict] = [
             {"role": "system", "content": _design_prompt()}
         ]
@@ -181,7 +181,7 @@ class Harness:
         self._token_estimate = after
         notice = (f"Context compacted: removed {removed} messages "
                   f"(was ~{before} tokens, now ~{after} tokens)")
-        self.logger.log_compact(self.mode, removed, before, after)
+        self.logger.log_compact(self.mode, self.client.model, removed, before, after)
         return notice
 
     def _estimate(self) -> int:
@@ -193,7 +193,7 @@ class Harness:
         """Called from the harness worker thread."""
         self.messages.append({"role": "user", "content": text})
 
-        tools = READ_ONLY_TOOLS if self.mode == "design" else ALL_TOOLS
+        tools = DESIGN_TOOLS if self.mode == "design" else ALL_TOOLS
         _MAX_ITERATIONS = 20
 
         iteration = 0
@@ -225,11 +225,8 @@ class Harness:
                 return
 
             msg = response.message
-            usage = getattr(response, "usage", None) or {}
-            if hasattr(usage, "__dict__"):
-                usage = usage.__dict__
-            prompt_tokens = usage.get("prompt_eval_count") if usage else None
-            eval_tokens = usage.get("eval_count") if usage else None
+            prompt_tokens = getattr(response, "prompt_eval_count", None)
+            eval_tokens = getattr(response, "eval_count", None)
 
             if prompt_tokens is not None:
                 self._token_estimate = (prompt_tokens or 0) + (eval_tokens or 0)
@@ -269,14 +266,14 @@ class Harness:
                         args = {}
 
                 self.event_queue.put(ToolCallEvent(name, args))
-                self.logger.log_tool_call(self.mode, name, args)
+                self.logger.log_tool_call(self.mode, self.client.model, name, args)
 
                 result = dispatch(name, args, self.workdir)
                 if self.max_tool_result > 0 and len(result) > self.max_tool_result:
                     result = result[:self.max_tool_result] + f"\n... (truncated, {len(result)} chars total)"
 
                 self.event_queue.put(ToolResultEvent(name, result))
-                self.logger.log_tool_result(self.mode, name, len(result))
+                self.logger.log_tool_result(self.mode, self.client.model, name, len(result))
 
                 self.messages.append({"role": "tool", "content": result})
 

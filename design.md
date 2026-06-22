@@ -108,19 +108,18 @@ After compaction, a `ChatEvent("system", ...)` notice is emitted and a `compact`
 `_compute_layout(rows, cols)` derives pixel-free window geometry:
 
 ```
-chat_h  = max(4, int(rows * 0.60))
-tool_h  = max(3, rows - chat_h - 2)   # 1 status row + 1 input row
-status  = chat_h + tool_h             # row index
-input   = chat_h + tool_h + 1         # row index
+chat_h   = max(4, rows - 2 - _INPUT_H)  # status(1) + input(_INPUT_H)
+status_y = chat_h
+input_y  = chat_h + 1
 ```
 
-Four `curses.newwin` objects are created: `_chat_win`, `_tool_win`, `_status_win`, `_input_win`. On `KEY_RESIZE` all four are rebuilt and the screen is redrawn from the in-memory `_LineBuffer` objects.
+Three `curses.newwin` objects are created: `_chat_win`, `_status_win`, `_input_win`. On `KEY_RESIZE` all three are rebuilt and the screen is redrawn from the in-memory `_LineBuffer` objects.
 
 ### `_LineBuffer`
 
 Stores rendered display lines as `(text: str, color_pair: int)` tuples. Maintains a `_scroll` offset (0-based index of the last visible line). `render(win, height, width)` slices `_lines[scroll+1-height : scroll+1]` and writes them with `addnstr`. Auto-scrolls to the bottom whenever a line is appended.
 
-Scroll keys in the main loop manipulate `_chat_buf._scroll` directly; `_tool_buf` scrolls are not bound to keys (the tool pane auto-scrolls to show the latest).
+Scroll keys in the main loop manipulate `_chat_buf._scroll` directly.
 
 ### Color pairs
 
@@ -145,9 +144,13 @@ The input area is 4 rows tall. State is `_input_lines: list[str]` (one entry per
 
 **Command history** (`_history: list[str]`) is in-memory for the session. `↑`/`↓` navigate it. On first `↑` the current buffer is stashed in `_history_stash`; `↓` past the newest entry restores the stash. `_history_idx = -1` means "not browsing."
 
-**Chat scroll** uses `PgUp`/`PgDn`. `↑`/`↓` are reserved for history navigation when the input pane is focused, or scroll the focused pane when chat/tool is focused (cycled with `Tab`).
+**Chat scroll** uses `PgUp`/`PgDn` or `↑`/`↓` when the chat pane is focused.
+
+**Tab** toggles focus between chat and input. `↑`/`↓` navigate history when input is focused.
 
 **Shift+Tab** toggles between design and coding mode without using a slash command.
+
+**Tool output** — `ToolCallEvent` and `ToolResultEvent` are rendered inline into the chat pane in yellow. `_chat_events` stores the raw events; `_tools_expanded` controls display format. When expanded (default), the full call line and result lines are shown. When collapsed (`/toggle-tool-output`), only the first 50 characters of the call line are shown with a `…` suffix and results are omitted. `_rebuild_chat_buf()` replays all stored events through the current `_tools_expanded` setting whenever it changes.
 
 ---
 
@@ -172,7 +175,14 @@ Each tool is an OpenAI-compatible function schema dict:
 }
 ```
 
-`READ_ONLY_TOOLS` and `CODING_ONLY_TOOLS` are separate lists. `ALL_TOOLS = READ_ONLY_TOOLS + CODING_ONLY_TOOLS`. `Harness.send` selects which list to pass based on the current mode.
+Three lists are defined:
+- `READ_ONLY_TOOLS` — exploration tools available in both modes
+- `DESIGN_EXTRA_TOOLS` — tools only available in design mode (`write_file`)
+- `CODING_ONLY_TOOLS` — mutation tools only available in coding mode
+
+`DESIGN_TOOLS = READ_ONLY_TOOLS + DESIGN_EXTRA_TOOLS` is passed in design mode.  
+`ALL_TOOLS = READ_ONLY_TOOLS + DESIGN_EXTRA_TOOLS + CODING_ONLY_TOOLS` is passed in coding mode.  
+`Harness.send` selects the appropriate list based on the current mode.
 
 ### Path safety
 
@@ -184,7 +194,7 @@ Each executor function takes keyword-only `workdir: Path` in addition to its dec
 
 Tool results are always strings. Errors are returned as `"ERROR: ..."` strings — never raised as exceptions — so the model can read them and decide how to proceed.
 
-**Read-only tools:**
+**Read-only tools (both modes):**
 
 | Tool | Notable behaviour |
 |---|---|
@@ -194,6 +204,12 @@ Tool results are always strings. Errors are returned as `"ERROR: ..."` strings �
 | `read_file` | Lines prefixed with 1-based numbers (`   1: content`) |
 | `grep_file` | Returns matching lines with numbers; validates regex before scanning |
 | `grep_files` | Skips unreadable/binary files silently via `OSError` catch |
+
+**Design mode only:**
+
+| Tool | Notable behaviour |
+|---|---|
+| `write_file` | Enforces `.md` extension; creates parent directories; role prompt restricts use to explicit user requests ("write design", "save spec", etc.) |
 
 **Coding-only tools:**
 
@@ -216,7 +232,7 @@ Tool results are always strings. Errors are returned as `"ERROR: ..."` strings �
 
 After `dispatch()` returns, `Harness.send` checks `len(result) > harness.max_tool_result` (when `max_tool_result > 0`). Oversized results are truncated to `max_tool_result` chars and a suffix `\n... (truncated, N chars total)` is appended so the model knows more content exists.
 
-`max_tool_result` defaults to **4000**, is set at startup via `--max-tool-result`, and can be changed at runtime with `/tool-result <n>`. Setting it to `0` disables truncation.
+`max_tool_result` defaults to **20000**, is set at startup via `--max-tool-result`, and can be changed at runtime with `/tool-result <n>`. Setting it to `0` disables truncation.
 
 ---
 
@@ -242,7 +258,7 @@ Schema:
   "model": "llama3.1",
   "mode": "coding",
   "workdir": "/Users/foo/project",
-  "context_limit": 8192,
+  "context_limit": 100000,
   "messages": [
     {"role": "system", "content": "..."},
     {"role": "user",   "content": "..."},

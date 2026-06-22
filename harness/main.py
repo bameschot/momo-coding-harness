@@ -15,15 +15,15 @@ def main():
     )
     parser.add_argument("--host",    default="http://localhost:11434", metavar="URL",
                         help="Ollama base URL")
-    parser.add_argument("--model",   default="devstral-small-2:latest", metavar="NAME",
+    parser.add_argument("--model",   default="qwen3.5:9b", metavar="NAME",
                         help="Ollama model name")
     parser.add_argument("--workdir", default=".", metavar="PATH",
                         help="Root directory for all file operations")
-    parser.add_argument("--context", default=8192, type=int, metavar="N",
+    parser.add_argument("--context", default=100000, type=int, metavar="N",
                         help="Initial context token limit")
     parser.add_argument("--mode",    default="design", choices=["design", "coding"],
                         help="Starting mode")
-    parser.add_argument("--max-tool-result", default=4000, type=int, metavar="N",
+    parser.add_argument("--max-tool-result", default=20000, type=int, metavar="N",
                         help="Max chars returned by a single tool call (0 = unlimited)")
     args = parser.parse_args()
 

@@ -26,11 +26,11 @@ Options:
 | Flag | Default | Description |
 |---|---|---|
 | `--host` | `http://localhost:11434` | Ollama base URL |
-| `--model` | `devstral-small-2:latest` | Model name |
+| `--model` | `qwen3.5:9b` | Model name |
 | `--workdir` | `.` (current directory) | Root for all file operations |
-| `--context` | `8192` | Initial context token limit |
+| `--context` | `100000` | Initial context token limit |
 | `--mode` | `design` | Starting mode (`design` or `coding`) |
-| `--max-tool-result` | `4000` | Max chars returned by a single tool call (`0` = unlimited) |
+| `--max-tool-result` | `20000` | Max chars returned by a single tool call (`0` = unlimited) |
 
 Example targeting a specific project and remote instance:
 
@@ -45,36 +45,32 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
 │  Chat pane                                            │
 │  [user] describe what the auth module does            │
 │  [assistant] The auth module handles...               │
-│                                                       │
-├──────────────────────────────────────────────────────┤
-│  Tool calls pane                                      │
-│  ▶ find_files("*.py","src/auth")                      │
+│  ▶ find_files({"pattern":"*.py","directory":"src"})   │
 │    → src/auth/login.py                                │
 │    → src/auth/tokens.py                               │
-│  ▶ read_file("src/auth/login.py")                     │
-│    →    1: import hashlib                             │
-│    →    2: ...                                        │
+│  [assistant] I can see the auth module consists of... │
+│                                                       │
 ├──────────────────────────────────────────────────────┤
-│  MODE: design | MODEL: llama3.1 | CTX: 12% | DIR: ./ │
+│  MODE: design | MODEL: qwen3.5:9b | CTX: 12% | DIR: .│
 ├──────────────────────────────────────────────────────┤
 │  > _                                                  │
 └──────────────────────────────────────────────────────┘
 ```
 
-- **Chat pane** — conversation history. Scroll with `↑`/`↓` or `PgUp`/`PgDn`.
-- **Tool calls pane** — live tool call requests and results as the model works.
+- **Chat pane** — conversation history including inline tool calls (yellow) and results. Scroll with `↑`/`↓` or `PgUp`/`PgDn`.
 - **Status bar** — current mode, model, context usage %, and working directory.
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
 - **Input bar** — 4-row area (long messages word-wrap). Press Enter to send. `↑`/`↓` navigate command history when input is focused.
-- **Focus** — Press `Tab` to cycle focus between Chat, Tool Calls, and Input. The focused pane's right edge highlights (green = chat, yellow = tool calls, cyan prefix = input). `↑`/`↓` and `PgUp`/`PgDn` scroll whichever pane is focused.
+- **Focus** — Press `Tab` to toggle focus between Chat and Input. The chat pane's right edge highlights green when focused; the input shows a cyan `›` prefix when focused.
+- **Tool call visibility** — `/toggle-tool-output` switches between full tool output (call + result) and abbreviated mode (first 50 chars + `…`, no result).
 
 ## Modes
 
 ### Design mode (default)
 
-The assistant acts as a design partner. It can explore your codebase (read-only) to understand existing code and asks clarifying questions to build a spec. It will **not** modify any files.
+The assistant acts as a design partner. It explores your codebase to understand existing code, asks clarifying questions, and builds a spec. When you explicitly ask it to write or save the design (e.g. "write design", "save spec"), it writes a Markdown document. It will **not** create or modify code files.
 
-Available tools in design mode: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`
+Available tools in design mode: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `write_file`
 
 ### Coding mode
 
@@ -96,6 +92,12 @@ Switch modes with `/design` and `/code`.
 | `read_file` | Read a file, optionally a specific line range |
 | `grep_file` | Regex search in a single file |
 | `grep_files` | Recursive regex search across a directory |
+
+### Design mode only
+
+| Tool | Description |
+|---|---|
+| `write_file` | Write content to a `.md` file. Only invoked when the user explicitly asks to write or save the design (e.g. "write design", "save spec"). |
 
 ### Coding mode only
 
@@ -153,7 +155,7 @@ Use `/context <n>` to raise the limit for models with larger context windows.
 
 Each tool call result is capped at a maximum number of characters before being added to the conversation context. This prevents a single large result (e.g. a directory listing or long file) from consuming the entire context window.
 
-Default cap: **4000 chars**. Set to `0` to disable truncation entirely.
+Default cap: **20000 chars**. Set to `0` to disable truncation entirely.
 
 ```
 /tool-result          # show current cap

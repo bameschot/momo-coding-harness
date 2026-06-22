@@ -106,9 +106,8 @@ class _LineBuffer:
                 # all content fits — render from row 0, ignore scroll offset
                 visible = self._lines
             else:
-                end = self._scroll + 1
-                start = max(0, end - height)
-                visible = self._lines[start:end]
+                start = max(0, self._scroll + 1 - height)
+                visible = self._lines[start:start + height]
             for row, (text, color) in enumerate(visible):
                 if row >= height:
                     break
@@ -144,30 +143,16 @@ class _LineBuffer:
 
 _INPUT_H = 4  # fixed height of the multi-line input area
 
-def _compute_layout(rows: int, cols: int, tools_visible: bool = True) -> dict:
-    if tools_visible:
-        chat_h   = max(4, int(rows * 0.55))
-        tool_h   = max(3, rows - chat_h - 2 - _INPUT_H)  # divider(1) + status(1) + input
-        div_y    = chat_h
-        tool_y   = chat_h + 1
-        status_y = tool_y + tool_h
-        input_y  = tool_y + tool_h + 1
-    else:
-        chat_h   = max(4, rows - 2 - _INPUT_H)  # status(1) + input, no divider/tool
-        tool_h   = 0
-        div_y    = -1
-        tool_y   = -1
-        status_y = chat_h
-        input_y  = chat_h + 1
+def _compute_layout(rows: int, cols: int) -> dict:
+    chat_h   = max(4, rows - 2 - _INPUT_H)  # status(1) + input(_INPUT_H)
+    status_y = chat_h
+    input_y  = chat_h + 1
     return {
-        "chat_y": 0,      "chat_h": chat_h,
-        "div_y":  div_y,
-        "tool_y": tool_y, "tool_h": tool_h,
+        "chat_y":   0,       "chat_h": chat_h,
         "status_y": status_y,
         "input_y":  input_y,
         "input_h":  _INPUT_H,
-        "cols":   cols,
-        "tools_visible": tools_visible,
+        "cols":     cols,
     }
 
 
@@ -177,13 +162,14 @@ class TUI:
     def __init__(self, stdscr, harness: Harness):
         self.stdscr = stdscr
         self.harness = harness
-        self._chat_buf  = _LineBuffer()
-        self._tool_buf  = _LineBuffer()
+        self._chat_buf    = _LineBuffer()
+        self._chat_events: list[tuple] = []  # raw events for toggle rebuild
+        self._tools_expanded: bool = True    # True = full tool output; False = abbreviated
         self._input: str = ""
         self._history: list[str] = []   # submitted entries, oldest first
         self._history_idx: int = -1     # -1 = not browsing
         self._history_stash: str = ""   # saves live input while browsing
-        self._focus: str = "input"      # "input" | "chat" | "tool"
+        self._focus: str = "input"      # "input" | "chat"
         self._status    = f"MODE: {harness.mode} | MODEL: {harness.client.model} | CTX: 0% | DIR: {harness.workdir}"
         self._ctx_color = _C_STATUS
         self._busy      = False
@@ -205,16 +191,10 @@ class TUI:
         self._chat_win   = curses.newwin(L["chat_h"],  cols, L["chat_y"],   0)
         self._status_win = curses.newwin(1,             cols, L["status_y"], 0)
         self._input_win  = curses.newwin(L["input_h"], cols, L["input_y"],  0)
-        if L["tools_visible"]:
-            self._div_win  = curses.newwin(1,            cols, L["div_y"],   0)
-            self._tool_win = curses.newwin(L["tool_h"],  cols, L["tool_y"],  0)
-        else:
-            self._div_win  = None
-            self._tool_win = None
 
     def _rebuild(self):
         rows, cols = self.stdscr.getmaxyx()
-        self._layout = _compute_layout(rows, cols, self._layout["tools_visible"])
+        self._layout = _compute_layout(rows, cols)
         self._build_windows()
         self.stdscr.clear()
         self.stdscr.noutrefresh()
@@ -224,10 +204,6 @@ class TUI:
         L = self._layout
         chat_edge = _C_ASSISTANT if self._focus == "chat" else _C_BORDER
         self._chat_buf.render(self._chat_win, L["chat_h"], L["cols"], edge_color=chat_edge)
-        if L["tools_visible"]:
-            self._draw_divider()
-            tool_edge = _C_TOOL_NAME if self._focus == "tool" else _C_BORDER
-            self._tool_buf.render(self._tool_win, L["tool_h"], L["cols"], edge_color=tool_edge)
         self._draw_status()
         self._draw_input()
         curses.doupdate()
@@ -291,26 +267,13 @@ class TUI:
         self._draw_input()
         curses.doupdate()
 
-    def _draw_divider(self):
-        win = self._div_win
-        win.erase()
-        cols = self._layout["cols"]
-        label = " TOOL CALLS "
-        fill = cols - len(label) - 2   # 1 leading + 1 trailing '─'
-        left  = fill // 2
-        right = fill - left
-        line = ("─" * left) + label + ("─" * right)
-        line = line[:cols - 1].ljust(cols - 1)
-        color = _C_TOOL_NAME if self._focus == "tool" else _C_BORDER
-        try:
-            win.addnstr(0, 0, line, cols - 1, curses.color_pair(color))
-        except curses.error:
-            pass
-        win.noutrefresh()
-
-    # ── adding lines to buffers ───────────────────────────────────────────────
+    # ── adding lines to chat buffer ───────────────────────────────────────────
 
     def _add_chat(self, role: str, text: str):
+        self._chat_events.append(("chat", role, text))
+        self._render_chat(role, text)
+
+    def _render_chat(self, role: str, text: str):
         cols = max(20, self._layout["cols"] - 2)
         label_map = {
             "user": ("[user]", _C_USER),
@@ -319,8 +282,6 @@ class TUI:
         }
         label, color = label_map.get(role, (f"[{role}]", _C_SYSTEM))
         indent = " " * (len(label) + 1)
-
-        # split on existing newlines first, then word-wrap each line
         source_lines = text.splitlines() or [""]
         first = True
         for src in source_lines:
@@ -331,27 +292,50 @@ class TUI:
                     first = False
                 else:
                     self._chat_buf.append(f"{indent}{wl}", color)
-        self._chat_buf.append("", 0)  # blank separator
+        self._chat_buf.append("", 0)
 
     def _add_tool_call(self, name: str, args: dict):
+        self._chat_events.append(("tool_call", name, args))
+        self._render_tool_call(name, args)
+
+    def _render_tool_call(self, name: str, args: dict):
         cols = max(20, self._layout["cols"] - 2)
         args_str = json.dumps(args, separators=(",", ":"))
-        header = f"▶ {name}({args_str})"
-        for line in textwrap.wrap(header, width=cols) or [header]:
-            self._tool_buf.append(line, _C_TOOL_NAME)
+        full = f"▶ {name}({args_str})"
+        if self._tools_expanded:
+            for line in textwrap.wrap(full, width=cols) or [full]:
+                self._chat_buf.append(line, _C_TOOL_NAME)
+        else:
+            abbrev = (full[:50] + "…") if len(full) > 50 else full
+            self._chat_buf.append(abbrev, _C_TOOL_NAME)
 
     def _add_tool_result(self, name: str, result: str):
+        self._chat_events.append(("tool_result", name, result))
+        self._render_tool_result(name, result)
+
+    def _render_tool_result(self, name: str, result: str):
+        if not self._tools_expanded:
+            return
         cols = max(20, self._layout["cols"] - 4)
         prefix = "  → "
         lines = result.splitlines() or ["(empty)"]
-        # show at most 20 lines of result to keep tool pane readable
         display = lines[:20]
         if len(lines) > 20:
             display.append(f"  ... ({len(lines) - 20} more lines)")
         for line in display:
             for wrapped in textwrap.wrap(prefix + line, width=cols) or [prefix + line]:
-                self._tool_buf.append(wrapped, _C_TOOL_RES)
-        self._tool_buf.append("", 0)
+                self._chat_buf.append(wrapped, _C_TOOL_RES)
+        self._chat_buf.append("", 0)
+
+    def _rebuild_chat_buf(self):
+        self._chat_buf = _LineBuffer()
+        for ev in self._chat_events:
+            if ev[0] == "chat":
+                self._render_chat(ev[1], ev[2])
+            elif ev[0] == "tool_call":
+                self._render_tool_call(ev[1], ev[2])
+            elif ev[0] == "tool_result":
+                self._render_tool_result(ev[1], ev[2])
 
     # ── event processing ──────────────────────────────────────────────────────
 
@@ -392,14 +376,8 @@ class TUI:
     # ── input handling ────────────────────────────────────────────────────────
 
     def _toggle_tools(self):
-        visible = not self._layout["tools_visible"]
-        if not visible and self._focus == "tool":
-            self._focus = "chat"
-        rows, cols = self.stdscr.getmaxyx()
-        self._layout = _compute_layout(rows, cols, visible)
-        self._build_windows()
-        self.stdscr.clear()
-        self.stdscr.noutrefresh()
+        self._tools_expanded = not self._tools_expanded
+        self._rebuild_chat_buf()
         self._redraw()
 
     def _history_prev(self):
@@ -433,9 +411,8 @@ class TUI:
         if not self._history or self._history[-1] != text:
             self._history.append(text)
 
-        # show the user's input immediately before any response appears
+        # show what the user typed (common to all paths below)
         self._add_chat("user", text)
-        self._redraw()
 
         # handle pending y/N confirmation
         if self._pending_confirm is not None:
@@ -447,6 +424,7 @@ class TUI:
                     self._add_chat("system", output)
             else:
                 self._add_chat("system", "Cancelled.")
+            self._redraw()
             return
 
         if text.startswith("/"):
@@ -462,16 +440,19 @@ class TUI:
                     self._add_chat("system", result.confirm_prompt + " [y/N]")
                 elif result.output:
                     self._add_chat("system", result.output)
+                self._redraw()
                 return
-            # unknown command — treat as chat input anyway
             self._add_chat("system", f"Unknown command: {text}")
+            self._redraw()
             return
 
         if self._busy:
             self._add_chat("system", "Busy — waiting for response...")
+            self._redraw()
             return
 
         self._busy = True
+        self._redraw()  # show user message before thread starts
         t = threading.Thread(target=self.harness.send, args=(text,), daemon=True)
         t.start()
 
@@ -512,40 +493,26 @@ class TUI:
                 self._redraw()
                 continue
 
-            # Tab cycles focus: chat → tool → input → chat (skips tool when hidden)
+            # Tab toggles focus between chat and input
             if ch == 9:
-                if self._layout["tools_visible"]:
-                    order = ("chat", "tool", "input")
-                else:
-                    order = ("chat", "input")
-                    if self._focus not in order:
-                        self._focus = "chat"
-                self._focus = order[(order.index(self._focus) + 1) % len(order)]
+                self._focus = "input" if self._focus == "chat" else "chat"
                 self._redraw()
                 continue
 
-            # PgUp/PgDn scroll the focused content pane (input falls back to chat)
+            # PgUp/PgDn scroll the chat pane
             if ch == curses.KEY_PPAGE:
-                if self._focus == "tool":
-                    self._tool_buf.scroll_up(self._layout["tool_h"] - 1)
-                else:
-                    self._chat_buf.scroll_up(self._layout["chat_h"] - 1)
+                self._chat_buf.scroll_up(self._layout["chat_h"] - 1)
                 self._redraw()
                 continue
             if ch == curses.KEY_NPAGE:
-                if self._focus == "tool":
-                    self._tool_buf.scroll_down(self._layout["tool_h"] - 1)
-                else:
-                    self._chat_buf.scroll_down(self._layout["chat_h"] - 1)
+                self._chat_buf.scroll_down(self._layout["chat_h"] - 1)
                 self._redraw()
                 continue
 
-            # ↑/↓ scroll focused pane; navigate history when input focused
+            # ↑/↓ scroll chat when focused there; navigate history otherwise
             if ch == curses.KEY_UP:
                 if self._focus == "chat":
                     self._chat_buf.scroll_up()
-                elif self._focus == "tool":
-                    self._tool_buf.scroll_up()
                 else:
                     self._history_prev()
                 self._redraw()
@@ -553,8 +520,6 @@ class TUI:
             if ch == curses.KEY_DOWN:
                 if self._focus == "chat":
                     self._chat_buf.scroll_down()
-                elif self._focus == "tool":
-                    self._tool_buf.scroll_down()
                 else:
                     self._history_next()
                 self._redraw()
@@ -567,7 +532,7 @@ class TUI:
                 input_changed = True
             elif ch in (10, 13, curses.KEY_ENTER):
                 self._submit()
-                input_changed = True
+                # _submit() handles all its own redraws
             elif 32 <= ch <= 126:
                 self._input += chr(ch)
                 input_changed = True

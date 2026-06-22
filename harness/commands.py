@@ -129,6 +129,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
         except ValueError:
             return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
 
+    if cmd == "/cost":
+        return CommandResult(handled=True, output=harness.logger.cost_summary())
+
     if cmd == "/session":
         if not arg:
             return CommandResult(handled=True,
@@ -162,6 +165,7 @@ Available commands:
   /context <n>        Set context token limit (e.g. /context 8192)
   /tool-result        Show current tool result character cap
   /tool-result <n>    Set cap (e.g. /tool-result 8000); 0 = unlimited
+  /cost               Show token usage for this session by mode and model
   /session            Show current session file
   /session <name>     Load a saved session by name or prefix
   /help               Show this help
