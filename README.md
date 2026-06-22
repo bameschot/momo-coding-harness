@@ -74,7 +74,7 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
 
 The assistant acts as a design partner. It can explore your codebase (read-only) to understand existing code and asks clarifying questions to build a spec. It will **not** modify any files.
 
-Available tools in design mode: `find_files`, `read_file`, `grep_file`, `grep_files`
+Available tools in design mode: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`
 
 ### Coding mode
 
@@ -86,12 +86,24 @@ Switch modes with `/design` and `/code`.
 
 ## Available Tools
 
+### Read-only (available in both modes)
+
 | Tool | Description |
 |---|---|
-| `find_files` | Find files by glob pattern under a directory |
+| `list_directory` | List the contents of a directory — dirs first, then files with sizes |
+| `file_info` | File/directory metadata: exists, type, size, mtime, line count |
+| `find_files` | Find files using standard shell glob patterns (`*.py`, `src/**/*.ts`). Simple patterns (no `/`) are recursive automatically; path patterns are anchored to the search directory. |
 | `read_file` | Read a file, optionally a specific line range |
 | `grep_file` | Regex search in a single file |
 | `grep_files` | Recursive regex search across a directory |
+
+### Coding mode only
+
+| Tool | Description |
+|---|---|
+| `move_file` | Move or rename a file (parent dirs created automatically) |
+| `append_to_file` | Append text to a file (creates if missing) |
+| `replace_all_in_file` | Replace every occurrence of a string in a file; returns count |
 | `edit_file` | Replace an exact string in a file (must match exactly once) |
 | `create_file` | Create or overwrite a file |
 | `delete_file` | Delete a file |

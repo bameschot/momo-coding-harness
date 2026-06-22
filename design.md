@@ -145,9 +145,9 @@ The input area is 4 rows tall. State is `_input_lines: list[str]` (one entry per
 
 **Command history** (`_history: list[str]`) is in-memory for the session. `↑`/`↓` navigate it. On first `↑` the current buffer is stashed in `_history_stash`; `↓` past the newest entry restores the stash. `_history_idx = -1` means "not browsing."
 
-**Shift+Enter** detection uses xterm `modifyOtherKeys` mode (escape sequence `\033[>4;2m` written to stdout before curses takes over). Two key sequences are registered with `curses.define_key`: `\033[27;2;13~` (xterm/VTE) and `\033[13;2u` (kitty), both mapped to the synthetic constant `KEY_SHIFT_ENTER = 600`. The mode is reset with `\033[>4;0m` in the `finally` block of `run_tui`. If the terminal does not support the protocol the define_key calls silently fail and Shift+Enter behaves like regular Enter.
+**Chat scroll** uses `PgUp`/`PgDn`. `↑`/`↓` are reserved for history navigation when the input pane is focused, or scroll the focused pane when chat/tool is focused (cycled with `Tab`).
 
-**Chat scroll** uses `PgUp`/`PgDn`. `↑`/`↓` are reserved for history navigation.
+**Shift+Tab** toggles between design and coding mode without using a slash command.
 
 ---
 
@@ -184,12 +184,33 @@ Each executor function takes keyword-only `workdir: Path` in addition to its dec
 
 Tool results are always strings. Errors are returned as `"ERROR: ..."` strings — never raised as exceptions — so the model can read them and decide how to proceed.
 
-Notable behaviours:
-- `edit_file`: counts occurrences of `old_string` before replacing. Returns an error if count ≠ 1. This prevents accidental multi-replacement and forces the model to be precise.
-- `read_file`: returns lines with line numbers prefixed (`   1: content`), making it easy for the model to reference specific lines.
-- `run_command`: uses `shell=True` so the model can use pipes, redirects, etc. stdout and stderr are both captured and returned together. Exit code is appended if non-zero.
-- `grep_files`: skips files that raise `OSError` on read (binary files, permission errors) rather than failing the whole search.
-- `find_files` and `grep_files`: prune `_SKIP_DIRS` (`.git`, `.venv`, `venv`, `__pycache__`, `node_modules`, `.tox`, `dist`, `build`, `.mypy_cache`, `.pytest_cache`) from `os.walk` traversal via in-place `dirnames[:]` mutation, preventing virtual-environment or build-output noise from flooding results.
+**Read-only tools:**
+
+| Tool | Notable behaviour |
+|---|---|
+| `list_directory` | `os.scandir` result sorted dirs-first then files alphabetically; hidden entries (`.`) skipped unless `show_hidden=True` |
+| `file_info` | Uses `Path.lstat()` to handle symlinks; attempts UTF-8 read for line count, reports `(binary)` on decode error |
+| `find_files` | Uses `Path.glob()` for standard shell glob semantics. Simple patterns (no `/`, no `**`) are auto-prefixed with `**/` to stay recursive. Path patterns (`src/*.py`) are left-anchored to `directory`, so they match only within that exact subdirectory — not any deeper directory with the same name. Skip-dirs filtered from results by checking path components. |
+| `read_file` | Lines prefixed with 1-based numbers (`   1: content`) |
+| `grep_file` | Returns matching lines with numbers; validates regex before scanning |
+| `grep_files` | Skips unreadable/binary files silently via `OSError` catch |
+
+**Coding-only tools:**
+
+| Tool | Notable behaviour |
+|---|---|
+| `move_file` | `_safe_path` on both src and dst; `dst.parent.mkdir(parents=True)` before `src.rename(dst)` |
+| `append_to_file` | Opens in `"a"` mode; creates file and parent dirs if missing |
+| `replace_all_in_file` | Returns error if `old_string` not found; replaces all occurrences via `str.replace`; reports count |
+| `edit_file` | Counts occurrences before replacing; errors if count ≠ 1 (exact-once guarantee) |
+| `create_file` | `parent.mkdir(parents=True, exist_ok=True)` before write; overwrites silently |
+| `delete_file` | `Path.unlink()`; errors if not found |
+| `git_command` | `shlex.split` for arg parsing; 30 s timeout; stdout + stderr combined |
+| `run_command` | `shell=True`; captures stdout and stderr separately, appends `[exit code: N]` if non-zero |
+
+`_SKIP_DIRS` = `{".git", ".venv", "venv", "__pycache__", "node_modules", ".tox", "dist", "build", ".mypy_cache", ".pytest_cache"}` — applied in all three directory-traversal tools, but via different mechanisms:
+- `grep_files` and `list_directory`: `os.walk` with in-place `dirnames[:] = [...]` pruning (prevents descent)
+- `find_files`: post-filter on `Path.glob()` results — checks `any(part in _SKIP_DIRS for part in p.relative_to(root).parts)`
 
 ### Tool result cap
 

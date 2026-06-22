@@ -2,6 +2,7 @@ import os
 import re
 import shlex
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 
@@ -23,6 +24,19 @@ def _fn(name: str, description: str, properties: dict, required: list[str]) -> d
 
 
 READ_ONLY_TOOLS = [
+    _fn("list_directory",
+        "List the contents of a directory. Returns '[D] name/' for subdirectories "
+        "and '[F] name  (N bytes)' for files, sorted dirs first then files.",
+        {"path":        {"type": "string",  "description": "Directory to list (default: .)"},
+         "show_hidden": {"type": "boolean", "description": "Include hidden entries starting with '.' (default: false)"}},
+        []),
+
+    _fn("file_info",
+        "Return metadata for a path: existence, type (file/directory/symlink), "
+        "size in bytes, last-modified timestamp, and line count for text files.",
+        {"path": {"type": "string"}},
+        ["path"]),
+
     _fn("find_files", "Find files matching a glob pattern under a directory",
         {"pattern": {"type": "string", "description": "Glob pattern, e.g. '*.py'"},
          "directory": {"type": "string", "description": "Directory to search (default: .)"}},
@@ -45,6 +59,29 @@ READ_ONLY_TOOLS = [
 ]
 
 CODING_ONLY_TOOLS = [
+    _fn("move_file",
+        "Move or rename a file. Both source and destination must be inside the working directory. "
+        "Parent directories of the destination are created automatically.",
+        {"src": {"type": "string", "description": "Current path"},
+         "dst": {"type": "string", "description": "Target path"}},
+        ["src", "dst"]),
+
+    _fn("append_to_file",
+        "Append text to the end of a file. Creates the file if it does not exist.",
+        {"path":    {"type": "string"},
+         "content": {"type": "string"}},
+        ["path", "content"]),
+
+    _fn("replace_all_in_file",
+        "Replace every occurrence of old_string with new_string in a file. "
+        "Returns the number of replacements made. "
+        "Use for renaming a variable or symbol throughout a file; "
+        "use edit_file instead when the change should apply to exactly one location.",
+        {"path":       {"type": "string"},
+         "old_string": {"type": "string"},
+         "new_string": {"type": "string"}},
+        ["path", "old_string", "new_string"]),
+
     _fn("edit_file",
         "Replace an exact occurrence of old_string with new_string in a file. "
         "Fails if old_string is not found exactly once.",
@@ -95,19 +132,27 @@ def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
     root = _safe_path(directory, workdir)
     if isinstance(root, str):
         return root
+    # Simple filename patterns (no path separator, no **) are made recursive
+    # so "*.py" behaves the same as "**/*.py" — finds all matches in the tree.
+    glob_pat = pattern if ("/" in pattern or pattern.startswith("**")) else f"**/{pattern}"
+    try:
+        gen = root.glob(glob_pat)
+    except ValueError as e:
+        return f"ERROR: invalid pattern: {e}"
     matches = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        # prune ignored directories in-place so os.walk won't descend into them
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
-        for fname in filenames:
-            full = Path(dirpath) / fname
-            # support both "*.py" (filename match) and "**/*.py" / "src/*.py" (path match)
-            rel = str(full.relative_to(root))
-            if full.match(pattern) or full.name == pattern or Path(rel).match(pattern):
-                try:
-                    matches.append(str(full.relative_to(workdir)))
-                except ValueError:
-                    matches.append(str(full))
+    for p in gen:
+        if not p.is_file():
+            continue
+        try:
+            rel_parts = p.relative_to(root).parts
+        except ValueError:
+            continue
+        if any(part in _SKIP_DIRS for part in rel_parts):
+            continue
+        try:
+            matches.append(str(p.relative_to(workdir)))
+        except ValueError:
+            matches.append(str(p))
     return "\n".join(sorted(matches)) if matches else "(no matches)"
 
 
@@ -174,6 +219,112 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
                         rel = fpath
                     results.append(f"{rel}:{i}: {line}")
     return "\n".join(results) if results else "(no matches)"
+
+
+def _list_directory(path: str = ".", show_hidden: bool = False, *, workdir: Path) -> str:
+    root = _safe_path(path, workdir)
+    if isinstance(root, str):
+        return root
+    if not root.is_dir():
+        return f"ERROR: not a directory: {path}"
+    try:
+        entries = list(os.scandir(root))
+    except OSError as e:
+        return f"ERROR: {e}"
+    dirs  = sorted([e for e in entries if e.is_dir(follow_symlinks=False)],  key=lambda e: e.name.lower())
+    files = sorted([e for e in entries if not e.is_dir(follow_symlinks=False)], key=lambda e: e.name.lower())
+    lines = []
+    for e in dirs + files:
+        if not show_hidden and e.name.startswith("."):
+            continue
+        if e.is_dir(follow_symlinks=False):
+            lines.append(f"[D] {e.name}/")
+        else:
+            try:
+                size = e.stat().st_size
+            except OSError:
+                size = 0
+            lines.append(f"[F] {e.name}  ({size:,} bytes)")
+    return "\n".join(lines) if lines else "(empty)"
+
+
+def _file_info(path: str, *, workdir: Path) -> str:
+    p = _safe_path(path, workdir)
+    if isinstance(p, str):
+        return p
+    if not p.exists() and not p.is_symlink():
+        return f"exists:   no\npath:     {path}"
+    try:
+        st = p.lstat()
+    except OSError as e:
+        return f"ERROR: {e}"
+    if p.is_symlink():
+        kind = "symlink"
+    elif p.is_dir():
+        kind = "directory"
+    else:
+        kind = "file"
+    mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        f"exists:   yes",
+        f"type:     {kind}",
+        f"size:     {st.st_size:,} bytes",
+        f"modified: {mtime}",
+    ]
+    if kind == "file":
+        try:
+            text = p.read_text(encoding="utf-8", errors="strict")
+            lines.append(f"lines:    {len(text.splitlines())}")
+        except (UnicodeDecodeError, OSError):
+            lines.append("lines:    (binary)")
+    return "\n".join(lines)
+
+
+def _move_file(src: str, dst: str, *, workdir: Path) -> str:
+    sp = _safe_path(src, workdir)
+    if isinstance(sp, str):
+        return sp
+    dp = _safe_path(dst, workdir)
+    if isinstance(dp, str):
+        return dp
+    if not sp.exists():
+        return f"ERROR: source not found: {src}"
+    try:
+        dp.parent.mkdir(parents=True, exist_ok=True)
+        sp.rename(dp)
+    except OSError as e:
+        return f"ERROR: {e}"
+    return "OK"
+
+
+def _append_to_file(path: str, content: str, *, workdir: Path) -> str:
+    p = _safe_path(path, workdir)
+    if isinstance(p, str):
+        return p
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as e:
+        return f"ERROR: {e}"
+    return "OK"
+
+
+def _replace_all_in_file(path: str, old_string: str, new_string: str, *, workdir: Path) -> str:
+    p = _safe_path(path, workdir)
+    if isinstance(p, str):
+        return p
+    try:
+        content = p.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return f"ERROR: file not found: {path}"
+    except OSError as e:
+        return f"ERROR: {e}"
+    count = content.count(old_string)
+    if count == 0:
+        return "ERROR: old_string not found in file"
+    p.write_text(content.replace(old_string, new_string), encoding="utf-8")
+    return f"Replaced {count} occurrence(s)"
 
 
 def _edit_file(path: str, old_string: str, new_string: str, *, workdir: Path) -> str:
@@ -260,15 +411,20 @@ def _run_command(command: str, timeout: int = 30, *, workdir: Path) -> str:
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
 _EXECUTORS = {
-    "find_files": _find_files,
-    "read_file": _read_file,
-    "grep_file": _grep_file,
-    "grep_files": _grep_files,
-    "edit_file": _edit_file,
-    "create_file": _create_file,
-    "delete_file": _delete_file,
-    "git_command": _git_command,
-    "run_command": _run_command,
+    "list_directory":     _list_directory,
+    "file_info":          _file_info,
+    "find_files":         _find_files,
+    "read_file":          _read_file,
+    "grep_file":          _grep_file,
+    "grep_files":         _grep_files,
+    "move_file":          _move_file,
+    "append_to_file":     _append_to_file,
+    "replace_all_in_file": _replace_all_in_file,
+    "edit_file":          _edit_file,
+    "create_file":        _create_file,
+    "delete_file":        _delete_file,
+    "git_command":        _git_command,
+    "run_command":        _run_command,
 }
 
 

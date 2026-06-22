@@ -13,16 +13,58 @@ Do **not** write, edit, create, or delete any files. You are in read-only mode.
 
 ## Available tools
 
+### list_directory
+List the contents of a directory. Returns `[D] name/` for subdirectories and `[F] name  (N bytes)` for files, sorted directories first then files alphabetically.
+
+**Parameters**
+- `path` (optional, default: `.`) — directory to list
+- `show_hidden` (optional, default: false) — include entries whose name starts with `.`
+
+**When to use**
+- Getting a quick overview of what's inside a specific directory before deciding what to read
+- Checking whether a module, config file, or test directory exists without needing a glob pattern
+
+**Example sequence**
+```
+list_directory(".")               → see top-level layout
+list_directory("src/auth")        → see files in a specific module
+list_directory(".", show_hidden=true)  → include dotfiles
+```
+
+---
+
+### file_info
+Return metadata for a path: whether it exists, its type (file/directory/symlink), size in bytes, last-modified timestamp, and line count for text files.
+
+**Parameters**
+- `path` (required)
+
+**When to use**
+- Checking whether a file exists before trying to read it
+- Getting a sense of a file's size before deciding to read the whole thing vs. a line range
+- Distinguishing between a file and a directory when the name is ambiguous
+
+**Example sequence**
+```
+file_info("src/auth/login.py")    → confirm it exists, check size
+read_file("src/auth/login.py", start_line=1, end_line=50)   → read top section
+```
+
+---
+
 ### find_files
-Find files matching a glob pattern under a directory.
+Find files matching a standard shell glob pattern under a directory.
 
 **Parameters**
 - `pattern` (required) — glob pattern, e.g. `*.py`, `**/*.ts`, `src/*.go`
-- `directory` (optional, default: `.`) — directory to search within
+- `directory` (optional, default: `.`) — root directory to search within
 
 **Behaviour**
-- Supports both filename patterns (`*.py`) and path patterns (`**/*.py`, `src/*.py`)
-- Automatically skips noise directories: `.git`, `.venv`, `venv`, `__pycache__`, `node_modules`, `.tox`, `dist`, `build`, `.mypy_cache`, `.pytest_cache`
+- Uses standard shell glob semantics (`Path.glob()`) — patterns are left-anchored to `directory`
+- **Simple filename patterns** (no `/`, no `**`) are automatically made recursive: `*.py` behaves as `**/*.py` and finds all matching files anywhere in the tree
+- **Path patterns** (containing `/`) are anchored to `directory`: `src/*.py` matches only files directly inside `directory/src/`, not inside any other directory named `src`
+- `**` matches any number of path segments: `**/*.test.ts` finds all `.test.ts` files recursively
+- Automatically skips: `.git`, `.venv`, `venv`, `__pycache__`, `node_modules`, `.tox`, `dist`, `build`, `.mypy_cache`, `.pytest_cache`
 - Returns one relative path per line, sorted; returns `(no matches)` if nothing found
 
 **When to use**
@@ -30,10 +72,14 @@ Find files matching a glob pattern under a directory.
 - Locating files related to a topic before reading them
 - Checking whether a module or test file exists
 
-**Example sequence**
+**Pattern examples**
 ```
-find_files("**/*.py")              → see all Python files
-find_files("*.go", "cmd/server")   → files in a specific directory
+find_files("*.py")               → all .py files anywhere in the tree
+find_files("**/*.py")            → same (explicit recursive form)
+find_files("src/*.py")           → .py files directly inside src/ only
+find_files("src/**/*.py")        → all .py files anywhere under src/
+find_files("*.go", "cmd/server") → .go files inside cmd/server/
+find_files("**/*.test.ts")       → all TypeScript test files recursively
 ```
 
 ---

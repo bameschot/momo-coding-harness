@@ -8,17 +8,55 @@ All file paths are relative to the working directory. Paths that attempt to esca
 
 ## Available tools
 
+### list_directory
+List the contents of a directory. Returns `[D] name/` for subdirectories and `[F] name  (N bytes)` for files.
+
+**Parameters**
+- `path` (optional, default: `.`) — directory to list
+- `show_hidden` (optional, default: false) — include dotfiles
+
+**When to use**
+- Getting a quick overview of what's in a directory before reading specific files
+- Checking whether a file or subdirectory exists without a glob pattern
+- Faster than `find_files("*", "dir")` for a simple directory listing
+
+---
+
+### file_info
+Return metadata: existence, type (file/directory/symlink), size in bytes, last-modified timestamp, line count for text files.
+
+**Parameters**
+- `path` (required)
+
+**When to use**
+- Checking whether a path exists before operating on it
+- Deciding whether to read a whole file or use `start_line`/`end_line` (check size first)
+- Confirming that an edit or move succeeded by re-checking mtime
+
+---
+
 ### find_files
-Find files matching a glob pattern under a directory.
+Find files matching a standard shell glob pattern under a directory.
 
 **Parameters**
 - `pattern` (required) — glob pattern, e.g. `*.py`, `**/*.ts`, `src/*.go`
-- `directory` (optional, default: `.`) — directory to search within
+- `directory` (optional, default: `.`) — root directory to search within
 
 **Behaviour**
-- Supports both filename patterns (`*.py`) and path patterns (`**/*.py`, `src/*.py`)
+- Uses standard shell glob semantics (`Path.glob()`) — patterns are left-anchored to `directory`
+- **Simple filename patterns** (no `/`, no `**`) are automatically made recursive: `*.py` finds all `.py` files anywhere in the tree
+- **Path patterns** (containing `/`) are anchored to `directory`: `src/*.py` matches only files directly inside `directory/src/`, not inside any other directory named `src` deeper in the tree
+- `**` matches any number of path segments: `src/**/*.py` finds all `.py` files anywhere under `src/`
 - Skips: `.git`, `.venv`, `venv`, `__pycache__`, `node_modules`, `.tox`, `dist`, `build`, `.mypy_cache`, `.pytest_cache`
 - Returns one relative path per line, sorted; returns `(no matches)` if nothing found
+
+**Pattern examples**
+```
+find_files("*.py")               → all .py files anywhere in the tree
+find_files("src/*.py")           → .py files directly inside src/ only
+find_files("src/**/*.py")        → all .py files anywhere under src/
+find_files("*.go", "cmd/server") → .go files inside cmd/server/
+```
 
 **When to use**
 - Locating files before reading or editing them
@@ -78,6 +116,56 @@ Recursive regex search across all files in a directory.
 - Finding all call sites of a function before changing its signature
 - Checking what else imports or references a module you are about to modify
 - Discovering tests related to the code you are changing
+
+---
+
+### move_file
+Move or rename a file. Both source and destination must be inside the working directory. Parent directories of the destination are created automatically.
+
+**Parameters**
+- `src` (required) — current path
+- `dst` (required) — target path
+
+**When to use**
+- Renaming a file as part of a refactor
+- Moving a module to a different directory
+
+**Before moving**
+- Run `grep_files` to find all references to the current path and update them first
+- Check that `dst` does not already exist (use `file_info`) unless overwriting is intentional
+
+---
+
+### append_to_file
+Append text to the end of a file. Creates the file if it does not exist.
+
+**Parameters**
+- `path` (required)
+- `content` (required) — text to append
+
+**When to use**
+- Adding entries to a log, config list, or registry file without overwriting the whole thing
+- Adding a new test case or fixture to an existing test file
+
+**Note:** You are responsible for including a trailing newline in `content` if the file should end with one.
+
+---
+
+### replace_all_in_file
+Replace every occurrence of `old_string` with `new_string` in a file. Returns the number of replacements made.
+
+**Parameters**
+- `path` (required)
+- `old_string` (required)
+- `new_string` (required)
+
+**When to use**
+- Renaming a variable, constant, or type throughout a single file
+- Changing a repeated literal value everywhere it appears
+
+**When NOT to use**
+- When only one specific occurrence should change — use `edit_file` instead, which enforces exactly-once matching
+- When the string appears in both code and comments and only one context should change
 
 ---
 
