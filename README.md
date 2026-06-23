@@ -65,7 +65,15 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
   - Shows `⠋ thinking` (spinner) while the model is working.
   - Shows `? waiting for input` when the model has called `ask_user` and is waiting for your reply. Type your answer and press Enter — the model resumes from where it paused.
-- **Input bar** — 4-row area (long messages word-wrap). Press Enter to send. `↑`/`↓` navigate command history when input is focused. When the model is waiting for input, the prefix changes from `›` to `?`.
+- **Input bar** — 4-row multi-line input area. Paste or type multi-line text freely.
+  - **Enter** — submit the message.
+  - **Ctrl+J** — insert a newline at the cursor without submitting (works in every terminal, including macOS Terminal.app and iTerm2 with default settings).
+  - **Option+Enter** — also inserts a newline on iTerm2 when Left Option Key is set to "+Esc" (Profiles → Keys), or on Terminal.app with "Use Option as Meta key" enabled.
+  - **Shift+Enter** — inserts a newline on terminals with CSI-u mode enabled (iTerm2 → Profiles → Keys → "Report modifiers using CSI u").
+  - Multi-line text can always be **pasted** regardless of terminal settings.
+  - **↑/↓** — move the cursor between lines when the input has multiple lines; at the top or bottom edge, navigates command history.
+  - **Shift+↑ / Shift+↓** — navigate command history regardless of cursor position.
+  - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green; the input `›` prefix turns green when the input pane is focused.
 - **Tool call visibility** — `/toggle-tool-output` or `T` (when chat focused) switches between full tool output and abbreviated mode (first 50 chars + `…`).
 - **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/toggle-think-output` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.

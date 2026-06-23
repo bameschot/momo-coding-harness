@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import session as session_mod
-from .harness import Harness, ChatEvent, _SKILLS_DIR
+from .harness import Harness, ChatEvent
 
 
 @dataclass
@@ -161,7 +161,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return CommandResult(handled=True, output=msg)
 
     if cmd == "/list-skills":
-        available = sorted(p.stem for p in _SKILLS_DIR.glob("*.md")) if _SKILLS_DIR.exists() else []
+        available = harness.list_available_skills()
         if not available:
             return CommandResult(handled=True, output="No skills found in skills/ folder.")
         active = set(harness.active_skills)

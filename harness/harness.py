@@ -152,12 +152,11 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
         # inside the JSON ({"name": "write_file", ...}) so the opening brace can
         # precede the name.  Extend to end-of-text because content args can be large.
         window_start = max(0, nm.start() - 300)
-        segment = text[window_start:]
-        for i, ch in enumerate(segment):
-            if ch != '{':
+        for i in range(window_start, len(text)):
+            if text[i] != '{':
                 continue
             try:
-                obj, _ = _JSON_DECODER.raw_decode(segment, i)
+                obj, _ = _JSON_DECODER.raw_decode(text, i)
                 # Case A: {"name": "write_file", "arguments": {...}}
                 hit = _accept_full(obj)
                 if hit and hit["name"] == found:
@@ -165,7 +164,7 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
                         break  # new result added — move on to the next name match
                 # Case B: write_file( {...} ) — JSON follows "(" after the tool
                 # name, with optional whitespace between "(" and "{".
-                pre = segment[max(0, i - 10):i].rstrip()
+                pre = text[max(window_start, i - 10):i].rstrip()
                 if pre.endswith('('):
                     hit = _accept_args(found, obj)
                     if hit and _append(hit):
@@ -186,6 +185,25 @@ _WRITE_INTENT = (
 def _has_write_intent(text: str) -> bool:
     t = text.lower()
     return any(p in t for p in _WRITE_INTENT)
+
+
+def _extract_and_strip_thinking(raw_content: str) -> tuple[str, str]:
+    """Return (content_without_think_tags, thinking_text).
+
+    Handles complete <think>…</think> blocks and incomplete <think>… blocks
+    (generation cut off mid-thinking).  Either or both may be absent.
+    """
+    thinking = ""
+    complete = re.search(r"<think>(.*?)</think>", raw_content, flags=re.DOTALL)
+    if complete:
+        thinking = complete.group(1).strip()
+    content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
+    incomplete = re.search(r"<think>(.*?)$", content, flags=re.DOTALL)
+    if incomplete:
+        if not thinking:
+            thinking = incomplete.group(1).strip()
+        content = content[:incomplete.start()].strip()
+    return content, thinking
 
 
 # ── TUI events ────────────────────────────────────────────────────────────────
@@ -465,19 +483,9 @@ class Harness:
             # Neither must re-enter the context (stored as role="thinking", filtered at API call).
             raw_thinking = getattr(msg, "thinking", "") or ""
             raw_content  = getattr(msg, "content",  "") or ""
-            # Complete block: <think>…</think>
-            think_in_content = re.search(r"<think>(.*?)</think>", raw_content, flags=re.DOTALL)
-            if think_in_content and not raw_thinking:
-                raw_thinking = think_in_content.group(1).strip()
-            content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
-            # Incomplete block: generation cut off mid-thinking → "<think>..." with no closing tag.
-            # Must be stripped or the raw tag leaks into the stored message and breaks Ollama's
-            # XML template on the next API call (500: element <function> closed by </parameter>).
-            incomplete_think = re.search(r"<think>(.*?)$", content, flags=re.DOTALL)
-            if incomplete_think:
-                if not raw_thinking:
-                    raw_thinking = incomplete_think.group(1).strip()
-                content = re.sub(r"<think>.*$", "", content, flags=re.DOTALL).strip()
+            content, thinking_from_content = _extract_and_strip_thinking(raw_content)
+            if thinking_from_content and not raw_thinking:
+                raw_thinking = thinking_from_content
 
             if raw_thinking:
                 self.messages.append({"role": "thinking", "content": raw_thinking})
@@ -700,11 +708,16 @@ class Harness:
             ctx_color=self._ctx_color(pct),
         ))
 
+    def list_available_skills(self) -> list[str]:
+        if not _SKILLS_DIR.exists():
+            return []
+        return sorted(p.stem for p in _SKILLS_DIR.glob("*.md"))
+
     def load_skill(self, name: str) -> str:
         name = name.removesuffix(".md")
         p = _SKILLS_DIR / f"{name}.md"
         if not p.exists():
-            available = sorted(x.stem for x in _SKILLS_DIR.glob("*.md")) if _SKILLS_DIR.exists() else []
+            available = self.list_available_skills()
             hint = f"Available: {', '.join(available)}" if available else "No skills found in skills/ folder."
             return f"ERROR: skill '{name}' not found. {hint}"
         if name in self.active_skills:

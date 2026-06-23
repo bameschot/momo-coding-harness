@@ -33,8 +33,9 @@ _C_FOCUS     = 11
 _C_THINK     = 12
 _C_CMD       = 13  # input text color when typing a /command
 
-_COLOR_ORANGE  = 16  # custom color slot for orange  (requires COLORS > 16)
-_COLOR_PURPLE  = 17  # custom color slot for purple  (requires COLORS > 17)
+_COLOR_ORANGE     = 16   # custom color slot for orange  (requires COLORS > 16)
+_COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
+_KEY_SHIFT_ENTER  = 601  # custom curses keycode bound to Shift+Enter escape sequences
 
 
 def _init_colors():
@@ -159,7 +160,7 @@ class _LineBuffer:
 
 # ── layout ────────────────────────────────────────────────────────────────────
 
-_INPUT_H  = 4  # fixed height of the multi-line input area
+_INPUT_H  = 5  # fixed height of the multi-line input area
 _STATUS_H = 3  # top border + text + bottom border
 
 def _compute_layout(rows: int, cols: int) -> dict:
@@ -201,6 +202,18 @@ class TUI:
 
         _init_colors()
         curses.curs_set(1)
+        # Disable CR→NL translation so Enter (\r, 13) and Ctrl+J (\n, 10) stay
+        # distinct.  Without this, ncurses maps \r → \n on input and the two codes
+        # collide, making Ctrl+J indistinguishable from Enter.
+        curses.nonl()
+        # Also try escape-sequence bindings for terminals that support them.
+        # \x1b\r / \x1b\n — Option+Enter (macOS iTerm2 with "+Esc" Option key setting).
+        # \x1b[13;2u     — Shift+Enter (kitty/wezterm or iTerm2 with CSI-u mode).
+        for _seq in ("\x1b\r", "\x1b\n", "\x1b[13;2u"):
+            try:
+                curses.define_key(_seq, _KEY_SHIFT_ENTER)
+            except Exception:
+                pass
         self.stdscr.nodelay(True)  # non-blocking getch — keys processed immediately
 
         rows, cols = stdscr.getmaxyx()
@@ -234,7 +247,8 @@ class TUI:
         win = self._status_win
         win.erase()
         cols = self._layout["cols"]
-        border_color = _C_FOCUS if self._focus == "input" else _C_BORDER
+        top_color    = _C_FOCUS if self._focus == "chat"  else _C_BORDER
+        bottom_color = _C_FOCUS if self._focus == "input" else _C_BORDER
         if self._busy and self._waiting_for_input:
             line = f" ? waiting for input  {self._status}"
             line_color = _C_WARN
@@ -248,12 +262,72 @@ class TUI:
         line = line[:cols - 1].ljust(cols - 1)
         rule = "─" * (cols - 1)
         try:
-            win.addnstr(0, 0, rule, cols - 1, curses.color_pair(border_color))
+            win.addnstr(0, 0, rule, cols - 1, curses.color_pair(top_color))
             win.addnstr(1, 0, line, cols - 1, curses.color_pair(line_color))
-            win.addnstr(2, 0, rule, cols - 1, curses.color_pair(border_color))
+            win.addnstr(2, 0, rule, cols - 1, curses.color_pair(bottom_color))
         except curses.error:
             pass
         win.noutrefresh()
+
+    def _build_screen_state(self) -> tuple[list[str], list[int], int, int]:
+        """Return (screen_lines, line_starts_raw, cursor_screen_line, cursor_screen_col).
+
+        screen_lines[i]    — text of screen row i
+        line_starts_raw[i] — index in (prefix + self._input) where row i begins
+        cursor_screen_line/col — cursor's current screen position
+        """
+        cols = self._layout["cols"]
+        w    = max(1, cols - 2)  # rightmost column reserved for scrollbar
+        prefix = "? " if self._waiting_for_input else "⊘ " if self._busy else "› "
+        plen   = len(prefix)
+        raw_full      = prefix + self._input
+        cursor_in_raw = plen + self._cursor
+
+        screen_lines:    list[str] = []
+        line_starts_raw: list[int] = []
+        csl = csc = sc_line = sc_col = 0
+        line_buf:  list[str] = []
+        line_start = 0
+
+        for i in range(len(raw_full) + 1):
+            if i == cursor_in_raw:
+                csl, csc = sc_line, sc_col
+            if i == len(raw_full):
+                screen_lines.append("".join(line_buf))
+                line_starts_raw.append(line_start)
+                break
+            ch = raw_full[i]
+            if ch == "\n":
+                screen_lines.append("".join(line_buf))
+                line_starts_raw.append(line_start)
+                line_buf = []; line_start = i + 1
+                sc_line += 1; sc_col = 0
+            else:
+                line_buf.append(ch); sc_col += 1
+                if sc_col >= w:
+                    screen_lines.append("".join(line_buf))
+                    line_starts_raw.append(line_start)
+                    line_buf = []; line_start = i + 1
+                    sc_line += 1; sc_col = 0
+
+        if not screen_lines:
+            screen_lines = [""]; line_starts_raw = [0]
+        return screen_lines, line_starts_raw, csl, csc
+
+    def _cursor_move_vertical(self, direction: int) -> bool:
+        """Move caret up (-1) or down (+1) by one screen line.
+        Returns True if moved; False at the boundary (caller falls back to history nav)."""
+        prefix = "? " if self._waiting_for_input else "⊘ " if self._busy else "› "
+        plen   = len(prefix)
+        screen_lines, line_starts_raw, csl, csc = self._build_screen_state()
+
+        target = csl + direction
+        if target < 0 or target >= len(screen_lines):
+            return False
+
+        target_col   = min(csc, len(screen_lines[target]))
+        self._cursor = max(0, line_starts_raw[target] + target_col - plen)
+        return True
 
     def _draw_input(self):
         win = self._input_win
@@ -263,51 +337,60 @@ class TUI:
         focused = self._focus == "input"
 
         prefix = "? " if self._waiting_for_input else "⊘ " if self._busy else "› "
-        raw = prefix + self._input
-        w = max(1, cols - 1)
-        chunks = [raw[i:i+w] for i in range(0, len(raw), w)] or [prefix]
-
-        # Map the logical cursor position to a (chunk_row, col) in the raw string.
-        raw_cursor   = len(prefix) + self._cursor
-        cursor_chunk = raw_cursor // w
-        cursor_col   = raw_cursor % w
-        # Edge case: cursor sits exactly at the start of a not-yet-rendered chunk
-        # (len(raw) is an exact multiple of w). Clamp to end of the last chunk.
-        if cursor_chunk >= len(chunks):
-            cursor_chunk = len(chunks) - 1
-            cursor_col   = len(chunks[-1])
+        plen   = len(prefix)
+        screen_lines, _starts, cursor_screen_line, cursor_screen_col = self._build_screen_state()
 
         # Scroll so the cursor row is always visible.
-        first_visible = max(0, cursor_chunk + 1 - h)
-        visible = chunks[first_visible:first_visible + h]
-        cursor_row = cursor_chunk - first_visible
+        first_visible = max(0, cursor_screen_line + 1 - h)
+        visible    = screen_lines[first_visible:first_visible + h]
+        cursor_row = cursor_screen_line - first_visible
 
         prefix_attr = curses.color_pair(_C_FOCUS) if focused else curses.color_pair(0)
-        is_cmd  = self._input.startswith("/")
+        is_cmd   = self._input.startswith("/")
         cmd_attr = curses.color_pair(_C_CMD) if is_cmd else curses.color_pair(0)
-        plen = len(prefix)
 
+        text_w = cols - 2  # rightmost column belongs to the scrollbar
         for row, text in enumerate(visible):
             if row >= h:
                 break
             try:
-                chunk_index = first_visible + row
-                if chunk_index == 0:
-                    # First chunk contains the prefix — render prefix and input separately.
+                if first_visible + row == 0:
+                    # First screen line — render prefix in its own colour.
                     head = text[:plen]
                     tail = text[plen:]
                     win.addnstr(row, 0, head, len(head), prefix_attr)
                     if tail:
-                        win.addnstr(row, plen, tail, cols - 1 - plen, cmd_attr)
+                        win.addnstr(row, plen, tail, text_w - plen, cmd_attr)
                 else:
-                    win.addnstr(row, 0, text, cols - 1, cmd_attr)
+                    win.addnstr(row, 0, text, text_w, cmd_attr)
             except curses.error:
                 pass
+
+        # Scrollbar — mirrors _LineBuffer.render() logic.
+        total  = len(screen_lines)
+        sx     = cols - 1
+        edge_color = _C_FOCUS if focused else _C_BORDER
+        if total > h:
+            thumb_h   = max(1, round(h * h / total))
+            ratio     = first_visible / max(1, total - h)
+            thumb_top = round(ratio * (h - thumb_h))
+            for r in range(h):
+                ch = "█" if thumb_top <= r < thumb_top + thumb_h else "│"
+                try:
+                    win.addch(r, sx, ch, curses.color_pair(edge_color))
+                except curses.error:
+                    pass
+        else:
+            for r in range(h):
+                try:
+                    win.addch(r, sx, "│", curses.color_pair(edge_color))
+                except curses.error:
+                    pass
 
         try:
             if focused:
                 curses.curs_set(1)
-                win.move(cursor_row, min(cursor_col, cols - 2))
+                win.move(cursor_row, min(cursor_screen_col, text_w - 1))
             else:
                 curses.curs_set(0)
         except curses.error:
@@ -573,8 +656,14 @@ class TUI:
         self.harness._emit_status()
         self._redraw()
 
+        _pushed_ch: int | None = None  # character pushed back after paste peek
+
         while True:
-            ch = self.stdscr.getch()
+            if _pushed_ch is not None:
+                ch = _pushed_ch
+                _pushed_ch = None
+            else:
+                ch = self.stdscr.getch()
 
             if ch == curses.KEY_RESIZE:
                 self._rebuild()
@@ -619,18 +708,34 @@ class TUI:
                 self._redraw()
                 continue
 
-            # ↑/↓ scroll chat when focused there; navigate history otherwise
+            # Shift+↑/↓ — explicit history navigation regardless of caret position.
+            if ch == curses.KEY_SR:
+                if self._focus == "input":
+                    self._history_prev()
+                else:
+                    self._chat_buf.scroll_up()
+                self._redraw()
+                continue
+            if ch == curses.KEY_SF:
+                if self._focus == "input":
+                    self._history_next()
+                else:
+                    self._chat_buf.scroll_down()
+                self._redraw()
+                continue
+
+            # ↑/↓ — caret movement in multi-line input; fall back to history at the boundary.
             if ch == curses.KEY_UP:
                 if self._focus == "chat":
                     self._chat_buf.scroll_up()
-                else:
+                elif not self._cursor_move_vertical(-1):
                     self._history_prev()
                 self._redraw()
                 continue
             if ch == curses.KEY_DOWN:
                 if self._focus == "chat":
                     self._chat_buf.scroll_down()
-                else:
+                elif not self._cursor_move_vertical(1):
                     self._history_next()
                 self._redraw()
                 continue
@@ -661,6 +766,20 @@ class TUI:
                 self._toggle_think()
                 continue
 
+            # ESC (27) — manual check for Option+Enter (ESC + CR/LF).
+            # curses.define_key registers the sequence but in nodelay mode curses
+            # often returns raw ESC before the following \r is buffered, so the
+            # assembled keycode never fires.  Peek immediately instead.
+            if ch == 27:
+                peek = self.stdscr.getch()
+                if peek in (10, 13):
+                    self._input = self._input[:self._cursor] + "\n" + self._input[self._cursor:]
+                    self._cursor += 1
+                    self._redraw_input_only()
+                elif peek != curses.ERR:
+                    _pushed_ch = peek
+                continue
+
             # input editing always works regardless of focus
             input_changed = False
             if ch in (curses.KEY_BACKSPACE, 127, 8):
@@ -668,8 +787,26 @@ class TUI:
                     self._input = self._input[:self._cursor - 1] + self._input[self._cursor:]
                     self._cursor -= 1
                     input_changed = True
-            elif ch in (10, 13, curses.KEY_ENTER):
-                self._submit()
+            elif ch in (10, _KEY_SHIFT_ENTER):
+                # LF (10) = Ctrl+J  — always insert a newline.
+                # curses.nonl() keeps Enter as \r (13) so these two never collide.
+                # _KEY_SHIFT_ENTER covers escape-sequence bindings (Option+Enter,
+                # Shift+Enter on terminals that send a distinct sequence).
+                self._input = self._input[:self._cursor] + "\n" + self._input[self._cursor:]
+                self._cursor += 1
+                input_changed = True
+            elif ch in (13, curses.KEY_ENTER):
+                # CR (13) = Enter.  Peek ahead: if more characters are buffered this
+                # is a paste — insert a newline and continue.  Otherwise submit.
+                next_ch = self.stdscr.getch()
+                if next_ch != curses.ERR:
+                    self._input = self._input[:self._cursor] + "\n" + self._input[self._cursor:]
+                    self._cursor += 1
+                    input_changed = True
+                    if next_ch != 10:  # skip the LF half of a CRLF pair
+                        _pushed_ch = next_ch
+                else:
+                    self._submit()
                 # _submit() handles all its own redraws
             elif 32 <= ch <= 126:
                 char = chr(ch)
