@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,6 +58,14 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.set_mode("design")
         return CommandResult(handled=True, output="Switched to design mode")
 
+    if cmd == "/write":
+        harness.set_mode("writing")
+        return CommandResult(handled=True, output="Switched to writing mode")
+
+    if cmd == "/data":
+        harness.set_mode("data")
+        return CommandResult(handled=True, output="Switched to data mode")
+
     if cmd == "/clear":
         system_msg = harness.messages[0]
         harness.messages = [system_msg]
@@ -74,8 +84,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 except OSError as e:
                     return f"ERROR: could not create directory: {e}"
                 harness.workdir = p
-                if harness.mode == "coding":
-                    harness.set_mode("coding")
+                if harness.mode in ("coding", "data"):
+                    harness.set_mode(harness.mode)
                 harness._emit_status()
                 return f"Created and set working directory: {p}"
             return CommandResult(
@@ -84,8 +94,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 confirm_action=_create,
             )
         harness.workdir = p
-        if harness.mode == "coding":
-            harness.set_mode("coding")  # refresh system prompt with new workdir
+        if harness.mode in ("coding", "data"):
+            harness.set_mode(harness.mode)  # refresh system prompt with new workdir
         harness._emit_status()
         return CommandResult(handled=True, output=f"Working directory set to: {p}")
 
@@ -178,7 +188,87 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output="Usage: /unload-skill <name>")
         return CommandResult(handled=True, output=harness.unload_skill(arg.strip()))
 
+    if cmd == "/sessions":
+        sessions = session_mod.list_sessions()
+        if not sessions:
+            return CommandResult(handled=True, output="No saved sessions.")
+        lines = []
+        for p in sessions[:20]:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                mode  = data.get("mode", "?")
+                model = data.get("model", "?")
+            except Exception:
+                mode = model = "?"
+            lines.append(f"  {p.stem}  [{mode}]  {model}")
+        return CommandResult(handled=True, output="Recent sessions:\n" + "\n".join(lines))
+
+    if cmd == "/export":
+        filename = arg.strip() or f"conversation-{harness._ts}.md"
+        rendered = _render_markdown(harness.messages)
+        out = harness.workdir / filename
+        try:
+            out.write_text(rendered, encoding="utf-8")
+        except OSError as e:
+            return CommandResult(handled=True, output=f"ERROR: {e}")
+        return CommandResult(handled=True, output=f"Exported to: {out}")
+
+    if cmd == "/copy":
+        if arg.strip() == "all":
+            text = _render_markdown(harness.messages)
+        else:
+            text = _last_assistant_text(harness.messages)
+        if not text:
+            return CommandResult(handled=True, output="Nothing to copy.")
+        err = _copy_to_clipboard(text)
+        if err:
+            return CommandResult(handled=True, output=err)
+        return CommandResult(handled=True, output="Copied to clipboard.")
+
     return CommandResult(handled=False)
+
+
+def _render_markdown(messages: list[dict]) -> str:
+    parts = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+        if role in ("system", "thinking"):
+            continue
+        if role == "user":
+            parts.append(f"**You:**\n\n{content}")
+        elif role == "assistant":
+            if content:
+                parts.append(f"**Assistant:**\n\n{content}")
+        elif role == "tool":
+            name = m.get("name", "tool")
+            parts.append(f"**Tool result ({name}):**\n\n```\n{content}\n```")
+    return "\n\n---\n\n".join(parts) + "\n"
+
+
+def _last_assistant_text(messages: list[dict]) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            content = m.get("content") or ""
+            if isinstance(content, list):
+                content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+            if content:
+                return content
+    return ""
+
+
+def _copy_to_clipboard(text: str) -> str:
+    for cmd in (["pbcopy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
+        try:
+            subprocess.run(cmd, input=text.encode(), check=True, timeout=5,
+                           capture_output=True)
+            return ""
+        except (FileNotFoundError, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired):
+            continue
+    return "ERROR: no clipboard tool found (tried pbcopy, xclip, xsel)"
 
 
 _HELP = """
@@ -189,6 +279,8 @@ Available commands:
   /host <url>         Connect to a different Ollama instance
   /code               Switch to coding mode (full tools)
   /design             Switch to design mode (read-only tools)
+  /write              Switch to writing mode (document editing tools)
+  /data               Switch to data analysis mode (run_command + read tools)
   /clear              Clear conversation history
   /workdir            Show current working directory
   /workdir <path>     Set working directory for file operations
@@ -204,6 +296,10 @@ Available commands:
   /list-skills        List available skills and show which are active
   /load-skill <name>  Append a skill's instructions to the system prompt
   /unload-skill <name> Remove a skill from the system prompt
+  /sessions           List recent sessions with mode and model info
+  /export [filename]  Export conversation to a Markdown file
+  /copy               Copy last assistant message to clipboard
+  /copy all           Copy full conversation to clipboard
   /cost               Show token usage for this session by mode and model
   /session            Show current session file
   /session <name>     Load a saved session by name or prefix

@@ -12,6 +12,8 @@ class Logger:
         self._fh = open(self._path, "a", encoding="utf-8")
 
     def _write(self, record: dict):
+        if self._fh.closed:
+            return
         record["ts"] = datetime.now(timezone.utc).isoformat()
         self._fh.write(json.dumps(record) + "\n")
         self._fh.flush()

@@ -29,7 +29,7 @@ Options:
 | `--model` | `qwen3.5:9b` | Model name |
 | `--workspace` / `--workdir` | `.` (current directory) | Root for all file operations |
 | `--context` | auto-detected | Override context token limit (default: half the model's maximum) |
-| `--mode` | `design` | Starting mode (`design` or `coding`) |
+| `--mode` | `design` | Starting mode (`design`, `writing`, `data`, or `coding`) |
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--no-think` | off | Disable model thinking/reasoning mode (on by default) |
 
@@ -65,54 +65,87 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
   - Shows `⠋ thinking` (spinner) while the model is working.
   - Shows `? waiting for input` when the model has called `ask_user` and is waiting for your reply. Type your answer and press Enter — the model resumes from where it paused.
-- **Input bar** — 4-row multi-line input area. Paste or type multi-line text freely.
+  - Top rule turns green when the chat pane has focus; bottom rule turns green when the input pane has focus.
+- **Input bar** — 5-row multi-line input area. Paste or type multi-line text freely.
   - **Enter** — submit the message.
-  - **Ctrl+J** — insert a newline at the cursor without submitting (works in every terminal, including macOS Terminal.app and iTerm2 with default settings).
+  - **Ctrl+J** — insert a newline at the cursor without submitting (works in every terminal).
   - **Option+Enter** — also inserts a newline on iTerm2 when Left Option Key is set to "+Esc" (Profiles → Keys), or on Terminal.app with "Use Option as Meta key" enabled.
   - **Shift+Enter** — inserts a newline on terminals with CSI-u mode enabled (iTerm2 → Profiles → Keys → "Report modifiers using CSI u").
   - Multi-line text can always be **pasted** regardless of terminal settings.
-  - **↑/↓** — move the cursor between lines when the input has multiple lines; at the top or bottom edge, navigates command history.
+  - **↑/↓** — move the cursor between lines in multi-line input; at the top or bottom edge, navigates command history.
   - **Shift+↑ / Shift+↓** — navigate command history regardless of cursor position.
+  - **Ctrl+Left / Ctrl+Right** — move cursor one word left or right (requires xterm-compatible terminal; also available as **Option+b / Option+f** on macOS with "+Esc" Option key).
+  - **Ctrl+A / Ctrl+E** — move cursor to start or end of the current line.
+  - **Ctrl+K** — delete from cursor to end of the current line (kills the newline itself when the cursor is right before one).
+  - **Ctrl+U** — delete from start of the current line to the cursor.
   - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
-- **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green; the input `›` prefix turns green when the input pane is focused.
+- **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green.
 - **Tool call visibility** — `/toggle-tool-output` or `T` (when chat focused) switches between full tool output and abbreviated mode (first 50 chars + `…`).
 - **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/toggle-think-output` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.
 
 ## Modes
 
+Press `Shift+Tab` to cycle through modes: **design → writing → data → coding → design**.
+
 ### Design mode (default)
 
-The assistant acts as a design partner. It explores your codebase to understand existing code, asks informed questions grounded in what it finds, and builds a spec. It writes the design document autonomously once it has gathered enough information — no explicit trigger required. It will **not** create or modify code files. It can pause mid-exploration to ask targeted questions via `ask_user`.
+The assistant acts as a design partner. It explores your codebase to understand existing code, asks informed questions grounded in what it finds, and builds a spec. It writes the design document autonomously once it has gathered enough information — no explicit trigger required. It will **not** create or modify code files.
 
-Available tools in design mode: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `write_file`, `ask_user`
+Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `write_file`, `ask_user`
+
+### Writing mode
+
+The assistant acts as a collaborative editor and writer. It reads existing documents before making changes, prefers targeted edits over full rewrites, and matches the tone and register of the existing text. Use it for drafting, editing, and rewriting documents, reports, READMEs, blog posts, and any other prose.
+
+Available tools: all design tools + `append_to_file`, `replace_all_in_file`
+
+### Data mode
+
+The assistant acts as a data analyst. It inspects data files first, processes them using `run_command` (Python, jq, awk, etc.), writes derived output to new files, and reports findings — row counts, shapes, anomalies. Source data files are never overwritten.
+
+Available tools: all design tools + `run_command`
 
 ### Coding mode
 
-The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git. It can pause mid-task to ask the user for clarification before proceeding with ambiguous or destructive changes via `ask_user`.
+The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
-Available tools in coding mode: all design tools + `edit_file`, `create_file`, `delete_file`, `git_command`, `run_command`
+Available tools: all design tools + `edit_file`, `create_file`, `delete_file`, `move_file`, `append_to_file`, `replace_all_in_file`, `git_command`, `run_command`
 
-Switch modes with `/design` and `/code`.
+Switch modes with `/design`, `/write`, `/data`, `/code`, or `Shift+Tab`.
 
 ## Available Tools
 
-### Read-only (available in both modes)
+### Read-only (all modes)
 
 | Tool | Description |
 |---|---|
 | `list_directory` | List the contents of a directory — dirs first, then files with sizes |
 | `file_info` | File/directory metadata: exists, type, size, mtime, line count |
-| `find_files` | Find files using standard shell glob patterns (`*.py`, `src/**/*.ts`). Simple patterns (no `/`) are recursive automatically; path patterns are anchored to the search directory. |
+| `find_files` | Find files using glob patterns (`*.py`, `src/**/*.ts`). Simple patterns are recursive automatically. |
 | `read_file` | Read a file, optionally a specific line range |
-| `grep_file` | Regex search in a single file |
-| `grep_files` | Recursive regex search across a directory |
+| `grep_file` | Regex search in a single file — returns matching lines |
+| `grep_files` | Recursive regex search across a directory — returns matching lines |
+| `grep_extract` | Extract matched text or a capture group from a file — returns just the matched values, not the full line. `group=0` (default) returns the full match; `group=1`, `2`, … returns a specific capture group. |
 
-### Shared (available in both modes)
+### Shared (all modes)
 
 | Tool | Description |
 |---|---|
-| `write_file` | Write content to a file. In design mode, used to save the finished spec. In coding mode, used to create or overwrite any file. |
-| `ask_user` | Pause mid-task and ask the user a focused clarifying question. The harness blocks the model and waits for your reply before continuing. |
+| `write_file` | Write content to a file |
+| `ask_user` | Pause mid-task and ask the user a focused clarifying question |
+
+### Writing mode only
+
+| Tool | Description |
+|---|---|
+| `append_to_file` | Append text to a file (creates if missing) |
+| `replace_all_in_file` | Replace every occurrence of a string in a file; returns count |
+
+### Data mode only
+
+| Tool | Description |
+|---|---|
+| `run_command` | Run any shell command — Python, jq, awk, etc. |
 
 ### Coding mode only
 
@@ -139,7 +172,27 @@ Skills are `.md` files in the `skills/` folder that get appended to the active r
 /unload-skill python      # remove it
 ```
 
-Active skills are saved with the session and restored on restart. Skills stack — multiple can be active at once. On a mode switch (`/code`, `/design`) the role prompt is rebuilt with all currently active skills still included.
+Active skills are saved with the session and restored on restart. Skills stack — multiple can be active at once. On a mode switch (`/code`, `/write`, etc.) the role prompt is rebuilt with all currently active skills still included.
+
+### Built-in skills
+
+| Skill | Description |
+|---|---|
+| `bash` | Shell scripting idioms, safety defaults, portability notes |
+| `c` | C programming patterns |
+| `code-review` | Code review approach and checklist |
+| `data-analysis` | pandas/polars patterns, jq idioms, CSV/JSON wrangling in Python |
+| `designer` | Software design patterns |
+| `document-editing` | Document structure, clarity editing, Markdown conventions |
+| `html-javascript` | Semantic HTML, accessibility, modern JS patterns and pitfalls |
+| `java` | Java patterns |
+| `kotlin` | Kotlin patterns |
+| `python` | Python patterns |
+| `rust` | Ownership, borrowing, error handling, idiomatic Rust |
+| `sql` | Query patterns, indexing, safe updates, migrations |
+| `testing` | TDD and testing patterns |
+| `text-based-game-design` | World design, puzzles, parser conventions |
+| `typescript` | TypeScript type system, strict mode, common patterns |
 
 To add a new skill, create a `.md` file in `skills/`. The filename (without extension) is the skill name used in commands.
 
@@ -152,6 +205,8 @@ Type any command in the input bar:
 | `/help` | Show all available commands |
 | `/code` | Switch to coding mode |
 | `/design` | Switch to design mode |
+| `/write` | Switch to writing mode |
+| `/data` | Switch to data analysis mode |
 | `/model` | List available Ollama models |
 | `/model <name>` | Switch to a different model |
 | `/host` | Show current Ollama host URL |
@@ -172,8 +227,13 @@ Type any command in the input bar:
 | `/compact` | Manually compact the context (remove old messages) |
 | `/clear` | Clear conversation history |
 | `/cost` | Show token usage for this session by mode and model |
+| `/sessions` | List recent sessions with mode and model info |
 | `/session` | Show the current session file path |
 | `/session <name>` | Load a saved session by name or prefix |
+| `/export` | Export the conversation to a Markdown file in the working directory |
+| `/export <filename>` | Export to a specific filename |
+| `/copy` | Copy the last assistant message to the clipboard |
+| `/copy all` | Copy the full conversation to the clipboard |
 | `/exit` or `/quit` | Save session and exit |
 
 ## Context Management
@@ -209,8 +269,9 @@ Each session is automatically saved after every assistant response to:
 
 A log file (`.log`) is written alongside the JSON, recording every request, response, tool call, and token count in newline-delimited JSON format. Use it to audit what the model did or analyse token usage.
 
-To resume a previous session:
-
-```bash
-/session 2026-06-22   # partial prefix match works
+```
+/sessions             # list recent sessions with mode and model
+/session 2026-06-22   # load by partial prefix
+/export               # save the current conversation as a Markdown file
+/copy                 # copy the last assistant response to the clipboard
 ```

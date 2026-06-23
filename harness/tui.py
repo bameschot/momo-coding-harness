@@ -36,6 +36,9 @@ _C_CMD       = 13  # input text color when typing a /command
 _COLOR_ORANGE     = 16   # custom color slot for orange  (requires COLORS > 16)
 _COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
 _KEY_SHIFT_ENTER  = 601  # custom curses keycode bound to Shift+Enter escape sequences
+_KEY_CTRL_LEFT    = 602  # Ctrl+Left  — word jump left
+_KEY_CTRL_RIGHT   = 603  # Ctrl+Right — word jump right
+_MODE_CYCLE = ["design", "writing", "data", "coding"]
 
 
 def _init_colors():
@@ -214,6 +217,13 @@ class TUI:
                 curses.define_key(_seq, _KEY_SHIFT_ENTER)
             except Exception:
                 pass
+        # Ctrl+Left / Ctrl+Right word-jump sequences (xterm/iTerm2 variants).
+        for _seq in ("\x1b[1;5D", "\x1b[5D"):
+            try: curses.define_key(_seq, _KEY_CTRL_LEFT)
+            except Exception: pass
+        for _seq in ("\x1b[1;5C", "\x1b[5C"):
+            try: curses.define_key(_seq, _KEY_CTRL_RIGHT)
+            except Exception: pass
         self.stdscr.nodelay(True)  # non-blocking getch — keys processed immediately
 
         rows, cols = stdscr.getmaxyx()
@@ -313,6 +323,25 @@ class TUI:
         if not screen_lines:
             screen_lines = [""]; line_starts_raw = [0]
         return screen_lines, line_starts_raw, csl, csc
+
+    def _word_start_left(self) -> int:
+        """Return the index in _input for the start of the previous word."""
+        i = self._cursor - 1
+        while i > 0 and self._input[i - 1] in " \t\n":
+            i -= 1
+        while i > 0 and self._input[i - 1] not in " \t\n":
+            i -= 1
+        return i
+
+    def _word_end_right(self) -> int:
+        """Return the index in _input for the end of the next word."""
+        i = self._cursor
+        n = len(self._input)
+        while i < n and self._input[i] in " \t\n":
+            i += 1
+        while i < n and self._input[i] not in " \t\n":
+            i += 1
+        return i
 
     def _cursor_move_vertical(self, direction: int) -> bool:
         """Move caret up (-1) or down (+1) by one screen line.
@@ -684,9 +713,10 @@ class TUI:
                 time.sleep(0.02)  # idle — avoids CPU spin without adding key lag
                 continue
 
-            # Shift+Tab toggles design ↔ coding mode
+            # Shift+Tab cycles through all four modes
             if ch == curses.KEY_BTAB:
-                new_mode = "coding" if self.harness.mode == "design" else "design"
+                idx = _MODE_CYCLE.index(self.harness.mode) if self.harness.mode in _MODE_CYCLE else 0
+                new_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
                 self.harness.set_mode(new_mode)
                 self._drain_events()  # consume the StatusEvent set_mode just enqueued
                 self._redraw()
@@ -760,6 +790,28 @@ class TUI:
                 self._redraw_input_only()
                 continue
 
+            # Ctrl+Left / Ctrl+Right — word jump (define_key sequences or manual ESC handler)
+            if ch == _KEY_CTRL_LEFT:
+                self._cursor = self._word_start_left()
+                self._redraw_input_only()
+                continue
+            if ch == _KEY_CTRL_RIGHT:
+                self._cursor = self._word_end_right()
+                self._redraw_input_only()
+                continue
+
+            # Ctrl+A / Ctrl+E — start / end of current logical line
+            if ch == 1:  # Ctrl+A
+                i = self._input.rfind('\n', 0, self._cursor)
+                self._cursor = i + 1  # 0 when no \n found (rfind returns -1)
+                self._redraw_input_only()
+                continue
+            if ch == 5:  # Ctrl+E
+                i = self._input.find('\n', self._cursor)
+                self._cursor = i if i >= 0 else len(self._input)
+                self._redraw_input_only()
+                continue
+
             # Shift+T toggles thinking output (only when chat pane has focus,
             # so typing 'T' in the input field still works normally)
             if ch == ord('T') and self._focus == "chat":
@@ -773,8 +825,17 @@ class TUI:
             if ch == 27:
                 peek = self.stdscr.getch()
                 if peek in (10, 13):
+                    # Option+Enter — insert newline
                     self._input = self._input[:self._cursor] + "\n" + self._input[self._cursor:]
                     self._cursor += 1
+                    self._redraw_input_only()
+                elif peek == ord('b'):
+                    # Option+Left / Meta+b — word jump left
+                    self._cursor = self._word_start_left()
+                    self._redraw_input_only()
+                elif peek == ord('f'):
+                    # Option+Right / Meta+f — word jump right
+                    self._cursor = self._word_end_right()
                     self._redraw_input_only()
                 elif peek != curses.ERR:
                     _pushed_ch = peek
@@ -808,6 +869,24 @@ class TUI:
                 else:
                     self._submit()
                 # _submit() handles all its own redraws
+            elif ch == 11:  # Ctrl+K — kill to end of line
+                i = self._input.find('\n', self._cursor)
+                if i < 0:
+                    end = len(self._input)
+                elif i == self._cursor:
+                    end = self._cursor + 1  # cursor is right before \n — kill the newline
+                else:
+                    end = i                 # kill up to but not including \n
+                if end > self._cursor:
+                    self._input = self._input[:self._cursor] + self._input[end:]
+                    input_changed = True
+            elif ch == 21:  # Ctrl+U — kill from start of line to cursor
+                i = self._input.rfind('\n', 0, self._cursor)
+                start = i + 1  # 0 when no \n (rfind returns -1)
+                if start < self._cursor:
+                    self._input = self._input[:start] + self._input[self._cursor:]
+                    self._cursor = start
+                    input_changed = True
             elif 32 <= ch <= 126:
                 char = chr(ch)
                 self._input = self._input[:self._cursor] + char + self._input[self._cursor:]

@@ -44,8 +44,9 @@ Propose concrete options rather than open-ended questions:
 | `file_info(path)` | Check if a file exists and its size |
 | `find_files(pattern, directory?)` | Search for files matching a glob, e.g. `*.md` |
 | `read_file(path)` | Read the contents of a file |
-| `grep_file(pattern, path)` | Regex search inside a single file |
-| `grep_files(pattern, directory?)` | Regex search across all files |
+| `grep_file(pattern, path)` | Regex search inside a single file — returns matching lines |
+| `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines |
+| `grep_extract(pattern, path, group?)` | Extract matched text or a capture group from a file — returns just the matched values, not the whole line |
 | `write_file(path, content)` | Write the finished design to a file |
 | `ask_user(question)` | Pause and ask the user a clarifying question mid-loop |
 

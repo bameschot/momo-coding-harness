@@ -56,6 +56,16 @@ READ_ONLY_TOOLS = [
         {"pattern": {"type": "string"},
          "directory": {"type": "string", "description": "Directory to search (default: .)"}},
         ["pattern"]),
+
+    _fn("grep_extract",
+        "Extract the matched text or a specific capture group from all regex matches in a file. "
+        "Returns one extracted value per match with its line number. "
+        "Use group=0 (default) for the full match; group=1, 2, … for a specific capture group. "
+        "Example: pattern r'version = \"(\\S+)\"' with group=1 returns just the version strings.",
+        {"pattern": {"type": "string", "description": "Regex pattern, optionally with capture groups"},
+         "path":    {"type": "string"},
+         "group":   {"type": "integer", "description": "Capture group to return: 0 = full match (default), 1 = first group, etc."}},
+        ["pattern", "path"]),
 ]
 
 CODING_ONLY_TOOLS = [
@@ -112,13 +122,14 @@ CODING_ONLY_TOOLS = [
 
 SHARED_TOOLS = [
     _fn("write_file",
-        "Write content to a file. "
-        "Call this when you have gathered enough information to write a complete design spec, "
-        "or when the user explicitly asks you to write, save, or finalize the design. "
-        "Put ALL content in the 'content' parameter — do NOT write the design as chat text. "
-        "Do NOT call this on the very first response to a new idea before any dialogue or exploration.",
-        {"path":    {"type": "string", "description": "Destination file path. Name it after the subject being designed in lowercase kebab-case, e.g. 'space-exploration-game.md'."},
-         "content": {"type": "string", "description": "Full file content to write"}},
+        "Write content to a file, creating it or overwriting it if it already exists. "
+        "Use this to save any file: scripts (.py, .sh), data files (.csv, .json, .jsonl), "
+        "documents (.md, .txt), or any other content. "
+        "The content parameter must contain the raw file content exactly as it should appear on disk — "
+        "do NOT wrap code in markdown code fences (no ```python or ``` markers) unless the target "
+        "file is itself a Markdown document.",
+        {"path":    {"type": "string", "description": "Destination file path, including the correct extension for the file type (e.g. 'process.py', 'output.csv', 'report.md')."},
+         "content": {"type": "string", "description": "Raw file content to write. For scripts, this is source code only — no surrounding markdown."}},
         ["path", "content"]),
 
     _fn("ask_user",
@@ -135,6 +146,18 @@ SHARED_TOOLS = [
 
 DESIGN_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS
 ALL_TOOLS    = READ_ONLY_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
+
+# Derived subsets for writer and data modes
+_by_name = {t["function"]["name"]: t for t in CODING_ONLY_TOOLS}
+
+WRITER_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS + [
+    _by_name["append_to_file"],
+    _by_name["replace_all_in_file"],
+]
+
+DATA_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS + [
+    _by_name["run_command"],
+]
 
 
 # ── path safety ───────────────────────────────────────────────────────────────
@@ -215,6 +238,32 @@ def _grep_file(pattern: str, path: str, *, workdir: Path) -> str:
     for i, line in enumerate(text.splitlines(), 1):
         if rx.search(line):
             hits.append(f"{i:4}: {line}")
+    return "\n".join(hits) if hits else "(no matches)"
+
+
+def _grep_extract(pattern: str, path: str, group: int = 0, *, workdir: Path) -> str:
+    p = _safe_path(path, workdir)
+    if isinstance(p, str):
+        return p
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return f"ERROR: file not found: {path}"
+    except OSError as e:
+        return f"ERROR: {e}"
+    try:
+        rx = re.compile(pattern)
+    except re.error as e:
+        return f"ERROR: invalid regex: {e}"
+    hits = []
+    for i, line in enumerate(text.splitlines(), 1):
+        for m in rx.finditer(line):
+            try:
+                extracted = m.group(group)
+            except IndexError:
+                return f"ERROR: group {group} does not exist in pattern"
+            if extracted is not None:
+                hits.append(f"{i:4}: {extracted}")
     return "\n".join(hits) if hits else "(no matches)"
 
 
@@ -457,6 +506,7 @@ _EXECUTORS = {
     "read_file":          _read_file,
     "grep_file":          _grep_file,
     "grep_files":         _grep_files,
+    "grep_extract":       _grep_extract,
     "write_file":          _write_file,
     "move_file":          _move_file,
     "append_to_file":     _append_to_file,

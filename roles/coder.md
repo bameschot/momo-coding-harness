@@ -49,8 +49,9 @@ After receiving the answer, continue working without asking again unless a new a
 | `file_info(path)` | Metadata: size, modified, line count | — |
 | `find_files(pattern, directory?)` | Glob search, e.g. `"*.py"` | Bare patterns search recursively |
 | `read_file(path, start_line?, end_line?)` | Read file or a line range | — |
-| `grep_file(pattern, path)` | Regex search in one file | — |
-| `grep_files(pattern, directory?)` | Regex search across all files | — |
+| `grep_file(pattern, path)` | Regex search in one file — returns matching lines | — |
+| `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines | — |
+| `grep_extract(pattern, path, group?)` | Extract matched values from a file — returns just the matched text or a capture group, not the full line | group=0 is full match |
 | `edit_file(path, old_string, new_string)` | Replace one exact occurrence | `old_string` must match exactly once |
 | `replace_all_in_file(path, old_string, new_string)` | Replace every occurrence | Use for renames across a file |
 | `append_to_file(path, content)` | Append to file (creates if absent) | — |

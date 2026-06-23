@@ -10,7 +10,7 @@ from typing import Any
 from . import session as session_mod
 from .logger import Logger
 from .ollama_client import OllamaClient
-from .tools import DESIGN_TOOLS, ALL_TOOLS, dispatch
+from .tools import DESIGN_TOOLS, WRITER_TOOLS, DATA_TOOLS, ALL_TOOLS, dispatch
 
 _ROLES_DIR  = Path(__file__).parent.parent / "roles"
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -37,6 +37,24 @@ _RX_MISTRAL   = re.compile(r'\[TOOL_CALL\]\s*(\[.*?\])',                       r
 _RX_COMMAND_R = re.compile(r'Action:\s*(\S+)\s*\nAction\s+Input:\s*(\{.*?\})', re.DOTALL)
 
 _JSON_DECODER = json.JSONDecoder()
+
+
+def _strip_text_tool_calls(text: str) -> str:
+    """Remove text-based tool-call markup from an assistant message content string.
+
+    When a model embeds its tool call in plain text (instead of via the native
+    tool_calls API field), the harness extracts the call but the raw XML/tagged
+    markup is still sitting in `content`.  Re-sending that markup to Ollama causes
+    Qwen3's XML template engine to embed it verbatim inside its own XML output,
+    producing malformed nesting and a 500 "XML syntax error: element <function>
+    closed by </parameter>" on the next request.  Stripping before storage fixes this.
+    """
+    for rx in (_RX_QWEN, _RX_FUNC, _RX_FUNC2, _RX_MISTRAL):
+        text = rx.sub("", text)
+    text = _RX_PHI.sub("", text)
+    text = _RX_DEEPSEEK.sub("", text)
+    text = _RX_COMMAND_R.sub("", text)
+    return text.strip()
 
 
 def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
@@ -175,6 +193,46 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
     return results
 
 
+# Tools whose "content" argument can be large and contain characters (<, >, &)
+# that break Ollama's Qwen3 XML template when re-sent in message history.
+# We replace the content with a short placeholder after storage — the file is
+# on disk and the model can read_file it back if needed.
+_CONTENT_ARG_TOOLS = {"write_file", "create_file", "append_to_file"}
+
+
+def _sanitize_tool_args(name: str, args: dict) -> dict:
+    """Replace the 'content' value for file-writing tools with a placeholder.
+    Prevents large file bodies (Python scripts, etc.) with XML-special characters
+    from being embedded verbatim in Ollama's XML chat template on subsequent turns."""
+    if name in _CONTENT_ARG_TOOLS and "content" in args:
+        return {k: (f"[written to {args.get('path', 'file')}]" if k == "content" else v)
+                for k, v in args.items()}
+    return args
+
+
+def _is_qwen(model: str) -> bool:
+    return "qwen" in model.lower()
+
+
+def _xml_escape_for_ollama(messages: list[dict]) -> list[dict]:
+    """Return a shallow copy of messages with XML-special characters escaped in
+    role:'tool' content.  Qwen3's Ollama template wraps tool results in
+    <tool_response>…</tool_response> XML; unescaped < > & in the content break
+    the XML parser and produce a 500.  We escape only the copy sent to the API —
+    the stored messages keep the correct, unescaped content so the history is
+    accurate and the model can still reason about the actual values."""
+    result = []
+    for m in messages:
+        if m.get("role") == "tool" and isinstance(m.get("content"), str):
+            m = dict(m)
+            m["content"] = (m["content"]
+                            .replace("&", "&amp;")
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;"))
+        result.append(m)
+    return result
+
+
 _WRITE_INTENT = (
     "let me write", "i will write", "i'll write", "i'm going to write",
     "writing the design", "writing the spec", "writing it now",
@@ -276,6 +334,45 @@ def _coding_prompt(workdir: str) -> str:
         f"Working directory: {workdir}"
     )
 
+def _writing_prompt(workdir: str = "") -> str:
+    return _load_role("writer") or (
+        "You are a writing assistant. Help the user write, edit, and improve documents. "
+        "Read existing documents before editing them. "
+        "Prefer targeted replacements (replace_all_in_file) over full rewrites. "
+        "Match the register and tone of the existing text unless instructed otherwise. "
+        "Ask one focused question when intent is ambiguous. "
+        "Save documents with write_file or extend them with append_to_file — "
+        "do not paste long content in chat."
+    )
+
+def _data_prompt(workdir: str) -> str:
+    raw = _load_role("data")
+    if raw:
+        return raw.replace("{workdir}", workdir)
+    return (
+        "You are a data analyst. Help the user explore, transform, and summarise data files. "
+        "Inspect data structure first (read_file, grep_files) before processing. "
+        "Use run_command with Python, jq, awk, or similar tools to process data. "
+        "Write output to a new file rather than printing large results in chat. "
+        "Always report row counts, shapes, and any anomalies you find. "
+        "Never overwrite source data files. "
+        f"Working directory: {workdir}"
+    )
+
+_ROLE_LOADERS = {
+    "design":  lambda wd: _design_prompt(),
+    "coding":  lambda wd: _coding_prompt(wd),
+    "writing": lambda wd: _writing_prompt(wd),
+    "data":    lambda wd: _data_prompt(wd),
+}
+
+_MODE_TOOLS = {
+    "design":  DESIGN_TOOLS,
+    "writing": WRITER_TOOLS,
+    "data":    DATA_TOOLS,
+    "coding":  ALL_TOOLS,
+}
+
 
 # ── token estimation ──────────────────────────────────────────────────────────
 
@@ -349,7 +446,8 @@ class Harness:
     # ── mode switching ────────────────────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
-        base = _design_prompt() if self.mode == "design" else _coding_prompt(str(self.workdir))
+        loader = _ROLE_LOADERS.get(self.mode, _ROLE_LOADERS["coding"])
+        base = loader(str(self.workdir))
         parts = []
         for name in self.active_skills:
             p = _SKILLS_DIR / f"{name}.md"
@@ -426,8 +524,8 @@ class Harness:
         """Called from the harness worker thread."""
         self.messages.append({"role": "user", "content": text})
 
-        tools = DESIGN_TOOLS if self.mode == "design" else ALL_TOOLS
-        _MAX_ITERATIONS = 35 if self.mode == "design" else 50
+        tools = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
+        _MAX_ITERATIONS = 40 if self.mode == "design" else 100
         _NUDGE_AFTER = 10  # consecutive tool-only turns before injecting a respond prompt
 
         iteration = 0
@@ -459,6 +557,8 @@ class Harness:
 
             try:
                 api_messages = [m for m in self.messages if m.get("role") != "thinking"]
+                if _is_qwen(self.client.model):
+                    api_messages = _xml_escape_for_ollama(api_messages)
                 think_this_turn = False if _suppress_think_next else self.think
                 _suppress_think_next = False
                 response = self.client.chat(api_messages, tools,
@@ -536,7 +636,7 @@ class Harness:
                         # After write_file the model sometimes returns nothing — the
                         # write already happened so this is a clean terminal state.
                         self.event_queue.put(ChatEvent("system",
-                            "Design written. Check the file to review it."))
+                            "File written."))
                     elif not empty_retried:
                         # Retry once with an explicit prompt. Only inject a user message
                         # if the last turn is not already a user turn — consecutive user
@@ -602,7 +702,7 @@ class Harness:
                     return
                 # Design mode: model announced it would write but produced no tool call.
                 # Inject one targeted nudge and continue the loop so it can comply.
-                if (self.mode == "design"
+                if (self.mode in ("design", "writing")
                         and _has_write_intent(content)
                         and not _write_nudged):
                     _write_nudged = True
@@ -622,24 +722,28 @@ class Harness:
             # Append the assistant turn.  Use Ollama's minimal tool_calls format:
             # {"function": {"name": ..., "arguments": ...}} with no id or type
             # fields — Ollama's template engine rejects those in message history.
+            _qwen = _is_qwen(self.client.model)
             if msg.tool_calls:
-                # Preserve the actual arguments object from Ollama's response.
                 self.messages.append({
                     "role": "assistant",
                     "content": content or None,
                     "tool_calls": [
                         {"function": {"name": tc.function.name,
-                                      "arguments": tc.function.arguments}}
+                                      "arguments": (_sanitize_tool_args(
+                                          tc.function.name, tc.function.arguments)
+                                          if _qwen else tc.function.arguments)}}
                         for tc in msg.tool_calls
                     ],
                 })
             else:
-                # Text-recovered calls — use extracted (name, args) tuples.
+                # Text-recovered calls — also strip tool-call markup from content
+                # so raw XML/tagged formats don't corrupt Qwen3's XML prompt.
                 self.messages.append({
                     "role": "assistant",
-                    "content": content or None,
+                    "content": _strip_text_tool_calls(content) or None,
                     "tool_calls": [
-                        {"function": {"name": n, "arguments": a}}
+                        {"function": {"name": n,
+                                      "arguments": _sanitize_tool_args(n, a) if _qwen else a}}
                         for n, a in _calls
                     ],
                 })
