@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import session as session_mod
-from .harness import Harness, ChatEvent
+from .harness import Harness, ChatEvent, _SKILLS_DIR
 
 
 @dataclass
@@ -160,6 +160,24 @@ def handle(line: str, harness: Harness) -> CommandResult:
         msg = harness.load_session(p)
         return CommandResult(handled=True, output=msg)
 
+    if cmd == "/list-skills":
+        available = sorted(p.stem for p in _SKILLS_DIR.glob("*.md")) if _SKILLS_DIR.exists() else []
+        if not available:
+            return CommandResult(handled=True, output="No skills found in skills/ folder.")
+        active = set(harness.active_skills)
+        lines = [f"  {'[on] ' if s in active else '[off]'} {s}" for s in available]
+        return CommandResult(handled=True, output="Skills:\n" + "\n".join(lines))
+
+    if cmd == "/load-skill":
+        if not arg:
+            return CommandResult(handled=True, output="Usage: /load-skill <name>")
+        return CommandResult(handled=True, output=harness.load_skill(arg.strip()))
+
+    if cmd == "/unload-skill":
+        if not arg:
+            return CommandResult(handled=True, output="Usage: /unload-skill <name>")
+        return CommandResult(handled=True, output=harness.unload_skill(arg.strip()))
+
     return CommandResult(handled=False)
 
 
@@ -183,6 +201,9 @@ Available commands:
   /tool-result <n>    Set cap (e.g. /tool-result 8000); 0 = unlimited
   /think              Show thinking mode state (on/off)
   /think on|off       Enable or disable model thinking/reasoning mode
+  /list-skills        List available skills and show which are active
+  /load-skill <name>  Append a skill's instructions to the system prompt
+  /unload-skill <name> Remove a skill from the system prompt
   /cost               Show token usage for this session by mode and model
   /session            Show current session file
   /session <name>     Load a saved session by name or prefix

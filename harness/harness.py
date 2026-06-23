@@ -12,7 +12,8 @@ from .logger import Logger
 from .ollama_client import OllamaClient
 from .tools import DESIGN_TOOLS, ALL_TOOLS, dispatch
 
-_ROLES_DIR = Path(__file__).parent.parent / "roles"
+_ROLES_DIR  = Path(__file__).parent.parent / "roles"
+_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 
 # ── text tool-call recovery ───────────────────────────────────────────────────
@@ -287,8 +288,9 @@ class Harness:
         self._user_input_queue: queue.Queue[str] = queue.Queue()
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
         self.think: bool = True    # enable model thinking/reasoning mode; configurable via /think or --think
+        self.active_skills: list[str] = []
         self.messages: list[dict] = [
-            {"role": "system", "content": _design_prompt()}
+            {"role": "system", "content": self._build_system_prompt()}
         ]
         self._token_estimate = 0
         self._sync_context_limit(emit=True)
@@ -313,8 +315,8 @@ class Harness:
         """Query the model's native context window and use it as the compaction limit."""
         reported = self.client.context_length()
         if reported:
-            self.context_limit = reported
-            msg = f"Model context: {reported:,} tokens ({self.client.model})"
+            self.context_limit = reported // 2
+            msg = f"Model context: {self.context_limit:,} tokens (half of {reported:,} max, {self.client.model})"
         else:
             msg = f"Model context: unknown — using default {self.context_limit:,} tokens ({self.client.model})"
         if emit:
@@ -328,12 +330,20 @@ class Harness:
 
     # ── mode switching ────────────────────────────────────────────────────────
 
+    def _build_system_prompt(self) -> str:
+        base = _design_prompt() if self.mode == "design" else _coding_prompt(str(self.workdir))
+        parts = []
+        for name in self.active_skills:
+            p = _SKILLS_DIR / f"{name}.md"
+            if p.exists():
+                parts.append(p.read_text(encoding="utf-8").strip())
+        if parts:
+            return base + "\n\n---\n\n" + "\n\n---\n\n".join(parts)
+        return base
+
     def set_mode(self, mode: str):
         self.mode = mode
-        if mode == "design":
-            self.messages[0] = {"role": "system", "content": _design_prompt()}
-        else:
-            self.messages[0] = {"role": "system", "content": _coding_prompt(str(self.workdir))}
+        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
         self._emit_status()
 
     # ── context management ────────────────────────────────────────────────────
@@ -399,14 +409,14 @@ class Harness:
         self.messages.append({"role": "user", "content": text})
 
         tools = DESIGN_TOOLS if self.mode == "design" else ALL_TOOLS
-        _MAX_ITERATIONS = 15 if self.mode == "design" else 20
-        _NUDGE_AFTER = 4  # consecutive tool-only turns before injecting a respond prompt
+        _MAX_ITERATIONS = 35 if self.mode == "design" else 50
+        _NUDGE_AFTER = 10  # consecutive tool-only turns before injecting a respond prompt
 
         iteration = 0
         tool_only_turns = 0
         last_tool: str | None = None
         empty_retried = False
-        _length_retried = False  # disable thinking for one turn after a length cutoff
+        _suppress_think_next = False  # disable thinking for one turn after cutoff or thinking-only retry
         _nudged = False
         _write_nudged = False  # one write-intent recovery nudge per send()
         while True:
@@ -431,8 +441,8 @@ class Harness:
 
             try:
                 api_messages = [m for m in self.messages if m.get("role") != "thinking"]
-                think_this_turn = False if _length_retried else self.think
-                _length_retried = False
+                think_this_turn = False if _suppress_think_next else self.think
+                _suppress_think_next = False
                 response = self.client.chat(api_messages, tools,
                                             think=think_this_turn,
                                             num_ctx=self.context_limit)
@@ -526,10 +536,9 @@ class Harness:
                         empty_retried = True
                         if self.messages[-1]["role"] != "user":
                             if done_reason == "length":
-                                # Generation was cut off by the context window — the
-                                # thinking block consumed all available tokens.
+                                # Generation cut off by context window — thinking consumed all tokens.
                                 # Disable thinking for the retry so it has budget to respond.
-                                _length_retried = True
+                                _suppress_think_next = True
                                 self.event_queue.put(ChatEvent("system",
                                     "Response cut off (context limit). Retrying without thinking."))
                                 retry_text = (
@@ -543,8 +552,11 @@ class Harness:
                                     "Call a tool directly or write a brief response."
                                 )
                             elif raw_thinking:
-                                # Model reasoned but produced no output — common when
-                                # think=True and the model gets stuck mid-reasoning.
+                                # Model reasoned but produced no output or tool call.
+                                # Disable thinking for the retry — passing think=True on a
+                                # retry after a thinking-only turn causes Ollama's Qwen3
+                                # XML template to generate malformed tool definitions (500).
+                                _suppress_think_next = True
                                 retry_text = (
                                     "You produced reasoning but no response or tool call. "
                                     "Based on your analysis, call write_file now with the complete document, "
@@ -560,6 +572,11 @@ class Harness:
                                     if self.mode == "design" else
                                     "Please respond with your current analysis or next step."
                                 )
+                            # Bridge a tool→user gap: Qwen3 expects an assistant turn
+                            # between tool results and the next user turn. Without it
+                            # the template may produce malformed XML for tool definitions.
+                            if self.messages[-1]["role"] == "tool":
+                                self.messages.append({"role": "assistant", "content": None})
                             self.messages.append({"role": "user", "content": retry_text})
                         tool_only_turns = 0
                         continue
@@ -683,10 +700,32 @@ class Harness:
             ctx_color=self._ctx_color(pct),
         ))
 
+    def load_skill(self, name: str) -> str:
+        name = name.removesuffix(".md")
+        p = _SKILLS_DIR / f"{name}.md"
+        if not p.exists():
+            available = sorted(x.stem for x in _SKILLS_DIR.glob("*.md")) if _SKILLS_DIR.exists() else []
+            hint = f"Available: {', '.join(available)}" if available else "No skills found in skills/ folder."
+            return f"ERROR: skill '{name}' not found. {hint}"
+        if name in self.active_skills:
+            return f"Skill '{name}' is already active."
+        self.active_skills.append(name)
+        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
+        return f"Skill loaded: {name}"
+
+    def unload_skill(self, name: str) -> str:
+        name = name.removesuffix(".md")
+        if name not in self.active_skills:
+            return f"Skill '{name}' is not active."
+        self.active_skills.remove(name)
+        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
+        return f"Skill unloaded: {name}"
+
     def _autosave(self):
         session_mod.save(
             self._ts, self.client.model, self.mode,
             self.workdir, self.messages, self.context_limit,
+            self.active_skills,
         )
 
     def load_session(self, path: Path) -> str:
@@ -696,13 +735,11 @@ class Harness:
         self.workdir = Path(data.get("workdir", str(self.workdir)))
         self.context_limit = data.get("context_limit", self.context_limit)
         self.client.set_model(data.get("model", self.client.model))
-        # Always refresh the system prompt from the current role file on disk.
-        # Saved sessions carry a snapshot of the old prompt; without this the
-        # model runs stale instructions regardless of role file edits.
+        self.active_skills = data.get("active_skills", [])
+        # Always rebuild the system prompt from the current role files and skills on
+        # disk — saved sessions carry a snapshot; role/skill edits must take effect.
         if self.messages and self.messages[0].get("role") == "system":
-            prompt = (_design_prompt() if self.mode == "design"
-                      else _coding_prompt(str(self.workdir)))
-            self.messages[0] = {"role": "system", "content": prompt}
+            self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
         self._token_estimate = self._estimate()
         self._emit_status()
         return f"Session loaded: {path.name} ({len(self.messages)} messages)"

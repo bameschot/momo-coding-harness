@@ -31,8 +31,10 @@ _C_BORDER    = 9
 _C_BUSY      = 10
 _C_FOCUS     = 11
 _C_THINK     = 12
+_C_CMD       = 13  # input text color when typing a /command
 
-_COLOR_ORANGE = 16  # custom color slot for orange (requires COLORS > 16)
+_COLOR_ORANGE  = 16  # custom color slot for orange  (requires COLORS > 16)
+_COLOR_PURPLE  = 17  # custom color slot for purple  (requires COLORS > 17)
 
 
 def _init_colors():
@@ -49,11 +51,14 @@ def _init_colors():
     curses.init_pair(_C_BORDER,    curses.COLOR_WHITE,   -1)
     curses.init_pair(_C_BUSY,      curses.COLOR_BLACK,   curses.COLOR_YELLOW)
     curses.init_pair(_C_FOCUS,     curses.COLOR_GREEN,   -1)
-    if curses.can_change_color() and curses.COLORS > 16:
-        curses.init_color(_COLOR_ORANGE, 1000, 500, 0)
+    if curses.can_change_color() and curses.COLORS > 17:
+        curses.init_color(_COLOR_ORANGE, 1000, 500,    0)
+        curses.init_color(_COLOR_PURPLE,  600,   0, 1000)
         curses.init_pair(_C_THINK, _COLOR_ORANGE, -1)
+        curses.init_pair(_C_CMD,   _COLOR_PURPLE, -1)
     else:
-        curses.init_pair(_C_THINK, curses.COLOR_YELLOW, -1)
+        curses.init_pair(_C_THINK, curses.COLOR_YELLOW,  -1)
+        curses.init_pair(_C_CMD,   curses.COLOR_MAGENTA, -1)
 
 
 # ── spinner ───────────────────────────────────────────────────────────────────
@@ -278,12 +283,24 @@ class TUI:
         cursor_row = cursor_chunk - first_visible
 
         prefix_attr = curses.color_pair(_C_FOCUS) if focused else curses.color_pair(0)
+        is_cmd  = self._input.startswith("/")
+        cmd_attr = curses.color_pair(_C_CMD) if is_cmd else curses.color_pair(0)
+        plen = len(prefix)
+
         for row, text in enumerate(visible):
             if row >= h:
                 break
             try:
-                attr = prefix_attr if row == 0 else curses.color_pair(0)
-                win.addnstr(row, 0, text, cols - 1, attr)
+                chunk_index = first_visible + row
+                if chunk_index == 0:
+                    # First chunk contains the prefix — render prefix and input separately.
+                    head = text[:plen]
+                    tail = text[plen:]
+                    win.addnstr(row, 0, head, len(head), prefix_attr)
+                    if tail:
+                        win.addnstr(row, plen, tail, cols - 1 - plen, cmd_attr)
+                else:
+                    win.addnstr(row, 0, text, cols - 1, cmd_attr)
             except curses.error:
                 pass
 
