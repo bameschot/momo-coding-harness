@@ -60,7 +60,9 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
 - **Chat pane** — conversation history including inline tool calls (yellow) and results. Scroll with `↑`/`↓` or `PgUp`/`PgDn`.
 - **Status bar** — current mode, model, context usage %, and working directory.
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
-- **Input bar** — 4-row area (long messages word-wrap). Press Enter to send. `↑`/`↓` navigate command history when input is focused.
+  - Shows `⠋ thinking` (black-on-yellow spinner) while the model is working.
+  - Shows `? waiting for input` (yellow) when the model has called `ask_user` and is waiting for your reply. Type your answer and press Enter — the model resumes from where it paused.
+- **Input bar** — 4-row area (long messages word-wrap). Press Enter to send. `↑`/`↓` navigate command history when input is focused. When the model is waiting for input, the prefix changes from `›` to `?`.
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The chat pane's right edge highlights green when focused; the input shows a cyan `›` prefix when focused.
 - **Tool call visibility** — `/toggle-tool-output` switches between full tool output (call + result) and abbreviated mode (first 50 chars + `…`, no result).
 
@@ -68,13 +70,13 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
 
 ### Design mode (default)
 
-The assistant acts as a design partner. It explores your codebase to understand existing code, asks clarifying questions, and builds a spec. When you explicitly ask it to write or save the design (e.g. "write design", "save spec"), it writes a Markdown document. It will **not** create or modify code files.
+The assistant acts as a design partner. It explores your codebase to understand existing code, asks informed questions grounded in what it finds, and builds a spec. When you explicitly ask it to write or save the design (e.g. "write design", "save spec"), it writes a Markdown document. It will **not** create or modify code files. It can pause mid-exploration to ask targeted questions via `ask_user`.
 
-Available tools in design mode: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `write_file`
+Available tools in design mode: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `write_file`, `ask_user`
 
 ### Coding mode
 
-The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
+The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git. It can pause mid-task to ask the user for clarification before proceeding with ambiguous or destructive changes via `ask_user`.
 
 Available tools in coding mode: all design tools + `edit_file`, `create_file`, `delete_file`, `git_command`, `run_command`
 
@@ -93,11 +95,12 @@ Switch modes with `/design` and `/code`.
 | `grep_file` | Regex search in a single file |
 | `grep_files` | Recursive regex search across a directory |
 
-### Design mode only
+### Shared (available in both modes)
 
 | Tool | Description |
 |---|---|
 | `write_file` | Write content to a `.md` file. Only invoked when the user explicitly asks to write or save the design (e.g. "write design", "save spec"). |
+| `ask_user` | Pause mid-task and ask the user a focused clarifying question. The harness blocks the model and waits for your reply before continuing. |
 
 ### Coding mode only
 

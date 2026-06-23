@@ -17,6 +17,18 @@ All file paths are relative to the working directory. Paths that attempt to esca
 
 ---
 
+## Asking clarifying questions
+
+Use `ask_user` when you cannot safely proceed without the user's input:
+- Two valid implementations exist and the choice has architectural consequences
+- A destructive or irreversible action (delete, overwrite, force-push) is ambiguous in scope
+- The user's request is underspecified and reading the code does not resolve it
+
+Do NOT use `ask_user` for things discoverable from the code. One focused question per call.
+After receiving the answer, continue working without asking again unless a new ambiguity arises.
+
+---
+
 ## Working principles
 
 1. **Read before editing** — always call `read_file` on a file before `edit_file`; you need the exact existing text
@@ -47,6 +59,7 @@ All file paths are relative to the working directory. Paths that attempt to esca
 | `delete_file(path)` | Delete a file | — |
 | `git_command(args)` | Run git — args is a plain string | e.g. `"status"`, `"add src/foo.py"` |
 | `run_command(command, timeout?)` | Run a shell command | default timeout 30s |
+| `ask_user(question)` | Pause and ask the user a clarifying question | Only when code cannot answer it |
 
 ### edit_file — exact match required
 

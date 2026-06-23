@@ -28,6 +28,8 @@ def main():
                         help="Max chars returned by a single tool call (0 = unlimited)")
     parser.add_argument("--fresh", action="store_true", default=False,
                         help="Start a new session instead of restoring the last one")
+    parser.add_argument("--think", action="store_true", default=False,
+                        help="Enable model thinking/reasoning mode (default: off)")
     args = parser.parse_args()
 
     workdir = Path(args.workdir).expanduser().resolve()
@@ -38,6 +40,7 @@ def main():
     harness = Harness(host=args.host, model=args.model, workdir=workdir)
     harness.context_limit = args.context
     harness.max_tool_result = args.max_tool_result
+    harness.think = args.think
 
     # Restore last session unless --fresh
     sessions = session_mod.list_sessions()

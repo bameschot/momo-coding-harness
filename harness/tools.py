@@ -110,21 +110,31 @@ CODING_ONLY_TOOLS = [
         ["command"]),
 ]
 
-DESIGN_EXTRA_TOOLS = [
+SHARED_TOOLS = [
     _fn("write_file",
         "Write content to a file. "
-        "Call this ONLY when the user explicitly says 'write it', 'save it', 'write the design', 'save the design', 'finalize', 'finalize the design', 'go ahead', 'yes', 'ready', or similar confirmation or save/export phrases, "
-        "AND at least one round of questions and answers has already occurred. "
-        "Put ALL design content in the 'content' parameter — do NOT write it as chat text before calling this tool. "
-        "Do NOT call this when the user says 'design a X', 'build a X', 'create a X', 'make a X', or describes an idea — those start a conversation. "
-        "Do NOT call this on the first turn.",
+        "Call this when you have gathered enough information to write a complete design spec, "
+        "or when the user explicitly asks you to write, save, or finalize the design. "
+        "Put ALL content in the 'content' parameter — do NOT write the design as chat text. "
+        "Do NOT call this on the very first response to a new idea before any dialogue or exploration.",
         {"path":    {"type": "string", "description": "Destination file path. Name it after the subject being designed in lowercase kebab-case, e.g. 'space-exploration-game.md'."},
          "content": {"type": "string", "description": "Full file content to write"}},
         ["path", "content"]),
+
+    _fn("ask_user",
+        "Pause and ask the user a clarifying question mid-task. "
+        "Use this when you genuinely cannot determine the answer from the code or context — "
+        "e.g. which of two approaches to take, confirmation before a destructive action, "
+        "or a preference the user has not expressed. "
+        "Do NOT use this for things discoverable by reading files. "
+        "Ask one focused question per call and continue after receiving the answer.",
+        {"question": {"type": "string",
+                      "description": "The question to present to the user"}},
+        ["question"]),
 ]
 
-DESIGN_TOOLS = READ_ONLY_TOOLS + DESIGN_EXTRA_TOOLS
-ALL_TOOLS = READ_ONLY_TOOLS + DESIGN_EXTRA_TOOLS + CODING_ONLY_TOOLS
+DESIGN_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS
+ALL_TOOLS    = READ_ONLY_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
 
 
 # ── path safety ───────────────────────────────────────────────────────────────

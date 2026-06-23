@@ -15,6 +15,7 @@ class CommandResult:
     confirm_prompt: str | None = None       # if set, TUI asks this before proceeding
     confirm_action: "callable | None" = None  # called with no args when user answers y
     toggle_tools: bool = False              # TUI toggles tool-pane visibility
+    toggle_think: bool = False              # TUI toggles thinking-output visibility
 
 
 def handle(line: str, harness: Harness) -> CommandResult:
@@ -92,6 +93,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
     if cmd == "/toggle-tool-output":
         return CommandResult(handled=True, toggle_tools=True)
 
+    if cmd == "/toggle-think-output":
+        return CommandResult(handled=True, toggle_think=True)
+
     if cmd == "/compact":
         notice = harness.compact()
         harness._emit_status()
@@ -129,6 +133,18 @@ def handle(line: str, harness: Harness) -> CommandResult:
         except ValueError:
             return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
 
+    if cmd == "/think":
+        if not arg:
+            state = "on" if harness.think else "off"
+            return CommandResult(handled=True, output=f"Thinking mode: {state}")
+        if arg.lower() in ("on", "true", "1", "yes"):
+            harness.think = True
+            return CommandResult(handled=True, output="Thinking mode: on")
+        if arg.lower() in ("off", "false", "0", "no"):
+            harness.think = False
+            return CommandResult(handled=True, output="Thinking mode: off")
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+
     if cmd == "/cost":
         return CommandResult(handled=True, output=harness.logger.cost_summary())
 
@@ -159,12 +175,15 @@ Available commands:
   /clear              Clear conversation history
   /workdir            Show current working directory
   /workdir <path>     Set working directory for file operations
-  /toggle-tool-output Toggle the tool calls pane on/off
+  /toggle-tool-output   Toggle the tool calls pane on/off
+  /toggle-think-output  Toggle display of model thinking/reasoning output
   /compact            Compact context (remove old tool calls / messages)
   /context            Show context limit and current usage
   /context <n>        Set context token limit (e.g. /context 8192)
   /tool-result        Show current tool result character cap
   /tool-result <n>    Set cap (e.g. /tool-result 8000); 0 = unlimited
+  /think              Show thinking mode state (on/off)
+  /think on|off       Enable or disable model thinking/reasoning mode
   /cost               Show token usage for this session by mode and model
   /session            Show current session file
   /session <name>     Load a saved session by name or prefix

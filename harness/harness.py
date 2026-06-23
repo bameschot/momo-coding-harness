@@ -175,6 +175,18 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
     return results
 
 
+_WRITE_INTENT = (
+    "let me write", "i will write", "i'll write", "i'm going to write",
+    "writing the design", "writing the spec", "writing it now",
+    "write the complete", "write the design", "write the specification",
+    "write the spec", "write it now", "now write", "will now write",
+)
+
+def _has_write_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _WRITE_INTENT)
+
+
 # ── TUI events ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -207,6 +219,14 @@ class ErrorEvent:
 @dataclass
 class DoneEvent:
     pass
+
+@dataclass
+class AskUserEvent:
+    question: str
+
+@dataclass
+class ThinkEvent:
+    text: str
 
 
 # ── system prompts ────────────────────────────────────────────────────────────
@@ -261,7 +281,9 @@ class Harness:
         self.logger = Logger(self._ts)
         self.client = OllamaClient(host=host, model=model)
         self.event_queue: queue.Queue[Any] = queue.Queue()
+        self._user_input_queue: queue.Queue[str] = queue.Queue()
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
+        self.think: bool = False   # enable model thinking/reasoning mode; configurable via /think or --think
         self.messages: list[dict] = [
             {"role": "system", "content": _design_prompt()}
         ]
@@ -278,6 +300,10 @@ class Harness:
         self._model = value
         if hasattr(self, "client"):
             self.client.set_model(value)
+
+    def provide_user_input(self, text: str):
+        """Called from the TUI thread when the user answers a mid-task ask_user question."""
+        self._user_input_queue.put(text)
 
     # ── mode switching ────────────────────────────────────────────────────────
 
@@ -310,7 +336,7 @@ class Harness:
         i = 1  # keep system prompt at 0
         while i < len(self.messages) and self._estimate() > target:
             msg = self.messages[i]
-            if msg["role"] == "tool":
+            if msg["role"] in ("tool", "thinking"):
                 # also remove the assistant message immediately before it (if any)
                 if i > 0 and self.messages[i - 1]["role"] == "assistant":
                     del self.messages[i - 1]
@@ -352,13 +378,15 @@ class Harness:
         self.messages.append({"role": "user", "content": text})
 
         tools = DESIGN_TOOLS if self.mode == "design" else ALL_TOOLS
-        _MAX_ITERATIONS = 10 if self.mode == "design" else 20
+        _MAX_ITERATIONS = 15 if self.mode == "design" else 20
         _NUDGE_AFTER = 4  # consecutive tool-only turns before injecting a respond prompt
 
         iteration = 0
         tool_only_turns = 0
         last_tool: str | None = None
         empty_retried = False
+        _nudged = False
+        _write_nudged = False  # one write-intent recovery nudge per send()
         while True:
             if iteration >= _MAX_ITERATIONS:
                 self.event_queue.put(ErrorEvent(f"Tool call loop exceeded {_MAX_ITERATIONS} iterations — stopping"))
@@ -380,7 +408,8 @@ class Harness:
             )
 
             try:
-                response = self.client.chat(self.messages, tools, think=False)
+                api_messages = [m for m in self.messages if m.get("role") != "thinking"]
+                response = self.client.chat(api_messages, tools, think=self.think)
             except Exception as e:
                 self.event_queue.put(ErrorEvent(f"Ollama error: {e}"))
                 self.event_queue.put(DoneEvent())
@@ -393,10 +422,20 @@ class Harness:
             if prompt_tokens is not None:
                 self._token_estimate = (prompt_tokens or 0) + (eval_tokens or 0)
 
-            # Strip thinking tokens. Qwen3/Qwen3.5 embeds <think>…</think> in the
-            # content field even when think=False is passed to Ollama.
-            raw_content = getattr(msg, "content", "") or ""
+            # Extract thinking tokens from two sources:
+            # 1. msg.thinking — newer Ollama SDK field when think=True.
+            # 2. <think>…</think> tags — Qwen3/Qwen3.5 embed them even when think=False.
+            # Neither must re-enter the context (stored as role="thinking", filtered at API call).
+            raw_thinking = getattr(msg, "thinking", "") or ""
+            raw_content  = getattr(msg, "content",  "") or ""
+            think_in_content = re.search(r"<think>(.*?)</think>", raw_content, flags=re.DOTALL)
+            if think_in_content and not raw_thinking:
+                raw_thinking = think_in_content.group(1).strip()
             content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
+
+            if raw_thinking:
+                self.messages.append({"role": "thinking", "content": raw_thinking})
+                self.event_queue.put(ThinkEvent(raw_thinking))
 
             # Normalize API tool calls to (name, args) tuples.  Older Ollama
             # versions return arguments as a raw JSON string rather than a dict.
@@ -424,6 +463,11 @@ class Harness:
                 prompt_tokens, eval_tokens,
                 bool(_calls),
             )
+
+            # Model produced something — reset the empty-retry window so a later
+            # empty response gets one fresh retry rather than failing immediately.
+            if content or _calls:
+                empty_retried = False
 
             # Emit preamble text before tool events so it appears above tool output
             # in the TUI. Deferring it until after tools run places it below the
@@ -466,6 +510,18 @@ class Harness:
                     self._autosave()
                     self.event_queue.put(DoneEvent())
                     return
+                # Design mode: model announced it would write but produced no tool call.
+                # Inject one targeted nudge and continue the loop so it can comply.
+                if (self.mode == "design"
+                        and _has_write_intent(content)
+                        and not _write_nudged):
+                    _write_nudged = True
+                    self.messages.append({"role": "assistant", "content": content})
+                    self.messages.append({"role": "user", "content":
+                        "You said you would write the design but did not call write_file. "
+                        "Call write_file now with the complete document in the content parameter."
+                    })
+                    continue
                 self.messages.append({"role": "assistant", "content": content})
                 break
 
@@ -482,13 +538,25 @@ class Harness:
                                    ]})
 
             for name, args in _calls:
-                last_tool = name
+                # write_file is sticky — it must not be overwritten by a later
+                # tool in the same batch or the terminal detection below misses it.
+                if last_tool != "write_file":
+                    last_tool = name
                 self.event_queue.put(ToolCallEvent(name, args))
                 self.logger.log_tool_call(self.mode, self.client.model, name, args)
 
-                result = dispatch(name, args, self.workdir)
-                if self.max_tool_result > 0 and len(result) > self.max_tool_result:
-                    result = result[:self.max_tool_result] + f"\n... (truncated, {len(result)} chars total)"
+                if name == "ask_user":
+                    # Block the worker thread until the TUI routes the user's answer back.
+                    # The TUI detects AskUserEvent, switches to waiting-for-input state,
+                    # and calls provide_user_input() when the user submits a response.
+                    question = args.get("question", "")
+                    self.event_queue.put(AskUserEvent(question))
+                    answer = self._user_input_queue.get()
+                    result = f"User answered: {answer}"
+                else:
+                    result = dispatch(name, args, self.workdir)
+                    if self.max_tool_result > 0 and len(result) > self.max_tool_result:
+                        result = result[:self.max_tool_result] + f"\n... (truncated, {len(result)} chars total)"
 
                 self.event_queue.put(ToolResultEvent(name, result))
                 self.logger.log_tool_result(self.mode, self.client.model, name, len(result))
@@ -503,11 +571,20 @@ class Harness:
             # Inject as role "user" — Ollama's tool-use turn format expects
             # assistant → tool(s) → user; a mid-conversation system message is
             # not supported and would break the alternating turn structure.
-            if tool_only_turns >= _NUDGE_AFTER:
-                self.messages.append({"role": "user", "content":
-                    "You have been calling tools for several turns without responding. "
-                    "If the user asked you to write or save the design, call write_file now with the full design. "
-                    "Otherwise stop exploring and write a text response summarising what you found."})
+            # Capped at one nudge per send() call to avoid polluting the history.
+            if tool_only_turns >= _NUDGE_AFTER and not _nudged:
+                _nudged = True
+                nudge = (
+                    "You have been calling tools for several turns without a text response. "
+                    "If you have gathered enough information to write the design, call write_file now with the complete spec. "
+                    "If you need more information, ask the user with ask_user. "
+                    "Otherwise write a text response summarising what you have found so far."
+                    if self.mode == "design" else
+                    "You have been calling tools for several turns without a text response. "
+                    "Stop and summarise what you have found or done so far, "
+                    "or describe your next step if you are not finished."
+                )
+                self.messages.append({"role": "user", "content": nudge})
                 tool_only_turns = 0
 
         self._emit_status()

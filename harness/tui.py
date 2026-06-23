@@ -13,7 +13,8 @@ from typing import Any
 
 from .commands import handle as handle_command
 from .harness import (
-    Harness, ChatEvent, ToolCallEvent, ToolResultEvent, StatusEvent, ErrorEvent, DoneEvent
+    Harness, ChatEvent, ToolCallEvent, ToolResultEvent,
+    StatusEvent, ErrorEvent, DoneEvent, AskUserEvent, ThinkEvent,
 )
 
 
@@ -28,13 +29,17 @@ _C_WARN      = 7
 _C_DANGER    = 8
 _C_BORDER    = 9
 _C_BUSY      = 10
+_C_FOCUS     = 11
+_C_THINK     = 12
+
+_COLOR_ORANGE = 16  # custom color slot for orange (requires COLORS > 16)
 
 
 def _init_colors():
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(_C_USER,      curses.COLOR_CYAN,    -1)
-    curses.init_pair(_C_ASSISTANT, curses.COLOR_GREEN,   -1)
+    curses.init_pair(_C_ASSISTANT, curses.COLOR_BLUE,    -1)
     curses.init_pair(_C_SYSTEM,    curses.COLOR_MAGENTA, -1)
     curses.init_pair(_C_TOOL_NAME, curses.COLOR_YELLOW,  -1)
     curses.init_pair(_C_TOOL_RES,  -1,                   -1)
@@ -43,6 +48,12 @@ def _init_colors():
     curses.init_pair(_C_DANGER,    curses.COLOR_RED,     -1)
     curses.init_pair(_C_BORDER,    curses.COLOR_WHITE,   -1)
     curses.init_pair(_C_BUSY,      curses.COLOR_BLACK,   curses.COLOR_YELLOW)
+    curses.init_pair(_C_FOCUS,     curses.COLOR_GREEN,   -1)
+    if curses.can_change_color() and curses.COLORS > 16:
+        curses.init_color(_COLOR_ORANGE, 1000, 500, 0)
+        curses.init_pair(_C_THINK, _COLOR_ORANGE, -1)
+    else:
+        curses.init_pair(_C_THINK, curses.COLOR_YELLOW, -1)
 
 
 # ── spinner ───────────────────────────────────────────────────────────────────
@@ -168,7 +179,9 @@ class TUI:
         self._chat_buf    = _LineBuffer()
         self._chat_events: list[tuple] = []  # raw events for toggle rebuild
         self._tools_expanded: bool = True    # True = full tool output; False = abbreviated
+        self._think_expanded: bool = False   # False = thinking hidden; toggle to show
         self._input: str = ""
+        self._cursor: int = 0           # insertion point within _input
         self._history: list[str] = []   # submitted entries, oldest first
         self._history_idx: int = -1     # -1 = not browsing
         self._history_stash: str = ""   # saves live input while browsing
@@ -179,6 +192,7 @@ class TUI:
         self._spinner_frame = 0
         self._spinner_ts    = 0.0
         self._pending_confirm: "callable | None" = None  # set while waiting for y/N
+        self._waiting_for_input: bool = False             # set while model is blocked on ask_user
 
         _init_colors()
         curses.curs_set(1)
@@ -205,7 +219,7 @@ class TUI:
 
     def _redraw(self):
         L = self._layout
-        chat_edge = _C_ASSISTANT if self._focus == "chat" else _C_BORDER
+        chat_edge = _C_FOCUS if self._focus == "chat" else _C_BORDER
         self._chat_buf.render(self._chat_win, L["chat_h"], L["cols"], edge_color=chat_edge)
         self._draw_status()
         self._draw_input()
@@ -215,14 +229,17 @@ class TUI:
         win = self._status_win
         win.erase()
         cols = self._layout["cols"]
-        border_color = self._ctx_color if self._focus == "input" else _C_BORDER
-        if self._busy:
+        border_color = _C_FOCUS if self._focus == "input" else _C_BORDER
+        if self._busy and self._waiting_for_input:
+            line = f" ? waiting for input  {self._status}"
+            line_color = _C_WARN
+        elif self._busy:
             spinner = _SPINNER[self._spinner_frame % len(_SPINNER)]
             line = f" {spinner} thinking  {self._status}"
             line_color = _C_BUSY
         else:
             line = f" {self._status}"
-            line_color = border_color
+            line_color = self._ctx_color
         line = line[:cols - 1].ljust(cols - 1)
         rule = "─" * (cols - 1)
         try:
@@ -240,15 +257,27 @@ class TUI:
         h    = self._layout["input_h"]
         focused = self._focus == "input"
 
-        # Hard-chunk into rows of (cols-1) chars — preserves trailing spaces
-        # so the cursor advances correctly after typing a space.
-        raw = ("⊘ " if self._busy else "› ") + self._input
+        prefix = "? " if self._waiting_for_input else "⊘ " if self._busy else "› "
+        raw = prefix + self._input
         w = max(1, cols - 1)
-        chunks = [raw[i:i+w] for i in range(0, len(raw), w)] or ["› "]
+        chunks = [raw[i:i+w] for i in range(0, len(raw), w)] or [prefix]
 
-        # scroll to keep the end of the text in view
-        visible = chunks[max(0, len(chunks) - h):]
-        prefix_attr = curses.color_pair(_C_USER) if focused else curses.color_pair(0)
+        # Map the logical cursor position to a (chunk_row, col) in the raw string.
+        raw_cursor   = len(prefix) + self._cursor
+        cursor_chunk = raw_cursor // w
+        cursor_col   = raw_cursor % w
+        # Edge case: cursor sits exactly at the start of a not-yet-rendered chunk
+        # (len(raw) is an exact multiple of w). Clamp to end of the last chunk.
+        if cursor_chunk >= len(chunks):
+            cursor_chunk = len(chunks) - 1
+            cursor_col   = len(chunks[-1])
+
+        # Scroll so the cursor row is always visible.
+        first_visible = max(0, cursor_chunk + 1 - h)
+        visible = chunks[first_visible:first_visible + h]
+        cursor_row = cursor_chunk - first_visible
+
+        prefix_attr = curses.color_pair(_C_FOCUS) if focused else curses.color_pair(0)
         for row, text in enumerate(visible):
             if row >= h:
                 break
@@ -258,13 +287,10 @@ class TUI:
             except curses.error:
                 pass
 
-        last_row = min(len(visible) - 1, h - 1)
-        last_text = visible[last_row] if visible else "› "
-        cx = min(len(last_text), cols - 2)
         try:
             if focused:
                 curses.curs_set(1)
-                win.move(last_row, cx)
+                win.move(cursor_row, min(cursor_col, cols - 2))
             else:
                 curses.curs_set(0)
         except curses.error:
@@ -335,6 +361,20 @@ class TUI:
                 self._chat_buf.append(wrapped, _C_TOOL_RES)
         self._chat_buf.append("", 0)
 
+    def _add_think(self, text: str):
+        self._chat_events.append(("think", text))
+        self._render_think(text)
+
+    def _render_think(self, text: str):
+        if not self._think_expanded:
+            return
+        cols = max(20, self._layout["cols"] - 4)
+        self._chat_buf.append("[thinking]", _C_THINK)
+        for src in text.splitlines() or [""]:
+            for line in textwrap.wrap(src, width=cols - 2) or [src]:
+                self._chat_buf.append("  " + line, _C_THINK)
+        self._chat_buf.append("", 0)
+
     def _rebuild_chat_buf(self):
         # Re-render all events from scratch. Called when display options change
         # (e.g. tool expand/collapse toggle) so the layout is consistent.
@@ -346,6 +386,8 @@ class TUI:
                 self._render_tool_call(ev[1], ev[2])
             elif ev[0] == "tool_result":
                 self._render_tool_result(ev[1], ev[2])
+            elif ev[0] == "think":
+                self._render_think(ev[1])
 
     # ── event processing ──────────────────────────────────────────────────────
 
@@ -377,8 +419,16 @@ class TUI:
                         f"CTX: {ev.ctx_pct}% | DIR: {ev.workdir}"
                     )
                     changed = True
+                elif isinstance(ev, ThinkEvent):
+                    self._add_think(ev.text)
+                    changed = True
+                elif isinstance(ev, AskUserEvent):
+                    self._add_chat("assistant", ev.question)
+                    self._waiting_for_input = True
+                    changed = True
                 elif isinstance(ev, DoneEvent):
                     self._busy = False
+                    self._waiting_for_input = False
                     self._spinner_frame = 0
                     changed = True
                 elif isinstance(ev, ErrorEvent):
@@ -407,6 +457,11 @@ class TUI:
         self._rebuild_chat_buf()
         self._redraw()
 
+    def _toggle_think(self):
+        self._think_expanded = not self._think_expanded
+        self._rebuild_chat_buf()
+        self._redraw()
+
     def _history_prev(self):
         if not self._history:
             return
@@ -416,6 +471,7 @@ class TUI:
         elif self._history_idx > 0:
             self._history_idx -= 1
         self._input = self._history[self._history_idx]
+        self._cursor = len(self._input)
 
     def _history_next(self):
         if self._history_idx == -1:
@@ -426,10 +482,12 @@ class TUI:
         else:
             self._history_idx = -1
             self._input = self._history_stash
+        self._cursor = len(self._input)
 
     def _submit(self):
         text = self._input.strip()
         self._input = ""
+        self._cursor = 0
         self._history_idx = -1
         self._history_stash = ""
         if not text:
@@ -462,6 +520,9 @@ class TUI:
                 if result.toggle_tools:
                     self._toggle_tools()
                     return
+                if result.toggle_think:
+                    self._toggle_think()
+                    return
                 if result.confirm_prompt:
                     self._pending_confirm = result.confirm_action
                     self._add_chat("system", result.confirm_prompt + " [y/N]")
@@ -474,6 +535,11 @@ class TUI:
             return
 
         if self._busy:
+            if self._waiting_for_input:
+                self._waiting_for_input = False
+                self.harness.provide_user_input(text)
+                self._redraw()
+                return
             self._add_chat("system", "Busy — waiting for response...")
             self._redraw()
             return
@@ -552,16 +618,46 @@ class TUI:
                 self._redraw()
                 continue
 
+            # cursor movement within the input field
+            if ch == curses.KEY_LEFT:
+                if self._cursor > 0:
+                    self._cursor -= 1
+                    self._redraw_input_only()
+                continue
+            if ch == curses.KEY_RIGHT:
+                if self._cursor < len(self._input):
+                    self._cursor += 1
+                    self._redraw_input_only()
+                continue
+            if ch == curses.KEY_HOME:
+                self._cursor = 0
+                self._redraw_input_only()
+                continue
+            if ch == curses.KEY_END:
+                self._cursor = len(self._input)
+                self._redraw_input_only()
+                continue
+
+            # Shift+T toggles thinking output (only when chat pane has focus,
+            # so typing 'T' in the input field still works normally)
+            if ch == ord('T') and self._focus == "chat":
+                self._toggle_think()
+                continue
+
             # input editing always works regardless of focus
             input_changed = False
             if ch in (curses.KEY_BACKSPACE, 127, 8):
-                self._input = self._input[:-1]
-                input_changed = True
+                if self._cursor > 0:
+                    self._input = self._input[:self._cursor - 1] + self._input[self._cursor:]
+                    self._cursor -= 1
+                    input_changed = True
             elif ch in (10, 13, curses.KEY_ENTER):
                 self._submit()
                 # _submit() handles all its own redraws
             elif 32 <= ch <= 126:
-                self._input += chr(ch)
+                char = chr(ch)
+                self._input = self._input[:self._cursor] + char + self._input[self._cursor:]
+                self._cursor += 1
                 input_changed = True
 
             if changed:
