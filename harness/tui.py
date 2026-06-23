@@ -179,7 +179,7 @@ class TUI:
         self._chat_buf    = _LineBuffer()
         self._chat_events: list[tuple] = []  # raw events for toggle rebuild
         self._tools_expanded: bool = True    # True = full tool output; False = abbreviated
-        self._think_expanded: bool = False   # False = thinking hidden; toggle to show
+        self._think_expanded: bool = True    # toggle with /toggle-think-output or Shift+T
         self._input: str = ""
         self._cursor: int = 0           # insertion point within _input
         self._history: list[str] = []   # submitted entries, oldest first

@@ -38,9 +38,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
             current = harness.client.model
             lines = [f"  {'*' if m == current else ' '} {m}" for m in models]
             return CommandResult(handled=True, output="Models:\n" + "\n".join(lines))
-        harness.client.set_model(arg)
-        harness._emit_status()
-        return CommandResult(handled=True, output=f"Model set to: {arg}")
+        harness.set_model(arg)
+        return CommandResult(handled=True, output=f"Model set to: {arg} (ctx: {harness.context_limit})")
 
     if cmd == "/host":
         if not arg:

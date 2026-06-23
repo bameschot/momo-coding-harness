@@ -272,22 +272,26 @@ def _estimate_tokens(messages: list[dict]) -> int:
 
 # ── harness ───────────────────────────────────────────────────────────────────
 
+_DEFAULT_CONTEXT = 32768  # fallback when the model does not report its context size
+
+
 class Harness:
     def __init__(self, host: str, model: str, workdir: Path):
         self.workdir = workdir.resolve()
         self.mode = "design"
-        self.context_limit = 100000
+        self.context_limit = _DEFAULT_CONTEXT
         self._ts = session_mod.new_timestamp()
         self.logger = Logger(self._ts)
         self.client = OllamaClient(host=host, model=model)
         self.event_queue: queue.Queue[Any] = queue.Queue()
         self._user_input_queue: queue.Queue[str] = queue.Queue()
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
-        self.think: bool = False   # enable model thinking/reasoning mode; configurable via /think or --think
+        self.think: bool = True    # enable model thinking/reasoning mode; configurable via /think or --think
         self.messages: list[dict] = [
             {"role": "system", "content": _design_prompt()}
         ]
         self._token_estimate = 0
+        self._sync_context_limit(emit=True)
 
     # ── public properties ─────────────────────────────────────────────────────
 
@@ -304,6 +308,23 @@ class Harness:
     def provide_user_input(self, text: str):
         """Called from the TUI thread when the user answers a mid-task ask_user question."""
         self._user_input_queue.put(text)
+
+    def _sync_context_limit(self, emit: bool = False):
+        """Query the model's native context window and use it as the compaction limit."""
+        reported = self.client.context_length()
+        if reported:
+            self.context_limit = reported
+            msg = f"Model context: {reported:,} tokens ({self.client.model})"
+        else:
+            msg = f"Model context: unknown — using default {self.context_limit:,} tokens ({self.client.model})"
+        if emit:
+            self.event_queue.put(ChatEvent("system", msg))
+
+    def set_model(self, model: str):
+        """Switch model and re-sync context limit from the new model's capabilities."""
+        self.client.set_model(model)
+        self._sync_context_limit(emit=True)
+        self._emit_status()
 
     # ── mode switching ────────────────────────────────────────────────────────
 
@@ -385,6 +406,7 @@ class Harness:
         tool_only_turns = 0
         last_tool: str | None = None
         empty_retried = False
+        _length_retried = False  # disable thinking for one turn after a length cutoff
         _nudged = False
         _write_nudged = False  # one write-intent recovery nudge per send()
         while True:
@@ -409,7 +431,11 @@ class Harness:
 
             try:
                 api_messages = [m for m in self.messages if m.get("role") != "thinking"]
-                response = self.client.chat(api_messages, tools, think=self.think)
+                think_this_turn = False if _length_retried else self.think
+                _length_retried = False
+                response = self.client.chat(api_messages, tools,
+                                            think=think_this_turn,
+                                            num_ctx=self.context_limit)
             except Exception as e:
                 self.event_queue.put(ErrorEvent(f"Ollama error: {e}"))
                 self.event_queue.put(DoneEvent())
@@ -418,6 +444,7 @@ class Harness:
             msg = response.message
             prompt_tokens = getattr(response, "prompt_eval_count", None)
             eval_tokens = getattr(response, "eval_count", None)
+            done_reason = getattr(response, "done_reason", None)  # "stop" | "length" | None
 
             if prompt_tokens is not None:
                 self._token_estimate = (prompt_tokens or 0) + (eval_tokens or 0)
@@ -428,10 +455,19 @@ class Harness:
             # Neither must re-enter the context (stored as role="thinking", filtered at API call).
             raw_thinking = getattr(msg, "thinking", "") or ""
             raw_content  = getattr(msg, "content",  "") or ""
+            # Complete block: <think>…</think>
             think_in_content = re.search(r"<think>(.*?)</think>", raw_content, flags=re.DOTALL)
             if think_in_content and not raw_thinking:
                 raw_thinking = think_in_content.group(1).strip()
             content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
+            # Incomplete block: generation cut off mid-thinking → "<think>..." with no closing tag.
+            # Must be stripped or the raw tag leaks into the stored message and breaks Ollama's
+            # XML template on the next API call (500: element <function> closed by </parameter>).
+            incomplete_think = re.search(r"<think>(.*?)$", content, flags=re.DOTALL)
+            if incomplete_think:
+                if not raw_thinking:
+                    raw_thinking = incomplete_think.group(1).strip()
+                content = re.sub(r"<think>.*$", "", content, flags=re.DOTALL).strip()
 
             if raw_thinking:
                 self.messages.append({"role": "thinking", "content": raw_thinking})
@@ -489,12 +525,41 @@ class Harness:
                         # messages are not valid in Ollama's turn format.
                         empty_retried = True
                         if self.messages[-1]["role"] != "user":
-                            retry_text = (
-                                "Please respond. If you are ready to write the design, "
-                                "call write_file now with the full document in the content parameter."
-                                if self.mode == "design" else
-                                "Please respond with your current analysis or next step."
-                            )
+                            if done_reason == "length":
+                                # Generation was cut off by the context window — the
+                                # thinking block consumed all available tokens.
+                                # Disable thinking for the retry so it has budget to respond.
+                                _length_retried = True
+                                self.event_queue.put(ChatEvent("system",
+                                    "Response cut off (context limit). Retrying without thinking."))
+                                retry_text = (
+                                    "Your previous response was cut off. "
+                                    "Do NOT output any reasoning or thinking. "
+                                    "Call write_file directly with the complete document, "
+                                    "or call ask_user if you need information."
+                                    if self.mode == "design" else
+                                    "Your previous response was cut off. "
+                                    "Do NOT output any reasoning or thinking. "
+                                    "Call a tool directly or write a brief response."
+                                )
+                            elif raw_thinking:
+                                # Model reasoned but produced no output — common when
+                                # think=True and the model gets stuck mid-reasoning.
+                                retry_text = (
+                                    "You produced reasoning but no response or tool call. "
+                                    "Based on your analysis, call write_file now with the complete document, "
+                                    "or call ask_user if you need more information."
+                                    if self.mode == "design" else
+                                    "You produced reasoning but no response or tool call. "
+                                    "Based on your analysis, call a tool to continue or write your conclusion."
+                                )
+                            else:
+                                retry_text = (
+                                    "Please respond. If you are ready to write the design, "
+                                    "call write_file now with the full document in the content parameter."
+                                    if self.mode == "design" else
+                                    "Please respond with your current analysis or next step."
+                                )
                             self.messages.append({"role": "user", "content": retry_text})
                         tool_only_turns = 0
                         continue
@@ -516,26 +581,43 @@ class Harness:
                         and _has_write_intent(content)
                         and not _write_nudged):
                     _write_nudged = True
-                    self.messages.append({"role": "assistant", "content": content})
+                    self.messages.append({"role": "assistant", "content": content or None})
                     self.messages.append({"role": "user", "content":
                         "You said you would write the design but did not call write_file. "
                         "Call write_file now with the complete document in the content parameter."
                     })
                     continue
-                self.messages.append({"role": "assistant", "content": content})
+                self.messages.append({"role": "assistant", "content": content or None})
                 break
 
             # track consecutive tool-only turns
             if not content:
                 tool_only_turns += 1
 
-            # Append with stripped content — thinking tokens must not re-enter the
-            # context or the model re-emits them on every subsequent turn.
-            self.messages.append({"role": "assistant", "content": content,
-                                   "tool_calls": [
-                                       {"function": {"name": n, "arguments": a}}
-                                       for n, a in _calls
-                                   ]})
+            # Append the assistant turn.  Use Ollama's minimal tool_calls format:
+            # {"function": {"name": ..., "arguments": ...}} with no id or type
+            # fields — Ollama's template engine rejects those in message history.
+            if msg.tool_calls:
+                # Preserve the actual arguments object from Ollama's response.
+                self.messages.append({
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": [
+                        {"function": {"name": tc.function.name,
+                                      "arguments": tc.function.arguments}}
+                        for tc in msg.tool_calls
+                    ],
+                })
+            else:
+                # Text-recovered calls — use extracted (name, args) tuples.
+                self.messages.append({
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": [
+                        {"function": {"name": n, "arguments": a}}
+                        for n, a in _calls
+                    ],
+                })
 
             for name, args in _calls:
                 # write_file is sticky — it must not be overwritten by a later

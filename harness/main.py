@@ -18,18 +18,18 @@ def main():
                         help="Ollama base URL")
     parser.add_argument("--model",   default="qwen3.5:9b", metavar="NAME",
                         help="Ollama model name")
-    parser.add_argument("--workdir", default=".", metavar="PATH",
-                        help="Root directory for all file operations")
-    parser.add_argument("--context", default=100000, type=int, metavar="N",
-                        help="Initial context token limit")
+    parser.add_argument("--workspace", "--workdir", default=".", metavar="PATH",
+                        dest="workdir", help="Root directory for all file operations")
+    parser.add_argument("--context", default=None, type=int, metavar="N",
+                        help="Override context token limit (default: read from model)")
     parser.add_argument("--mode",    default="design", choices=["design", "coding"],
                         help="Starting mode (ignored when restoring a session)")
     parser.add_argument("--max-tool-result", default=0, type=int, metavar="N",
                         help="Max chars returned by a single tool call (0 = unlimited)")
     parser.add_argument("--fresh", action="store_true", default=False,
                         help="Start a new session instead of restoring the last one")
-    parser.add_argument("--think", action="store_true", default=False,
-                        help="Enable model thinking/reasoning mode (default: off)")
+    parser.add_argument("--no-think", action="store_true", default=False,
+                        help="Disable model thinking/reasoning mode (default: on)")
     args = parser.parse_args()
 
     workdir = Path(args.workdir).expanduser().resolve()
@@ -38,9 +38,11 @@ def main():
         sys.exit(1)
 
     harness = Harness(host=args.host, model=args.model, workdir=workdir)
-    harness.context_limit = args.context
+    if args.context is not None:
+        harness.context_limit = args.context
     harness.max_tool_result = args.max_tool_result
-    harness.think = args.think
+    if args.no_think:
+        harness.think = False
 
     # Restore last session unless --fresh
     sessions = session_mod.list_sessions()
