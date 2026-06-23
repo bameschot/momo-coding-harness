@@ -15,6 +15,166 @@ from .tools import DESIGN_TOOLS, ALL_TOOLS, dispatch
 _ROLES_DIR = Path(__file__).parent.parent / "roles"
 
 
+# ── text tool-call recovery ───────────────────────────────────────────────────
+# Static regexes for known tagged formats.  The tier-3 bare-JSON pattern is
+# built dynamically inside _extract_text_tool_calls from the live tool set.
+
+# Qwen3, Hermes 2/3, NousResearch — most common Ollama chat models
+_RX_QWEN      = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>',         re.DOTALL)
+# Functionary / older Hermes variants
+_RX_FUNC      = re.compile(r'<functioncall>\s*(\{.*?\})\s*</functioncall>',   re.DOTALL | re.IGNORECASE)
+_RX_FUNC2     = re.compile(r'<function_call>\s*(\{.*?\})\s*</function_call>', re.DOTALL | re.IGNORECASE)
+# Phi-3 / Phi-4 — no closing tag, JSON follows the token directly
+_RX_PHI       = re.compile(r'<\|tool_call\|>\s*(\{.*?\})',                    re.DOTALL)
+# DeepSeek-V2/V3/R1 — tool name precedes the args JSON, separated by a special token
+_RX_DEEPSEEK  = re.compile(
+    r'<｜tool▁call▁begin｜>(.*?)<｜tool▁sep｜>(.*?)<｜tool▁call▁end｜>', re.DOTALL
+)
+# Mistral / Mixtral — JSON array prefixed by a literal tag
+_RX_MISTRAL   = re.compile(r'\[TOOL_CALL\]\s*(\[.*?\])',                       re.DOTALL)
+# Command-R / Cohere — text-based action format
+_RX_COMMAND_R = re.compile(r'Action:\s*(\S+)\s*\nAction\s+Input:\s*(\{.*?\})', re.DOTALL)
+
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
+    """
+    Recover tool calls embedded in plain text when the model bypassed the tool
+    API.  Tries known tagged formats (tiers 1–2), then falls back to a
+    bare-JSON scan anchored to tool-name occurrences in the text (tier 3).
+
+    Tier-3 builds its name-detection pattern dynamically from `tools`, so
+    adding a tool to tools.py automatically extends coverage without touching
+    this function.
+
+    Returns a list of {"name": str, "arguments": dict}.
+    """
+    known = {t["function"]["name"] for t in tools}
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    def _append(hit: dict) -> bool:
+        """Dedup-check and append.  Returns True if the hit was new."""
+        key = hit["name"] + json.dumps(hit["arguments"], sort_keys=True)
+        if key in seen:
+            return False
+        seen.add(key)
+        results.append(hit)
+        return True
+
+    def _accept_full(obj: object) -> dict | None:
+        """
+        Validate a {"name": ..., "arguments"|"parameters": ...} object.
+        Requires the arguments/parameters key to be explicitly present so that
+        an arbitrary JSON blob with a matching "name" field is not mistaken for
+        a tool call.  Does not touch `seen` — dedup is the caller's job.
+        """
+        if not isinstance(obj, dict):
+            return None
+        name = obj.get("name")
+        if name not in known:
+            return None
+        if "arguments" in obj:
+            args = obj["arguments"]
+        elif "parameters" in obj:
+            args = obj["parameters"]
+        else:
+            return None  # no explicit args key → not a tool-call structure
+        if not isinstance(args, dict):
+            return None
+        return {"name": name, "arguments": args}
+
+    def _accept_args(name: str, obj: object) -> dict | None:
+        """
+        Validate a plain args dict paired with a tool name supplied externally
+        (e.g. DeepSeek / Command-R formats where the name precedes the JSON).
+        Does not touch `seen`.
+        """
+        if name not in known or not isinstance(obj, dict):
+            return None
+        return {"name": name, "arguments": obj}
+
+    # ── Tier 1: tagged JSON formats ───────────────────────────────────────────
+
+    for rx in (_RX_QWEN, _RX_FUNC, _RX_FUNC2, _RX_PHI):
+        for m in rx.finditer(text):
+            try:
+                hit = _accept_full(json.loads(m.group(1)))
+                if hit:
+                    _append(hit)
+            except json.JSONDecodeError:
+                pass
+
+    # DeepSeek: name before separator, captured group 2 is the raw args dict
+    for m in _RX_DEEPSEEK.finditer(text):
+        name = m.group(1).strip()
+        try:
+            hit = _accept_args(name, json.loads(m.group(2).strip()))
+            if hit:
+                _append(hit)
+        except json.JSONDecodeError:
+            pass
+
+    # ── Tier 2: structured text / array formats ───────────────────────────────
+
+    for m in _RX_MISTRAL.finditer(text):
+        try:
+            for obj in json.loads(m.group(1)):
+                hit = _accept_full(obj)
+                if hit:
+                    _append(hit)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    for m in _RX_COMMAND_R.finditer(text):
+        name = m.group(1).strip()
+        try:
+            hit = _accept_args(name, json.loads(m.group(2).strip()))
+            if hit:
+                _append(hit)
+        except json.JSONDecodeError:
+            pass
+
+    if results:
+        return results
+
+    # ── Tier 3: bare JSON scan anchored to tool-name occurrences ─────────────
+    # Build the name pattern dynamically.  Longer names listed first so that
+    # "grep_files" cannot be shadowed by the shorter prefix "grep_file".
+    name_pat = re.compile(
+        r'\b(' + '|'.join(re.escape(n) for n in sorted(known, key=len, reverse=True)) + r')\b'
+    )
+    for nm in name_pat.finditer(text):
+        found = nm.group(1)
+        # Start the window up to 300 chars before the match: the name may appear
+        # inside the JSON ({"name": "write_file", ...}) so the opening brace can
+        # precede the name.  Extend to end-of-text because content args can be large.
+        window_start = max(0, nm.start() - 300)
+        segment = text[window_start:]
+        for i, ch in enumerate(segment):
+            if ch != '{':
+                continue
+            try:
+                obj, _ = _JSON_DECODER.raw_decode(segment, i)
+                # Case A: {"name": "write_file", "arguments": {...}}
+                hit = _accept_full(obj)
+                if hit and hit["name"] == found:
+                    if _append(hit):
+                        break  # new result added — move on to the next name match
+                # Case B: write_file( {...} ) — JSON follows "(" after the tool
+                # name, with optional whitespace between "(" and "{".
+                pre = segment[max(0, i - 10):i].rstrip()
+                if pre.endswith('('):
+                    hit = _accept_args(found, obj)
+                    if hit and _append(hit):
+                        break
+            except json.JSONDecodeError:
+                continue
+
+    return results
+
+
 # ── TUI events ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -233,17 +393,37 @@ class Harness:
             if prompt_tokens is not None:
                 self._token_estimate = (prompt_tokens or 0) + (eval_tokens or 0)
 
-            tool_calls = getattr(msg, "tool_calls", None) or []
-            self.logger.log_response(
-                self.mode, self.client.model,
-                prompt_tokens, eval_tokens,
-                bool(tool_calls),
-            )
-
             # Strip thinking tokens. Qwen3/Qwen3.5 embeds <think>…</think> in the
             # content field even when think=False is passed to Ollama.
             raw_content = getattr(msg, "content", "") or ""
             content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
+
+            # Normalize API tool calls to (name, args) tuples.  Older Ollama
+            # versions return arguments as a raw JSON string rather than a dict.
+            _calls: list[tuple[str, dict]] = []
+            for tc in (getattr(msg, "tool_calls", None) or []):
+                args = tc.function.arguments or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {}
+                _calls.append((tc.function.name, args))
+
+            # Recover tool calls embedded as text when the model bypassed the
+            # tool API.  Suppress the raw content in that case — the tool events
+            # shown in the TUI carry the information without redundancy.
+            if not _calls and content:
+                recovered = _extract_text_tool_calls(content, tools)
+                if recovered:
+                    _calls = [(r["name"], r["arguments"]) for r in recovered]
+                    content = ""
+
+            self.logger.log_response(
+                self.mode, self.client.model,
+                prompt_tokens, eval_tokens,
+                bool(_calls),
+            )
 
             # Emit preamble text before tool events so it appears above tool output
             # in the TUI. Deferring it until after tools run places it below the
@@ -252,7 +432,7 @@ class Harness:
                 tool_only_turns = 0
                 self.event_queue.put(ChatEvent("assistant", content))
 
-            if not tool_calls:
+            if not _calls:
                 if not content:
                     if last_tool == "write_file":
                         # After write_file the model sometimes returns nothing — the
@@ -265,8 +445,13 @@ class Harness:
                         # messages are not valid in Ollama's turn format.
                         empty_retried = True
                         if self.messages[-1]["role"] != "user":
-                            self.messages.append({"role": "user", "content":
-                                "Please respond with your current analysis or next question."})
+                            retry_text = (
+                                "Please respond. If you are ready to write the design, "
+                                "call write_file now with the full document in the content parameter."
+                                if self.mode == "design" else
+                                "Please respond with your current analysis or next step."
+                            )
+                            self.messages.append({"role": "user", "content": retry_text})
                         tool_only_turns = 0
                         continue
                     else:
@@ -292,21 +477,11 @@ class Harness:
             # context or the model re-emits them on every subsequent turn.
             self.messages.append({"role": "assistant", "content": content,
                                    "tool_calls": [
-                                       {"function": {"name": tc.function.name,
-                                                     "arguments": tc.function.arguments}}
-                                       for tc in tool_calls
+                                       {"function": {"name": n, "arguments": a}}
+                                       for n, a in _calls
                                    ]})
 
-            for tc in tool_calls:
-                name = tc.function.name
-                args = tc.function.arguments or {}
-                if isinstance(args, str):
-                    # Older Ollama versions return arguments as a raw JSON string.
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        args = {}
-
+            for name, args in _calls:
                 last_tool = name
                 self.event_queue.put(ToolCallEvent(name, args))
                 self.logger.log_tool_call(self.mode, self.client.model, name, args)

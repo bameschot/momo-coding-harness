@@ -353,10 +353,14 @@ class TUI:
         # Drain the entire queue before redrawing — one redraw per poll cycle
         # is sufficient and avoids screen flicker from partial updates.
         changed = False
+        # Buffer index just before the last ChatEvent rendered this cycle.
+        # Used below to scroll the start of the new message into view.
+        last_chat_start: int | None = None
         try:
             while True:
                 ev = self.harness.event_queue.get_nowait()
                 if isinstance(ev, ChatEvent):
+                    last_chat_start = len(self._chat_buf._lines)
                     self._add_chat(ev.role, ev.text)
                     changed = True
                 elif isinstance(ev, ToolCallEvent):
@@ -378,11 +382,22 @@ class TUI:
                     self._spinner_frame = 0
                     changed = True
                 elif isinstance(ev, ErrorEvent):
+                    last_chat_start = len(self._chat_buf._lines)
                     self._add_chat("system", f"ERROR: {ev.text}")
                     self._busy = False
                     changed = True
         except queue.Empty:
             pass
+
+        # _scroll is the 0-based index of the LAST visible line.
+        # Setting it to (start + height - 1) places `start` at the top row,
+        # so the beginning of the new message is always visible rather than
+        # the end — which looks like the output was cut off mid-text.
+        if last_chat_start is not None:
+            chat_h = self._layout["chat_h"]
+            total  = len(self._chat_buf._lines)
+            self._chat_buf._scroll = min(last_chat_start + chat_h - 1, total - 1)
+
         return changed
 
     # ── input handling ────────────────────────────────────────────────────────

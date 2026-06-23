@@ -113,8 +113,9 @@ CODING_ONLY_TOOLS = [
 DESIGN_EXTRA_TOOLS = [
     _fn("write_file",
         "Write content to a file. "
-        "Call this ONLY when the user explicitly says 'write it', 'save it', 'write the design', 'save the design', or similar save/export phrases, "
+        "Call this ONLY when the user explicitly says 'write it', 'save it', 'write the design', 'save the design', 'finalize', 'finalize the design', 'go ahead', 'yes', 'ready', or similar confirmation or save/export phrases, "
         "AND at least one round of questions and answers has already occurred. "
+        "Put ALL design content in the 'content' parameter — do NOT write it as chat text before calling this tool. "
         "Do NOT call this when the user says 'design a X', 'build a X', 'create a X', 'make a X', or describes an idea — those start a conversation. "
         "Do NOT call this on the first turn.",
         {"path":    {"type": "string", "description": "Destination file path. Name it after the subject being designed in lowercase kebab-case, e.g. 'space-exploration-game.md'."},
