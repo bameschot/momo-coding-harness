@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import queue
-import threading
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -100,8 +101,6 @@ class Harness:
         self.logger = Logger(self._ts)
         self.client = OllamaClient(host=host, model=model)
         self.event_queue: queue.Queue[Any] = queue.Queue()
-        self._lock = threading.Lock()
-
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
         self.messages: list[dict] = [
             {"role": "system", "content": _design_prompt()}
@@ -241,23 +240,29 @@ class Harness:
                 bool(tool_calls),
             )
 
-            # emit assistant text; when tool calls follow, defer until after they run
-            # so the user never sees a sentence cut off mid-word at a tool boundary
-            content = getattr(msg, "content", "") or ""
-            if content and not tool_calls:
+            # Strip thinking tokens. Qwen3/Qwen3.5 embeds <think>…</think> in the
+            # content field even when think=False is passed to Ollama.
+            raw_content = getattr(msg, "content", "") or ""
+            content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
+
+            # Emit preamble text before tool events so it appears above tool output
+            # in the TUI. Deferring it until after tools run places it below the
+            # result, making the response look cut off.
+            if content:
                 tool_only_turns = 0
                 self.event_queue.put(ChatEvent("assistant", content))
 
             if not tool_calls:
                 if not content:
                     if last_tool == "write_file":
-                        # Expected terminal state: write happened, no follow-up needed
+                        # After write_file the model sometimes returns nothing — the
+                        # write already happened so this is a clean terminal state.
                         self.event_queue.put(ChatEvent("system",
                             "Design written. Check the file to review it."))
                     elif not empty_retried:
-                        # First empty — retry once; only inject a user message if the
-                        # last message is not already a user turn (prevents consecutive
-                        # user messages which confuse the model further)
+                        # Retry once with an explicit prompt. Only inject a user message
+                        # if the last turn is not already a user turn — consecutive user
+                        # messages are not valid in Ollama's turn format.
                         empty_retried = True
                         if self.messages[-1]["role"] != "user":
                             self.messages.append({"role": "user", "content":
@@ -265,6 +270,12 @@ class Harness:
                         tool_only_turns = 0
                         continue
                     else:
+                        # Second consecutive empty. Remove the injected retry message
+                        # so the next user send does not arrive as a consecutive-user pair.
+                        if (self.messages
+                                and self.messages[-1]["role"] == "user"
+                                and self.messages[-1].get("content", "").startswith("Please respond")):
+                            self.messages.pop()
                         self.event_queue.put(ChatEvent("system",
                             "No response. Please rephrase or add more detail and try again."))
                     self._autosave()
@@ -277,7 +288,8 @@ class Harness:
             if not content:
                 tool_only_turns += 1
 
-            # assistant message with tool calls
+            # Append with stripped content — thinking tokens must not re-enter the
+            # context or the model re-emits them on every subsequent turn.
             self.messages.append({"role": "assistant", "content": content,
                                    "tool_calls": [
                                        {"function": {"name": tc.function.name,
@@ -289,7 +301,7 @@ class Harness:
                 name = tc.function.name
                 args = tc.function.arguments or {}
                 if isinstance(args, str):
-                    import json
+                    # Older Ollama versions return arguments as a raw JSON string.
                     try:
                         args = json.loads(args)
                     except Exception:
@@ -313,15 +325,9 @@ class Harness:
                 if name == "write_file":
                     tool_only_turns = 0
 
-            # Emit any pre-tool-call text now that all tools have run.
-            # Deferring until here prevents the sentence from being cut off mid-word
-            # at the tool boundary (the model often ends the text just before calling
-            # a tool, leaving an incomplete sentence visible while the tool runs).
-            if content:
-                tool_only_turns = 0
-                self.event_queue.put(ChatEvent("assistant", content))
-
-            # nudge model to respond if stuck in an exploration loop
+            # Inject as role "user" — Ollama's tool-use turn format expects
+            # assistant → tool(s) → user; a mid-conversation system message is
+            # not supported and would break the alternating turn structure.
             if tool_only_turns >= _NUDGE_AFTER:
                 self.messages.append({"role": "user", "content":
                     "You have been calling tools for several turns without responding. "

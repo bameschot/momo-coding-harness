@@ -336,6 +336,8 @@ class TUI:
         self._chat_buf.append("", 0)
 
     def _rebuild_chat_buf(self):
+        # Re-render all events from scratch. Called when display options change
+        # (e.g. tool expand/collapse toggle) so the layout is consistent.
         self._chat_buf = _LineBuffer()
         for ev in self._chat_events:
             if ev[0] == "chat":
@@ -348,6 +350,8 @@ class TUI:
     # ── event processing ──────────────────────────────────────────────────────
 
     def _drain_events(self):
+        # Drain the entire queue before redrawing — one redraw per poll cycle
+        # is sufficient and avoids screen flicker from partial updates.
         changed = False
         try:
             while True:

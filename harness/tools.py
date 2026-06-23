@@ -112,16 +112,13 @@ CODING_ONLY_TOOLS = [
 
 DESIGN_EXTRA_TOOLS = [
     _fn("write_file",
-        "Save the current design discussion to a Markdown (.md) file. "
-        "Call this ONLY when the user explicitly asks to persist the design that is already "
-        "being discussed — trigger phrases: 'write the design', 'write it up', 'write up the spec', "
-        "'save the design', 'save the spec', 'save it', or 'export'. "
-        "Do NOT trigger on 'write a <thing>' or 'write me a <thing>' — those are requests to "
-        "START a new design discussion, not to save an existing one. "
-        "Do NOT call list_directory, find_files, or read_file before calling this — write "
-        "based on the current conversation without prior exploration.",
-        {"path":    {"type": "string", "description": "Destination path — must end with .md"},
-         "content": {"type": "string", "description": "Full Markdown content to write"}},
+        "Write content to a file. "
+        "Call this ONLY when the user explicitly says 'write it', 'save it', 'write the design', 'save the design', or similar save/export phrases, "
+        "AND at least one round of questions and answers has already occurred. "
+        "Do NOT call this when the user says 'design a X', 'build a X', 'create a X', 'make a X', or describes an idea — those start a conversation. "
+        "Do NOT call this on the first turn.",
+        {"path":    {"type": "string", "description": "Destination file path. Name it after the subject being designed in lowercase kebab-case, e.g. 'space-exploration-game.md'."},
+         "content": {"type": "string", "description": "Full file content to write"}},
         ["path", "content"]),
 ]
 
@@ -148,8 +145,8 @@ def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
     root = _safe_path(directory, workdir)
     if isinstance(root, str):
         return root
-    # Simple filename patterns (no path separator, no **) are made recursive
-    # so "*.py" behaves the same as "**/*.py" — finds all matches in the tree.
+    # Bare filename patterns (no slash, no **) are promoted to recursive so
+    # "*.py" behaves the same as "**/*.py" without the caller needing to know.
     glob_pat = pattern if ("/" in pattern or pattern.startswith("**")) else f"**/{pattern}"
     try:
         gen = root.glob(glob_pat)
@@ -356,6 +353,8 @@ def _edit_file(path: str, old_string: str, new_string: str, *, workdir: Path) ->
     count = content.count(old_string)
     if count == 0:
         return "ERROR: old_string not found in file"
+    # Require exactly one match so the model can't accidentally replace the
+    # wrong occurrence when the same string appears multiple times.
     if count > 1:
         return f"ERROR: old_string found {count} times; must match exactly once"
     p.write_text(content.replace(old_string, new_string, 1), encoding="utf-8")
@@ -375,8 +374,6 @@ def _create_file(path: str, content: str, *, workdir: Path) -> str:
 
 
 def _write_file(path: str, content: str, *, workdir: Path) -> str:
-    if not path.endswith(".md"):
-        return "ERROR: write_file only accepts .md files in design mode"
     p = _safe_path(path, workdir)
     if isinstance(p, str):
         return p
@@ -385,6 +382,8 @@ def _write_file(path: str, content: str, *, workdir: Path) -> str:
         p.write_text(content, encoding="utf-8")
     except OSError as e:
         return f"ERROR: {e}"
+    # "Written: <path>" — the harness inspects last_tool by name (not return value)
+    # but the model uses this confirmation to know the write succeeded.
     return f"Written: {path}"
 
 
@@ -447,7 +446,7 @@ _EXECUTORS = {
     "read_file":          _read_file,
     "grep_file":          _grep_file,
     "grep_files":         _grep_files,
-    "write_file":         _write_file,
+    "write_file":          _write_file,
     "move_file":          _move_file,
     "append_to_file":     _append_to_file,
     "replace_all_in_file": _replace_all_in_file,
