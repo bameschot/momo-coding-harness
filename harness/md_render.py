@@ -152,9 +152,10 @@ def process(text: str, cols: int) -> list[tuple[str, int, int]]:
 def _strip_inline(text: str) -> str:
     """Remove inline markdown markers: **bold**, *italic*, `code`, etc."""
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-    text = re.sub(r'__(.+?)__', r'\1', text)
+    # __ and _ only match at word boundaries to avoid false positives in filenames/snake_case
+    text = re.sub(r'(?<!\w)__(.+?)__(?!\w)', r'\1', text)
     text = re.sub(r'\*(.+?)\*', r'\1', text)
-    text = re.sub(r'_(.+?)_', r'\1', text)
+    text = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'\1', text)
     text = re.sub(r'`(.+?)`', r'‹\1›', text)
     return text
 
@@ -164,8 +165,8 @@ def _inline_style(text: str) -> tuple[int, int, str]:
     # Bold — **...** or __...__ present
     if re.search(r'\*\*|__', text):
         return curses.A_BOLD, _C_MD_BOLD, _strip_inline(text)
-    # Italic — *...* or _..._
-    if re.search(r'\*[^*]|(?<!\w)_[^_]', text):
+    # Italic — *...* or word-boundary _word_ (not snake_case)
+    if re.search(r'\*[^*]|(?<!\w)_\w', text):
         return 0, _C_MD_H3, _strip_inline(text)  # reuse H3 color as "soft highlight"
     # Inline code only
     cleaned = re.sub(r'`(.+?)`', r'‹\1›', text)
@@ -181,7 +182,7 @@ def _parse_table(rows: list[str], cols: int) -> list[tuple[str, int, int]]:
     alignments: list[str] = []   # "left" | "right" | "center" per column
 
     for i, row in enumerate(rows):
-        cells = [c.strip() for c in row.strip("|").split("|")]
+        cells = [_strip_inline(c.strip()) for c in row.strip("|").split("|")]
         # detect separator row: every non-empty cell is only dashes and optional colons
         if cells and all(re.match(r'^:?-+:?$', c) for c in cells if c):
             sep_idx = i
@@ -215,11 +216,6 @@ def _parse_table(rows: list[str], cols: int) -> list[tuple[str, int, int]]:
 
     # compute column widths from content
     widths = [max(len(r[c]) for r in parsed) for c in range(ncols)]
-
-    # guard: if table is too wide for the terminal, fall back to raw text
-    total_w = sum(widths) + ncols * 3 + 1
-    if total_w > cols:
-        return [(r, _C_NORMAL, 0) for r in rows]
 
     def _align(text: str, width: int, align: str) -> str:
         if align == "right":  return text.rjust(width)

@@ -114,11 +114,12 @@ def _disable_shift_enter():
 # ── scrollable line buffer ────────────────────────────────────────────────────
 
 class _LineBuffer:
-    """Holds wrapped display lines and a scroll offset."""
+    """Holds wrapped display lines and scroll offsets (vertical + horizontal)."""
 
     def __init__(self):
         self._lines: list[tuple[str, int, int]] = []  # (text, color_pair, attrs)
-        self._scroll = 0
+        self._scroll  = 0   # vertical: 0-based index of the last visible line
+        self._hscroll = 0   # horizontal: columns scrolled from the left
 
     def append(self, text: str, color: int, attrs: int = 0):
         self._lines.append((text, color, attrs))
@@ -134,45 +135,72 @@ class _LineBuffer:
     def scroll_to_bottom(self):
         self._scroll = max(0, len(self._lines) - 1)
 
+    def scroll_left(self, n: int = 8):
+        self._hscroll = max(0, self._hscroll - n)
+
+    def scroll_right(self, n: int = 8):
+        max_w = max((len(t) for t, _, _ in self._lines), default=0)
+        self._hscroll = min(max(0, max_w - 1), self._hscroll + n)
+
     def render(self, win, height: int, width: int, edge_color: int = _C_BORDER):
         win.erase()
         total = len(self._lines)
+        display_w = width - 2   # rightmost column reserved for vertical scrollbar
 
-        # text region — leave rightmost column for edge/scrollbar
+        # determine if horizontal scrollbar is needed; if so, reserve one row
+        max_w = max((len(t) for t, _, _ in self._lines), default=0)
+        has_hscroll = max_w > display_w
+        content_h = height - 1 if has_hscroll else height
+
+        # text region
         if total:
-            if total <= height:
-                # all content fits — render from row 0, ignore scroll offset
+            if total <= content_h:
                 visible = self._lines
             else:
-                start = max(0, self._scroll + 1 - height)
-                visible = self._lines[start:start + height]
+                start = max(0, self._scroll + 1 - content_h)
+                visible = self._lines[start:start + content_h]
             for row, (text, color, attrs) in enumerate(visible):
-                if row >= height:
+                if row >= content_h:
                     break
+                display = text[self._hscroll : self._hscroll + display_w]
                 try:
-                    win.addnstr(row, 0, text, width - 2, curses.color_pair(color) | attrs)
+                    win.addnstr(row, 0, display, display_w, curses.color_pair(color) | attrs)
                 except curses.error:
                     pass
 
-        # right-column edge / scrollbar — always drawn as focus indicator
+        # right-column vertical scrollbar
         sx = width - 1
-        if total > height:
-            thumb_h = max(1, round(height * height / total))
-            scroll_start = max(0, self._scroll + 1 - height)
-            ratio = scroll_start / max(1, total - height)
-            thumb_top = round(ratio * (height - thumb_h))
-            for r in range(height):
+        if total > content_h:
+            thumb_h = max(1, round(content_h * content_h / total))
+            scroll_start = max(0, self._scroll + 1 - content_h)
+            ratio = scroll_start / max(1, total - content_h)
+            thumb_top = round(ratio * (content_h - thumb_h))
+            for r in range(content_h):
                 ch = "█" if thumb_top <= r < thumb_top + thumb_h else "│"
                 try:
                     win.addch(r, sx, ch, curses.color_pair(edge_color))
                 except curses.error:
                     pass
         else:
-            for r in range(height):
+            for r in range(content_h):
                 try:
                     win.addch(r, sx, "│", curses.color_pair(edge_color))
                 except curses.error:
                     pass
+
+        # horizontal scrollbar (bottom row, only when content is wider than window)
+        if has_hscroll:
+            scrollable = max(1, max_w - display_w)
+            ratio_h = self._hscroll / scrollable
+            bar_w = max(2, width - 4)
+            thumb_w = max(1, round(display_w / max_w * bar_w))
+            thumb_pos = max(0, min(round(ratio_h * (bar_w - thumb_w)), bar_w - thumb_w))
+            hbar = "─" * thumb_pos + "█" * thumb_w + "─" * (bar_w - thumb_pos - thumb_w)
+            try:
+                win.addnstr(height - 1, 0, "◀" + hbar + "▶", width - 1,
+                            curses.color_pair(edge_color))
+            except curses.error:
+                pass
 
         win.noutrefresh()
 
@@ -205,7 +233,7 @@ class TUI:
         self._chat_events: list[tuple] = []  # raw events for toggle rebuild
         self._tools_expanded: bool = True    # True = full tool output; False = abbreviated
         self._think_expanded: bool = True    # toggle with /toggle-think-output or Shift+T
-        self._md_expanded: bool = False      # markdown rendering; toggle with /toggle-markdown or Shift+M
+        self._md_expanded: bool = True       # markdown rendering; toggle with /toggle-markdown or Shift+M
         self._input: str = ""
         self._cursor: int = 0           # insertion point within _input
         self._history = harness.input_history  # submitted entries, oldest first; shared with harness for persistence
@@ -841,14 +869,20 @@ class TUI:
                 self._redraw()
                 continue
 
-            # cursor movement within the input field
+            # cursor movement in input / horizontal scroll in chat
             if ch == curses.KEY_LEFT:
-                if self._cursor > 0:
+                if self._focus == "chat":
+                    self._chat_buf.scroll_left()
+                    self._redraw()
+                elif self._cursor > 0:
                     self._cursor -= 1
                     self._redraw_input_only()
                 continue
             if ch == curses.KEY_RIGHT:
-                if self._cursor < len(self._input):
+                if self._focus == "chat":
+                    self._chat_buf.scroll_right()
+                    self._redraw()
+                elif self._cursor < len(self._input):
                     self._cursor += 1
                     self._redraw_input_only()
                 continue
