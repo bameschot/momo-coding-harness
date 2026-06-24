@@ -18,6 +18,7 @@ class CommandResult:
     confirm_action: "callable | None" = None  # called with no args when user answers y
     toggle_tools: bool = False              # TUI toggles tool-pane visibility
     toggle_think: bool = False              # TUI toggles thinking-output visibility
+    toggle_md: bool = False                 # TUI toggles markdown rendering
     replay_session: bool = False            # TUI replays loaded session messages into chat buffer
 
 
@@ -105,6 +106,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/toggle-think-output":
         return CommandResult(handled=True, toggle_think=True)
+
+    if cmd == "/toggle-markdown":
+        return CommandResult(handled=True, toggle_md=True)
 
     if cmd == "/compact":
         notice = harness.compact()
@@ -287,6 +291,7 @@ Available commands:
   /workdir <path>     Set working directory for file operations
   /toggle-tool-output   Toggle the tool calls pane on/off
   /toggle-think-output  Toggle display of model thinking/reasoning output
+  /toggle-markdown      Toggle markdown rendering for assistant output  (Shift+M)
   /compact            Compact context (remove old tool calls / messages)
   /context            Show context limit and current usage
   /context <n>        Set context token limit (e.g. /context 8192)

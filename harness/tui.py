@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .commands import handle as handle_command
+from . import md_render
 from .harness import (
     Harness, ChatEvent, ToolCallEvent, ToolResultEvent,
     StatusEvent, ErrorEvent, DoneEvent, AskUserEvent, ThinkEvent,
@@ -32,6 +33,14 @@ _C_BUSY      = 10
 _C_FOCUS     = 11
 _C_THINK     = 12
 _C_CMD       = 13  # input text color when typing a /command
+
+# markdown renderer color pairs (assigned in _init_colors)
+_C_MD_H1    = 14
+_C_MD_H2    = 15
+_C_MD_H3    = 16
+_C_MD_CODE  = 17
+_C_MD_QUOTE = 18
+_C_MD_BOLD  = 19
 
 _COLOR_ORANGE     = 16   # custom color slot for orange  (requires COLORS > 16)
 _COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
@@ -63,6 +72,13 @@ def _init_colors():
     else:
         curses.init_pair(_C_THINK, curses.COLOR_YELLOW,  -1)
         curses.init_pair(_C_CMD,   curses.COLOR_MAGENTA, -1)
+    # markdown renderer pairs (always standard colors — no custom slots needed)
+    curses.init_pair(_C_MD_H1,    curses.COLOR_CYAN,   -1)
+    curses.init_pair(_C_MD_H2,    curses.COLOR_CYAN,   -1)
+    curses.init_pair(_C_MD_H3,    curses.COLOR_WHITE,  -1)
+    curses.init_pair(_C_MD_CODE,  curses.COLOR_WHITE,  -1)
+    curses.init_pair(_C_MD_QUOTE, curses.COLOR_YELLOW, -1)
+    curses.init_pair(_C_MD_BOLD,  curses.COLOR_WHITE,  -1)
 
 
 # ── spinner ───────────────────────────────────────────────────────────────────
@@ -101,11 +117,11 @@ class _LineBuffer:
     """Holds wrapped display lines and a scroll offset."""
 
     def __init__(self):
-        self._lines: list[tuple[str, int]] = []  # (text, color_pair)
+        self._lines: list[tuple[str, int, int]] = []  # (text, color_pair, attrs)
         self._scroll = 0
 
-    def append(self, text: str, color: int):
-        self._lines.append((text, color))
+    def append(self, text: str, color: int, attrs: int = 0):
+        self._lines.append((text, color, attrs))
         # auto-scroll to bottom when new content added
         self._scroll = max(0, len(self._lines) - 1)
 
@@ -130,11 +146,11 @@ class _LineBuffer:
             else:
                 start = max(0, self._scroll + 1 - height)
                 visible = self._lines[start:start + height]
-            for row, (text, color) in enumerate(visible):
+            for row, (text, color, attrs) in enumerate(visible):
                 if row >= height:
                     break
                 try:
-                    win.addnstr(row, 0, text, width - 2, curses.color_pair(color))
+                    win.addnstr(row, 0, text, width - 2, curses.color_pair(color) | attrs)
                 except curses.error:
                     pass
 
@@ -189,6 +205,7 @@ class TUI:
         self._chat_events: list[tuple] = []  # raw events for toggle rebuild
         self._tools_expanded: bool = True    # True = full tool output; False = abbreviated
         self._think_expanded: bool = True    # toggle with /toggle-think-output or Shift+T
+        self._md_expanded: bool = False      # markdown rendering; toggle with /toggle-markdown or Shift+M
         self._input: str = ""
         self._cursor: int = 0           # insertion point within _input
         self._history = harness.input_history  # submitted entries, oldest first; shared with harness for persistence
@@ -444,6 +461,12 @@ class TUI:
             "system": ("[system]", _C_SYSTEM),
         }
         label, color = label_map.get(role, (f"[{role}]", _C_SYSTEM))
+        if self._md_expanded and role == "assistant":
+            self._chat_buf.append(label, color)
+            for (line_text, line_color, line_attrs) in md_render.process(text, cols):
+                self._chat_buf.append(line_text, line_color, line_attrs)
+            self._chat_buf.append("", 0)
+            return
         indent = " " * (len(label) + 1)
         source_lines = text.splitlines() or [""]
         first = True
@@ -591,6 +614,11 @@ class TUI:
         self._rebuild_chat_buf()
         self._redraw()
 
+    def _toggle_md(self):
+        self._md_expanded = not self._md_expanded
+        self._rebuild_chat_buf()
+        self._redraw()
+
     def _history_prev(self):
         if not self._history:
             return
@@ -684,6 +712,9 @@ class TUI:
                     return
                 if result.toggle_think:
                     self._toggle_think()
+                    return
+                if result.toggle_md:
+                    self._toggle_md()
                     return
                 if result.replay_session:
                     self._replay_session()
@@ -856,6 +887,11 @@ class TUI:
             # so typing 'T' in the input field still works normally)
             if ch == ord('T') and self._focus == "chat":
                 self._toggle_think()
+                continue
+
+            # Shift+M toggles markdown rendering (chat focus only)
+            if ch == ord('M') and self._focus == "chat":
+                self._toggle_md()
                 continue
 
             # ESC (27) — manual check for Option+Enter (ESC + CR/LF).
