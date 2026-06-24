@@ -87,13 +87,12 @@ Thinking is disabled for one turn after: (a) the context window was cut off (`do
 
 ### Text tool-call recovery
 
-Some models emit tool calls as plain text rather than using the API's structured tool-call field. The harness applies a three-tier fallback before giving up:
+Some models emit tool calls as plain text rather than using the API's structured tool-call field. The harness applies a two-pass fallback before giving up:
 
-1. **Tier 1 — tagged formats**: Recognises model-specific XML/JSON wrappers: Qwen3 `<tool_call>`, Hermes `<tool_call>`, Phi `<|tool_call|>`, DeepSeek `<｜tool▁call▁begin｜>`, Mistral `[TOOL_CALLS]`, Command-R.
-2. **Tier 2 — structured arrays**: Catches Mistral-style `[{"name":…}]` arrays in content.
-3. **Tier 3 — bare JSON anchored to tool names**: Pattern built dynamically from the current tool set; searches for `{"name": "<known_tool>", "parameters": {…}}` anywhere in the response.
+1. **Tagged / structured formats**: Recognises model-specific wrappers — Qwen3/Hermes `<tool_call>`, Functionary `<functioncall>` / `<function_call>`, Phi `<|tool_call|>`, DeepSeek `<｜tool▁call▁begin｜>`, Mistral `[TOOL_CALLS]` array, Command-R `Action:/Action Input:`.
+2. **Bare JSON anchored to tool names**: Pattern built dynamically from the current tool set; scans for `{"name": "<known_tool>", "arguments": {…}}` or `known_tool({…})` anywhere in the response. Only runs if pass 1 found nothing.
 
-If a text tool call is recovered it is executed normally; if all tiers fail the text is treated as a regular assistant response.
+If a text tool call is recovered it is executed normally; if both passes fail the text is treated as a regular assistant response.
 
 ### Tool content sanitization
 

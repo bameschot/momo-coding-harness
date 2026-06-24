@@ -60,12 +60,11 @@ def _strip_text_tool_calls(text: str) -> str:
 def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
     """
     Recover tool calls embedded in plain text when the model bypassed the tool
-    API.  Tries known tagged formats (tiers 1–2), then falls back to a
-    bare-JSON scan anchored to tool-name occurrences in the text (tier 3).
+    API.  Tries all known tagged/structured formats first, then falls back to a
+    bare-JSON scan anchored to tool-name occurrences in the text.
 
-    Tier-3 builds its name-detection pattern dynamically from `tools`, so
-    adding a tool to tools.py automatically extends coverage without touching
-    this function.
+    The bare-JSON pattern is built dynamically from `tools`, so adding a tool
+    to tools.py automatically extends coverage without touching this function.
 
     Returns a list of {"name": str, "arguments": dict}.
     """
@@ -114,7 +113,7 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
             return None
         return {"name": name, "arguments": obj}
 
-    # ── Tier 1: tagged JSON formats ───────────────────────────────────────────
+    # ── Tagged / structured formats ───────────────────────────────────────────
 
     for rx in (_RX_QWEN, _RX_FUNC, _RX_FUNC2, _RX_PHI):
         for m in rx.finditer(text):
@@ -135,8 +134,7 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
         except json.JSONDecodeError:
             pass
 
-    # ── Tier 2: structured text / array formats ───────────────────────────────
-
+    # Mistral wraps multiple calls in a JSON array
     for m in _RX_MISTRAL.finditer(text):
         try:
             for obj in json.loads(m.group(1)):
