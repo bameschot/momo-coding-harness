@@ -18,6 +18,7 @@ class CommandResult:
     confirm_action: "callable | None" = None  # called with no args when user answers y
     toggle_tools: bool = False              # TUI toggles tool-pane visibility
     toggle_think: bool = False              # TUI toggles thinking-output visibility
+    replay_session: bool = False            # TUI replays loaded session messages into chat buffer
 
 
 def handle(line: str, harness: Harness) -> CommandResult:
@@ -168,7 +169,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             hint = "\nRecent sessions:\n" + "\n".join(f"  {n}" for n in names) if names else ""
             return CommandResult(handled=True, output=f"Session not found: {arg}{hint}")
         msg = harness.load_session(p)
-        return CommandResult(handled=True, output=msg)
+        return CommandResult(handled=True, output=msg, replay_session=True)
 
     if cmd == "/list-skills":
         available = harness.list_available_skills()

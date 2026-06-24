@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from . import session as session_mod
-from .harness import Harness, ChatEvent
+from .harness import Harness
 from .tui import run_tui
 
 
@@ -47,8 +47,7 @@ def main():
     # Restore last session unless --fresh
     sessions = session_mod.list_sessions()
     if not args.fresh and sessions:
-        msg = harness.load_session(sessions[0])
-        harness.event_queue.put(ChatEvent("system", msg))
+        harness.load_session(sessions[0])
     else:
         harness.set_mode(args.mode)
 

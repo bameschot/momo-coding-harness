@@ -613,6 +613,39 @@ class TUI:
             self._input = self._history_stash
         self._cursor = len(self._input)
 
+    def _replay_session(self):
+        """Render all stored session messages into the chat buffer, then show a status notice."""
+        pending_names: list[str] = []
+        for msg in self.harness.messages:
+            role = msg.get("role")
+            content = msg.get("content") or ""
+            if role == "system":
+                continue
+            elif role == "thinking":
+                self._add_think(content)
+            elif role == "user":
+                self._add_chat("user", content)
+            elif role == "assistant":
+                if content:
+                    self._add_chat("assistant", content)
+                pending_names = []
+                for tc in (msg.get("tool_calls") or []):
+                    name = tc["function"]["name"]
+                    args = tc["function"].get("arguments") or {}
+                    pending_names.append(name)
+                    self._add_tool_call(name, args)
+            elif role == "tool":
+                name = pending_names.pop(0) if pending_names else ""
+                self._add_tool_result(name, content)
+        h = self.harness
+        notice = (
+            f"Session loaded: {h.session_path().name} ({len(h.messages)} messages)\n"
+            f"Model: {h.client.model} | Mode: {h.mode} | Dir: {h.workdir}"
+        )
+        self._add_chat("system", notice)
+        self._chat_buf.scroll_to_bottom()
+        self._redraw()
+
     def _submit(self):
         text = self._input.strip()
         self._input = ""
@@ -652,6 +685,9 @@ class TUI:
                 if result.toggle_think:
                     self._toggle_think()
                     return
+                if result.replay_session:
+                    self._replay_session()
+                    return
                 if result.confirm_prompt:
                     self._pending_confirm = result.confirm_action
                     self._add_chat("system", result.confirm_prompt + " [y/N]")
@@ -683,7 +719,11 @@ class TUI:
     def run(self):
         # emit initial status
         self.harness._emit_status()
-        self._redraw()
+        # if a session was pre-loaded before the TUI started, replay it now
+        if len(self.harness.messages) > 1:
+            self._replay_session()
+        else:
+            self._redraw()
 
         _pushed_ch: int | None = None  # character pushed back after paste peek
 
