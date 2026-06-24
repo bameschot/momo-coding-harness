@@ -191,7 +191,7 @@ class TUI:
         self._think_expanded: bool = True    # toggle with /toggle-think-output or Shift+T
         self._input: str = ""
         self._cursor: int = 0           # insertion point within _input
-        self._history: list[str] = []   # submitted entries, oldest first
+        self._history = harness.input_history  # submitted entries, oldest first; shared with harness for persistence
         self._history_idx: int = -1     # -1 = not browsing
         self._history_stash: str = ""   # saves live input while browsing
         self._focus: str = "input"      # "input" | "chat"

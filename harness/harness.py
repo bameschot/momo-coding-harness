@@ -404,6 +404,7 @@ class Harness:
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
         self.think: bool = True    # enable model thinking/reasoning mode; configurable via /think or --think
         self.active_skills: list[str] = []
+        self.input_history: list[str] = []
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
         ]
@@ -843,6 +844,7 @@ class Harness:
             self._ts, self.client.model, self.mode,
             self.workdir, self.messages, self.context_limit,
             self.active_skills,
+            self.input_history,
         )
 
     def load_session(self, path: Path) -> str:
@@ -853,6 +855,8 @@ class Harness:
         self.context_limit = data.get("context_limit", self.context_limit)
         self.client.set_model(data.get("model", self.client.model))
         self.active_skills = data.get("active_skills", [])
+        self.input_history.clear()
+        self.input_history.extend(data.get("input_history", []))
         # Always rebuild the system prompt from the current role files and skills on
         # disk — saved sessions carry a snapshot; role/skill edits must take effect.
         if self.messages and self.messages[0].get("role") == "system":

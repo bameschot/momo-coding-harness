@@ -17,7 +17,8 @@ def session_path(ts: str) -> Path:
 
 def save(ts: str, model: str, mode: str, workdir: Path,
          messages: list[dict], context_limit: int,
-         active_skills: list[str] | None = None):
+         active_skills: list[str] | None = None,
+         input_history: list[str] | None = None):
     data = {
         "created_at": ts,
         "model": model,
@@ -25,6 +26,7 @@ def save(ts: str, model: str, mode: str, workdir: Path,
         "workdir": str(workdir),
         "context_limit": context_limit,
         "active_skills": active_skills or [],
+        "input_history": input_history or [],
         "messages": messages,
     }
     session_path(ts).write_text(json.dumps(data, indent=2), encoding="utf-8")
