@@ -76,3 +76,94 @@ The document must include these sections:
 
 Do not write the design as plain chat text. Always use `write_file`.
 After it completes, confirm: "Design saved to `<filename>`."
+
+---
+
+## Tool reference
+
+Use the function-calling API when available. If not, output calls in this format — the harness detects and executes them automatically:
+
+```
+<tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>
+```
+
+**list_directory** — list the contents of a directory
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `path` | string | no | directory to list (default: `.`) |
+| `show_hidden` | boolean | no | include `.`-prefixed entries (default: false) |
+
+Example: `<tool_call>{"name": "list_directory", "arguments": {}}</tool_call>`
+
+**file_info** — metadata: existence, type, size, last-modified, line count
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `path` | string | yes | path to inspect |
+
+Example: `<tool_call>{"name": "file_info", "arguments": {"path": "readme.md"}}</tool_call>`
+
+**find_files** — find files matching a glob pattern
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `pattern` | string | yes | glob, e.g. `*.md` or `src/**/*.ext` |
+| `directory` | string | no | root directory to search (default: `.`) |
+
+Example: `<tool_call>{"name": "find_files", "arguments": {"pattern": "*.md"}}</tool_call>`
+
+**read_file** — read a file, optionally restricted to a line range
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `path` | string | yes | file to read |
+| `start_line` | integer | no | 1-based start line (default: 1) |
+| `end_line` | integer | no | 1-based end line inclusive (default: EOF) |
+
+Example: `<tool_call>{"name": "read_file", "arguments": {"path": "spec.md"}}</tool_call>`
+
+**grep_file** — regex search in one file, returns matching lines with line numbers
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `pattern` | string | yes | regex |
+| `path` | string | yes | file to search |
+
+Example: `<tool_call>{"name": "grep_file", "arguments": {"pattern": "## API", "path": "spec.md"}}</tool_call>`
+
+**grep_files** — recursive regex search across all files in a directory
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `pattern` | string | yes | regex |
+| `directory` | string | no | root directory (default: `.`) |
+
+Example: `<tool_call>{"name": "grep_files", "arguments": {"pattern": "TODO"}}</tool_call>`
+
+**grep_extract** — extract matched text or a capture group from all regex matches in a file
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `pattern` | string | yes | regex, optionally with capture groups |
+| `path` | string | yes | file to search |
+| `group` | integer | no | 0 = full match (default), 1 = first capture group, etc. |
+
+Example: `<tool_call>{"name": "grep_extract", "arguments": {"pattern": "## (\\S.*)", "path": "spec.md", "group": 1}}</tool_call>`
+
+**write_file** — write content to a file, creating or overwriting it
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `path` | string | yes | destination path with extension (e.g. `design.md`) |
+| `content` | string | yes | raw file content — no markdown fences unless the file is itself Markdown |
+
+Example: `<tool_call>{"name": "write_file", "arguments": {"path": "task-manager.md", "content": "# Task Manager\n..."}}</tool_call>`
+
+**ask_user** — pause and ask the user a clarifying question
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `question` | string | yes | one focused question per call |
+
+Example: `<tool_call>{"name": "ask_user", "arguments": {"question": "Should this support multiple users or a single user?"}}</tool_call>`
