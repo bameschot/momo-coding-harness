@@ -20,6 +20,8 @@ class CommandResult:
     toggle_think: bool = False              # TUI toggles thinking-output visibility
     toggle_md: bool = False                 # TUI toggles markdown rendering
     replay_session: bool = False            # TUI replays loaded session messages into chat buffer
+    run_compact: bool = False               # TUI runs compact on worker thread
+    compact_summarise: bool = True          # passed to compact_threaded()
 
 
 def handle(line: str, harness: Harness) -> CommandResult:
@@ -111,9 +113,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return CommandResult(handled=True, toggle_md=True)
 
     if cmd == "/compact":
-        notice = harness.compact()
-        harness._emit_status()
-        return CommandResult(handled=True, output=notice)
+        return CommandResult(handled=True, run_compact=True)
+
+    if cmd == "/fast-compact":
+        return CommandResult(handled=True, run_compact=True, compact_summarise=False)
 
     if cmd == "/context":
         if not arg:
@@ -292,7 +295,8 @@ Available commands:
   /toggle-tool-output   Toggle the tool calls pane on/off
   /toggle-think-output  Toggle display of model thinking/reasoning output
   /toggle-markdown      Toggle markdown rendering for assistant output  (Shift+M)
-  /compact            Compact context (remove old tool calls / messages)
+  /compact            Compact context with LLM summary of dropped history
+  /fast-compact       Compact context without LLM summarisation (instant)
   /context            Show context limit and current usage
   /context <n>        Set context token limit (e.g. /context 8192)
   /tool-result        Show current tool result character cap

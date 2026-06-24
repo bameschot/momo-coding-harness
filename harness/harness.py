@@ -386,6 +386,28 @@ def _estimate_tokens(messages: list[dict]) -> int:
     return total
 
 
+def _format_for_summary(messages: list[dict]) -> str:
+    parts = []
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+        if role == "user":
+            parts.append(f"User: {content}")
+        elif role == "assistant":
+            if content:
+                parts.append(f"Assistant: {content}")
+            for tc in (m.get("tool_calls") or []):
+                fn = tc.get("function", {})
+                parts.append(f"  [Tool call: {fn.get('name', '?')} {json.dumps(fn.get('arguments', {}))}]")
+        elif role == "tool":
+            name = m.get("name", "tool")
+            snippet = content[:500] + ("…" if len(content) > 500 else "")
+            parts.append(f"  [Tool result ({name}): {snippet}]")
+    return "\n".join(parts)
+
+
 # ── harness ───────────────────────────────────────────────────────────────────
 
 _DEFAULT_CONTEXT = 32768  # fallback when the model does not report its context size
@@ -475,46 +497,93 @@ class Harness:
             return "yellow"
         return "normal"
 
-    def compact(self) -> str:
+    def compact(self, summarise: bool = True) -> str:
         before = self._token_estimate
         removed = 0
-        target = self.context_limit // 2
+        target = self.context_limit // 3
+        removed_msgs: list[dict] = []
 
-        # Pass 1: remove old tool result messages + their triggering assistant message
+        # Pass 1: remove tool-call groups (assistant + all its tool/thinking results)
         i = 1  # keep system prompt at 0
         while i < len(self.messages) and self._estimate() > target:
             msg = self.messages[i]
-            if msg["role"] in ("tool", "thinking"):
-                # also remove the assistant message immediately before it (if any)
-                if i > 0 and self.messages[i - 1]["role"] == "assistant":
-                    del self.messages[i - 1]
-                    removed += 1
-                    i = max(1, i - 1)
+            if msg["role"] == "assistant":
+                j = i + 1
+                while j < len(self.messages) and self.messages[j]["role"] in ("tool", "thinking"):
+                    j += 1
+                if j > i + 1:
+                    group = self.messages[i:j]
+                    removed_msgs.extend(group)
+                    del self.messages[i:j]
+                    removed += len(group)
+                    continue
+            elif msg["role"] in ("tool", "thinking"):
+                # orphaned tool/thinking with no preceding assistant
+                removed_msgs.append(self.messages[i])
                 del self.messages[i]
                 removed += 1
-            else:
-                i += 1
+                continue
+            i += 1
 
         # Pass 2: remove oldest user+assistant pairs
         i = 1
         while i < len(self.messages) and self._estimate() > target:
             msg = self.messages[i]
             if msg["role"] == "user":
+                removed_msgs.append(self.messages[i])
                 del self.messages[i]
                 removed += 1
-                # remove following assistant if present
                 if i < len(self.messages) and self.messages[i]["role"] == "assistant":
+                    removed_msgs.append(self.messages[i])
                     del self.messages[i]
                     removed += 1
             else:
                 i += 1
 
+        # Summarise removed messages and inject into oldest remaining user turn
+        summary = self._summarize_removed(removed_msgs) if (removed_msgs and summarise) else ""
+        if summary:
+            for msg in self.messages[1:]:
+                if msg["role"] == "user":
+                    msg["content"] = f"[Earlier context summary:\n{summary}\n]\n\n{msg['content']}"
+                    break
+
         after = self._estimate()
         self._token_estimate = after
-        notice = (f"Context compacted: removed {removed} messages "
+        action = "summarised" if summary else "removed"
+        notice = (f"Context compacted: {action} {removed} messages "
                   f"(was ~{before} tokens, now ~{after} tokens)")
         self.logger.log_compact(self.mode, self.client.model, removed, before, after)
         return notice
+
+    def _summarize_removed(self, msgs: list[dict]) -> str:
+        """One-shot LLM call to summarise removed messages. Returns '' on failure."""
+        conversation = _format_for_summary(msgs)
+        if not conversation.strip():
+            return ""
+        prompt = [{
+            "role": "user",
+            "content": (
+                "Summarize the following conversation fragment concisely. "
+                "Preserve: key decisions, file names, code entities, outcomes, and "
+                "any facts needed to continue the work. Omit pleasantries and filler.\n\n"
+                + conversation
+            )
+        }]
+        try:
+            response = self.client.chat(prompt, [])
+            return getattr(response.message, "content", "") or ""
+        except Exception:
+            return ""
+
+    def compact_threaded(self, summarise: bool = True):
+        """Run compact() on a worker thread, emitting events back to the TUI."""
+        try:
+            notice = self.compact(summarise=summarise)
+            self.event_queue.put(ChatEvent("system", notice))
+            self._emit_status()
+        finally:
+            self.event_queue.put(DoneEvent())
 
     def _estimate(self) -> int:
         return _estimate_tokens(self.messages)

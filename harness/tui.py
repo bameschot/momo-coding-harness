@@ -747,6 +747,17 @@ class TUI:
                 if result.replay_session:
                     self._replay_session()
                     return
+                if result.run_compact:
+                    self._add_chat("system", "Compacting context...")
+                    self._busy = True
+                    self._redraw()
+                    t = threading.Thread(
+                        target=self.harness.compact_threaded,
+                        args=(result.compact_summarise,),
+                        daemon=True,
+                    )
+                    t.start()
+                    return
                 if result.confirm_prompt:
                     self._pending_confirm = result.confirm_action
                     self._add_chat("system", result.confirm_prompt + " [y/N]")

@@ -75,13 +75,16 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
   - **↑/↓** — move the cursor between lines in multi-line input; at the top or bottom edge, navigates command history.
   - **Shift+↑ / Shift+↓** — navigate command history regardless of cursor position.
   - **Ctrl+Left / Ctrl+Right** — move cursor one word left or right (requires xterm-compatible terminal; also available as **Option+b / Option+f** on macOS with "+Esc" Option key).
-  - **Ctrl+A / Ctrl+E** — move cursor to start or end of the current line.
+  - **Ctrl+A / Home** — move cursor to start of the current line.
+  - **Ctrl+E / End** — move cursor to end of the current line.
   - **Ctrl+K** — delete from cursor to end of the current line (kills the newline itself when the cursor is right before one).
   - **Ctrl+U** — delete from start of the current line to the cursor.
   - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
+- **Chat pane scrolling** — `↑`/`↓`, `PgUp`/`PgDn`. When a table or other wide content is present, `←`/`→` scrolls horizontally (chat focus required).
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green.
-- **Tool call visibility** — `/toggle-tool-output` or `T` (when chat focused) switches between full tool output and abbreviated mode (first 50 chars + `…`).
+- **Tool call visibility** — `/toggle-tool-output` or `Shift+T` (when chat focused) switches between full tool output and abbreviated mode (first 50 chars + `…`).
 - **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/toggle-think-output` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.
+- **Markdown rendering** — assistant responses are rendered as formatted markdown by default. Headings use box-drawing decorations, lists use `•`/numbered prefixes, code blocks are prefixed with `│`, tables render with full box-drawing characters. Toggle with `/toggle-markdown` or `Shift+M` (when chat focused). When a table is wider than the terminal, a horizontal scrollbar appears at the bottom of the chat pane; scroll it with `←`/`→` while the chat pane is focused.
 
 ## Modes
 
@@ -132,7 +135,7 @@ Switch modes with `/design`, `/write`, `/data`, `/code`, or `Shift+Tab`.
 | Tool | Description |
 |---|---|
 | `write_file` | Write content to a file |
-| `ask_user` | Pause mid-task and ask the user a focused clarifying question |
+| `ask_user` | Pause mid-task and ask the user a focused clarifying question. The worker thread blocks until the answer is submitted; the status bar shows `? waiting for input`. |
 
 ### Writing mode only
 
@@ -154,11 +157,11 @@ Switch modes with `/design`, `/write`, `/data`, `/code`, or `Shift+Tab`.
 | `move_file` | Move or rename a file (parent dirs created automatically) |
 | `append_to_file` | Append text to a file (creates if missing) |
 | `replace_all_in_file` | Replace every occurrence of a string in a file; returns count |
-| `edit_file` | Replace an exact string in a file (must match exactly once) |
+| `edit_file` | Replace an exact string in a file. The string must appear exactly once — returns an error if it matches zero or multiple times. |
 | `create_file` | Create or overwrite a file |
 | `delete_file` | Delete a file |
 | `git_command` | Run a git command (e.g. `status`, `diff`, `add src/foo.py`) |
-| `run_command` | Run any shell command — scripts, tests, build tools, etc. |
+| `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 30 seconds by default. |
 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
 
@@ -212,7 +215,7 @@ Type any command in the input bar:
 | `/host` | Show current Ollama host URL |
 | `/host <url>` | Connect to a different Ollama instance at runtime |
 | `/workdir` | Show the current working directory |
-| `/workdir <path>` | Change the working directory |
+| `/workdir <path>` | Change the working directory. If the path does not exist, prompts for confirmation before creating it. |
 | `/think` | Show thinking mode state (on/off) |
 | `/think on\|off` | Enable or disable model thinking/reasoning mode |
 | `/list-skills` | List available skills and show which are active |
@@ -221,18 +224,20 @@ Type any command in the input bar:
 | `/toggle-think-output` | Toggle display of model thinking/reasoning blocks |
 | `/toggle-tool-output` | Toggle the tool calls pane on/off |
 | `/context` | Show context limit and current token usage |
-| `/context <n>` | Set the context token limit (e.g. `/context 16384`) |
+| `/context <n>` | Set the context token limit (e.g. `/context 16384`); minimum 256 |
 | `/tool-result` | Show the current tool result character cap |
 | `/tool-result <n>` | Set the cap (e.g. `/tool-result 8000`); `0` = unlimited |
-| `/compact` | Manually compact the context (remove old messages) |
+| `/toggle-markdown` | Toggle markdown rendering for assistant output (also `Shift+M`) |
+| `/compact` | Compact context — removes old messages and summarises them with the LLM |
+| `/fast-compact` | Compact context without LLM summarisation (instant) |
 | `/clear` | Clear conversation history |
-| `/cost` | Show token usage for this session by mode and model |
-| `/sessions` | List recent sessions with mode and model info |
+| `/cost` | Show token usage for this session, aggregated by mode and model (in/out/total tokens per combination) |
+| `/sessions` | List up to 20 recent sessions with mode and model |
 | `/session` | Show the current session file path |
-| `/session <name>` | Load a saved session by name or prefix |
-| `/export` | Export the conversation to a Markdown file in the working directory |
+| `/session <name>` | Load a saved session by exact name or partial prefix (e.g. `2026-06-22` matches the first session from that date) |
+| `/export` | Export the conversation to a Markdown file in the working directory (filename: `conversation-<timestamp>.md`) |
 | `/export <filename>` | Export to a specific filename |
-| `/copy` | Copy the last assistant message to the clipboard |
+| `/copy` | Copy the last assistant message to the clipboard (tries `pbcopy`, then `xclip`, then `xsel`) |
 | `/copy all` | Copy the full conversation to the clipboard |
 | `/exit` or `/quit` | Save session and exit |
 
@@ -240,12 +245,18 @@ Type any command in the input bar:
 
 The harness automatically detects the model's native context window on startup and uses half of it as the working limit (e.g. a 262,144-token model gets a 131,072-token limit). The startup message confirms what was detected. Use `--context N` or `/context N` to override.
 
+Token usage is estimated as `sum(len(content) // 4)` across all messages (a fast approximation). Tool call argument content is not counted, so real usage in tool-heavy sessions can be higher than the displayed percentage.
+
 Compaction fires automatically when token usage exceeds the limit:
 
-1. **Pass 1** — removes old tool call and thinking messages (oldest first) until usage drops to 50% of the limit
-2. **Pass 2** — if still over limit, removes old user/assistant message pairs (oldest first)
+1. **Pass 1** — removes tool-call groups (oldest first): the assistant message that issued tool calls plus all its tool/thinking result messages are removed as a unit until usage drops to 33% of the limit.
+2. **Pass 2** — if still over limit, removes the oldest user/assistant message pairs until the target is met.
 
-The system prompt is never removed. A notice is shown in the chat pane whenever compaction occurs.
+After removing messages the harness makes a one-shot LLM call to summarise what was dropped and prepends the summary to the oldest remaining user message so the model retains key context. The notice in the chat pane says "summarised N messages" when this succeeds, or "removed N messages" if summarisation was skipped or failed.
+
+The system prompt is never removed. Compaction runs on the worker thread — the TUI stays responsive and shows the spinner while the summary is being generated.
+
+Use `/fast-compact` to skip LLM summarisation and compact immediately.
 
 ## Tool Result Cap
 
