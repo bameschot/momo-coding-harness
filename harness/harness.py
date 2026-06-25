@@ -212,21 +212,43 @@ def _is_qwen(model: str) -> bool:
     return "qwen" in model.lower()
 
 
+def _xml_escape_str(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _xml_escape_args(obj: object) -> object:
+    """Recursively escape XML special chars in string values within a tool-call argument structure."""
+    if isinstance(obj, dict):
+        return {k: _xml_escape_args(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_xml_escape_args(v) for v in obj]
+    if isinstance(obj, str):
+        return _xml_escape_str(obj)
+    return obj
+
+
 def _xml_escape_for_ollama(messages: list[dict]) -> list[dict]:
-    """Return a shallow copy of messages with XML-special characters escaped in
-    role:'tool' content.  Qwen3's Ollama template wraps tool results in
-    <tool_response>…</tool_response> XML; unescaped < > & in the content break
-    the XML parser and produce a 500.  We escape only the copy sent to the API —
-    the stored messages keep the correct, unescaped content so the history is
-    accurate and the model can still reason about the actual values."""
+    """Return a shallow copy of messages with XML-special characters escaped for Qwen3's template.
+
+    Qwen3's Ollama template wraps tool results in <tool_response>…</tool_response> XML and
+    embeds past tool-call arguments in XML-like structure.  Unescaped < > & in either location
+    break the XML parser and produce a 500.  We escape only the copy sent to the API —
+    the stored messages keep the correct, unescaped content so the history is accurate."""
     result = []
     for m in messages:
-        if m.get("role") == "tool" and isinstance(m.get("content"), str):
+        role = m.get("role")
+        if role == "tool" and isinstance(m.get("content"), str):
             m = dict(m)
-            m["content"] = (m["content"]
-                            .replace("&", "&amp;")
-                            .replace("<", "&lt;")
-                            .replace(">", "&gt;"))
+            m["content"] = _xml_escape_str(m["content"])
+        elif role == "assistant" and m.get("tool_calls"):
+            m = dict(m)
+            m["tool_calls"] = [
+                {"function": {
+                    "name": tc["function"]["name"],
+                    "arguments": _xml_escape_args(tc["function"]["arguments"]),
+                }}
+                for tc in m["tool_calls"]
+            ]
         result.append(m)
     return result
 
@@ -796,7 +818,7 @@ class Harness:
             if msg.tool_calls:
                 self.messages.append({
                     "role": "assistant",
-                    "content": content or None,
+                    "content": _strip_text_tool_calls(content) or None,
                     "tool_calls": [
                         {"function": {"name": tc.function.name,
                                       "arguments": (_sanitize_tool_args(
