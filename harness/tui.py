@@ -281,6 +281,11 @@ class TUI:
         self._chat_win   = curses.newwin(L["chat_h"],  cols, L["chat_y"],   0)
         self._status_win = curses.newwin(_STATUS_H,    cols, L["status_y"], 0)
         self._input_win  = curses.newwin(L["input_h"], cols, L["input_y"],  0)
+        # Only input_win owns the cursor; chat and status redraws must not
+        # displace it (curses.doupdate() moves the cursor to the last
+        # noutrefresh'd window that has leaveok=False).
+        self._chat_win.leaveok(True)
+        self._status_win.leaveok(True)
 
     def _rebuild(self):
         rows, cols = self.stdscr.getmaxyx()
@@ -594,9 +599,10 @@ class TUI:
                 elif isinstance(ev, StatusEvent):
                     ctx_map = {"normal": _C_STATUS, "yellow": _C_WARN, "red": _C_DANGER}
                     self._ctx_color = ctx_map.get(ev.ctx_color, _C_STATUS)
+                    tools_str = "" if ev.tools_enabled else " | TOOLS: off"
                     self._status = (
                         f"MODE: {ev.mode} | MODEL: {ev.model} | "
-                        f"CTX: {ev.ctx_pct}% | DIR: {ev.workdir}"
+                        f"CTX: {ev.ctx_pct}% | DIR: {ev.workdir}{tools_str}"
                     )
                     changed = True
                 elif isinstance(ev, ThinkEvent):
@@ -735,14 +741,20 @@ class TUI:
             if result.exit_app:
                 raise SystemExit(0)
             if result.handled:
-                if result.toggle_tools:
-                    self._toggle_tools()
+                if result.tool_output is not None:
+                    self._tools_expanded = result.tool_output
+                    self._rebuild_chat_buf()
+                    self._redraw()
                     return
-                if result.toggle_think:
-                    self._toggle_think()
+                if result.think_output is not None:
+                    self._think_expanded = result.think_output
+                    self._rebuild_chat_buf()
+                    self._redraw()
                     return
-                if result.toggle_md:
-                    self._toggle_md()
+                if result.md_render is not None:
+                    self._md_expanded = result.md_render
+                    self._rebuild_chat_buf()
+                    self._redraw()
                     return
                 if result.replay_session:
                     self._replay_session()
@@ -813,7 +825,7 @@ class TUI:
             if ch == curses.ERR:
                 if changed:
                     self._redraw()
-                elif self._busy:
+                elif self._busy and not self._waiting_for_input:
                     now = time.time()
                     if now - self._spinner_ts >= _SPINNER_INTERVAL:
                         self._spinner_frame += 1

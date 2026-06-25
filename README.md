@@ -82,9 +82,9 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
   - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
 - **Chat pane scrolling** — `↑`/`↓`, `PgUp`/`PgDn`. When a table or other wide content is present, `←`/`→` scrolls horizontally (chat focus required).
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green.
-- **Tool call visibility** — `/toggle-tool-output` or `Shift+T` (when chat focused) switches between full tool output and abbreviated mode (first 50 chars + `…`).
-- **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/toggle-think-output` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.
-- **Markdown rendering** — assistant responses are rendered as formatted markdown by default. Headings use box-drawing decorations, lists use `•`/numbered prefixes, code blocks are prefixed with `│`, tables render with full box-drawing characters. Toggle with `/toggle-markdown` or `Shift+M` (when chat focused). When a table is wider than the terminal, a horizontal scrollbar appears at the bottom of the chat pane; scroll it with `←`/`→` while the chat pane is focused.
+- **Tool call visibility** — `/tool-output on|off` switches between full tool output and abbreviated mode (first 50 chars + `…`).
+- **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/think-output on|off` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.
+- **Markdown rendering** — assistant responses are rendered as formatted markdown by default. Headings use box-drawing decorations, lists use `•`/numbered prefixes, code blocks are prefixed with `│`, tables render with full box-drawing characters. Toggle with `/markdown on|off` or `Shift+M` (when chat focused). When a table is wider than the terminal, a horizontal scrollbar appears at the bottom of the chat pane; scroll it with `←`/`→` while the chat pane is focused.
 
 ## Modes
 
@@ -289,16 +289,17 @@ Type any command in the input bar:
 | `/workdir <path>` | Change the working directory. If the path does not exist, prompts for confirmation before creating it. |
 | `/think` | Show thinking mode state (on/off) |
 | `/think on\|off` | Enable or disable model thinking/reasoning mode |
+| `/tools on\|off` | Enable or disable tool calls (off = model receives no tool schemas) |
+| `/tool-output on\|off` | Show or hide the tool calls pane |
+| `/think-output on\|off` | Show or hide model thinking/reasoning blocks (also `Shift+T`) |
+| `/markdown on\|off` | Enable or disable markdown rendering for assistant output (also `Shift+M`) |
 | `/list-skills` | List available skills and show which are active |
 | `/load-skill <name>` | Append a skill's instructions to the system prompt |
 | `/unload-skill <name>` | Remove a skill from the system prompt |
-| `/toggle-think-output` | Toggle display of model thinking/reasoning blocks |
-| `/toggle-tool-output` | Toggle the tool calls pane on/off |
 | `/context` | Show context limit and current token usage |
 | `/context <n>` | Set the context token limit (e.g. `/context 16384`); minimum 256 |
 | `/tool-result` | Show the current tool result character cap |
 | `/tool-result <n>` | Set the cap (e.g. `/tool-result 8000`); `0` = unlimited |
-| `/toggle-markdown` | Toggle markdown rendering for assistant output (also `Shift+M`) |
 | `/compact` | Compact context — removes old messages and summarises them with the LLM |
 | `/fast-compact` | Compact context without LLM summarisation (instant) |
 | `/clear` | Clear conversation history |

@@ -286,6 +286,7 @@ class StatusEvent:
     workdir: str
     ctx_pct: int
     ctx_color: str  # "normal" | "yellow" | "red"
+    tools_enabled: bool = True
 
 @dataclass
 class ErrorEvent:
@@ -423,6 +424,7 @@ class Harness:
         self._user_input_queue: queue.Queue[str] = queue.Queue()
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
         self.think: bool = True    # enable model thinking/reasoning mode; configurable via /think or --think
+        self.tools_enabled: bool = True
         self.active_skills: list[str] = []
         self.input_history: list[str] = []
         self.messages: list[dict] = [
@@ -592,7 +594,7 @@ class Harness:
         """Called from the harness worker thread."""
         self.messages.append({"role": "user", "content": text})
 
-        tools = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
+        tools = [] if not self.tools_enabled else _MODE_TOOLS.get(self.mode, ALL_TOOLS)
         _MAX_ITERATIONS = 40 if self.mode == "design" else 100
         _NUDGE_AFTER = 10  # consecutive tool-only turns before injecting a respond prompt
 
@@ -878,6 +880,7 @@ class Harness:
             workdir=str(self.workdir),
             ctx_pct=pct,
             ctx_color=self._ctx_color(pct),
+            tools_enabled=self.tools_enabled,
         ))
 
     def list_available_skills(self) -> list[str]:

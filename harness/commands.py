@@ -16,9 +16,9 @@ class CommandResult:
     exit_app: bool = False
     confirm_prompt: str | None = None       # if set, TUI asks this before proceeding
     confirm_action: "callable | None" = None  # called with no args when user answers y
-    toggle_tools: bool = False              # TUI toggles tool-pane visibility
-    toggle_think: bool = False              # TUI toggles thinking-output visibility
-    toggle_md: bool = False                 # TUI toggles markdown rendering
+    tool_output: bool | None = None         # TUI sets tool-pane visibility (True=show, False=hide)
+    think_output: bool | None = None        # TUI sets thinking-output visibility
+    md_render: bool | None = None           # TUI sets markdown rendering
     replay_session: bool = False            # TUI replays loaded session messages into chat buffer
     run_compact: bool = False               # TUI runs compact on worker thread
     compact_summarise: bool = True          # passed to compact_threaded()
@@ -103,14 +103,26 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness._emit_status()
         return CommandResult(handled=True, output=f"Working directory set to: {p}")
 
-    if cmd == "/toggle-tool-output":
-        return CommandResult(handled=True, toggle_tools=True)
+    if cmd == "/tool-output":
+        if arg.lower() in ("on", "true", "1", "yes"):
+            return CommandResult(handled=True, tool_output=True)
+        if arg.lower() in ("off", "false", "0", "no"):
+            return CommandResult(handled=True, tool_output=False)
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}" if arg else "ERROR: expected 'on' or 'off'")
 
-    if cmd == "/toggle-think-output":
-        return CommandResult(handled=True, toggle_think=True)
+    if cmd == "/think-output":
+        if arg.lower() in ("on", "true", "1", "yes"):
+            return CommandResult(handled=True, think_output=True)
+        if arg.lower() in ("off", "false", "0", "no"):
+            return CommandResult(handled=True, think_output=False)
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}" if arg else "ERROR: expected 'on' or 'off'")
 
-    if cmd == "/toggle-markdown":
-        return CommandResult(handled=True, toggle_md=True)
+    if cmd == "/markdown":
+        if arg.lower() in ("on", "true", "1", "yes"):
+            return CommandResult(handled=True, md_render=True)
+        if arg.lower() in ("off", "false", "0", "no"):
+            return CommandResult(handled=True, md_render=False)
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}" if arg else "ERROR: expected 'on' or 'off'")
 
     if cmd == "/compact":
         return CommandResult(handled=True, run_compact=True)
@@ -160,6 +172,20 @@ def handle(line: str, harness: Harness) -> CommandResult:
         if arg.lower() in ("off", "false", "0", "no"):
             harness.think = False
             return CommandResult(handled=True, output="Thinking mode: off")
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+
+    if cmd == "/tools":
+        if not arg:
+            state = "on" if harness.tools_enabled else "off"
+            return CommandResult(handled=True, output=f"Tool calls: {state}")
+        if arg.lower() in ("on", "true", "1", "yes"):
+            harness.tools_enabled = True
+            harness._emit_status()
+            return CommandResult(handled=True, output="Tool calls: on")
+        if arg.lower() in ("off", "false", "0", "no"):
+            harness.tools_enabled = False
+            harness._emit_status()
+            return CommandResult(handled=True, output="Tool calls: off")
         return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
 
     if cmd == "/cost":
@@ -292,9 +318,9 @@ Available commands:
   /clear              Clear conversation history
   /workdir            Show current working directory
   /workdir <path>     Set working directory for file operations
-  /toggle-tool-output   Toggle the tool calls pane on/off
-  /toggle-think-output  Toggle display of model thinking/reasoning output
-  /toggle-markdown      Toggle markdown rendering for assistant output  (Shift+M)
+  /tool-output on|off   Show or hide the tool calls pane
+  /think-output on|off  Show or hide model thinking/reasoning output  (Shift+T)
+  /markdown on|off      Enable or disable markdown rendering  (Shift+M)
   /compact            Compact context with LLM summary of dropped history
   /fast-compact       Compact context without LLM summarisation (instant)
   /context            Show context limit and current usage
