@@ -62,7 +62,7 @@ def _init_colors():
     curses.init_pair(_C_WARN,      curses.COLOR_YELLOW,  -1)
     curses.init_pair(_C_DANGER,    curses.COLOR_RED,     -1)
     curses.init_pair(_C_BORDER,    curses.COLOR_WHITE,   -1)
-    curses.init_pair(_C_BUSY,      curses.COLOR_BLACK,   curses.COLOR_YELLOW)
+    curses.init_pair(_C_BUSY,      curses.COLOR_YELLOW,  -1)
     curses.init_pair(_C_FOCUS,     curses.COLOR_GREEN,   -1)
     if curses.can_change_color() and curses.COLORS > 17:
         curses.init_color(_COLOR_ORANGE, 1000, 500,    0)
@@ -311,19 +311,25 @@ class TUI:
         bottom_color = _C_FOCUS if self._focus == "input" else _C_BORDER
         if self._busy and self._waiting_for_input:
             line = f" ? waiting for input  {self._status}"
-            line_color = _C_WARN
+            line_attr = curses.color_pair(_C_WARN)
         elif self._busy:
             spinner = _SPINNER[self._spinner_frame % len(_SPINNER)]
             line = f" {spinner} thinking  {self._status}"
-            line_color = _C_BUSY
+            line_attr = curses.color_pair(_C_BUSY)
         else:
             line = f" {self._status}"
-            line_color = self._ctx_color
+            line_attr = curses.color_pair(self._ctx_color)
         line = line[:cols - 1].ljust(cols - 1)
         rule = "─" * (cols - 1)
         try:
             win.addnstr(0, 0, rule, cols - 1, curses.color_pair(top_color))
-            win.addnstr(1, 0, line, cols - 1, curses.color_pair(line_color))
+        except curses.error:
+            pass
+        try:
+            win.addnstr(1, 0, line, cols - 1, line_attr)
+        except curses.error:
+            pass
+        try:
             win.addnstr(2, 0, rule, cols - 1, curses.color_pair(bottom_color))
         except curses.error:
             pass
