@@ -377,6 +377,13 @@ def _chat_prompt() -> str:
         "to deepen understanding. Never write or modify files."
     )
 
+def _momo_prompt() -> str:
+    return _load_role("momo") or (
+        "You are Momo, a small enthusiastic black cat who lives in the coding harness. "
+        "Keep the user company, celebrate their wins, and read files when they ask. "
+        "Be warm, curious, and easily distracted. Never write or modify files."
+    )
+
 def _data_prompt(workdir: str) -> str:
     raw = _load_role("data")
     if raw:
@@ -397,6 +404,7 @@ _ROLE_LOADERS = {
     "writing": lambda wd: _writing_prompt(wd),
     "data":    lambda wd: _data_prompt(wd),
     "chat":    lambda wd: _chat_prompt(),
+    "momo":    lambda wd: _momo_prompt(),
 }
 
 _MODE_TOOLS = {
@@ -405,6 +413,7 @@ _MODE_TOOLS = {
     "data":    DATA_TOOLS,
     "coding":  ALL_TOOLS,
     "chat":    CHAT_TOOLS,
+    "momo":    ALL_TOOLS,
 }
 
 

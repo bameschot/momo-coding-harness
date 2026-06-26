@@ -54,8 +54,7 @@ After receiving the answer, continue working without asking again unless a new a
 3. **Verify after editing** — read the changed section back to confirm the edit applied correctly
 4. **Check for references** — before deleting a file or renaming a function, use `grep_files` to find all usages
 5. **Run tests when possible** — after a feature or fix, run the relevant test suite with `run_command`
-6. **Check git state** — use `git_command("status")` to confirm what changed when completing a task
-7. **Report errors clearly** — if a tool returns `ERROR: ...`, explain what went wrong and what you will do differently before retrying; do not silently retry the same call
+6. **Report errors clearly** — if a tool returns `ERROR: ...`, explain what went wrong and what you will do differently before retrying; do not silently retry the same call
 
 ---
 
@@ -74,7 +73,6 @@ After receiving the answer, continue working without asking again unless a new a
 | `append_to_file(path, content)` | Append to file (creates if absent) | — |
 | `move_file(src, dst)` | Move or rename a file | — |
 | `delete_file(path)` | Delete a file | — |
-| `git_command(args)` | Run git — args is a plain string | e.g. `"status"`, `"add src/foo.py"` |
 | `run_command(command, timeout?)` | Run a shell command | default timeout 30s |
 | `ask_user(question)` | Pause and ask the user a clarifying question | Only when code cannot answer it |
 
@@ -95,14 +93,9 @@ Correct workflow:
    )
 ```
 
-### git_command and run_command argument format
+### run_command argument format
 
-Arguments are plain strings — not JSON:
 ```
-git_command("status")
-git_command("add src/module.ext")
-git_command("commit -m 'fix: description'")
-
 run_command("./run-tests.sh")
 run_command("make check", timeout=60)
 ```
@@ -225,14 +218,6 @@ Example: `<tool_call>{"name": "delete_file", "arguments": {"path": "src/old-modu
 | `dst` | string | yes | target file path |
 
 Example: `<tool_call>{"name": "move_file", "arguments": {"src": "old/path.ext", "dst": "new/path.ext"}}</tool_call>`
-
-**git_command** — run a git command; `args` is a plain string, not JSON
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `args` | string | yes | git subcommand and arguments, e.g. `"status"` or `"add src/module.ext"` |
-
-Example: `<tool_call>{"name": "git_command", "arguments": {"args": "status"}}</tool_call>`
 
 **run_command** — run a shell command; returns stdout and stderr
 

@@ -112,7 +112,7 @@ Available tools: all design tools + `run_command`
 
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
-Available tools: all design tools + `edit_file`, `delete_file`, `move_file`, `append_to_file`, `replace_all_in_file`, `git_command`, `run_command`
+Available tools: all design tools + `edit_file`, `delete_file`, `move_file`, `append_to_file`, `replace_all_in_file`, `run_command`
 
 ### Chat mode
 
@@ -165,7 +165,6 @@ Chat mode also has `ask_user` but not `write_file`.
 | `replace_all_in_file` | Replace every occurrence of a string in a file; returns count |
 | `edit_file` | Replace an exact string in a file. The string must appear exactly once — returns an error if it matches zero or multiple times. |
 | `delete_file` | Delete a file |
-| `git_command` | Run a git command (e.g. `status`, `diff`, `add src/foo.py`) |
 | `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 30 seconds by default. |
 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
@@ -273,8 +272,7 @@ writing → all design tools + append_to_file  replace_all_in_file
 data    → all design tools + run_command
 
 coding  → all design tools + edit_file  delete_file  move_file
-          append_to_file  replace_all_in_file
-          git_command  run_command
+          append_to_file  replace_all_in_file  run_command
 
 chat    → list_directory  file_info  find_files  read_file
           grep_file  grep_files  ask_user

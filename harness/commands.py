@@ -76,6 +76,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.set_mode("chat")
         return CommandResult(handled=True, output="Switched to chat mode")
 
+    if cmd == "/momo":
+        harness.set_mode("momo")
+        return CommandResult(handled=True, output="Switched to momo mode")
+
     if cmd == "/clear":
         system_msg = harness.messages[0]
         harness.messages = [system_msg]
@@ -261,9 +265,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=err)
         return CommandResult(handled=True, output="Copied to clipboard.")
 
-    if cmd == "/momo":
+    if cmd == "/companion":
         if not arg:
-            return CommandResult(handled=True, output="Usage: /momo on|off  (Shift+Q to toggle)")
+            return CommandResult(handled=True, output="Usage: /companion on|off  (Shift+Q to toggle)")
         if arg.lower() in ("on", "true", "1", "yes"):
             return CommandResult(handled=True, companion=True)
         if arg.lower() in ("off", "false", "0", "no"):
@@ -357,13 +361,14 @@ Available commands:
   /write              Switch to writing mode (document editing tools)
   /data               Switch to data analysis mode (run_command + read tools)
   /chat               Switch to chat mode (read files, ask questions)
+  /momo               Switch to momo companion mode (talk to the cat)
   /clear              Clear conversation history
   /workdir            Show current working directory
   /workdir <path>     Set working directory for file operations
   /tool-output on|off   Show or hide the tool calls pane
   /think-output on|off  Show or hide model thinking/reasoning output  (Shift+T)
   /markdown on|off      Enable or disable markdown rendering  (Shift+M)
-  /momo on|off          Show or hide the momo companion bar  (Shift+Q)
+  /companion on|off     Show or hide the momo companion bar  (Shift+Q)
   Shift+C               Interrupt a running LLM response
   /compact            Compact context with LLM summary of dropped history
   /fast-compact       Compact context without LLM summarisation (instant)

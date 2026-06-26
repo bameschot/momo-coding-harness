@@ -49,7 +49,7 @@ _COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
 _KEY_SHIFT_ENTER  = 601  # custom curses keycode bound to Shift+Enter escape sequences
 _KEY_CTRL_LEFT    = 602  # Ctrl+Left  — word jump left
 _KEY_CTRL_RIGHT   = 603  # Ctrl+Right — word jump right
-_MODE_CYCLE = ["design", "chat", "writing", "data", "coding"]
+_MODE_CYCLE = ["design", "chat", "writing", "data", "coding", "momo"]
 
 
 def _init_colors():
@@ -272,6 +272,31 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< hmm hmm...", "< checking...", "< pattern match!",
         "< got a clue!", "< narrowing...", "< almost there",
         "< verifying...", "< cross ref...", "< purrr...",
+    ],
+    ("momo",   False): [
+        "< mew~", "< purrr~", "< hi there!",
+        "< whatcha doing?", "< ooh!", "< shiny!",
+        "< sniff sniff", "< found a bug?", "< cuddle break?",
+        "< mew mew~", "< sunny spot!", "< outside?",
+        "< zoomies!", "< nap time?", "< treat?",
+        "< bird outside!", "< *chirps*", "< brrp!",
+        "< purrr purrr", "< headbutt!", "< mew!",
+        "< you okay?", "< proud of you!", "< good job!",
+        "< mew mew mew", "< *kneads*", "< snooze...",
+        "< i'm here!", "< tell me more!", "< oh no!",
+        "< mew~",
+    ],
+    ("momo",   True): [
+        "< reading...", "< sniff sniff", "< hmm...",
+        "< looking...", "< mew?", "< found it?",
+        "< scanning...", "< curious...", "< one sec...",
+        "< *stares*", "< parsing...", "< mew mew?",
+        "< digging in!", "< hold on...", "< oh interesting",
+        "< following...", "< tracing...", "< almost!",
+        "< mew...", "< inspecting!", "< got a clue!",
+        "< cross ref...", "< hmm hmm", "< checking...",
+        "< purrr...", "< nearly there", "< ah!",
+        "< verifying...", "< *sniffs file*", "< mew!",
     ],
 }
 _SPEECH_TEXTS_DEFAULT = ["< mew~", "< purrr", "< mew mew"]  # fallback for unknown modes

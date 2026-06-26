@@ -95,10 +95,6 @@ CODING_ONLY_TOOLS = [
         {"path": {"type": "string"}},
         ["path"]),
 
-    _fn("git_command", "Run a git command. Provide args as a string, e.g. 'status' or 'add src/foo.py'",
-        {"args": {"type": "string", "description": "git subcommand and arguments"}},
-        ["args"]),
-
     _fn("run_command",
         "Run an arbitrary shell command. Returns stdout and stderr. "
         "Use for running scripts, tests, build tools, etc.",
@@ -470,22 +466,6 @@ def _delete_file(path: str, *, workdir: Path) -> str:
     return "OK"
 
 
-def _git_command(args: str, *, workdir: Path) -> str:
-    try:
-        cmd = ["git"] + shlex.split(args)
-    except ValueError as e:
-        return f"ERROR: could not parse args: {e}"
-    try:
-        r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=30)
-        out = r.stdout + r.stderr
-        return out.strip() or "(no output)"
-    except FileNotFoundError:
-        return "ERROR: git not found"
-    except subprocess.TimeoutExpired:
-        return "ERROR: git command timed out"
-    except OSError as e:
-        return f"ERROR: {e}"
-
 
 def _run_command(command: str, timeout: int = 30, *, workdir: Path) -> str:
     try:
@@ -524,7 +504,6 @@ _EXECUTORS = {
     "edit_file":          _edit_file,
     "create_file":        _create_file,
     "delete_file":        _delete_file,
-    "git_command":        _git_command,
     "run_command":        _run_command,
 }
 
