@@ -88,7 +88,7 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
 
 ## Modes
 
-Press `Shift+Tab` to cycle through modes: **design → writing → data → coding → chat → design**.
+Press `Shift+Tab` to cycle through modes: **design → chat → writing → data → coding → design**.
 
 ### Design mode (default)
 

@@ -49,7 +49,7 @@ _COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
 _KEY_SHIFT_ENTER  = 601  # custom curses keycode bound to Shift+Enter escape sequences
 _KEY_CTRL_LEFT    = 602  # Ctrl+Left  — word jump left
 _KEY_CTRL_RIGHT   = 603  # Ctrl+Right — word jump right
-_MODE_CYCLE = ["design", "writing", "data", "coding"]
+_MODE_CYCLE = ["design", "chat", "writing", "data", "coding"]
 
 
 def _init_colors():
