@@ -107,6 +107,10 @@ _MOMO_SIT = [  # sitting — normal, blink
     ["\\    /\\ ", " )  ( ')", "(  /  ) ", " \\(__)| "],
     ["\\    /\\ ", " )  ( -)", "(  /  ) ", " \\(__)| "],
 ]
+_MOMO_SIT_L = [  # sitting facing left — normal, blink
+    [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", " |(__)/ "],
+    [" /\\   \\ ", "(- )  ( ", "(  \\  ) ", " |(__)/ "],
+]
 _MOMO_WR_BLINK = ["\\    /\\ ", " )  ( -)", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-right blink
 _MOMO_WL_BLINK = [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-left blink
 # key: (mode, is_thinking)  value: list of strings each ≤ 25 visible chars
@@ -116,6 +120,16 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< git commit!", "< tests pass?", "< grep is love",
         "< ship it!", "< refactor?", "< code review!",
         "< off by one!", "< vim or emacs?",
+        "< lgtm!", "< rubber duck?",
+        "< dry it up!", "< lint errors!",
+        "< push to main?", "< branch first!",
+        "< stash it!", "< rebase time!",
+        "< merge conflict?", "< squash it!",
+        "< todo fixme!", "< purrr~",
+        "< hot reload?", "< benchmarks!",
+        "< profiler!", "< coverage!",
+        "< make clean?", "< chmod +x!",
+        "< mew mew~",
     ],
     ("coding",  True): [
         "< mew?", "< compiling...", "< stack trace!",
@@ -123,6 +137,16 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< linker error!", "< undefined!",
         "< syntax error?", "< type mismatch",
         "< core dumped!", "< infinite loop?",
+        "< race condition?", "< deadlock...",
+        "< heap overflow!", "< bus error!",
+        "< stack overflow!", "< exception!",
+        "< unhandled err!", "< oom killed...",
+        "< traceback!", "< mew...",
+        "< assertion fail", "< divide by zero?",
+        "< abi mismatch!", "< memory leak...",
+        "< watchdog!", "< panic!",
+        "< signal caught!", "< debugger...",
+        "< step through?",
     ],
     ("design",  False): [
         "< mew~", "< nice api!", "< solid design!",
@@ -134,6 +158,11 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< idempotent!", "< immutable!",
         "< hexagonal?", "< monolith?",
         "< async!", "< solid!",
+        "< loose coupling", "< extension pts?",
+        "< separation?", "< dependency inj?",
+        "< pure functions?", "< state machine?",
+        "< event sourcing?", "< cqrs?",
+        "< mew mew~", "< purrr~",
     ],
     ("design",  True): [
         "< mew mew mew", "< hmm...", "< thinking hard",
@@ -143,6 +172,14 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< mew?", "< complexity...",
         "< layering...", "< contracts!",
         "< invariants...", "< mew mew",
+        "< abstractions?", "< modelling...",
+        "< boundaries?", "< purrr...",
+        "< cohesion?", "< simplify...",
+        "< risk analysis?", "< first principles",
+        "< tech debt...", "< scope creep?",
+        "< bottleneck?", "< scalability?",
+        "< feedback loop?", "< mew~",
+        "< purrr~",
     ],
     ("writing", False): [
         "< mew~", "< write more!", "< plot twist!",
@@ -150,12 +187,33 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< show don't tell", "< passive voice?",
         "< new paragraph!", "< mew mew",
         "< semicolon!", "< em dash!",
+        "< active voice!", "< strong verb!",
+        "< cut the fluff!", "< shorter?",
+        "< chapter break?", "< purrr~",
+        "< hook them!", "< reader first!",
+        "< read aloud?", "< oxford comma!",
+        "< dialogue tags?", "< pacing!",
+        "< tension!", "< show not tell!",
+        "< foreshadow?", "< metaphor!",
+        "< trim it down!", "< concise!",
+        "< mew mew~",
     ],
     ("writing", True): [
         "< mew...", "< searching...", "< spell check!",
         "< thesaurus!", "< mew mew",
         "< rephrasing...", "< synonyms...",
         "< proofreading!", "< flow check...",
+        "< word choice...", "< sentence flow?",
+        "< clarity...", "< restructure?",
+        "< transition?", "< voice check...",
+        "< tone shift?", "< mew~",
+        "< reading level?", "< pacing...",
+        "< paragraph?", "< awkward phrase?",
+        "< cliche alert!", "< simpler word?",
+        "< dangling mod?", "< tense check...",
+        "< purrr...", "< conciseness?",
+        "< cadence...", "< mew mew mew",
+        "< context?",
     ],
     ("data",    False): [
         "< mew~", "< nice data!", "< correlation!",
@@ -163,6 +221,16 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< outliers!", "< normalize!", "< p < 0.05!",
         "< histogram!", "< clean data?",
         "< pivot table!",
+        "< feature select", "< sample size?",
+        "< variance!", "< regression?",
+        "< purrr", "< cluster it!",
+        "< heatmap!", "< time series?",
+        "< log scale!", "< mew~",
+        "< model fit?", "< bias check!",
+        "< data split!", "< cross validate",
+        "< confusion mat?", "< roc curve!",
+        "< distribution?", "< mew mew",
+        "< purrr~",
     ],
     ("data",    True): [
         "< calculating", "< mew?", "< running...",
@@ -170,6 +238,16 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< aggregating...", "< joining...",
         "< query running!", "< indexing...",
         "< sampling...",
+        "< crunching...", "< converging?",
+        "< epochs left...", "< gradient...",
+        "< batch size?", "< loss dropping?",
+        "< fitting...", "< matrix math!",
+        "< overfit?", "< checkpoint!",
+        "< mew...", "< epoch 1/100...",
+        "< loss plateau?", "< purrr...",
+        "< hyper tuning!", "< val acc drop?",
+        "< early stop?", "< data shuffle!",
+        "< normalizing...", "< gpu warming...",
     ],
 }
 _SPEECH_TEXTS_DEFAULT = ["< mew~", "< purrr", "< mew mew"]  # fallback for unknown modes
@@ -835,9 +913,14 @@ class TUI:
             self._companion_x = max(0, min(self._companion_x + self._companion_dir, max_x))
 
             if self._companion_x == 0 or self._companion_x == max_x or random.random() < 0.02:
-                self._companion_state     = "sit"
-                self._companion_sit_ticks = random.randint(15, 40)
+                self._companion_state       = "sit"
+                self._companion_sit_ticks   = random.randint(50, 100)
                 self._companion_blink_ticks = 0
+                if random.random() < 0.75:
+                    key  = (self.harness.mode, self._busy and not self._waiting_for_input)
+                    pool = _SPEECH_TEXTS.get(key, _SPEECH_TEXTS_DEFAULT)
+                    self._companion_mew_text  = random.choice(pool)
+                    self._companion_mew_ticks = random.randint(18, 32)
 
             if self._companion_blink_ticks > 0:
                 self._companion_blink_ticks -= 1
@@ -847,7 +930,7 @@ class TUI:
             else:
                 frames = _MOMO_WR if self._companion_dir > 0 else _MOMO_WL
                 self._companion_current_frame = frames[self._companion_walk_step]
-                if random.random() < 0.015:
+                if random.random() < 0.03:
                     self._companion_blink_ticks = 2
 
         else:  # sit
@@ -873,18 +956,14 @@ class TUI:
             # Sit blink is probabilistic each tick, independent of blink_ticks.
             # This is intentionally simpler than the walk blink (which uses a
             # multi-tick counter to hold the blink frame open).
+            sit_frames = _MOMO_SIT_L if self._companion_dir < 0 else _MOMO_SIT
             if random.random() < 0.08:
-                self._companion_current_frame = _MOMO_SIT[1]   # blink
+                self._companion_current_frame = sit_frames[1]   # blink
             else:
-                self._companion_current_frame = _MOMO_SIT[0]   # normal
+                self._companion_current_frame = sit_frames[0]   # normal
 
             if self._companion_mew_ticks > 0:
                 self._companion_mew_ticks -= 1
-            elif random.random() < 0.008:
-                key  = (self.harness.mode, self._busy and not self._waiting_for_input)
-                pool = _SPEECH_TEXTS.get(key, _SPEECH_TEXTS_DEFAULT)
-                self._companion_mew_text  = random.choice(pool)
-                self._companion_mew_ticks = random.randint(10, 20)
 
     def _draw_companion(self):
         win = self._companion_win
@@ -913,13 +992,22 @@ class TUI:
             except curses.error:
                 pass
         if mew_visible:
-            mew_x   = x + _CAT_W + 1
             mew_txt = self._companion_mew_text
-            if mew_x + len(mew_txt) < cols - 1:
-                try:
-                    win.addnstr(1, mew_x, mew_txt, cols - mew_x - 1, attr)
-                except curses.error:
-                    pass
+            if self._companion_dir < 0:
+                display = (mew_txt[2:] + " >") if mew_txt.startswith("< ") else mew_txt
+                mew_x = x - len(display) - 1
+                if mew_x >= 0:
+                    try:
+                        win.addnstr(1, mew_x, display, len(display), attr)
+                    except curses.error:
+                        pass
+            else:
+                mew_x = x + _CAT_W + 1
+                if mew_x + len(mew_txt) < cols - 1:
+                    try:
+                        win.addnstr(1, mew_x, mew_txt, cols - mew_x - 1, attr)
+                    except curses.error:
+                        pass
 
         # Update cache so subsequent identical ticks are skipped.
         self._companion_drawn_x        = self._companion_x
