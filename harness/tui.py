@@ -100,13 +100,16 @@ _MOMO_WR = [   # walking right — two alternating leg frames
     ["\\    /\\ ", " )  ( ')", "(  ¯  ) ", " \\/\\/\\/ "],
 ]
 _MOMO_WL = [   # walking left — two alternating leg frames
-    [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", " /\\/\\/\\ "],
-    [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", " \\/\\/\\/ "],
+    [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " /\\/\\/\\ "],
+    [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " \\/\\/\\/ "],
 ]
 _MOMO_SIT = [  # sitting — normal, blink
     ["\\    /\\ ", " )  ( ')", "(  /  ) ", " \\(__)| "],
     ["\\    /\\ ", " )  ( -)", "(  /  ) ", " \\(__)| "],
 ]
+_MOMO_WR_BLINK = ["\\    /\\ ", " )  ( -)", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-right blink
+_MOMO_WL_BLINK = [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-left blink
+_MEW_TEXT = "< mew~"
 
 
 # ── extended key support ─────────────────────────────────────────────────────
@@ -277,6 +280,8 @@ class TUI:
         self._companion_sit_ticks:     int        = 0
         self._companion_walk_step:     int        = 0
         self._companion_current_frame: list[str]  = _MOMO_SIT[0]
+        self._companion_blink_ticks:   int        = 0
+        self._companion_mew_ticks:     int        = 0
         self._companion_ts:            float      = 0.0
 
         _init_colors()
@@ -711,8 +716,16 @@ class TUI:
                 self._companion_state     = "sit"
                 self._companion_sit_ticks = random.randint(15, 40)
 
-            frames = _MOMO_WR if self._companion_dir > 0 else _MOMO_WL
-            self._companion_current_frame = frames[self._companion_walk_step]
+            if self._companion_blink_ticks > 0:
+                self._companion_blink_ticks -= 1
+                self._companion_current_frame = (
+                    _MOMO_WR_BLINK if self._companion_dir > 0 else _MOMO_WL_BLINK
+                )
+            else:
+                frames = _MOMO_WR if self._companion_dir > 0 else _MOMO_WL
+                self._companion_current_frame = frames[self._companion_walk_step]
+                if random.random() < 0.015:
+                    self._companion_blink_ticks = 2
 
         else:  # sit
             self._companion_sit_ticks -= 1
@@ -724,11 +737,17 @@ class TUI:
                 else:
                     self._companion_dir = random.choice([-1, 1])
                 self._companion_state = "walk"
+                self._companion_mew_ticks = 0
 
             if random.random() < 0.08:
                 self._companion_current_frame = _MOMO_SIT[1]   # blink
             else:
                 self._companion_current_frame = _MOMO_SIT[0]   # normal
+
+            if self._companion_mew_ticks > 0:
+                self._companion_mew_ticks -= 1
+            elif random.random() < 0.008:
+                self._companion_mew_ticks = random.randint(10, 20)
 
     def _draw_companion(self):
         win = self._companion_win
@@ -748,6 +767,13 @@ class TUI:
                 win.addnstr(i + 1, x, line, cols - x - 1, attr)
             except curses.error:
                 pass
+        if self._companion_mew_ticks > 0:
+            mew_x = x + _CAT_W + 1
+            if mew_x + len(_MEW_TEXT) < cols - 1:
+                try:
+                    win.addnstr(2, mew_x, _MEW_TEXT, cols - mew_x - 1, attr)
+                except curses.error:
+                    pass
         win.noutrefresh()
 
     def _toggle_companion(self):
