@@ -94,9 +94,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 except OSError as e:
                     return f"ERROR: could not create directory: {e}"
                 harness.workdir = p
-                if harness.mode in ("coding", "data"):
-                    harness.set_mode(harness.mode)
-                harness._emit_status()
+                harness.set_mode(harness.mode)
                 return f"Created and set working directory: {p}"
             return CommandResult(
                 handled=True,
@@ -104,9 +102,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 confirm_action=_create,
             )
         harness.workdir = p
-        if harness.mode in ("coding", "data"):
-            harness.set_mode(harness.mode)  # refresh system prompt with new workdir
-        harness._emit_status()
+        harness.set_mode(harness.mode)  # always refresh system prompt with new workdir
         return CommandResult(handled=True, output=f"Working directory set to: {p}")
 
     if cmd == "/tool-output":

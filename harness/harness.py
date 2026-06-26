@@ -507,6 +507,8 @@ class Harness:
     def _build_system_prompt(self) -> str:
         loader = _ROLE_LOADERS.get(self.mode, _ROLE_LOADERS["coding"])
         base = loader(str(self.workdir))
+        if str(self.workdir) not in base:
+            base += f"\n\nWorking directory: {self.workdir}"
         parts = []
         for name in self.active_skills:
             p = _SKILLS_DIR / f"{name}.md"
