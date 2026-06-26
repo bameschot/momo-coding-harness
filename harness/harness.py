@@ -768,8 +768,8 @@ class Harness:
                                 retry_text = (
                                     "Your previous response was cut off. "
                                     "Do NOT output any reasoning or thinking. "
-                                    "Call write_file directly with the complete document, "
-                                    "or call ask_user if you need information."
+                                    "Call write_file with both 'path' (e.g. 'design.md') and 'content' (the complete document). "
+                                    "Or call ask_user if you need information."
                                     if self.mode == "design" else
                                     "Your previous response was cut off. "
                                     "Do NOT output any reasoning or thinking. "
@@ -783,8 +783,8 @@ class Harness:
                                 _suppress_think_next = True
                                 retry_text = (
                                     "You produced reasoning but no response or tool call. "
-                                    "Based on your analysis, call write_file now with the complete document, "
-                                    "or call ask_user if you need more information."
+                                    "Based on your analysis, call write_file now with both 'path' (e.g. 'design.md') and 'content' (the complete document). "
+                                    "Or call ask_user if you need more information."
                                     if self.mode == "design" else
                                     "You produced reasoning but no response or tool call. "
                                     "Based on your analysis, call a tool to continue or write your conclusion."
@@ -792,7 +792,7 @@ class Harness:
                             else:
                                 retry_text = (
                                     "Please respond. If you are ready to write the design, "
-                                    "call write_file now with the full document in the content parameter."
+                                    "call write_file now with both 'path' (e.g. 'design.md') and 'content' (the full document)."
                                     if self.mode == "design" else
                                     "Please respond with your current analysis or next step."
                                 )
@@ -825,7 +825,7 @@ class Harness:
                     self.messages.append({"role": "assistant", "content": content or None})
                     self.messages.append({"role": "user", "content":
                         "You said you would write the design but did not call write_file. "
-                        "Call write_file now with the complete document in the content parameter."
+                        "Call write_file now with both 'path' (e.g. 'design.md') and 'content' (the complete document)."
                     })
                     continue
                 self.messages.append({"role": "assistant", "content": content or None})
@@ -907,7 +907,7 @@ class Harness:
                 _nudged = True
                 nudge = (
                     "You have been calling tools for several turns without a text response. "
-                    "If you have gathered enough information to write the design, call write_file now with the complete spec. "
+                    "If you have gathered enough information to write the design, call write_file now with both 'path' (e.g. 'design.md') and 'content' (the complete spec). "
                     "If you need more information, ask the user with ask_user. "
                     "Otherwise write a text response summarising what you have found so far."
                     if self.mode == "design" else
