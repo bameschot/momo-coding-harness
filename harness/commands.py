@@ -19,6 +19,7 @@ class CommandResult:
     tool_output: bool | None = None         # TUI sets tool-pane visibility (True=show, False=hide)
     think_output: bool | None = None        # TUI sets thinking-output visibility
     md_render: bool | None = None           # TUI sets markdown rendering
+    companion: bool | None = None           # TUI shows/hides momo companion bar
     replay_session: bool = False            # TUI replays loaded session messages into chat buffer
     run_compact: bool = False               # TUI runs compact on worker thread
     compact_summarise: bool = True          # passed to compact_threaded()
@@ -259,6 +260,15 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=err)
         return CommandResult(handled=True, output="Copied to clipboard.")
 
+    if cmd == "/momo":
+        if not arg:
+            return CommandResult(handled=True, output="Usage: /momo on|off  (Shift+Q to toggle)")
+        if arg.lower() in ("on", "true", "1", "yes"):
+            return CommandResult(handled=True, companion=True)
+        if arg.lower() in ("off", "false", "0", "no"):
+            return CommandResult(handled=True, companion=False)
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}")
+
     return CommandResult(handled=False)
 
 
@@ -321,6 +331,8 @@ Available commands:
   /tool-output on|off   Show or hide the tool calls pane
   /think-output on|off  Show or hide model thinking/reasoning output  (Shift+T)
   /markdown on|off      Enable or disable markdown rendering  (Shift+M)
+  /momo on|off          Show or hide the momo companion bar  (Shift+Q)
+  Shift+C               Interrupt a running LLM response
   /compact            Compact context with LLM summary of dropped history
   /fast-compact       Compact context without LLM summarisation (instant)
   /context            Show context limit and current usage

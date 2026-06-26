@@ -4,6 +4,7 @@ import curses
 import json
 import os
 import queue
+import random
 import sys
 import threading
 import time
@@ -41,6 +42,7 @@ _C_MD_H3    = 16
 _C_MD_CODE  = 17
 _C_MD_QUOTE = 18
 _C_MD_BOLD  = 19
+_C_COMPANION = 20
 
 _COLOR_ORANGE     = 16   # custom color slot for orange  (requires COLORS > 16)
 _COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
@@ -62,7 +64,7 @@ def _init_colors():
     curses.init_pair(_C_WARN,      curses.COLOR_YELLOW,  -1)
     curses.init_pair(_C_DANGER,    curses.COLOR_RED,     -1)
     curses.init_pair(_C_BORDER,    curses.COLOR_WHITE,   -1)
-    curses.init_pair(_C_BUSY,      curses.COLOR_YELLOW,  -1)
+    curses.init_pair(_C_BUSY,      curses.COLOR_BLACK,   curses.COLOR_YELLOW)
     curses.init_pair(_C_FOCUS,     curses.COLOR_GREEN,   -1)
     if curses.can_change_color() and curses.COLORS > 17:
         curses.init_color(_COLOR_ORANGE, 1000, 500,    0)
@@ -79,12 +81,32 @@ def _init_colors():
     curses.init_pair(_C_MD_CODE,  curses.COLOR_WHITE,  -1)
     curses.init_pair(_C_MD_QUOTE, curses.COLOR_YELLOW, -1)
     curses.init_pair(_C_MD_BOLD,  curses.COLOR_WHITE,  -1)
+    curses.init_pair(_C_COMPANION, curses.COLOR_MAGENTA, -1)
 
 
 # ── spinner ───────────────────────────────────────────────────────────────────
 
 _SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _SPINNER_INTERVAL = 0.1  # seconds per frame
+
+# ── momo companion ────────────────────────────────────────────────────────────
+
+_CAT_W              = 8    # visible width of every frame line
+_COMPANION_H        = 5    # 1 top-rule row + 4 art rows
+_COMPANION_INTERVAL = 0.12  # seconds per animation tick
+
+_MOMO_WR = [   # walking right — two alternating leg frames
+    ["\\    /\\ ", " )  ( ')", "(  ¯  ) ", " /\\/\\/\\ "],
+    ["\\    /\\ ", " )  ( ')", "(  ¯  ) ", " \\/\\/\\/ "],
+]
+_MOMO_WL = [   # walking left — two alternating leg frames
+    [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", " /\\/\\/\\ "],
+    [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", " \\/\\/\\/ "],
+]
+_MOMO_SIT = [  # sitting — normal, blink
+    ["\\    /\\ ", " )  ( ')", "(  /  ) ", " \\(__)| "],
+    ["\\    /\\ ", " )  ( -)", "(  /  ) ", " \\(__)| "],
+]
 
 
 # ── extended key support ─────────────────────────────────────────────────────
@@ -210,16 +232,17 @@ class _LineBuffer:
 _INPUT_H  = 5  # fixed height of the multi-line input area
 _STATUS_H = 3  # top border + text + bottom border
 
-def _compute_layout(rows: int, cols: int) -> dict:
-    chat_h   = max(4, rows - _STATUS_H - _INPUT_H)
-    status_y = chat_h
-    input_y  = chat_h + _STATUS_H
+def _compute_layout(rows: int, cols: int, companion_h: int = 0) -> dict:
+    chat_h      = max(4, rows - _STATUS_H - _INPUT_H - companion_h)
+    companion_y = chat_h
+    status_y    = chat_h + companion_h
+    input_y     = status_y + _STATUS_H
     return {
-        "chat_y":   0,       "chat_h": chat_h,
-        "status_y": status_y,
-        "input_y":  input_y,
-        "input_h":  _INPUT_H,
-        "cols":     cols,
+        "chat_y":      0,       "chat_h":      chat_h,
+        "companion_y": companion_y, "companion_h": companion_h,
+        "status_y":    status_y,
+        "input_y":     input_y, "input_h":     _INPUT_H,
+        "cols":        cols,
     }
 
 
@@ -247,6 +270,14 @@ class TUI:
         self._spinner_ts    = 0.0
         self._pending_confirm: "callable | None" = None  # set while waiting for y/N
         self._waiting_for_input: bool = False             # set while model is blocked on ask_user
+        self._companion_visible:       bool       = True
+        self._companion_x:             int        = 4
+        self._companion_dir:           int        = 1
+        self._companion_state:         str        = "walk"
+        self._companion_sit_ticks:     int        = 0
+        self._companion_walk_step:     int        = 0
+        self._companion_current_frame: list[str]  = _MOMO_SIT[0]
+        self._companion_ts:            float      = 0.0
 
         _init_colors()
         curses.curs_set(1)
@@ -272,7 +303,7 @@ class TUI:
         self.stdscr.nodelay(True)  # non-blocking getch — keys processed immediately
 
         rows, cols = stdscr.getmaxyx()
-        self._layout = _compute_layout(rows, cols)
+        self._layout = _compute_layout(rows, cols, companion_h=_COMPANION_H)
         self._build_windows()
 
     def _build_windows(self):
@@ -286,10 +317,18 @@ class TUI:
         # noutrefresh'd window that has leaveok=False).
         self._chat_win.leaveok(True)
         self._status_win.leaveok(True)
+        if L["companion_h"] > 0:
+            self._companion_win = curses.newwin(L["companion_h"], cols, L["companion_y"], 0)
+            self._companion_win.leaveok(True)
+        else:
+            self._companion_win = None
 
     def _rebuild(self):
         rows, cols = self.stdscr.getmaxyx()
-        self._layout = _compute_layout(rows, cols)
+        self._layout = _compute_layout(
+            rows, cols,
+            companion_h=_COMPANION_H if self._companion_visible else 0,
+        )
         self._build_windows()
         self.stdscr.clear()
         self.stdscr.noutrefresh()
@@ -299,6 +338,7 @@ class TUI:
         L = self._layout
         chat_edge = _C_FOCUS if self._focus == "chat" else _C_BORDER
         self._chat_buf.render(self._chat_win, L["chat_h"], L["cols"], edge_color=chat_edge)
+        self._draw_companion()
         self._draw_status()
         self._draw_input()
         curses.doupdate()
@@ -659,6 +699,70 @@ class TUI:
         self._rebuild_chat_buf()
         self._redraw()
 
+    def _advance_companion(self):
+        cols  = self._layout["cols"]
+        max_x = max(0, cols - 2 - _CAT_W)
+
+        if self._companion_state == "walk":
+            self._companion_walk_step ^= 1
+            self._companion_x = max(0, min(self._companion_x + self._companion_dir, max_x))
+
+            if self._companion_x == 0 or self._companion_x == max_x or random.random() < 0.02:
+                self._companion_state     = "sit"
+                self._companion_sit_ticks = random.randint(15, 40)
+
+            frames = _MOMO_WR if self._companion_dir > 0 else _MOMO_WL
+            self._companion_current_frame = frames[self._companion_walk_step]
+
+        else:  # sit
+            self._companion_sit_ticks -= 1
+            if self._companion_sit_ticks <= 0:
+                if self._companion_x <= 2:
+                    self._companion_dir = 1
+                elif self._companion_x >= max_x - 2:
+                    self._companion_dir = -1
+                else:
+                    self._companion_dir = random.choice([-1, 1])
+                self._companion_state = "walk"
+
+            if random.random() < 0.08:
+                self._companion_current_frame = _MOMO_SIT[1]   # blink
+            else:
+                self._companion_current_frame = _MOMO_SIT[0]   # normal
+
+    def _draw_companion(self):
+        win = self._companion_win
+        if win is None:
+            return
+        cols  = self._layout["cols"]
+        attr  = curses.color_pair(_C_COMPANION)
+        battr = curses.color_pair(_C_BORDER)
+        win.erase()
+        try:
+            win.addnstr(0, 0, "─" * (cols - 1), cols - 1, battr)
+        except curses.error:
+            pass
+        x = 1 + self._companion_x
+        for i, line in enumerate(self._companion_current_frame):
+            try:
+                win.addnstr(i + 1, x, line, cols - x - 1, attr)
+            except curses.error:
+                pass
+        win.noutrefresh()
+
+    def _toggle_companion(self):
+        self._companion_visible = not self._companion_visible
+        rows, cols = self.stdscr.getmaxyx()
+        self._layout = _compute_layout(
+            rows, cols,
+            companion_h=_COMPANION_H if self._companion_visible else 0,
+        )
+        self._build_windows()
+        self.stdscr.clear()
+        self.stdscr.noutrefresh()
+        self._rebuild_chat_buf()
+        self._redraw()
+
     def _history_prev(self):
         if not self._history:
             return
@@ -762,6 +866,10 @@ class TUI:
                     self._rebuild_chat_buf()
                     self._redraw()
                     return
+                if result.companion is not None:
+                    if result.companion != self._companion_visible:
+                        self._toggle_companion()
+                    return
                 if result.replay_session:
                     self._replay_session()
                     return
@@ -831,12 +939,24 @@ class TUI:
             if ch == curses.ERR:
                 if changed:
                     self._redraw()
-                elif self._busy and not self._waiting_for_input:
-                    now = time.time()
-                    if now - self._spinner_ts >= _SPINNER_INTERVAL:
-                        self._spinner_frame += 1
-                        self._spinner_ts = now
-                        self._draw_status()
+                else:
+                    _any = False
+                    if self._busy and not self._waiting_for_input:
+                        now = time.time()
+                        if now - self._spinner_ts >= _SPINNER_INTERVAL:
+                            self._spinner_frame += 1
+                            self._spinner_ts = now
+                            self._draw_status()
+                            _any = True
+                    if self._companion_visible:
+                        now = time.time()
+                        if now - self._companion_ts >= _COMPANION_INTERVAL:
+                            self._companion_ts = now
+                            self._advance_companion()
+                            self._draw_companion()
+                            _any = True
+                    if _any:
+                        self._input_win.noutrefresh()
                         curses.doupdate()
                 time.sleep(0.02)  # idle — avoids CPU spin without adding key lag
                 continue
@@ -955,6 +1075,17 @@ class TUI:
             # Shift+M toggles markdown rendering (chat focus only)
             if ch == ord('M') and self._focus == "chat":
                 self._toggle_md()
+                continue
+
+            # Shift+Q toggles the momo companion bar (chat focus only)
+            if ch == ord('Q') and self._focus == "chat":
+                self._toggle_companion()
+                continue
+
+            # Shift+C interrupts the running LLM (chat focus only)
+            if ch == ord('C') and self._focus == "chat":
+                if self._busy and not self._waiting_for_input:
+                    self.harness.cancel()
                 continue
 
             # ESC (27) — manual check for Option+Enter (ESC + CR/LF).

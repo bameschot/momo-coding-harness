@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import queue
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -453,6 +454,7 @@ class Harness:
             {"role": "system", "content": self._build_system_prompt()}
         ]
         self._token_estimate = 0
+        self._cancel = threading.Event()
         self._sync_context_limit(emit=True)
 
     # ── public properties ─────────────────────────────────────────────────────
@@ -610,10 +612,15 @@ class Harness:
     def _estimate(self) -> int:
         return _estimate_tokens(self.messages)
 
+    def cancel(self):
+        """Signal the running send() loop to stop after the current LLM call."""
+        self._cancel.set()
+
     # ── send ──────────────────────────────────────────────────────────────────
 
     def send(self, text: str):
         """Called from the harness worker thread."""
+        self._cancel.clear()
         self.messages.append({"role": "user", "content": text})
 
         tools = [] if not self.tools_enabled else _MODE_TOOLS.get(self.mode, ALL_TOOLS)
@@ -628,6 +635,11 @@ class Harness:
         _nudged = False
         _write_nudged = False  # one write-intent recovery nudge per send()
         while True:
+            if self._cancel.is_set():
+                self.event_queue.put(ChatEvent("system", "Interrupted."))
+                self._autosave()
+                self.event_queue.put(DoneEvent())
+                return
             if iteration >= _MAX_ITERATIONS:
                 self.event_queue.put(ErrorEvent(f"Tool call loop exceeded {_MAX_ITERATIONS} iterations — stopping"))
                 self._autosave()
