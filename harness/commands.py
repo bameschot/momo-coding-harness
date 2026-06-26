@@ -71,6 +71,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.set_mode("data")
         return CommandResult(handled=True, output="Switched to data mode")
 
+    if cmd == "/chat":
+        harness.set_mode("chat")
+        return CommandResult(handled=True, output="Switched to chat mode")
+
     if cmd == "/clear":
         system_msg = harness.messages[0]
         harness.messages = [system_msg]
@@ -325,6 +329,7 @@ Available commands:
   /design             Switch to design mode (read-only tools)
   /write              Switch to writing mode (document editing tools)
   /data               Switch to data analysis mode (run_command + read tools)
+  /chat               Switch to chat mode (read files, ask questions)
   /clear              Clear conversation history
   /workdir            Show current working directory
   /workdir <path>     Set working directory for file operations

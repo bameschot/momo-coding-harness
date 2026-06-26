@@ -29,7 +29,7 @@ Options:
 | `--model` | `qwen3.5:9b` | Model name |
 | `--workspace` / `--workdir` | `.` (current directory) | Root for all file operations |
 | `--context` | auto-detected | Override context token limit (default: half the model's maximum) |
-| `--mode` | `design` | Starting mode (`design`, `writing`, `data`, or `coding`) |
+| `--mode` | `design` | Starting mode (`design`, `writing`, `data`, `coding`, or `chat`) |
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--no-think` | off | Disable model thinking/reasoning mode (on by default) |
 
@@ -88,7 +88,7 @@ python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b
 
 ## Modes
 
-Press `Shift+Tab` to cycle through modes: **design → writing → data → coding → design**.
+Press `Shift+Tab` to cycle through modes: **design → writing → data → coding → chat → design**.
 
 ### Design mode (default)
 
@@ -114,7 +114,13 @@ The assistant acts as an engineer. It uses the full tool suite to implement chan
 
 Available tools: all design tools + `edit_file`, `create_file`, `delete_file`, `move_file`, `append_to_file`, `replace_all_in_file`, `git_command`, `run_command`
 
-Switch modes with `/design`, `/write`, `/data`, `/code`, or `Shift+Tab`.
+### Chat mode
+
+The assistant acts as a conversation partner for exploring code and documents. Point it at a file or module and it will read it, explain what it found, and ask follow-up questions to deepen the discussion. It never writes or modifies files — it is a read-only dialogue mode designed for understanding rather than implementation.
+
+Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `grep_extract`, `ask_user`
+
+Switch modes with `/design`, `/write`, `/data`, `/code`, `/chat`, or `Shift+Tab`.
 
 ## Available Tools
 
@@ -130,12 +136,14 @@ Switch modes with `/design`, `/write`, `/data`, `/code`, or `Shift+Tab`.
 | `grep_files` | Recursive regex search across a directory — returns matching lines |
 | `grep_extract` | Extract matched text or a capture group from a file — returns just the matched values, not the full line. `group=0` (default) returns the full match; `group=1`, `2`, … returns a specific capture group. |
 
-### Shared (all modes)
+### Shared (design, writing, data, coding modes)
 
 | Tool | Description |
 |---|---|
 | `write_file` | Write content to a file |
 | `ask_user` | Pause mid-task and ask the user a focused clarifying question. The worker thread blocks until the answer is submitted; the status bar shows `? waiting for input`. |
+
+Chat mode also has `ask_user` but not `write_file`.
 
 ### Writing mode only
 
@@ -268,6 +276,9 @@ data    → all design tools + run_command
 coding  → all design tools + edit_file  create_file  delete_file
           move_file  append_to_file  replace_all_in_file
           git_command  run_command
+
+chat    → list_directory  file_info  find_files  read_file
+          grep_file  grep_files  grep_extract  ask_user
 ```
 
 ## Slash Commands
@@ -281,6 +292,7 @@ Type any command in the input bar:
 | `/design` | Switch to design mode |
 | `/write` | Switch to writing mode |
 | `/data` | Switch to data analysis mode |
+| `/chat` | Switch to chat mode (read files, ask questions — no file writes) |
 | `/model` | List available Ollama models |
 | `/model <name>` | Switch to a different model |
 | `/host` | Show current Ollama host URL |

@@ -11,7 +11,7 @@ from typing import Any
 from . import session as session_mod
 from .logger import Logger
 from .ollama_client import OllamaClient
-from .tools import DESIGN_TOOLS, WRITER_TOOLS, DATA_TOOLS, ALL_TOOLS, dispatch
+from .tools import DESIGN_TOOLS, WRITER_TOOLS, DATA_TOOLS, ALL_TOOLS, CHAT_TOOLS, dispatch
 
 _ROLES_DIR  = Path(__file__).parent.parent / "roles"
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -367,6 +367,13 @@ def _writing_prompt(workdir: str = "") -> str:
         "do not paste long content in chat."
     )
 
+def _chat_prompt() -> str:
+    return _load_role("chat") or (
+        "You are a knowledgeable assistant. Read code and documents when the user "
+        "points at them, then answer questions and actively ask follow-up questions "
+        "to deepen understanding. Never write or modify files."
+    )
+
 def _data_prompt(workdir: str) -> str:
     raw = _load_role("data")
     if raw:
@@ -386,6 +393,7 @@ _ROLE_LOADERS = {
     "coding":  lambda wd: _coding_prompt(wd),
     "writing": lambda wd: _writing_prompt(wd),
     "data":    lambda wd: _data_prompt(wd),
+    "chat":    lambda wd: _chat_prompt(),
 }
 
 _MODE_TOOLS = {
@@ -393,6 +401,7 @@ _MODE_TOOLS = {
     "writing": WRITER_TOOLS,
     "data":    DATA_TOOLS,
     "coding":  ALL_TOOLS,
+    "chat":    CHAT_TOOLS,
 }
 
 

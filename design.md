@@ -63,7 +63,7 @@ Tool results are appended as `{"role": "tool", ...}` messages. Thinking content 
 ### Iteration limits
 
 - Design mode: 40 iterations maximum.
-- All other modes: 100 iterations maximum.
+- All other modes (writing, data, coding, chat): 100 iterations maximum.
 
 On hitting the limit an `ErrorEvent` is emitted and the loop exits.
 
@@ -248,3 +248,15 @@ Sessions are auto-saved at the end of every `send()` call. On startup the most r
 ## Roles and Skills
 
 The system prompt is built from `roles/<mode>.md` plus any active skill files from `skills/`. Skills are appended in load order separated by `---`. Switching mode or loading/unloading a skill rebuilds `messages[0]` in place. Active skills are persisted with the session.
+
+### Modes
+
+| Mode | Role file | Tools | Purpose |
+|------|-----------|-------|---------|
+| `design` | `roles/designer.md` | read-only + `write_file` + `ask_user` | Interview-based design partner; explores codebase, writes specs |
+| `writing` | `roles/writer.md` | design tools + `append_to_file` + `replace_all_in_file` | Document editor; targeted edits, matches existing voice |
+| `data` | `roles/data.md` | design tools + `run_command` | Data analyst; inspects, processes, reports |
+| `coding` | `roles/coder.md` | all tools | Engineer; full read/write/exec/git access |
+| `chat` | `roles/chat.md` | read-only + `ask_user` | Conversational Q&A over code and documents; never writes files |
+
+`{workdir}` in role files is substituted with the actual working directory path at load time (currently only `coder.md` and `data.md` use this token).

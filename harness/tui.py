@@ -249,6 +249,30 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< early stop?", "< data shuffle!",
         "< normalizing...", "< gpu warming...",
     ],
+    ("chat",    False): [
+        "< tell me more!", "< interesting!", "< got it!",
+        "< ooh!", "< makes sense!", "< mew~",
+        "< say more!", "< purrr", "< keep going!",
+        "< I see!", "< right right!", "< nice!",
+        "< elaborate?", "< and then?", "< really?",
+        "< noted!", "< curious!", "< for sure!",
+        "< neat!", "< love it!", "< mhm!",
+        "< yep!", "< ah ha!", "< go on!",
+        "< understood!", "< mew mew~", "< clever!",
+        "< fascinating!", "< ok ok!", "< purrr~",
+    ],
+    ("chat",    True): [
+        "< reading...", "< let me check", "< searching...",
+        "< hmm...", "< found it!", "< scanning...",
+        "< parsing...", "< mew?", "< cross-checking",
+        "< grepping...", "< hold on...", "< one sec...",
+        "< digging in...", "< inspecting!", "< ah interesting",
+        "< found a ref", "< following up", "< tracing it...",
+        "< mew mew?", "< mapping it...", "< connecting dots",
+        "< hmm hmm...", "< checking...", "< pattern match!",
+        "< got a clue!", "< narrowing...", "< almost there",
+        "< verifying...", "< cross ref...", "< purrr...",
+    ],
 }
 _SPEECH_TEXTS_DEFAULT = ["< mew~", "< purrr", "< mew mew"]  # fallback for unknown modes
 

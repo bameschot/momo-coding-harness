@@ -159,6 +159,9 @@ DATA_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS + [
     _by_name["run_command"],
 ]
 
+_shared_by_name = {t["function"]["name"]: t for t in SHARED_TOOLS}
+CHAT_TOOLS = READ_ONLY_TOOLS + [_shared_by_name["ask_user"]]
+
 
 # ── path safety ───────────────────────────────────────────────────────────────
 
