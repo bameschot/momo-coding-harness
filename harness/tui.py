@@ -292,14 +292,14 @@ class _LineBuffer:
     def scroll_left(self, n: int = 8):
         self._hscroll = max(0, self._hscroll - n)
 
-    def scroll_right(self, n: int = 8):
+    def scroll_right(self, n: int = 8, display_w: int = 0):
         max_w = self._max_line_w
-        # HAZARD: upper bound is max_w - 1, not max_w - display_w, so this does
-        # not account for the window width.  The last few characters of the
-        # longest line may therefore be unreachable when that line is exactly
-        # display_w wide.  Also, display_w is not available here; a caller-supplied
-        # width parameter (like scroll_up/down use content_h) would fix both issues.
-        self._hscroll = min(max(0, max_w - 1), self._hscroll + n)
+        # Cap at max_w - display_w: scrolling further would show only blank space.
+        # Also prevents hscroll going positive when content fits (max_w <= display_w),
+        # which would shift content without triggering the scrollbar (has_hscroll uses
+        # strict >, so content exactly equal to display_w shows no bar).
+        max_hscroll = max(0, max_w - display_w) if display_w > 0 else max(0, max_w - 1)
+        self._hscroll = min(max_hscroll, self._hscroll + n)
 
     def render(self, win, height: int, width: int, edge_color: int = _C_BORDER):
         win.erase()
@@ -1322,7 +1322,7 @@ class TUI:
                 continue
             if ch == curses.KEY_RIGHT:
                 if self._focus == "chat":
-                    self._chat_buf.scroll_right()
+                    self._chat_buf.scroll_right(display_w=self._layout["cols"] - 2)
                     self._redraw()
                 elif self._cursor < len(self._input):
                     self._cursor += 1
