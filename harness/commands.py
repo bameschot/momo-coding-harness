@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import session as session_mod
 from .harness import Harness, ChatEvent
+from .tools import dispatch
 
 
 @dataclass
@@ -273,6 +274,36 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, companion=False)
         return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}")
 
+    if cmd == "/read":
+        if not arg:
+            return CommandResult(handled=True, output="Usage: /read <path> [start_line] [end_line]")
+        parts = arg.split()
+        path = parts[0]
+        try:
+            start = int(parts[1]) if len(parts) > 1 else 1
+            end   = int(parts[2]) if len(parts) > 2 else None
+        except ValueError:
+            return CommandResult(handled=True, output="ERROR: start_line and end_line must be integers")
+        result = dispatch("read_file", {"path": path, "start_line": start, "end_line": end}, harness.workdir)
+        return CommandResult(handled=True, output=result)
+
+    if cmd == "/ls":
+        result = dispatch("list_directory", {"path": arg or "."}, harness.workdir)
+        return CommandResult(handled=True, output=result)
+
+    if cmd == "/grep":
+        if not arg:
+            return CommandResult(handled=True, output="Usage: /grep <pattern> [path_or_dir]")
+        parts = arg.split(None, 1)
+        pattern = parts[0]
+        target  = parts[1] if len(parts) > 1 else "."
+        p = (harness.workdir / target).resolve()
+        if p.is_file():
+            result = dispatch("grep_file", {"pattern": pattern, "path": target}, harness.workdir)
+        else:
+            result = dispatch("grep_files", {"pattern": pattern, "directory": target}, harness.workdir)
+        return CommandResult(handled=True, output=result)
+
     return CommandResult(handled=False)
 
 
@@ -358,4 +389,9 @@ Available commands:
   /session <name>     Load a saved session by name or prefix
   /help               Show this help
   /exit | /quit       Save session and exit
+
+File inspection (no model round-trip):
+  /ls [path]                       List directory contents
+  /read <path> [start] [end]       Read a file (optional line range)
+  /grep <pattern> [path_or_dir]    Regex search in a file or directory
 """.strip()

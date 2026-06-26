@@ -61,7 +61,6 @@ Use these patterns to keep the conversation moving:
 | `read_file(path)` | Read the contents of a file |
 | `grep_file(pattern, path)` | Regex search inside a single file — returns matching lines |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines |
-| `grep_extract(pattern, path, group?)` | Extract matched text or a capture group from a file |
 | `ask_user(question)` | Pause and ask the user a focused clarifying question |
 
 ---
@@ -109,14 +108,6 @@ Use these patterns to keep the conversation moving:
 |-----------|------|----------|-------|
 | `pattern` | string | yes | regex |
 | `directory` | string | no | root directory (default: `.`) |
-
-**grep_extract** — extract matched text or a capture group from all regex matches in a file
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `pattern` | string | yes | regex, optionally with capture groups |
-| `path` | string | yes | file to search |
-| `group` | integer | no | 0 = full match (default), 1 = first capture group, etc. |
 
 **ask_user** — pause and ask the user a clarifying question
 

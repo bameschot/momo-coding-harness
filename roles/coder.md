@@ -69,11 +69,9 @@ After receiving the answer, continue working without asking again unless a new a
 | `read_file(path, start_line?, end_line?)` | Read file or a line range | — |
 | `grep_file(pattern, path)` | Regex search in one file — returns matching lines | — |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines | — |
-| `grep_extract(pattern, path, group?)` | Extract matched values from a file — returns just the matched text or a capture group, not the full line | group=0 is full match |
 | `edit_file(path, old_string, new_string)` | Replace one exact occurrence | `old_string` must match exactly once |
 | `replace_all_in_file(path, old_string, new_string)` | Replace every occurrence | Use for renames across a file |
 | `append_to_file(path, content)` | Append to file (creates if absent) | — |
-| `create_file(path, content)` | Create or overwrite a file | — |
 | `move_file(src, dst)` | Move or rename a file | — |
 | `delete_file(path)` | Delete a file | — |
 | `git_command(args)` | Run git — args is a plain string | e.g. `"status"`, `"add src/foo.py"` |
@@ -173,16 +171,6 @@ Example: `<tool_call>{"name": "grep_file", "arguments": {"pattern": "functionNam
 
 Example: `<tool_call>{"name": "grep_files", "arguments": {"pattern": "functionName"}}</tool_call>`
 
-**grep_extract** — extract matched text or a capture group from all regex matches in a file
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `pattern` | string | yes | regex, optionally with capture groups |
-| `path` | string | yes | file to search |
-| `group` | integer | no | 0 = full match (default), 1 = first capture group, etc. |
-
-Example: `<tool_call>{"name": "grep_extract", "arguments": {"pattern": "version = \"(\\S+)\"", "path": "config.ext", "group": 1}}</tool_call>`
-
 **write_file** — write content to a file, creating or overwriting it
 
 | Parameter | Type | Required | Notes |
@@ -220,15 +208,6 @@ Example: `<tool_call>{"name": "replace_all_in_file", "arguments": {"path": "src/
 | `content` | string | yes | text to append |
 
 Example: `<tool_call>{"name": "append_to_file", "arguments": {"path": "src/module.ext", "content": "\nnew content"}}</tool_call>`
-
-**create_file** — create or overwrite a file with the given content
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `path` | string | yes | file path to create |
-| `content` | string | yes | full file content |
-
-Example: `<tool_call>{"name": "create_file", "arguments": {"path": "src/new-module.ext", "content": "..."}}</tool_call>`
 
 **delete_file** — delete a file
 

@@ -48,24 +48,15 @@ READ_ONLY_TOOLS = [
          "end_line": {"type": "integer", "description": "1-based end line inclusive (default: EOF)"}},
         ["path"]),
 
-    _fn("grep_file", "Search for a regex pattern in a single file, returns matching lines",
+    _fn("grep_file", "Single-file regex search. Search for a regex pattern in one file, returns matching lines with line numbers.",
         {"pattern": {"type": "string"}, "path": {"type": "string"}},
         ["pattern", "path"]),
 
-    _fn("grep_files", "Recursively search for a regex pattern across all files in a directory",
+    _fn("grep_files", "Multi-file recursive search. Search for a regex pattern across all files in a directory, returns file:line:content hits.",
         {"pattern": {"type": "string"},
          "directory": {"type": "string", "description": "Directory to search (default: .)"}},
         ["pattern"]),
 
-    _fn("grep_extract",
-        "Extract the matched text or a specific capture group from all regex matches in a file. "
-        "Returns one extracted value per match with its line number. "
-        "Use group=0 (default) for the full match; group=1, 2, … for a specific capture group. "
-        "Example: pattern r'version = \"(\\S+)\"' with group=1 returns just the version strings.",
-        {"pattern": {"type": "string", "description": "Regex pattern, optionally with capture groups"},
-         "path":    {"type": "string"},
-         "group":   {"type": "integer", "description": "Capture group to return: 0 = full match (default), 1 = first group, etc."}},
-        ["pattern", "path"]),
 ]
 
 CODING_ONLY_TOOLS = [
@@ -99,10 +90,6 @@ CODING_ONLY_TOOLS = [
          "old_string": {"type": "string", "description": "Exact text to find (must match exactly once)"},
          "new_string": {"type": "string", "description": "Replacement text"}},
         ["path", "old_string", "new_string"]),
-
-    _fn("create_file", "Create or overwrite a file with given content",
-        {"path": {"type": "string"}, "content": {"type": "string"}},
-        ["path", "content"]),
 
     _fn("delete_file", "Delete a file",
         {"path": {"type": "string"}},
@@ -178,6 +165,10 @@ def _safe_path(raw: str, workdir: Path) -> Path | str:
 
 _SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".tox", "dist", "build", ".mypy_cache", ".pytest_cache"}
 
+_MAX_FIND_RESULTS  = 100
+_MAX_GREP_RESULTS  = 200
+_READ_FOOTER_LINES = 200  # show footer when file exceeds this length and no range given
+
 def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
     root = _safe_path(directory, workdir)
     if isinstance(root, str):
@@ -203,7 +194,13 @@ def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
             matches.append(str(p.relative_to(workdir)))
         except ValueError:
             matches.append(str(p))
-    return "\n".join(sorted(matches)) if matches else "(no matches)"
+    if not matches:
+        return "(no matches)"
+    total = len(matches)
+    matches = sorted(matches)
+    if total > _MAX_FIND_RESULTS:
+        return "\n".join(matches[:_MAX_FIND_RESULTS]) + f"\n... (first {_MAX_FIND_RESULTS} of {total} files — use a more specific pattern or directory)"
+    return "\n".join(matches)
 
 
 def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, workdir: Path) -> str:
@@ -216,11 +213,16 @@ def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, w
         return f"ERROR: file not found: {path}"
     except OSError as e:
         return f"ERROR: {e}"
+    n = len(lines)
     s = max(0, start_line - 1)
-    e = end_line if end_line is not None else len(lines)
+    e = end_line if end_line is not None else n
     chunk = lines[s:e]
     numbered = "".join(f"{s + i + 1:4}: {l}" for i, l in enumerate(chunk))
-    return numbered or "(empty)"
+    if not numbered:
+        return "(empty)"
+    if end_line is None and n > _READ_FOOTER_LINES:
+        numbered += f"\n[{n} lines total — use start_line/end_line to read specific sections]"
+    return numbered
 
 
 def _grep_file(pattern: str, path: str, *, workdir: Path) -> str:
@@ -294,7 +296,12 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
                     except ValueError:
                         rel = fpath
                     results.append(f"{rel}:{i}: {line}")
-    return "\n".join(results) if results else "(no matches)"
+    if not results:
+        return "(no matches)"
+    total = len(results)
+    if total > _MAX_GREP_RESULTS:
+        return "\n".join(results[:_MAX_GREP_RESULTS]) + f"\n... (first {_MAX_GREP_RESULTS} of {total} matches — narrow the pattern or specify a directory)"
+    return "\n".join(results)
 
 
 def _list_directory(path: str = ".", show_hidden: bool = False, *, workdir: Path) -> str:

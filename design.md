@@ -73,7 +73,7 @@ When the model makes 10 or more consecutive tool-only turns (assistant + tool re
 
 ### Write-intent recovery
 
-If the assistant response contains phrases like "let me write", "i will write", "write the complete", etc., but no `write_file` / `create_file` tool call was made, a targeted recovery nudge is injected — "You said you would write X — please call write_file now." One recovery nudge per `send()`.
+If the assistant response contains phrases like "let me write", "i will write", "write the complete", etc., but no `write_file` tool call was made, a targeted recovery nudge is injected — "You said you would write X — please call write_file now." One recovery nudge per `send()`.
 
 ### Empty response handling
 
@@ -96,7 +96,7 @@ If a text tool call is recovered it is executed normally; if both passes fail th
 
 ### Tool content sanitization
 
-For `write_file`, `create_file`, and `append_to_file` tool results stored in the message history, the `content` field of the *assistant* message (which contains the file content that was written) is replaced with a short placeholder `[written to <path>]`. This prevents large file content from accumulating in the context and avoids Qwen3 template corruption on subsequent turns.
+For `write_file` and `append_to_file` tool results stored in the message history, the `content` field of the *assistant* message (which contains the file content that was written) is replaced with a short placeholder `[written to <path>]`. This prevents large file content from accumulating in the context and avoids Qwen3 template corruption on subsequent turns.
 
 ### `ask_user` blocking
 

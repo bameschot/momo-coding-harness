@@ -112,13 +112,13 @@ Available tools: all design tools + `run_command`
 
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
-Available tools: all design tools + `edit_file`, `create_file`, `delete_file`, `move_file`, `append_to_file`, `replace_all_in_file`, `git_command`, `run_command`
+Available tools: all design tools + `edit_file`, `delete_file`, `move_file`, `append_to_file`, `replace_all_in_file`, `git_command`, `run_command`
 
 ### Chat mode
 
 The assistant acts as a conversation partner for exploring code and documents. Point it at a file or module and it will read it, explain what it found, and ask follow-up questions to deepen the discussion. It never writes or modifies files — it is a read-only dialogue mode designed for understanding rather than implementation.
 
-Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `grep_extract`, `ask_user`
+Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `ask_user`
 
 Switch modes with `/design`, `/write`, `/data`, `/code`, `/chat`, or `Shift+Tab`.
 
@@ -134,8 +134,6 @@ Switch modes with `/design`, `/write`, `/data`, `/code`, `/chat`, or `Shift+Tab`
 | `read_file` | Read a file, optionally a specific line range |
 | `grep_file` | Regex search in a single file — returns matching lines |
 | `grep_files` | Recursive regex search across a directory — returns matching lines |
-| `grep_extract` | Extract matched text or a capture group from a file — returns just the matched values, not the full line. `group=0` (default) returns the full match; `group=1`, `2`, … returns a specific capture group. |
-
 ### Shared (design, writing, data, coding modes)
 
 | Tool | Description |
@@ -166,12 +164,13 @@ Chat mode also has `ask_user` but not `write_file`.
 | `append_to_file` | Append text to a file (creates if missing) |
 | `replace_all_in_file` | Replace every occurrence of a string in a file; returns count |
 | `edit_file` | Replace an exact string in a file. The string must appear exactly once — returns an error if it matches zero or multiple times. |
-| `create_file` | Create or overwrite a file |
 | `delete_file` | Delete a file |
 | `git_command` | Run a git command (e.g. `status`, `diff`, `add src/foo.py`) |
 | `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 30 seconds by default. |
 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
+
+`grep_files` returns at most 200 matches; `find_files` returns at most 100 files. Results over the cap include a trailer explaining how many were omitted.
 
 ## Skills
 
@@ -267,18 +266,18 @@ The set of tools included in the call depends on the current mode:
 
 ```
 design  → list_directory  file_info  find_files  read_file
-          grep_file  grep_files  grep_extract  write_file  ask_user
+          grep_file  grep_files  write_file  ask_user
 
 writing → all design tools + append_to_file  replace_all_in_file
 
 data    → all design tools + run_command
 
-coding  → all design tools + edit_file  create_file  delete_file
-          move_file  append_to_file  replace_all_in_file
+coding  → all design tools + edit_file  delete_file  move_file
+          append_to_file  replace_all_in_file
           git_command  run_command
 
 chat    → list_directory  file_info  find_files  read_file
-          grep_file  grep_files  grep_extract  ask_user
+          grep_file  grep_files  ask_user
 ```
 
 ## Slash Commands
@@ -323,6 +322,9 @@ Type any command in the input bar:
 | `/export <filename>` | Export to a specific filename |
 | `/copy` | Copy the last assistant message to the clipboard (tries `pbcopy`, then `xclip`, then `xsel`) |
 | `/copy all` | Copy the full conversation to the clipboard |
+| `/ls [path]` | List directory contents directly (no model round-trip) |
+| `/read <path> [start] [end]` | Read a file directly, with optional line range |
+| `/grep <pattern> [path_or_dir]` | Regex search in a file or across a directory directly |
 | `/exit` or `/quit` | Save session and exit |
 
 ## Context Management
@@ -352,7 +354,7 @@ By default tool results are passed to the model without truncation. Set a cap to
 /tool-result 0        # disable cap (unlimited)
 ```
 
-Truncated results display a notice: `... (truncated, N chars total)` so the model knows more content exists and can request a narrower read (e.g. with `start_line`/`end_line` on `read_file`).
+Truncated results are cut at the last line boundary before the cap and display a notice: `... (truncated after N chars of M — use read_file with start_line/end_line for specific sections)` so the model knows more content exists and gets an actionable hint for how to retrieve the rest.
 
 ## Sessions
 

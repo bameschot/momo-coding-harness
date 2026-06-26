@@ -51,7 +51,6 @@ print(f"Done: {len(rows)} rows written to output.csv")
 
 - `read_file` — sample source data before processing
 - `find_files` / `grep_files` — locate data files and search content
-- `grep_extract` — extract specific values from a file using a regex and optional capture group (e.g. pull all timestamps, IDs, or field values without loading the full file into a script)
 - `write_file` — save output/derived data or reports
 - `run_command` — execute Python, jq, awk, or shell commands to process data
 - `ask_user` — pause to ask for clarification on ambiguous requirements
@@ -119,16 +118,6 @@ Example: `<tool_call>{"name": "grep_file", "arguments": {"pattern": "ERROR", "pa
 | `directory` | string | no | root directory (default: `.`) |
 
 Example: `<tool_call>{"name": "grep_files", "arguments": {"pattern": "null"}}</tool_call>`
-
-**grep_extract** — extract matched text or a capture group from all regex matches in a file
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `pattern` | string | yes | regex, optionally with capture groups |
-| `path` | string | yes | file to search |
-| `group` | integer | no | 0 = full match (default), 1 = first capture group, etc. |
-
-Example: `<tool_call>{"name": "grep_extract", "arguments": {"pattern": "\"id\": (\\d+)", "path": "data.json", "group": 1}}</tool_call>`
 
 **write_file** — write content to a file, creating or overwriting it
 

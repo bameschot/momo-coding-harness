@@ -259,6 +259,9 @@ _WRITE_INTENT = (
     "writing the design", "writing the spec", "writing it now",
     "write the complete", "write the design", "write the specification",
     "write the spec", "write it now", "now write", "will now write",
+    "let me create", "i'll draft", "i'll compose", "i'm going to create",
+    "going to write", "going to draft", "composing the", "drafting the",
+    "creating the design", "creating the spec", "i'm writing", "i'm creating",
 )
 
 def _has_write_intent(text: str) -> bool:
@@ -880,7 +883,11 @@ class Harness:
                 else:
                     result = dispatch(name, args, self.workdir)
                     if self.max_tool_result > 0 and len(result) > self.max_tool_result:
-                        result = result[:self.max_tool_result] + f"\n... (truncated, {len(result)} chars total)"
+                        total = len(result)
+                        cutoff = result.rfind("\n", 0, self.max_tool_result)
+                        if cutoff < self.max_tool_result // 2:
+                            cutoff = self.max_tool_result
+                        result = result[:cutoff] + f"\n... (truncated after {cutoff} chars of {total} — use read_file with start_line/end_line for specific sections)"
 
                 self.event_queue.put(ToolResultEvent(name, result))
                 self.logger.log_tool_result(self.mode, self.client.model, name, len(result))
