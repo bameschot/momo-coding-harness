@@ -96,12 +96,12 @@ _COMPANION_H        = 4    # 4 art rows
 _COMPANION_INTERVAL = 0.12  # seconds per animation tick
 
 _MOMO_WR = [   # walking right — two alternating leg frames
-    ["\\    /\\ ", " )  ( ')", "(  ¯  ) ", " /\\/\\/\\ "],
-    ["\\    /\\ ", " )  ( ')", "(  ¯  ) ", " \\/\\/\\/ "],
+    ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " /\\/\\/\\ "],
+    ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " \\/\\/\\/ "],
 ]
 _MOMO_WL = [   # walking left — two alternating leg frames
-    [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " /\\/\\/\\ "],
-    [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " \\/\\/\\/ "],
+    [" /\\   \\ ", "(' )  ( ", "(  ¯¯ ) ", " /\\/\\/\\ "],
+    [" /\\   \\ ", "(' )  ( ", "(  ¯¯ ) ", " \\/\\/\\/ "],
 ]
 _MOMO_SIT = [  # sitting — normal, blink
     ["\\    /\\ ", " )  ( ')", "(  /  ) ", " \\(__)| "],
