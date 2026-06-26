@@ -305,16 +305,11 @@ class _LineBuffer:
         win.erase()
         total = len(self._lines)
         display_w = width - 2   # rightmost column reserved for vertical scrollbar
+        content_h = height - 1  # bottom row always reserved for horizontal scrollbar
 
-        # determine if horizontal scrollbar is needed; if so, reserve one row
-        max_w = self._max_line_w
+        # thumb is only shown when content is wider than the display area
+        max_w    = self._max_line_w
         has_hscroll = max_w > display_w
-        # Shrinking content_h when hscroll is shown can itself flip has_hscroll
-        # from False to True (if the line that was barely fitting now needs the
-        # scrollbar row).  A single pass does not iterate to a fixpoint, so in
-        # edge cases the horizontal scrollbar can appear/disappear unexpectedly
-        # depending on whether the threshold is computed pre- or post-shrink.
-        content_h = height - 1 if has_hscroll else height
 
         # text region
         if total:
@@ -352,25 +347,21 @@ class _LineBuffer:
                 except curses.error:
                     pass
 
-        # horizontal scrollbar (bottom row, only when content is wider than window)
+        # horizontal scrollbar — always drawn; thumb only when content overflows
+        bar_w = max(2, width - 4)
         if has_hscroll:
             scrollable = max(1, max_w - display_w)
-            ratio_h = self._hscroll / scrollable
-            # HAZARD: bar_w = max(2, width - 4) does not account for the two
-            # arrow-glyph columns (◀ and ▶).  The rendered string is
-            # "◀" + hbar + "▶" = 1 + bar_w + 1 = width - 2 wide, which is fine
-            # for width >= 6.  Below that (width <= 5) bar_w collapses to 2 but
-            # the full string is still 4 characters; addnstr clips it at width-1
-            # so ▶ is silently lost and the bar looks truncated.
-            bar_w = max(2, width - 4)
-            thumb_w = max(1, round(display_w / max_w * bar_w))
-            thumb_pos = max(0, min(round(ratio_h * (bar_w - thumb_w)), bar_w - thumb_w))
+            ratio_h    = self._hscroll / scrollable
+            thumb_w    = max(1, round(display_w / max_w * bar_w))
+            thumb_pos  = max(0, min(round(ratio_h * (bar_w - thumb_w)), bar_w - thumb_w))
             hbar = "─" * thumb_pos + "█" * thumb_w + "─" * (bar_w - thumb_pos - thumb_w)
-            try:
-                win.addnstr(height - 1, 0, "◀" + hbar + "▶", width - 1,
-                            curses.color_pair(edge_color))
-            except curses.error:
-                pass
+        else:
+            hbar = "─" * bar_w  # track only, no thumb
+        try:
+            win.addnstr(height - 1, 0, "◀" + hbar + "▶", width - 1,
+                        curses.color_pair(edge_color))
+        except curses.error:
+            pass
 
         # noutrefresh (not refresh) so the caller can batch multiple window
         # updates before the single curses.doupdate() that pushes them all to
