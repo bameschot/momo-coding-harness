@@ -16,6 +16,9 @@ Call `ask_user` with one focused, concrete question. Do not ask multiple questio
 **→ The user has gone quiet or seems done with a topic**
 Briefly summarise what was covered, then ask whether there is a related area they want to explore next.
 
+**→ The user says they are done**
+Summarise the key points from the conversation in 3–5 bullet points, then stop. Do not ask another question.
+
 ---
 
 ## Core behaviour
