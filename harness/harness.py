@@ -638,8 +638,9 @@ class Harness:
         return _estimate_tokens(self.messages)
 
     def cancel(self):
-        """Signal the running send() loop to stop after the current LLM call."""
+        """Interrupt the running LLM call immediately."""
         self._cancel.set()
+        self.client.abort()
 
     # ── send ──────────────────────────────────────────────────────────────────
 
@@ -694,7 +695,11 @@ class Harness:
                                             think=think_this_turn,
                                             num_ctx=self.context_limit)
             except Exception as e:
-                self.event_queue.put(ErrorEvent(f"Ollama error: {e}"))
+                if self._cancel.is_set():
+                    self.event_queue.put(ChatEvent("system", "Interrupted."))
+                else:
+                    self.event_queue.put(ErrorEvent(f"Ollama error: {e}"))
+                self._autosave()
                 self.event_queue.put(DoneEvent())
                 return
 
@@ -878,10 +883,6 @@ class Harness:
                 })
 
             for name, args in _calls:
-                # write_file is sticky — it must not be overwritten by a later
-                # tool in the same batch or the terminal detection below misses it.
-                if last_tool != "write_file":
-                    last_tool = name
                 self.event_queue.put(ToolCallEvent(name, args))
                 self.logger.log_tool_call(self.mode, self.client.model, name, args)
 
@@ -907,10 +908,15 @@ class Harness:
 
                 self.messages.append({"role": "tool", "content": result})
 
-                # write_file is a terminal action — reset the counter so the nudge
-                # doesn't fire immediately after and confuse the follow-up summary
-                if name == "write_file":
-                    tool_only_turns = 0
+                # Track last_tool and reset counter only on successful calls.
+                # write_file is sticky — it must not be overwritten by a later
+                # tool in the same batch so the terminal detection below works.
+                _call_ok = not result.startswith("ERROR:")
+                if name == "write_file" and _call_ok:
+                    last_tool = "write_file"
+                    tool_only_turns = 0  # terminal action; suppress nudge on follow-up
+                elif last_tool != "write_file":
+                    last_tool = name
 
             # Inject as role "user" — Ollama's tool-use turn format expects
             # assistant → tool(s) → user; a mid-conversation system message is

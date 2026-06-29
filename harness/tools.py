@@ -489,6 +489,16 @@ def _run_command(command: str, timeout: int = 30, *, workdir: Path) -> str:
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
+# Required-argument map built from the tool schemas — used to generate clear
+# error messages before Python's TypeError exposes internal function names.
+_REQUIRED_ARGS: dict[str, list[str]] = {}
+for _tl in (READ_ONLY_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS, WRITER_TOOLS, DATA_TOOLS):
+    for _t in _tl:
+        _tname = _t["function"]["name"]
+        _req   = _t["function"]["parameters"].get("required", [])
+        if _req and _tname not in _REQUIRED_ARGS:
+            _REQUIRED_ARGS[_tname] = _req
+
 _EXECUTORS = {
     "list_directory":     _list_directory,
     "file_info":          _file_info,
@@ -512,6 +522,13 @@ def dispatch(name: str, args: dict, workdir: Path) -> str:
     fn = _EXECUTORS.get(name)
     if fn is None:
         return f"ERROR: unknown tool '{name}'"
+    required = _REQUIRED_ARGS.get(name, [])
+    missing = [r for r in required if r not in args]
+    if missing:
+        return (
+            f"ERROR: {name} called without required argument(s): {', '.join(missing)}. "
+            f"Required: {', '.join(required)}. Retry the call with all required arguments."
+        )
     try:
         return fn(**args, workdir=workdir)
     except TypeError as e:

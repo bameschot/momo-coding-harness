@@ -20,6 +20,14 @@ class OllamaClient:
         self._auth_token = token
         self._client = self._make_client()
 
+    def abort(self):
+        """Close the underlying HTTP client to interrupt any in-flight request."""
+        try:
+            self._client.close()
+        except Exception:
+            pass
+        self._client = self._make_client()
+
     def set_model(self, model: str):
         self.model = model
 
