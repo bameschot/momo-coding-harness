@@ -1141,6 +1141,19 @@ class TUI:
         if not text:
             return
 
+        # Sensitive commands: never add to history or show raw text in chat
+        _tcmd_parts = text.strip().split(None, 1)
+        if _tcmd_parts and _tcmd_parts[0].lower() == "/token" and len(_tcmd_parts) > 1:
+            raw = _tcmd_parts[1]
+            n = len(raw)
+            masked = (raw[:2] + "*" * (n - 5) + raw[-3:]) if n > 5 else "*" * n
+            self._add_chat("user", f"/token {masked}")
+            result = handle_command(text, self.harness)
+            if result.output:
+                self._add_chat("system", result.output)
+            self._redraw()
+            return
+
         if not self._history or self._history[-1] != text:
             self._history.append(text)
 

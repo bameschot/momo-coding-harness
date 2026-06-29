@@ -39,6 +39,25 @@ Example targeting a specific project and remote instance:
 python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b --host http://192.168.1.10:11434
 ```
 
+## Connecting to a remote Ollama host
+
+If your Ollama instance is hosted remotely and protected by an API key, set the host and token once the harness is running:
+
+```
+/host https://my-remote-ollama.example.com
+/token sk-your-api-key-here
+```
+
+The token is sent as a `Authorization: Bearer <token>` header on every request.
+
+**Security notes:**
+
+- The token is **never written to disk** — it is not saved to the session JSON, the log file, or the input history. It disappears when the harness exits.
+- When you type `/token <key>`, the key is masked in the chat display immediately: only the first 2 and last 3 characters are shown (e.g. `sk***ere`). The raw value is never displayed or echoed.
+- Because the token is not persisted, **you must re-enter it each time the harness starts**. Use the `/host` flag at startup to pre-set the host; add a shell alias or script if you connect to the same remote frequently.
+- `/token` with no argument shows the current masked token (or "not set").
+- `/clear-token` removes the token for the current session.
+
 ## TUI Layout
 
 ```
@@ -294,6 +313,9 @@ Type any command in the input bar:
 | `/model <name>` | Switch to a different model |
 | `/host` | Show current Ollama host URL |
 | `/host <url>` | Connect to a different Ollama instance at runtime |
+| `/token` | Show whether an auth token is set (masked display) |
+| `/token <key>` | Set a Bearer token for authenticated remote hosts (never saved to disk or history) |
+| `/clear-token` | Remove the current auth token |
 | `/workdir` | Show the current working directory |
 | `/workdir <path>` | Change the working directory. If the path does not exist, prompts for confirmation before creating it. |
 | `/think` | Show thinking mode state (on/off) |
@@ -306,7 +328,8 @@ Type any command in the input bar:
 | `/load-skill <name>` | Append a skill's instructions to the system prompt |
 | `/unload-skill <name>` | Remove a skill from the system prompt |
 | `/context` | Show context limit and current token usage |
-| `/context <n>` | Set the context token limit (e.g. `/context 16384`); minimum 256 |
+| `/context <n>` | Set an absolute context token limit (e.g. `/context 16384`); minimum 256; clears any percentage scale |
+| `/context <n>%` | Set the context limit as a percentage of the model's native maximum (e.g. `/context 75%`); saved in session and reapplied on model switch |
 | `/tool-result` | Show the current tool result character cap |
 | `/tool-result <n>` | Set the cap (e.g. `/tool-result 8000`); `0` = unlimited |
 | `/compact` | Compact context — removes old messages and summarises them with the LLM |

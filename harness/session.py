@@ -18,13 +18,15 @@ def session_path(ts: str) -> Path:
 def save(ts: str, model: str, mode: str, workdir: Path,
          messages: list[dict], context_limit: int,
          active_skills: list[str] | None = None,
-         input_history: list[str] | None = None):
+         input_history: list[str] | None = None,
+         context_pct: int | None = None):
     data = {
         "created_at": ts,
         "model": model,
         "mode": mode,
         "workdir": str(workdir),
         "context_limit": context_limit,
+        "context_pct": context_pct,
         "active_skills": active_skills or [],
         "input_history": input_history or [],
         "messages": messages,

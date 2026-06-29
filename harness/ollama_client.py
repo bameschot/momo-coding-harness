@@ -5,11 +5,20 @@ class OllamaClient:
     def __init__(self, host: str, model: str):
         self.host = host
         self.model = model
-        self._client = ollama.Client(host=host)
+        self._auth_token: str | None = None
+        self._client = self._make_client()
+
+    def _make_client(self) -> ollama.Client:
+        headers = {"Authorization": f"Bearer {self._auth_token}"} if self._auth_token else None
+        return ollama.Client(host=self.host, headers=headers)
 
     def set_host(self, host: str):
         self.host = host
-        self._client = ollama.Client(host=host)
+        self._client = self._make_client()
+
+    def set_auth_token(self, token: str | None):
+        self._auth_token = token
+        self._client = self._make_client()
 
     def set_model(self, model: str):
         self.model = model

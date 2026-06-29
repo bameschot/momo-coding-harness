@@ -56,6 +56,19 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness._emit_status()
         return CommandResult(handled=True, output=f"Host set to: {arg}")
 
+    if cmd == "/token":
+        if not arg:
+            token = harness.client._auth_token
+            if token:
+                return CommandResult(handled=True, output=f"Auth token: {_mask_token(token)}")
+            return CommandResult(handled=True, output="Auth token: not set")
+        harness.client.set_auth_token(arg)
+        return CommandResult(handled=True, output=f"Auth token set: {_mask_token(arg)}")
+
+    if cmd == "/clear-token":
+        harness.client.set_auth_token(None)
+        return CommandResult(handled=True, output="Auth token cleared")
+
     if cmd == "/code":
         harness.set_mode("coding")
         return CommandResult(handled=True, output="Switched to coding mode")
@@ -138,15 +151,29 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/context":
         if not arg:
-            pct = harness._ctx_pct()
+            usage_pct = harness._ctx_pct()
             est = harness._token_estimate
+            scale = f" | scale: {harness.context_pct}% of model max" if harness.context_pct is not None else ""
             return CommandResult(handled=True,
                                  output=(f"Context limit: {harness.context_limit} tokens | "
-                                         f"usage: ~{est} tokens ({pct}%)"))
+                                         f"usage: ~{est} tokens ({usage_pct}%){scale}"))
+        if arg.endswith("%"):
+            try:
+                n = int(arg[:-1])
+                if not 1 <= n <= 100:
+                    return CommandResult(handled=True, output="ERROR: percentage must be 1–100")
+                harness.context_pct = n
+                harness._sync_context_limit(emit=False)
+                harness._emit_status()
+                return CommandResult(handled=True,
+                                     output=f"Context limit set to {n}% of model max: {harness.context_limit:,} tokens")
+            except ValueError:
+                return CommandResult(handled=True, output=f"ERROR: invalid percentage: {arg}")
         try:
             n = int(arg)
             if n < 256:
                 return CommandResult(handled=True, output="ERROR: context limit must be >= 256")
+            harness.context_pct = None
             harness.context_limit = n
             harness._emit_status()
             return CommandResult(handled=True, output=f"Context limit set to: {n}")
@@ -307,6 +334,13 @@ def handle(line: str, harness: Harness) -> CommandResult:
     return CommandResult(handled=False)
 
 
+def _mask_token(t: str) -> str:
+    n = len(t)
+    if n <= 5:
+        return "*" * n
+    return t[:2] + "*" * (n - 5) + t[-3:]
+
+
 def _render_markdown(messages: list[dict]) -> str:
     parts = []
     for m in messages:
@@ -356,6 +390,9 @@ Available commands:
   /model <name>       Switch to a different model
   /host               Show current Ollama host
   /host <url>         Connect to a different Ollama instance
+  /token              Show whether an auth token is set (masked)
+  /token <key>        Set a Bearer token for authenticated remote hosts
+  /clear-token        Remove the current auth token
   /code               Switch to coding mode (full tools)
   /design             Switch to design mode (read-only tools)
   /write              Switch to writing mode (document editing tools)
@@ -374,6 +411,7 @@ Available commands:
   /fast-compact       Compact context without LLM summarisation (instant)
   /context            Show context limit and current usage
   /context <n>        Set context token limit (e.g. /context 8192)
+  /context <n>%       Set context limit as % of model max (e.g. /context 75%); saved in session
   /tool-result        Show current tool result character cap
   /tool-result <n>    Set cap (e.g. /tool-result 8000); 0 = unlimited
   /think              Show thinking mode state (on/off)

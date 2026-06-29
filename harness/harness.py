@@ -471,6 +471,7 @@ class Harness:
         self.tools_enabled: bool = True
         self.active_skills: list[str] = []
         self.input_history: list[str] = []
+        self.context_pct: int | None = None  # user-set % of model max; None = use default 50%
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
         ]
@@ -495,11 +496,12 @@ class Harness:
         self._user_input_queue.put(text)
 
     def _sync_context_limit(self, emit: bool = False):
-        """Query the model's native context window and use it as the compaction limit."""
+        """Query the model's native context window and compute the compaction limit."""
         reported = self.client.context_length()
         if reported:
-            self.context_limit = reported // 2
-            msg = f"Model context: {self.context_limit:,} tokens (half of {reported:,} max, {self.client.model})"
+            pct = self.context_pct if self.context_pct is not None else 50
+            self.context_limit = max(256, int(reported * pct / 100))
+            msg = f"Model context: {self.context_limit:,} tokens ({pct}% of {reported:,} max, {self.client.model})"
         else:
             msg = f"Model context: unknown — using default {self.context_limit:,} tokens ({self.client.model})"
         if emit:
@@ -976,6 +978,7 @@ class Harness:
             self.workdir, self.messages, self.context_limit,
             self.active_skills,
             self.input_history,
+            context_pct=self.context_pct,
         )
 
     def load_session(self, path: Path) -> str:
@@ -983,8 +986,12 @@ class Harness:
         self.messages = data["messages"]
         self.mode = data.get("mode", "design")
         self.workdir = Path(data.get("workdir", str(self.workdir)))
-        self.context_limit = data.get("context_limit", self.context_limit)
+        self.context_pct = data.get("context_pct", None)
         self.client.set_model(data.get("model", self.client.model))
+        if self.context_pct is not None:
+            self._sync_context_limit(emit=False)
+        else:
+            self.context_limit = data.get("context_limit", self.context_limit)
         self.active_skills = data.get("active_skills", [])
         self.input_history.clear()
         self.input_history.extend(data.get("input_history", []))
