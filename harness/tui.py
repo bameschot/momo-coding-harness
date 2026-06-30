@@ -465,6 +465,7 @@ class TUI:
         self._status    = f"MODE: {harness.mode} | MODEL: {harness.client.model} | CTX: 0% | DIR: {harness.workdir}"
         self._ctx_color = _C_STATUS
         self._busy      = False
+        self._too_small = False   # set when the terminal is too small to host the layout
         self._spinner_frame = 0
         self._spinner_ts    = 0.0
         self._pending_confirm: "callable | None" = None  # set while waiting for y/N
@@ -528,6 +529,17 @@ class TUI:
         self._companion_drawn_mew_text = ""
         L = self._layout
         cols = L["cols"]
+        # Guard against a terminal too small to fit the fixed regions: newwin
+        # raises if a window would extend past the screen. Detect it up front,
+        # flag it, and let _redraw paint a "too small" placeholder instead of
+        # building (and then drawing into) windows that don't fit.
+        rows, _ = self.stdscr.getmaxyx()
+        if cols < 20 or L["chat_h"] < 1 or L["input_y"] + L["input_h"] > rows:
+            self._too_small = True
+            self._chat_win = self._status_win = self._input_win = None
+            self._companion_win = None
+            return
+        self._too_small = False
         self._chat_win   = curses.newwin(L["chat_h"],  cols, L["chat_y"],   0)
         self._status_win = curses.newwin(_STATUS_H,    cols, L["status_y"], 0)
         self._input_win  = curses.newwin(L["input_h"], cols, L["input_y"],  0)
@@ -565,12 +577,29 @@ class TUI:
         # _draw_input() MUST be called last so its noutrefresh() is the final
         # one recorded — doupdate() parks the cursor at the last leaveok=False
         # window's noutrefresh position, which must be the input window.
+        if self._too_small:
+            self._draw_too_small()
+            return
         L = self._layout
         chat_edge = _C_FOCUS if self._focus == "chat" else _C_BORDER
         self._chat_buf.render(self._chat_win, L["chat_h"], L["cols"], edge_color=chat_edge)
         self._draw_companion()
         self._draw_status()
         self._draw_input()
+        curses.doupdate()
+
+    def _draw_too_small(self):
+        """Render a placeholder when the terminal can't fit the layout, instead
+        of crashing in newwin/addnstr. Recovers automatically on the next resize."""
+        self.stdscr.erase()
+        rows, cols = self.stdscr.getmaxyx()
+        msg = "Terminal too small — please enlarge"
+        try:
+            self.stdscr.addnstr(max(0, rows // 2), max(0, (cols - len(msg)) // 2),
+                                msg, max(1, cols - 1))
+        except curses.error:
+            pass
+        self.stdscr.noutrefresh()
         curses.doupdate()
 
     def _draw_status(self, spinner_only: bool = False):
@@ -768,6 +797,9 @@ class TUI:
         win.noutrefresh()
 
     def _redraw_input_only(self):
+        if self._too_small:
+            self._draw_too_small()
+            return
         self._draw_input()
         curses.doupdate()
 
@@ -895,9 +927,10 @@ class TUI:
                     ctx_map = {"normal": _C_STATUS, "yellow": _C_WARN, "red": _C_DANGER}
                     self._ctx_color = ctx_map.get(ev.ctx_color, _C_STATUS)
                     tools_str = "" if ev.tools_enabled else " | TOOLS: off"
+                    run_str = " | RUN: confirm" if ev.run_confirm else ""
                     self._status = (
                         f"MODE: {ev.mode} | MODEL: {ev.model} | "
-                        f"CTX: {ev.ctx_pct}% | DIR: {ev.workdir}{tools_str}"
+                        f"CTX: {ev.ctx_pct}% | DIR: {ev.workdir}{tools_str}{run_str}"
                     )
                     changed = True
                 elif isinstance(ev, ThinkEvent):
@@ -942,6 +975,14 @@ class TUI:
     def _toggle_md(self):
         self._md_expanded = not self._md_expanded
         self._rebuild_chat_buf()
+        self._redraw()
+
+    def _toggle_run_confirm(self):
+        self.harness.run_confirm = not self.harness.run_confirm
+        state = "on" if self.harness.run_confirm else "off"
+        self._add_chat("system", f"run_command confirmation: {state}")
+        self.harness._emit_status()
+        self._drain_events()  # consume the StatusEvent so the bar updates now
         self._redraw()
 
     def _advance_companion(self):
@@ -1174,6 +1215,19 @@ class TUI:
             return
 
         if text.startswith("/"):
+            # Block commands that mutate harness.messages while a worker thread
+            # (send/compact) is still running — both threads would edit the same
+            # list and corrupt the turn structure. Read-only commands are fine.
+            if self._busy and not self._waiting_for_input:
+                _cparts = text.strip().split(None, 1)
+                _c0 = _cparts[0].lower()
+                _mutating = _c0 in ("/clear", "/compact", "/fast-compact") or (
+                    _c0 == "/session" and len(_cparts) > 1)
+                if _mutating:
+                    self._add_chat("system",
+                        "Busy — finish the response or interrupt (Shift+C) before running that command.")
+                    self._redraw()
+                    return
             result = handle_command(text, self.harness)
             if result.exit_app:
                 raise SystemExit(0)
@@ -1277,6 +1331,9 @@ class TUI:
             if ch == curses.ERR:
                 if changed:
                     self._redraw()
+                elif self._too_small:
+                    # No windows to animate; the placeholder is static until resize.
+                    pass
                 else:
                     _any = False
                     if self._busy and not self._waiting_for_input:
@@ -1441,6 +1498,11 @@ class TUI:
             if ch == ord('C') and self._focus == "chat":
                 if self._busy and not self._waiting_for_input:
                     self.harness.cancel()
+                continue
+
+            # Shift+P toggles run_command confirmation (chat focus only)
+            if ch == ord('P') and self._focus == "chat":
+                self._toggle_run_confirm()
                 continue
 
             # ESC (27) — manual check for Option+Enter (ESC + CR/LF).

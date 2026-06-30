@@ -119,6 +119,7 @@ Do not ask open-ended questions like "What are your security requirements?" — 
 | `read_file(path)` | Read the contents of a file |
 | `grep_file(pattern, path)` | Regex search inside a single file — returns matching lines |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines |
+| `grep_extract(pattern, path, group?)` | Extract the matched text or a capture group from one file |
 | `write_file(path, content)` | Write the finished design to a file |
 | `ask_user(question)` | Pause and ask the user a clarifying question mid-loop |
 
@@ -277,6 +278,16 @@ Example: `<tool_call>{"name": "grep_file", "arguments": {"pattern": "## API", "p
 | `directory` | string | no | root directory (default: `.`) |
 
 Example: `<tool_call>{"name": "grep_files", "arguments": {"pattern": "TODO"}}</tool_call>`
+
+**grep_extract** — like grep_file, but returns only the matched text (or a capture group), not the whole line
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `pattern` | string | yes | regex; use a capture group to extract part of the match |
+| `path` | string | yes | file to search |
+| `group` | integer | no | capture group to return (default: 0 = whole match) |
+
+Example: `<tool_call>{"name": "grep_extract", "arguments": {"pattern": "^## (.+)", "path": "spec.md", "group": 1}}</tool_call>`
 
 **write_file** — write content to a file, creating or overwriting it
 

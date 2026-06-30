@@ -68,6 +68,7 @@ After receiving the answer, continue working without asking again unless a new a
 | `read_file(path, start_line?, end_line?)` | Read file or a line range | — |
 | `grep_file(pattern, path)` | Regex search in one file — returns matching lines | — |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines | — |
+| `grep_extract(pattern, path, group?)` | Extract matched text or a capture group from one file | Returns the match, not the whole line |
 | `edit_file(path, old_string, new_string)` | Replace one exact occurrence | `old_string` must match exactly once |
 | `replace_all_in_file(path, old_string, new_string)` | Replace every occurrence | Use for renames across a file |
 | `append_to_file(path, content)` | Append to file (creates if absent) | — |
@@ -163,6 +164,16 @@ Example: `<tool_call>{"name": "grep_file", "arguments": {"pattern": "functionNam
 | `directory` | string | no | root directory (default: `.`) |
 
 Example: `<tool_call>{"name": "grep_files", "arguments": {"pattern": "functionName"}}</tool_call>`
+
+**grep_extract** — like grep_file, but returns only the matched text (or a capture group), not the whole line
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `pattern` | string | yes | regex; use a capture group to extract part of the match |
+| `path` | string | yes | file to search |
+| `group` | integer | no | capture group to return (default: 0 = whole match) |
+
+Example: `<tool_call>{"name": "grep_extract", "arguments": {"pattern": "version\\s*=\\s*\"(.+?)\"", "path": "pyproject.toml", "group": 1}}</tool_call>`
 
 **write_file** — write content to a file, creating or overwriting it
 

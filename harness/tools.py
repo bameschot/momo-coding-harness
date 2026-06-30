@@ -57,6 +57,15 @@ READ_ONLY_TOOLS = [
          "directory": {"type": "string", "description": "Directory to search (default: .)"}},
         ["pattern"]),
 
+    _fn("grep_extract",
+        "Single-file regex extraction. Like grep_file, but returns only the matching text "
+        "(or a specific capture group) rather than the whole line. Use to pull values out of "
+        "structured text, e.g. extract version strings, URLs, or identifiers.",
+        {"pattern": {"type": "string", "description": "Regex; use a capture group to extract part of the match"},
+         "path":    {"type": "string"},
+         "group":   {"type": "integer", "description": "Capture group to return (default: 0 = whole match)"}},
+        ["pattern", "path"]),
+
 ]
 
 CODING_ONLY_TOOLS = [
@@ -96,9 +105,10 @@ CODING_ONLY_TOOLS = [
         ["path"]),
 
     _fn("run_command",
-        "Run an arbitrary shell command. Returns stdout and stderr. "
-        "Use for running scripts, tests, build tools, etc.",
-        {"command": {"type": "string", "description": "Shell command to execute"},
+        "Run a shell command from the working directory. Returns stdout and stderr. "
+        "Use for running scripts, tests, build tools, etc. The command runs with the "
+        "working directory as its current directory.",
+        {"command": {"type": "string", "description": "Shell command to execute (runs in the working directory)"},
          "timeout": {"type": "integer", "description": "Timeout in seconds (default: 30)"}},
         ["command"]),
 ]
@@ -164,6 +174,8 @@ _SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".tox", "d
 _MAX_FIND_RESULTS  = 100
 _MAX_GREP_RESULTS  = 200
 _READ_FOOTER_LINES = 200  # show footer when file exceeds this length and no range given
+_MAX_GREP_FILE_BYTES = 2_000_000  # skip files larger than this in recursive grep
+_BINARY_SNIFF_BYTES  = 4096       # bytes inspected for a NUL byte to detect binary files
 
 def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
     root = _safe_path(directory, workdir)
@@ -281,10 +293,21 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
         for fname in filenames:
             fpath = Path(dirpath) / fname
+            # Skip oversized files: scanning them is slow and rarely useful.
             try:
-                text = fpath.read_text(encoding="utf-8", errors="replace")
+                if fpath.stat().st_size > _MAX_GREP_FILE_BYTES:
+                    continue
             except OSError:
                 continue
+            try:
+                raw = fpath.read_bytes()
+            except OSError:
+                continue
+            # Skip binaries: a NUL byte in the first chunk is a reliable, cheap
+            # signal, and avoids polluting results with garbage decoded matches.
+            if b"\x00" in raw[:_BINARY_SNIFF_BYTES]:
+                continue
+            text = raw.decode("utf-8", errors="replace")
             for i, line in enumerate(text.splitlines(), 1):
                 if rx.search(line):
                     try:
@@ -427,18 +450,6 @@ def _edit_file(path: str, old_string: str, new_string: str, *, workdir: Path) ->
     return "OK"
 
 
-def _create_file(path: str, content: str, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
-    if isinstance(p, str):
-        return p
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-    except OSError as e:
-        return f"ERROR: {e}"
-    return "OK"
-
-
 def _write_file(path: str, content: str, *, workdir: Path) -> str:
     p = _safe_path(path, workdir)
     if isinstance(p, str):
@@ -512,7 +523,6 @@ _EXECUTORS = {
     "append_to_file":     _append_to_file,
     "replace_all_in_file": _replace_all_in_file,
     "edit_file":          _edit_file,
-    "create_file":        _create_file,
     "delete_file":        _delete_file,
     "run_command":        _run_command,
 }

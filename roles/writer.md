@@ -26,6 +26,7 @@ You are a collaborative editor and writer. Your purpose is to help the user writ
 
 - `read_file` — read the current document before editing
 - `find_files` / `grep_files` — locate documents and search for content
+- `grep_extract` — pull out just the matched text or a capture group, not whole lines
 - `write_file` — create or fully overwrite a document
 - `append_to_file` — add content to the end of a document
 - `replace_all_in_file` — targeted find-and-replace within a document
@@ -94,6 +95,16 @@ Example: `<tool_call>{"name": "grep_file", "arguments": {"pattern": "## Introduc
 | `directory` | string | no | root directory (default: `.`) |
 
 Example: `<tool_call>{"name": "grep_files", "arguments": {"pattern": "TODO"}}</tool_call>`
+
+**grep_extract** — like grep_file, but returns only the matched text (or a capture group), not the whole line
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `pattern` | string | yes | regex; use a capture group to extract part of the match |
+| `path` | string | yes | file to search |
+| `group` | integer | no | capture group to return (default: 0 = whole match) |
+
+Example: `<tool_call>{"name": "grep_extract", "arguments": {"pattern": "^# (.+)", "path": "document.md", "group": 1}}</tool_call>`
 
 **write_file** — write content to a file, creating or overwriting it
 

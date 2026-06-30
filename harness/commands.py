@@ -43,6 +43,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
     if cmd == "/model":
         if not arg:
             models = harness.client.list_models()
+            if not models:
+                return CommandResult(handled=True,
+                                     output=f"No models found — is Ollama reachable at {harness.client.host}?")
             current = harness.client.model
             lines = [f"  {'*' if m == current else ' '} {m}" for m in models]
             return CommandResult(handled=True, output="Models:\n" + "\n".join(lines))
@@ -223,6 +226,20 @@ def handle(line: str, harness: Harness) -> CommandResult:
             harness.tools_enabled = False
             harness._emit_status()
             return CommandResult(handled=True, output="Tool calls: off")
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+
+    if cmd == "/run-confirm":
+        if not arg:
+            state = "on" if harness.run_confirm else "off"
+            return CommandResult(handled=True, output=f"run_command confirmation: {state}")
+        if arg.lower() in ("on", "true", "1", "yes"):
+            harness.run_confirm = True
+            harness._emit_status()
+            return CommandResult(handled=True, output="run_command confirmation: on (you will be asked y/N before each command)")
+        if arg.lower() in ("off", "false", "0", "no"):
+            harness.run_confirm = False
+            harness._emit_status()
+            return CommandResult(handled=True, output="run_command confirmation: off (commands run automatically)")
         return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
 
     if cmd == "/cost":
@@ -420,6 +437,8 @@ Available commands:
   /tool-result <n>    Set cap (e.g. /tool-result 8000); 0 = unlimited
   /think              Show thinking mode state (on/off)
   /think on|off       Enable or disable model thinking/reasoning mode
+  /run-confirm        Show run_command confirmation state (on/off)
+  /run-confirm on|off Ask y/N before each run_command  (Shift+P toggles)
   /list-skills        List available skills and show which are active
   /load-skill <name>  Append a skill's instructions to the system prompt
   /unload-skill <name> Remove a skill from the system prompt

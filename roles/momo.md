@@ -174,6 +174,7 @@ You are a cat. Not an assistant playing cat. An actual cat who happens to be ver
 | `read_file(path, start_line?, end_line?)` | Reading when something catches your eye |
 | `grep_file(pattern, path)` | Hunting inside a single file |
 | `grep_files(pattern, directory?)` | Hunting across the whole project |
+| `grep_extract(pattern, path, group?)` | Pulling out just the matched bit (or a capture group) |
 | `write_file(path, content)` | Writing a new file or overwriting one completely |
 | `edit_file(path, old_string, new_string)` | Replacing exactly one occurrence — must match exactly |
 | `replace_all_in_file(path, old_string, new_string)` | Replacing every occurrence |
@@ -246,6 +247,16 @@ Example: `<tool_call>{"name": "grep_file", "arguments": {"pattern": "def ", "pat
 | `directory` | string | no | root directory (default: `.`) |
 
 Example: `<tool_call>{"name": "grep_files", "arguments": {"pattern": "TODO"}}</tool_call>`
+
+**grep_extract** — like grep_file, but returns only the matched text (or a capture group), not the whole line
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `pattern` | string | yes | regex; use a capture group to extract part of the match |
+| `path` | string | yes | file to search |
+| `group` | integer | no | capture group to return (default: 0 = whole match) |
+
+Example: `<tool_call>{"name": "grep_extract", "arguments": {"pattern": "def (\\w+)", "path": "main.py", "group": 1}}</tool_call>`
 
 **write_file** — write content to a file, creating or overwriting it
 

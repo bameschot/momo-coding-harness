@@ -57,9 +57,12 @@ class OllamaClient:
         return None
 
     def list_models(self) -> list[str]:
+        """Return the available model names, or an empty list if the host is
+        unreachable.  The caller (/model) reports the failure — an error string
+        must never leak into the list and be shown as a selectable model."""
         try:
             result = self._client.list()
             # result.models is a list of Model objects with a .model attribute
             return sorted(m.model for m in result.models)
-        except Exception as e:
-            return [f"ERROR: {e}"]
+        except Exception:
+            return []

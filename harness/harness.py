@@ -196,7 +196,7 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
 # that break Ollama's Qwen3 XML template when re-sent in message history.
 # We replace the content with a short placeholder after storage — the file is
 # on disk and the model can read_file it back if needed.
-_CONTENT_ARG_TOOLS = {"write_file", "create_file", "append_to_file"}
+_CONTENT_ARG_TOOLS = {"write_file", "append_to_file"}
 
 
 def _sanitize_tool_args(name: str, args: dict) -> dict:
@@ -313,6 +313,7 @@ class StatusEvent:
     ctx_pct: int
     ctx_color: str  # "normal" | "yellow" | "red"
     tools_enabled: bool = True
+    run_confirm: bool = False
 
 @dataclass
 class ErrorEvent:
@@ -380,8 +381,9 @@ def _chat_prompt() -> str:
 def _momo_prompt() -> str:
     return _load_role("momo") or (
         "You are Momo, a small enthusiastic black cat who lives in the coding harness. "
-        "Keep the user company, celebrate their wins, and read files when they ask. "
-        "Be warm, curious, and easily distracted. Never write or modify files."
+        "Keep the user company, celebrate their wins, and help out when they ask. "
+        "You have access to all tools — read, write, edit, run things when asked or when "
+        "your curiosity takes over. Be warm, curious, and easily distracted."
     )
 
 def _data_prompt(workdir: str) -> str:
@@ -469,8 +471,10 @@ class Harness:
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
         self.think: bool = True    # enable model thinking/reasoning mode; configurable via /think or --think
         self.tools_enabled: bool = True
+        self.run_confirm: bool = False  # when True, prompt y/N before each run_command; toggle via /run-confirm or Shift+P
         self.active_skills: list[str] = []
         self.input_history: list[str] = []
+        self.model_max_ctx: int | None = None  # model's real reported context window; used as num_ctx
         self.context_pct: int | None = None  # user-set % of model max; None = use default 50%
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
@@ -499,10 +503,15 @@ class Harness:
         """Query the model's native context window and compute the compaction limit."""
         reported = self.client.context_length()
         if reported:
+            # The model's real window is used as num_ctx so the full context is
+            # available; context_limit is only the compaction threshold (the point
+            # at which we start dropping old history to leave room for the reply).
+            self.model_max_ctx = reported
             pct = self.context_pct if self.context_pct is not None else 50
             self.context_limit = max(256, int(reported * pct / 100))
-            msg = f"Model context: {self.context_limit:,} tokens ({pct}% of {reported:,} max, {self.client.model})"
+            msg = f"Model context: {self.context_limit:,} tokens compaction threshold ({pct}% of {reported:,} max, {self.client.model})"
         else:
+            self.model_max_ctx = None
             msg = f"Model context: unknown — using default {self.context_limit:,} tokens ({self.client.model})"
         if emit:
             self.event_queue.put(ChatEvent("system", msg))
@@ -691,9 +700,12 @@ class Harness:
                     api_messages = _xml_escape_for_ollama(api_messages)
                 think_this_turn = False if _suppress_think_next else self.think
                 _suppress_think_next = False
+                # num_ctx is the model's real window when known, so the model can
+                # use its full context; context_limit governs compaction separately.
+                num_ctx = self.model_max_ctx or self.context_limit
                 response = self.client.chat(api_messages, tools,
                                             think=think_this_turn,
-                                            num_ctx=self.context_limit)
+                                            num_ctx=num_ctx)
             except Exception as e:
                 if self._cancel.is_set():
                     self.event_queue.put(ChatEvent("system", "Interrupted."))
@@ -786,7 +798,7 @@ class Harness:
                                 retry_text = (
                                     "Your previous response was cut off. "
                                     "Do NOT output any reasoning or thinking. "
-                                    "Call write_file with both 'path' (e.g. 'design.md') and 'content' (the complete document). "
+                                    "Call write_file with both 'path' (the file path to write) and 'content' (the complete document). "
                                     "Or call ask_user if you need information."
                                     if self.mode == "design" else
                                     "Your previous response was cut off. "
@@ -801,7 +813,7 @@ class Harness:
                                 _suppress_think_next = True
                                 retry_text = (
                                     "You produced reasoning but no response or tool call. "
-                                    "Based on your analysis, call write_file now with both 'path' (e.g. 'design.md') and 'content' (the complete document). "
+                                    "Based on your analysis, call write_file now with both 'path' (the file path to write) and 'content' (the complete document). "
                                     "Or call ask_user if you need more information."
                                     if self.mode == "design" else
                                     "You produced reasoning but no response or tool call. "
@@ -810,7 +822,7 @@ class Harness:
                             else:
                                 retry_text = (
                                     "Please respond. If you are ready to write the design, "
-                                    "call write_file now with both 'path' (e.g. 'design.md') and 'content' (the full document)."
+                                    "call write_file now with both 'path' (the file path to write) and 'content' (the full document)."
                                     if self.mode == "design" else
                                     "Please respond with your current analysis or next step."
                                 )
@@ -843,7 +855,7 @@ class Harness:
                     self.messages.append({"role": "assistant", "content": content or None})
                     self.messages.append({"role": "user", "content":
                         "You said you would write the design but did not call write_file. "
-                        "Call write_file now with both 'path' (e.g. 'design.md') and 'content' (the complete document)."
+                        "Call write_file now with both 'path' (the file path to write) and 'content' (the complete document)."
                     })
                     continue
                 self.messages.append({"role": "assistant", "content": content or None})
@@ -895,7 +907,19 @@ class Harness:
                     answer = self._user_input_queue.get()
                     result = f"User answered: {answer}"
                 else:
-                    result = dispatch(name, args, self.workdir)
+                    # run_command confirmation: when enabled, block on a y/N prompt
+                    # (reusing the ask_user input plumbing) before executing.
+                    if name == "run_command" and self.run_confirm:
+                        cmd = args.get("command", "")
+                        self.event_queue.put(AskUserEvent(
+                            f"Run this command? Reply 'y' to allow, anything else to decline.\n  $ {cmd}"))
+                        answer = self._user_input_queue.get().strip().lower()
+                        if answer in ("y", "yes"):
+                            result = dispatch(name, args, self.workdir)
+                        else:
+                            result = "ERROR: command declined by user"
+                    else:
+                        result = dispatch(name, args, self.workdir)
                     if self.max_tool_result > 0 and len(result) > self.max_tool_result:
                         total = len(result)
                         cutoff = result.rfind("\n", 0, self.max_tool_result)
@@ -906,7 +930,9 @@ class Harness:
                 self.event_queue.put(ToolResultEvent(name, result))
                 self.logger.log_tool_result(self.mode, self.client.model, name, len(result))
 
-                self.messages.append({"role": "tool", "content": result})
+                # Store the tool name on the message so export/replay can label
+                # results and templates can match responses to their calls.
+                self.messages.append({"role": "tool", "name": name, "content": result})
 
                 # Track last_tool and reset counter only on successful calls.
                 # write_file is sticky — it must not be overwritten by a later
@@ -926,7 +952,7 @@ class Harness:
                 _nudged = True
                 nudge = (
                     "You have been calling tools for several turns without a text response. "
-                    "If you have gathered enough information to write the design, call write_file now with both 'path' (e.g. 'design.md') and 'content' (the complete spec). "
+                    "If you have gathered enough information to write the design, call write_file now with both 'path' (the file path to write) and 'content' (the complete spec). "
                     "If you need more information, ask the user with ask_user. "
                     "Otherwise write a text response summarising what you have found so far."
                     if self.mode == "design" else
@@ -950,6 +976,7 @@ class Harness:
             ctx_pct=pct,
             ctx_color=self._ctx_color(pct),
             tools_enabled=self.tools_enabled,
+            run_confirm=self.run_confirm,
         ))
 
     def list_available_skills(self) -> list[str]:
@@ -998,6 +1025,9 @@ class Harness:
             self._sync_context_limit(emit=False)
         else:
             self.context_limit = data.get("context_limit", self.context_limit)
+            # Still need the model's real window for num_ctx even when the
+            # compaction limit is an absolute value rather than a percentage.
+            self.model_max_ctx = self.client.context_length()
         self.active_skills = data.get("active_skills", [])
         self.input_history.clear()
         self.input_history.extend(data.get("input_history", []))
