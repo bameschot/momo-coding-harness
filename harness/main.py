@@ -16,8 +16,8 @@ def main():
     )
     parser.add_argument("--host",    default="http://localhost:11434", metavar="URL",
                         help="Ollama base URL")
-    parser.add_argument("--model",   default="qwen3.5:9b", metavar="NAME",
-                        help="Ollama model name")
+    parser.add_argument("--model",   default=None, metavar="NAME",
+                        help="Ollama model name (default: last-used model or qwen3.5:9b)")
     parser.add_argument("--workspace", "--workdir", default=".", metavar="PATH",
                         dest="workdir", help="Root directory for all file operations")
     parser.add_argument("--context", default=None, type=int, metavar="N",
@@ -37,7 +37,8 @@ def main():
         print(f"error: --workdir is not a directory: {workdir}", file=sys.stderr)
         sys.exit(1)
 
-    harness = Harness(host=args.host, model=args.model, workdir=workdir)
+    model = args.model or session_mod.load_prefs().get("model") or "qwen3.5:9b"
+    harness = Harness(host=args.host, model=model, workdir=workdir)
     if args.context is not None:
         harness.context_limit = args.context
     harness.max_tool_result = args.max_tool_result

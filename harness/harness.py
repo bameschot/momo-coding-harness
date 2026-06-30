@@ -1013,6 +1013,7 @@ class Harness:
             self.input_history,
             context_pct=self.context_pct,
         )
+        session_mod.save_prefs(model=self.client.model)
 
     def load_session(self, path: Path) -> str:
         data = session_mod.load(path)

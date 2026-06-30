@@ -4,6 +4,21 @@ from pathlib import Path
 
 
 SESSION_DIR = Path.home() / ".momo-harness" / "sessions"
+_PREFS_PATH = Path.home() / ".momo-harness" / "prefs.json"
+
+
+def load_prefs() -> dict:
+    try:
+        return json.loads(_PREFS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_prefs(**kwargs) -> None:
+    _PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    prefs = load_prefs()
+    prefs.update(kwargs)
+    _PREFS_PATH.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
 
 
 def new_timestamp() -> str:

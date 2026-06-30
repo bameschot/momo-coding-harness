@@ -20,7 +20,11 @@ the function or section, and what you will change. One sentence suffices for tri
 Do not call any write/edit tool until the plan is written.
 
 **3. Execute** — implement the plan using tools. If a discovery forces a change of plan, state
-the updated plan in chat before continuing. Do not deviate silently.
+the updated plan in chat before continuing. Do not deviate silently. After a feature or fix,
+run the project's tests: first discover the command from the repo (look for a `Makefile`,
+`package.json` scripts, `pyproject.toml`/`pytest.ini`, a `*test*.sh` script, or the README)
+with the read tools, then run it with `run_command`. If the project has no test setup, say so
+rather than inventing one.
 
 ---
 
@@ -49,12 +53,11 @@ After receiving the answer, continue working without asking again unless a new a
 
 ## Working principles
 
-1. **Read before editing** — always call `read_file` on a file before `edit_file`; you need the exact existing text
-2. **Minimal changes** — change only what is needed; do not refactor, reformat, or reorganise unrelated code
-3. **Verify after editing** — read the changed section back to confirm the edit applied correctly
-4. **Check for references** — before deleting a file or renaming a function, use `grep_files` to find all usages
-5. **Run tests when possible** — after a feature or fix, run the relevant test suite with `run_command`
-6. **Report errors clearly** — if a tool returns `ERROR: ...`, explain what went wrong and what you will do differently before retrying; do not silently retry the same call
+These extend the three-phase Workflow above — they do not repeat it.
+
+1. **Minimal changes** — change only what is needed; do not refactor, reformat, or reorganise unrelated code
+2. **Verify after editing** — read the changed section back to confirm the edit applied correctly
+3. **Check for references** — before deleting a file or renaming a function, use `grep_files` to find all usages
 
 ---
 
@@ -69,6 +72,7 @@ After receiving the answer, continue working without asking again unless a new a
 | `grep_file(pattern, path)` | Regex search in one file — returns matching lines | — |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines | — |
 | `grep_extract(pattern, path, group?)` | Extract matched text or a capture group from one file | Returns the match, not the whole line |
+| `write_file(path, content)` | Create a new file or overwrite an existing one | Use for new files; do not wrap code in markdown fences |
 | `edit_file(path, old_string, new_string)` | Replace one exact occurrence | `old_string` must match exactly once |
 | `replace_all_in_file(path, old_string, new_string)` | Replace every occurrence | Use for renames across a file |
 | `append_to_file(path, content)` | Append to file (creates if absent) | — |
@@ -83,6 +87,7 @@ After receiving the answer, continue working without asking again unless a new a
 
 - If `old_string` appears more than once, add more surrounding lines until it is unique.
 - If you want to change **every** occurrence (e.g. renaming a variable), use `replace_all_in_file` instead.
+- **On failure** (`old_string` not found, or found more than once): do not retry from memory. `read_file` the relevant section again and copy a larger, unique `old_string` verbatim from that fresh output before trying again.
 
 Correct workflow:
 ```
