@@ -160,15 +160,19 @@ def handle(line: str, harness: Harness) -> CommandResult:
         if arg.endswith("%"):
             try:
                 n = int(arg[:-1])
-                if not 1 <= n <= 100:
-                    return CommandResult(handled=True, output="ERROR: percentage must be 1–100")
-                harness.context_pct = n
-                harness._sync_context_limit(emit=False)
-                harness._emit_status()
-                return CommandResult(handled=True,
-                                     output=f"Context limit set to {n}% of model max: {harness.context_limit:,} tokens")
             except ValueError:
                 return CommandResult(handled=True, output=f"ERROR: invalid percentage: {arg}")
+            if not 1 <= n <= 100:
+                return CommandResult(handled=True, output="ERROR: percentage must be 1–100")
+            reported = harness.client.context_length()
+            if not reported:
+                return CommandResult(handled=True,
+                                     output="ERROR: model did not report a context size — use /context <n> to set an absolute limit")
+            harness.context_pct = n
+            harness._sync_context_limit(emit=False)
+            harness._emit_status()
+            return CommandResult(handled=True,
+                                 output=f"Context limit set to {n}% of {reported:,} max: {harness.context_limit:,} tokens")
         try:
             n = int(arg)
             if n < 256:
