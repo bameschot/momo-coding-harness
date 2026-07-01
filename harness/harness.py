@@ -9,9 +9,18 @@ from pathlib import Path
 from typing import Any
 
 from . import session as session_mod
+from .diff import build_diff_body
 from .logger import Logger
 from .ollama_client import OllamaClient
 from .tools import DESIGN_TOOLS, WRITER_TOOLS, DATA_TOOLS, ALL_TOOLS, CHAT_TOOLS, dispatch
+
+# Tools that mutate a file on disk — the harness snapshots the target before and
+# after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
+# affected path ("move_file" uses src/dst and is handled separately).
+_MUTATING_TOOLS = {
+    "edit_file", "replace_all_in_file", "append_to_file",
+    "write_file", "delete_file", "move_file",
+}
 
 _ROLES_DIR  = Path(__file__).parent.parent / "roles"
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -331,6 +340,16 @@ class AskUserEvent:
 class ThinkEvent:
     text: str
 
+@dataclass
+class DiffEvent:
+    op: str                        # "edit" | "write" | "append" | "delete" | "move"
+    path: str                      # target path (for "move", the source path)
+    added: int
+    removed: int
+    body: list[tuple[str, str]]    # (kind, text) diff lines; empty for "move"
+    dst: str | None = None         # destination path for "move"
+    is_new: bool = False           # write_file created a new file
+
 
 # ── system prompts ────────────────────────────────────────────────────────────
 
@@ -498,6 +517,46 @@ class Harness:
     def provide_user_input(self, text: str):
         """Called from the TUI thread when the user answers a mid-task ask_user question."""
         self._user_input_queue.put(text)
+
+    # ── file-edit diffs ─────────────────────────────────────────────────────────
+
+    def _read_text_safe(self, rel_path: str) -> tuple[str, bool]:
+        """Read the text of a workdir-relative path. Returns (text, existed).
+        Missing files, directories, and read errors all yield ("", False)."""
+        try:
+            return (self.workdir / rel_path).read_text(encoding="utf-8", errors="replace"), True
+        except (FileNotFoundError, IsADirectoryError, OSError):
+            return "", False
+
+    def _emit_diff(self, name: str, args: dict, result: str,
+                   old_text: str | None, existed: bool) -> bool:
+        """Emit a DiffEvent for a successful mutating tool call.
+
+        Returns True if a diff was emitted (so the caller skips the plain
+        ToolResultEvent), False otherwise (errors, no-op edits, non-mutating tools).
+        """
+        if name not in _MUTATING_TOOLS or result.startswith("ERROR:"):
+            return False
+        if name == "move_file":
+            self.event_queue.put(DiffEvent(
+                op="move", path=args.get("src", ""), dst=args.get("dst", ""),
+                added=0, removed=0, body=[]))
+            return True
+        path = args.get("path", "")
+        new_text = "" if name == "delete_file" else self._read_text_safe(path)[0]
+        body, added, removed = build_diff_body(old_text or "", new_text)
+        if not body:
+            return False  # no visible change — fall back to the plain result line
+        op_map = {
+            "edit_file": "edit", "replace_all_in_file": "edit",
+            "append_to_file": "append", "write_file": "write",
+            "delete_file": "delete",
+        }
+        self.event_queue.put(DiffEvent(
+            op=op_map.get(name, "edit"), path=path,
+            added=added, removed=removed, body=body,
+            is_new=(name == "write_file" and not existed)))
+        return True
 
     def _sync_context_limit(self, emit: bool = False):
         """Query the model's native context window and compute the compaction limit."""
@@ -898,6 +957,15 @@ class Harness:
                 self.event_queue.put(ToolCallEvent(name, args))
                 self.logger.log_tool_call(self.mode, self.client.model, name, args)
 
+                # Snapshot the target file before a mutating tool runs so the
+                # post-edit diff can be built against its previous contents.
+                diff_old: str | None = None
+                diff_existed = False
+                if name in _MUTATING_TOOLS:
+                    snap_path = args.get("src") if name == "move_file" else args.get("path")
+                    if snap_path:
+                        diff_old, diff_existed = self._read_text_safe(snap_path)
+
                 if name == "ask_user":
                     # Block the worker thread until the TUI routes the user's answer back.
                     # The TUI detects AskUserEvent, switches to waiting-for-input state,
@@ -927,7 +995,11 @@ class Harness:
                             cutoff = self.max_tool_result
                         result = result[:cutoff] + f"\n... (truncated after {cutoff} chars of {total} — use read_file with start_line/end_line for specific sections)"
 
-                self.event_queue.put(ToolResultEvent(name, result))
+                # For mutating tools, show a diff of what changed on disk instead
+                # of the terse "OK" result. Falls back to ToolResultEvent on errors
+                # or no-op edits so failures stay visible.
+                if not self._emit_diff(name, args, result, diff_old, diff_existed):
+                    self.event_queue.put(ToolResultEvent(name, result))
                 self.logger.log_tool_result(self.mode, self.client.model, name, len(result))
 
                 # Store the tool name on the message so export/replay can label

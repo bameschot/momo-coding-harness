@@ -20,6 +20,8 @@ class CommandResult:
     tool_output: bool | None = None         # TUI sets tool-pane visibility (True=show, False=hide)
     think_output: bool | None = None        # TUI sets thinking-output visibility
     md_render: bool | None = None           # TUI sets markdown rendering
+    diff_output: bool | None = None         # TUI shows/hides edit diffs
+    diff_style: str | None = None           # TUI sets diff style ("compact"|"git")
     companion: bool | None = None           # TUI shows/hides momo companion bar
     replay_session: bool = False            # TUI replays loaded session messages into chat buffer
     run_compact: bool = False               # TUI runs compact on worker thread
@@ -145,6 +147,18 @@ def handle(line: str, harness: Harness) -> CommandResult:
         if arg.lower() in ("off", "false", "0", "no"):
             return CommandResult(handled=True, md_render=False)
         return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}" if arg else "ERROR: expected 'on' or 'off'")
+
+    if cmd == "/diff":
+        if arg.lower() in ("on", "true", "1", "yes"):
+            return CommandResult(handled=True, diff_output=True)
+        if arg.lower() in ("off", "false", "0", "no"):
+            return CommandResult(handled=True, diff_output=False)
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}" if arg else "ERROR: expected 'on' or 'off'")
+
+    if cmd == "/diff-style":
+        if arg.lower() in ("git", "compact"):
+            return CommandResult(handled=True, diff_style=arg.lower())
+        return CommandResult(handled=True, output=f"ERROR: expected 'git' or 'compact', got: {arg!r}" if arg else "ERROR: expected 'git' or 'compact'")
 
     if cmd == "/compact":
         return CommandResult(handled=True, run_compact=True)
@@ -426,6 +440,8 @@ Available commands:
   /tool-output on|off   Show or hide the tool calls pane
   /think-output on|off  Show or hide model thinking/reasoning output  (Shift+T)
   /markdown on|off      Enable or disable markdown rendering  (Shift+M)
+  /diff on|off          Show or hide diffs of file edits  (Shift+D)
+  /diff-style git|compact  Choose diff presentation (git-style or compact)
   /companion on|off     Show or hide the momo companion bar  (Shift+Q)
   Shift+C               Interrupt a running LLM response
   /compact            Compact context with LLM summary of dropped history

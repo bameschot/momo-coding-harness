@@ -16,7 +16,7 @@ from .commands import handle as handle_command
 from . import md_render
 from .harness import (
     Harness, ChatEvent, ToolCallEvent, ToolResultEvent,
-    StatusEvent, ErrorEvent, DoneEvent, AskUserEvent, ThinkEvent,
+    StatusEvent, ErrorEvent, DoneEvent, AskUserEvent, ThinkEvent, DiffEvent,
 )
 
 
@@ -43,6 +43,10 @@ _C_MD_CODE  = 17
 _C_MD_QUOTE = 18
 _C_MD_BOLD  = 19
 _C_COMPANION = 20
+_C_DIFF_ADD  = 21  # diff added lines   (green)
+_C_DIFF_DEL  = 22  # diff removed lines (red)
+_C_DIFF_HUNK = 23  # diff @@ hunk header (cyan)
+_C_DIFF_META = 24  # diff file header line
 
 _COLOR_ORANGE     = 16   # custom color slot for orange  (requires COLORS > 16)
 _COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
@@ -82,6 +86,10 @@ def _init_colors():
     curses.init_pair(_C_MD_QUOTE, curses.COLOR_YELLOW, -1)
     curses.init_pair(_C_MD_BOLD,  curses.COLOR_WHITE,  -1)
     curses.init_pair(_C_COMPANION, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(_C_DIFF_ADD,  curses.COLOR_GREEN,  -1)
+    curses.init_pair(_C_DIFF_DEL,  curses.COLOR_RED,    -1)
+    curses.init_pair(_C_DIFF_HUNK, curses.COLOR_CYAN,   -1)
+    curses.init_pair(_C_DIFF_META, curses.COLOR_WHITE,  -1)
 
 
 # ── spinner ───────────────────────────────────────────────────────────────────
@@ -456,6 +464,8 @@ class TUI:
         self._tools_expanded: bool = True    # True = full tool output; False = abbreviated
         self._think_expanded: bool = True    # toggle with /toggle-think-output or Shift+T
         self._md_expanded: bool = True       # markdown rendering; toggle with /toggle-markdown or Shift+M
+        self._diff_expanded: bool = True     # show edit diffs; toggle with /diff or Shift+D
+        self._diff_style: str = "compact"    # "compact" | "git"; set with /diff-style
         self._input: str = ""
         self._cursor: int = 0           # insertion point within _input
         self._history = harness.input_history  # submitted entries, oldest first; shared with harness for persistence
@@ -883,6 +893,55 @@ class TUI:
                 self._chat_buf.append("  " + line, _C_THINK)
         self._chat_buf.append("", 0)
 
+    def _add_diff(self, ev: DiffEvent):
+        self._chat_events.append(("diff", ev))
+        self._render_diff(ev)
+
+    _DIFF_KIND_COLOR = {
+        "add":  _C_DIFF_ADD,
+        "del":  _C_DIFF_DEL,
+        "hunk": _C_DIFF_HUNK,
+        "ctx":  _C_TOOL_RES,
+    }
+    _DIFF_MAX_LINES = 40  # cap body lines shown per diff, like tool results
+
+    def _render_diff(self, ev: DiffEvent):
+        if not self._diff_expanded:
+            return
+        cols = max(20, self._layout["cols"] - 2)
+
+        # Header line(s) — presentation differs by style; the body is identical.
+        if ev.op == "move":
+            self._chat_buf.append(f"± renamed {ev.path} → {ev.dst}", _C_DIFF_META,
+                                  curses.A_BOLD)
+            self._chat_buf.append("", 0)
+            return
+
+        if self._diff_style == "git":
+            self._chat_buf.append(f"diff --git a/{ev.path} b/{ev.path}", _C_DIFF_META,
+                                  curses.A_BOLD)
+            self._chat_buf.append(f"--- {'/dev/null' if ev.is_new else 'a/' + ev.path}",
+                                  _C_DIFF_DEL)
+            self._chat_buf.append(f"+++ {'/dev/null' if ev.op == 'delete' else 'b/' + ev.path}",
+                                  _C_DIFF_ADD)
+        else:  # compact
+            if ev.is_new:
+                note = f"(new file +{ev.added})"
+            elif ev.op == "delete":
+                note = f"(deleted -{ev.removed})"
+            else:
+                note = f"(+{ev.added} -{ev.removed})"
+            self._chat_buf.append(f"± {ev.path}  {note}", _C_DIFF_META, curses.A_BOLD)
+
+        body = ev.body[:self._DIFF_MAX_LINES]
+        for kind, text in body:
+            attr = curses.A_BOLD if kind == "hunk" else 0
+            self._chat_buf.append(text[:cols], self._DIFF_KIND_COLOR.get(kind, _C_TOOL_RES), attr)
+        if len(ev.body) > self._DIFF_MAX_LINES:
+            self._chat_buf.append(f"  ... ({len(ev.body) - self._DIFF_MAX_LINES} more diff lines)",
+                                  _C_TOOL_RES)
+        self._chat_buf.append("", 0)
+
     def _rebuild_chat_buf(self):
         # Re-render all events from scratch. Called when display options change
         # (e.g. tool expand/collapse toggle) so the layout is consistent.
@@ -896,6 +955,8 @@ class TUI:
                 self._render_tool_result(ev[1], ev[2])
             elif ev[0] == "think":
                 self._render_think(ev[1])
+            elif ev[0] == "diff":
+                self._render_diff(ev[1])
 
     # ── event processing ──────────────────────────────────────────────────────
 
@@ -936,6 +997,9 @@ class TUI:
                 elif isinstance(ev, ThinkEvent):
                     self._add_think(ev.text)
                     changed = True
+                elif isinstance(ev, DiffEvent):
+                    self._add_diff(ev)
+                    changed = True
                 elif isinstance(ev, AskUserEvent):
                     self._add_chat("assistant", ev.question)
                     self._waiting_for_input = True
@@ -974,6 +1038,16 @@ class TUI:
 
     def _toggle_md(self):
         self._md_expanded = not self._md_expanded
+        self._rebuild_chat_buf()
+        self._redraw()
+
+    def _toggle_diff(self):
+        self._diff_expanded = not self._diff_expanded
+        self._rebuild_chat_buf()
+        self._redraw()
+
+    def _set_diff_style(self, style: str):
+        self._diff_style = style
         self._rebuild_chat_buf()
         self._redraw()
 
@@ -1247,6 +1321,14 @@ class TUI:
                     self._rebuild_chat_buf()
                     self._redraw()
                     return
+                if result.diff_output is not None:
+                    self._diff_expanded = result.diff_output
+                    self._rebuild_chat_buf()
+                    self._redraw()
+                    return
+                if result.diff_style is not None:
+                    self._set_diff_style(result.diff_style)
+                    return
                 if result.companion is not None:
                     if result.companion != self._companion_visible:
                         self._toggle_companion()
@@ -1487,6 +1569,11 @@ class TUI:
             # Shift+M toggles markdown rendering (chat focus only)
             if ch == ord('M') and self._focus == "chat":
                 self._toggle_md()
+                continue
+
+            # Shift+D toggles edit-diff rendering (chat focus only)
+            if ch == ord('D') and self._focus == "chat":
+                self._toggle_diff()
                 continue
 
             # Shift+Q toggles the momo companion bar (chat focus only)
