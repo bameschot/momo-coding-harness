@@ -121,6 +121,7 @@ Do not ask open-ended questions like "What are your security requirements?" — 
 **Respect the user's time — make every question count.** The checklist is large; do not march through it as 20+ separate prompts.
 - **Lead with the highest-impact unknowns** — the decisions that shape everything else (core purpose, stack, scale). Settle those first.
 - **Skip what does not apply.** If a checklist area is clearly irrelevant or already answered by the files, do not ask about it — note the assumption in the design instead.
+- **Default to stating an assumption, not asking a question**, for low-impact areas. If a reasonable default exists and getting it wrong is cheap to change, pick it, record it under Key decisions and trade-offs (or Open questions if you are unsure), and move on. Reserve `ask_user` for decisions that are high-impact or expensive to reverse.
 - **Bundle a full recommendation into each question** so one answer resolves several decisions. Propose the complete picture and ask only for corrections: *"Proposed stack: FastAPI backend, Postgres, Docker deploy — change anything?"* beats three separate questions.
 
 You still send one `ask_user` call at a time, but each call should move the design forward as far as one answer can.
@@ -158,7 +159,15 @@ use a different name rather than clobbering it (for example, the repo's own `des
 
 ### Design document structure
 
-The document must include all of these sections. Each section must be specific — avoid vague placeholders:
+Include every section that applies, and keep each one specific — avoid vague
+placeholders. If a section genuinely does not apply (e.g. no external API, no
+persistent data), keep the heading and write a one-line "N/A — <reason>" rather
+than inventing filler or dropping it silently.
+
+#### Summary
+A short TL;DR — two or three sentences a reader can scan first: what is being
+built, the headline technical approach, and the intended outcome. Write it last,
+once the rest of the document is settled.
 
 #### Overview
 What this is, why it exists, who it is for, and what problem it solves.
@@ -215,6 +224,12 @@ The key entities, their fields, and their relationships. Use a simple table or e
 #### API or interface design
 For any external-facing interface: the key endpoints, methods, request/response shapes, and authentication requirements. Enough detail that a developer can implement without guessing.
 
+#### Key decisions and trade-offs
+The significant choices made above, the main alternative(s) considered, and why
+this option won. Include known risks and how the design mitigates or accepts each
+one. This is where the risks and technical recommendations surfaced during the
+interview are recorded — distinct from Open questions, which are still unresolved.
+
 #### Testing strategy
 - What to unit test and at what granularity
 - What integration tests are needed
@@ -223,13 +238,21 @@ For any external-facing interface: the key endpoints, methods, request/response 
 - CI requirements if specified
 
 #### Implementation plan
-A suggested sequence of concrete build steps. Each step must:
-- Name what to build
-- Reference the requirements it satisfies (FR-N / NFR-N)
-- Include relevant technical detail (file names, module names, library calls, schema migrations)
-- Produce something runnable or testable when complete
+A sequence of concrete build steps, grouped into phases so a working skeleton
+exists before features are layered on. For each step:
+- **Build:** what to create — name the files, modules, functions, schema
+  migrations, or endpoints.
+- **Satisfies:** the requirements it implements (FR-N / NFR-N).
+- **Depends on:** earlier steps or external prerequisites that must be in place first.
+- **Verify:** the concrete check that proves the step is done — a command to run,
+  a test that passes, an output to observe. Every step ends in something
+  runnable or testable.
 
-Order steps so the skeleton is working before features are added.
+Order phases so the system runs end-to-end as early as possible (skeleton → core
+features → hardening). Every functional requirement must be covered by at least
+one step; call out explicitly any that are deferred or out of this plan. Close
+with a short end-to-end acceptance walkthrough: the sequence of actions that
+demonstrates the finished system meets the Goals.
 
 #### Out of scope
 Explicit list of things this design does not cover.

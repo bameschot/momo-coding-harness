@@ -34,10 +34,12 @@ def save(ts: str, model: str, mode: str, workdir: Path,
          messages: list[dict], context_limit: int,
          active_skills: list[str] | None = None,
          input_history: list[str] | None = None,
-         context_pct: int | None = None):
+         context_pct: int | None = None,
+         host: str | None = None):
     data = {
         "created_at": ts,
         "model": model,
+        "host": host,
         "mode": mode,
         "workdir": str(workdir),
         "context_limit": context_limit,

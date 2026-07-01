@@ -140,16 +140,12 @@ SHARED_TOOLS = [
 DESIGN_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS
 ALL_TOOLS    = READ_ONLY_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
 
-# Derived subsets for writer and data modes
+# Derived subset for writer mode
 _by_name = {t["function"]["name"]: t for t in CODING_ONLY_TOOLS}
 
 WRITER_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS + [
     _by_name["append_to_file"],
     _by_name["replace_all_in_file"],
-]
-
-DATA_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS + [
-    _by_name["run_command"],
 ]
 
 _shared_by_name = {t["function"]["name"]: t for t in SHARED_TOOLS}
@@ -503,7 +499,7 @@ def _run_command(command: str, timeout: int = 30, *, workdir: Path) -> str:
 # Required-argument map built from the tool schemas — used to generate clear
 # error messages before Python's TypeError exposes internal function names.
 _REQUIRED_ARGS: dict[str, list[str]] = {}
-for _tl in (READ_ONLY_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS, WRITER_TOOLS, DATA_TOOLS):
+for _tl in (READ_ONLY_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS, WRITER_TOOLS):
     for _t in _tl:
         _tname = _t["function"]["name"]
         _req   = _t["function"]["parameters"].get("required", [])

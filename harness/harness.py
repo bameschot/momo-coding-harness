@@ -12,7 +12,7 @@ from . import session as session_mod
 from .diff import build_diff_body
 from .logger import Logger
 from .ollama_client import OllamaClient
-from .tools import DESIGN_TOOLS, WRITER_TOOLS, DATA_TOOLS, ALL_TOOLS, CHAT_TOOLS, dispatch
+from .tools import DESIGN_TOOLS, WRITER_TOOLS, ALL_TOOLS, CHAT_TOOLS, dispatch
 
 # Tools that mutate a file on disk — the harness snapshots the target before and
 # after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
@@ -323,6 +323,7 @@ class StatusEvent:
     ctx_color: str  # "normal" | "yellow" | "red"
     tools_enabled: bool = True
     run_confirm: bool = False
+    host: str = ""
 
 @dataclass
 class ErrorEvent:
@@ -346,7 +347,7 @@ class DiffEvent:
     path: str                      # target path (for "move", the source path)
     added: int
     removed: int
-    body: list[tuple[str, str]]    # (kind, text) diff lines; empty for "move"
+    body: list[tuple[str, int | None, int | None, str]]  # (kind, old_no, new_no, text); empty for "move"
     dst: str | None = None         # destination path for "move"
     is_new: bool = False           # write_file created a new file
 
@@ -405,25 +406,10 @@ def _momo_prompt() -> str:
         "your curiosity takes over. Be warm, curious, and easily distracted."
     )
 
-def _data_prompt(workdir: str) -> str:
-    raw = _load_role("data")
-    if raw:
-        return raw.replace("{workdir}", workdir)
-    return (
-        "You are a data analyst. Help the user explore, transform, and summarise data files. "
-        "Inspect data structure first (read_file, grep_files) before processing. "
-        "Use run_command with Python, jq, awk, or similar tools to process data. "
-        "Write output to a new file rather than printing large results in chat. "
-        "Always report row counts, shapes, and any anomalies you find. "
-        "Never overwrite source data files. "
-        f"Working directory: {workdir}"
-    )
-
 _ROLE_LOADERS = {
     "design":  lambda wd: _design_prompt(),
     "coding":  lambda wd: _coding_prompt(wd),
     "writing": lambda wd: _writing_prompt(wd),
-    "data":    lambda wd: _data_prompt(wd),
     "chat":    lambda wd: _chat_prompt(),
     "momo":    lambda wd: _momo_prompt(),
 }
@@ -431,7 +417,6 @@ _ROLE_LOADERS = {
 _MODE_TOOLS = {
     "design":  DESIGN_TOOLS,
     "writing": WRITER_TOOLS,
-    "data":    DATA_TOOLS,
     "coding":  ALL_TOOLS,
     "chat":    CHAT_TOOLS,
     "momo":    ALL_TOOLS,
@@ -1049,6 +1034,7 @@ class Harness:
             ctx_color=self._ctx_color(pct),
             tools_enabled=self.tools_enabled,
             run_confirm=self.run_confirm,
+            host=self.client.host,
         ))
 
     def list_available_skills(self) -> list[str]:
@@ -1084,6 +1070,7 @@ class Harness:
             self.active_skills,
             self.input_history,
             context_pct=self.context_pct,
+            host=self.client.host,
         )
         session_mod.save_prefs(model=self.client.model)
 
@@ -1093,6 +1080,11 @@ class Harness:
         self.mode = data.get("mode", "design")
         self.workdir = Path(data.get("workdir", str(self.workdir)))
         self.context_pct = data.get("context_pct", None)
+        # Restore the host before set_model, since the context-length query below
+        # runs against it. Older sessions without a saved host keep the current one.
+        saved_host = data.get("host")
+        if saved_host:
+            self.client.set_host(saved_host)
         self.client.set_model(data.get("model", self.client.model))
         if self.context_pct is not None:
             self._sync_context_limit(emit=False)

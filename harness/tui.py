@@ -53,7 +53,7 @@ _COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
 _KEY_SHIFT_ENTER  = 601  # custom curses keycode bound to Shift+Enter escape sequences
 _KEY_CTRL_LEFT    = 602  # Ctrl+Left  — word jump left
 _KEY_CTRL_RIGHT   = 603  # Ctrl+Right — word jump right
-_MODE_CYCLE = ["design", "chat", "writing", "data", "coding", "momo"]
+_MODE_CYCLE = ["design", "chat", "writing", "coding", "momo"]
 
 
 def _init_colors():
@@ -222,40 +222,6 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< purrr...", "< conciseness?",
         "< cadence...", "< mew mew mew",
         "< context?",
-    ],
-    ("data",    False): [
-        "< mew~", "< nice data!", "< correlation!",
-        "< null values?", "< plot it!",
-        "< outliers!", "< normalize!", "< p < 0.05!",
-        "< histogram!", "< clean data?",
-        "< pivot table!",
-        "< feature select", "< sample size?",
-        "< variance!", "< regression?",
-        "< purrr", "< cluster it!",
-        "< heatmap!", "< time series?",
-        "< log scale!", "< mew~",
-        "< model fit?", "< bias check!",
-        "< data split!", "< cross validate",
-        "< confusion mat?", "< roc curve!",
-        "< distribution?", "< mew mew",
-        "< purrr~",
-    ],
-    ("data",    True): [
-        "< calculating", "< mew?", "< running...",
-        "< loading data", "< 42!",
-        "< aggregating...", "< joining...",
-        "< query running!", "< indexing...",
-        "< sampling...",
-        "< crunching...", "< converging?",
-        "< epochs left...", "< gradient...",
-        "< batch size?", "< loss dropping?",
-        "< fitting...", "< matrix math!",
-        "< overfit?", "< checkpoint!",
-        "< mew...", "< epoch 1/100...",
-        "< loss plateau?", "< purrr...",
-        "< hyper tuning!", "< val acc drop?",
-        "< early stop?", "< data shuffle!",
-        "< normalizing...", "< gpu warming...",
     ],
     ("chat",    False): [
         "< tell me more!", "< interesting!", "< got it!",
@@ -429,6 +395,17 @@ class _LineBuffer:
 
 # ── layout ────────────────────────────────────────────────────────────────────
 
+def _shorten_path_left(path: str, budget: int) -> str:
+    """Shorten a path to at most `budget` chars, trimming from the front with a
+    leading '…' so the tail (the most specific part) stays visible.  Returns ''
+    when there is no room."""
+    if budget <= 1:
+        return ""
+    if len(path) <= budget:
+        return path
+    return "…" + path[-(budget - 1):]
+
+
 _INPUT_H  = 5  # fixed height of the multi-line input area
 _STATUS_H = 3  # top border + text + bottom border
 
@@ -472,7 +449,13 @@ class TUI:
         self._history_idx: int = -1     # -1 = not browsing
         self._history_stash: str = ""   # saves live input while browsing
         self._focus: str = "input"      # "input" | "chat"
-        self._status    = f"MODE: {harness.mode} | MODEL: {harness.client.model} | CTX: 0% | DIR: {harness.workdir}"
+        # Status bar components — assembled (with DIR shortening) in _draw_status.
+        self._st_mode  = harness.mode
+        self._st_model = harness.client.model
+        self._st_host  = harness.client.host
+        self._st_ctx   = 0
+        self._st_dir   = str(harness.workdir)
+        self._st_extra = ""             # trailing " | TOOLS: off" / " | RUN: confirm"
         self._ctx_color = _C_STATUS
         self._busy      = False
         self._too_small = False   # set when the terminal is too small to host the layout
@@ -618,15 +601,20 @@ class TUI:
         top_color    = _C_FOCUS if self._focus == "chat"  else _C_BORDER
         bottom_color = _C_FOCUS if self._focus == "input" else _C_BORDER
         if self._busy and self._waiting_for_input:
-            line = f" ? waiting for input  {self._status}"
+            prefix = " ? waiting for input  "
             line_attr = curses.color_pair(_C_WARN)
         elif self._busy:
             spinner = _SPINNER[self._spinner_frame % len(_SPINNER)]
-            line = f" {spinner} thinking  {self._status}"
+            prefix = f" {spinner} thinking  "
             line_attr = curses.color_pair(_C_BUSY)
         else:
-            line = f" {self._status}"
+            prefix = " "
             line_attr = curses.color_pair(self._ctx_color)
+        # Compose the status text into the space left after the prefix, shortening
+        # the working directory from the front so its tail (the important part)
+        # stays visible instead of being clipped off the right edge.
+        avail = max(0, cols - 1 - len(prefix))
+        line = prefix + self._compose_status(avail)
         line = line[:cols - 1].ljust(cols - 1)
 
         # When called from a spinner tick, only the middle text row (row 1)
@@ -658,6 +646,13 @@ class TUI:
         except curses.error:
             pass
         win.noutrefresh()
+
+    def _compose_status(self, avail: int) -> str:
+        """Build the status text, shortening DIR from the front to fit `avail` cols."""
+        head = (f"MODE: {self._st_mode} | MODEL: {self._st_model} | "
+                f"HOST: {self._st_host} | CTX: {self._st_ctx}% | DIR: ")
+        budget = avail - len(head) - len(self._st_extra)
+        return head + _shorten_path_left(self._st_dir, budget) + self._st_extra
 
     def _build_screen_state(self) -> tuple[list[str], list[int], int, int]:
         """Return (screen_lines, line_starts_raw, cursor_screen_line, cursor_screen_col).
@@ -908,7 +903,6 @@ class TUI:
     def _render_diff(self, ev: DiffEvent):
         if not self._diff_expanded:
             return
-        cols = max(20, self._layout["cols"] - 2)
 
         # Header line(s) — presentation differs by style; the body is identical.
         if ev.op == "move":
@@ -934,9 +928,17 @@ class TUI:
             self._chat_buf.append(f"± {ev.path}  {note}", _C_DIFF_META, curses.A_BOLD)
 
         body = ev.body[:self._DIFF_MAX_LINES]
-        for kind, text in body:
+        # Two-column line-number gutter (old | new), width-matched to the largest
+        # number in this diff. Removed lines show only old_no, added lines only
+        # new_no, context both, hunk headers neither.
+        num_w = max((len(str(n)) for _, o, nw, _ in body
+                     for n in (o, nw) if n is not None), default=1)
+        def _fmt(n: int | None) -> str:
+            return str(n).rjust(num_w) if n is not None else " " * num_w
+        for kind, old_no, new_no, text in body:
             attr = curses.A_BOLD if kind == "hunk" else 0
-            self._chat_buf.append(text[:cols], self._DIFF_KIND_COLOR.get(kind, _C_TOOL_RES), attr)
+            gutter = f"{_fmt(old_no)} {_fmt(new_no)} │ "
+            self._chat_buf.append(gutter + text, self._DIFF_KIND_COLOR.get(kind, _C_TOOL_RES), attr)
         if len(ev.body) > self._DIFF_MAX_LINES:
             self._chat_buf.append(f"  ... ({len(ev.body) - self._DIFF_MAX_LINES} more diff lines)",
                                   _C_TOOL_RES)
@@ -989,10 +991,12 @@ class TUI:
                     self._ctx_color = ctx_map.get(ev.ctx_color, _C_STATUS)
                     tools_str = "" if ev.tools_enabled else " | TOOLS: off"
                     run_str = " | RUN: confirm" if ev.run_confirm else ""
-                    self._status = (
-                        f"MODE: {ev.mode} | MODEL: {ev.model} | "
-                        f"CTX: {ev.ctx_pct}% | DIR: {ev.workdir}{tools_str}{run_str}"
-                    )
+                    self._st_mode  = ev.mode
+                    self._st_model = ev.model
+                    self._st_host  = ev.host
+                    self._st_ctx   = ev.ctx_pct
+                    self._st_dir   = ev.workdir
+                    self._st_extra = f"{tools_str}{run_str}"
                     changed = True
                 elif isinstance(ev, ThinkEvent):
                     self._add_think(ev.text)

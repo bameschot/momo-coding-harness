@@ -86,10 +86,6 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.set_mode("writing")
         return CommandResult(handled=True, output="Switched to writing mode")
 
-    if cmd == "/data":
-        harness.set_mode("data")
-        return CommandResult(handled=True, output="Switched to data mode")
-
     if cmd == "/chat":
         harness.set_mode("chat")
         return CommandResult(handled=True, output="Switched to chat mode")
@@ -105,7 +101,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness._emit_status()
         return CommandResult(handled=True, output="Conversation cleared")
 
-    if cmd == "/workdir":
+    if cmd in ("/workspace", "/workdir"):  # /workdir kept as a backward-compatible alias
         if not arg:
             return CommandResult(handled=True, output=f"Working directory: {harness.workdir}")
         p = Path(arg).expanduser().resolve()
@@ -431,12 +427,11 @@ Available commands:
   /code               Switch to coding mode (full tools)
   /design             Switch to design mode (read-only tools)
   /write              Switch to writing mode (document editing tools)
-  /data               Switch to data analysis mode (run_command + read tools)
   /chat               Switch to chat mode (read files, ask questions)
   /momo               Switch to momo companion mode (talk to the cat)
   /clear              Clear conversation history
-  /workdir            Show current working directory
-  /workdir <path>     Set working directory for file operations
+  /workspace          Show current working directory (alias: /workdir)
+  /workspace <path>   Set working directory for file operations
   /tool-output on|off   Show or hide the tool calls pane
   /think-output on|off  Show or hide model thinking/reasoning output  (Shift+T)
   /markdown on|off      Enable or disable markdown rendering  (Shift+M)

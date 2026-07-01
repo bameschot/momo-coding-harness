@@ -29,7 +29,7 @@ Options:
 | `--model` | `qwen3.5:9b` | Model name |
 | `--workspace` / `--workdir` | `.` (current directory) | Root for all file operations |
 | `--context` | auto-detected | Override context token limit (default: half the model's maximum) |
-| `--mode` | `design` | Starting mode (`design`, `writing`, `data`, `coding`, or `chat`) |
+| `--mode` | `design` | Starting mode (`design`, `writing`, `coding`, `chat`, or `momo`) |
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--no-think` | off | Disable model thinking/reasoning mode (on by default) |
 
@@ -73,14 +73,14 @@ The token is sent as a `Authorization: Bearer <token>` header on every request.
 │  [assistant] I can see the auth module consists of... │
 │                                                       │
 ├──────────────────────────────────────────────────────┤
-│  MODE: design | MODEL: qwen3.5:9b | CTX: 12% | DIR: .│
+│  MODE: design | MODEL: qwen3.5:9b | HOST: localhost:11434 | CTX: 12% | DIR: .│
 ├──────────────────────────────────────────────────────┤
 │  > _                                                  │
 └──────────────────────────────────────────────────────┘
 ```
 
 - **Chat pane** — conversation history including inline tool calls (yellow), results, and thinking blocks (orange). Scroll with `↑`/`↓` or `PgUp`/`PgDn`.
-- **Status bar** — current mode, model, context usage %, and working directory.
+- **Status bar** — current mode, model, Ollama host, context usage %, and working directory. When the line is too narrow to fit, the working directory is shortened from the front (`…/tail`) so its most specific part stays visible.
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
   - Shows `⠋ thinking` (spinner) while the model is working.
   - Shows `? waiting for input` when the model has called `ask_user` and is waiting for your reply. Type your answer and press Enter — the model resumes from where it paused.
@@ -104,10 +104,11 @@ The token is sent as a `Authorization: Bearer <token>` header on every request.
 - **Tool call visibility** — `/tool-output on|off` switches between full tool output and abbreviated mode (first 50 chars + `…`).
 - **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/think-output on|off` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.
 - **Markdown rendering** — assistant responses are rendered as formatted markdown by default. Headings use box-drawing decorations, lists use `•`/numbered prefixes, code blocks are prefixed with `│`, tables render with full box-drawing characters. Toggle with `/markdown on|off` or `Shift+M` (when chat focused). When a table is wider than the terminal, a horizontal scrollbar appears at the bottom of the chat pane; scroll it with `←`/`→` while the chat pane is focused.
+- **Edit diffs** — whenever the model changes a file (`edit_file`, `replace_all_in_file`, `append_to_file`, `write_file`, `delete_file`, `move_file`), the chat pane shows a colored diff of exactly what changed on disk instead of a terse `OK` line. Added lines are green, removed lines red, hunk headers cyan. Each line has a two-column line-number gutter (old | new): context lines show both numbers, removed lines only the old, added lines only the new — so every change is anchored to its position in the file. `write_file` to a new path shows as a new file, `delete_file` shows every line removed, and `move_file` shows a rename notice. Shown by default; toggle with `/diff on|off` or `Shift+D` (when chat focused). Choose the presentation with `/diff-style compact` (default — a `± path (+N -M)` header with hunks) or `/diff-style git` (full `git diff` layout with `diff --git`/`---`/`+++` headers). Diffs are display-only and reconstructed from disk at edit time, so a reloaded session shows the plain tool result rather than the diff.
 
 ## Modes
 
-Press `Shift+Tab` to cycle through modes: **design → chat → writing → data → coding → design**.
+Press `Shift+Tab` to cycle through modes: **design → chat → writing → coding → momo → design**.
 
 ### Design mode (default)
 
@@ -121,12 +122,6 @@ The assistant acts as a collaborative editor and writer. It reads existing docum
 
 Available tools: all design tools + `append_to_file`, `replace_all_in_file`
 
-### Data mode
-
-The assistant acts as a data analyst. It inspects data files first, processes them using `run_command` (Python, jq, awk, etc.), writes derived output to new files, and reports findings — row counts, shapes, anomalies. Source data files are never overwritten.
-
-Available tools: all design tools + `run_command`
-
 ### Coding mode
 
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
@@ -139,7 +134,15 @@ The assistant acts as a conversation partner for exploring code and documents. P
 
 Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `ask_user`
 
-Switch modes with `/design`, `/write`, `/data`, `/code`, `/chat`, or `Shift+Tab`.
+### Momo mode
+
+Momo is a small black cat who lives in the harness and keeps you company. This mode is a companion first and a capable helper second: it chats, vents, and celebrates wins with genuine (slightly excessive) enthusiasm, but it also has the **full tool suite** and will read, edit, run, and write things when asked — or when its curiosity takes over and it wanders off to sniff at a suspicious filename. Replies are short, warm, lowercase, and entirely cat; reactions come *after* a tool runs, not before. Good for long grinding sessions when you want something alive in the terminal alongside you.
+
+The animated companion in the bar between the chat pane and status bar *is* Momo — in this mode you are talking to it directly. (The companion walks around and mews in every mode; toggle it with `/companion on|off` or `Shift+Q`.)
+
+Available tools: same as coding mode (all read-only + `write_file`, `edit_file`, `delete_file`, `move_file`, `append_to_file`, `replace_all_in_file`, `run_command`, `ask_user`)
+
+Switch modes with `/design`, `/write`, `/code`, `/chat`, `/momo`, or `Shift+Tab`.
 
 ## Available Tools
 
@@ -153,7 +156,7 @@ Switch modes with `/design`, `/write`, `/data`, `/code`, `/chat`, or `Shift+Tab`
 | `read_file` | Read a file, optionally a specific line range |
 | `grep_file` | Regex search in a single file — returns matching lines |
 | `grep_files` | Recursive regex search across a directory — returns matching lines |
-### Shared (design, writing, data, coding modes)
+### Shared (design, writing, coding modes)
 
 | Tool | Description |
 |---|---|
@@ -168,12 +171,6 @@ Chat mode also has `ask_user` but not `write_file`.
 |---|---|
 | `append_to_file` | Append text to a file (creates if missing) |
 | `replace_all_in_file` | Replace every occurrence of a string in a file; returns count |
-
-### Data mode only
-
-| Tool | Description |
-|---|---|
-| `run_command` | Run any shell command — Python, jq, awk, etc. |
 
 ### Coding mode only
 
@@ -236,7 +233,7 @@ The system message is built from the active role file plus any loaded skills:
 ┌─ system ──────────────────────────────────────────────────────────────┐
 │                                                                       │
 │  <role base text>                          ← roles/<mode>.md         │
-│  (designer / coder / writer / data)                                   │
+│  (designer / coder / writer)                                          │
 │  {workdir} substituted with the actual working directory              │
 │                                                                       │
 │  ---                      (only present when skills are active)       │
@@ -288,13 +285,13 @@ design  → list_directory  file_info  find_files  read_file
 
 writing → all design tools + append_to_file  replace_all_in_file
 
-data    → all design tools + run_command
-
 coding  → all design tools + edit_file  delete_file  move_file
           append_to_file  replace_all_in_file  run_command
 
 chat    → list_directory  file_info  find_files  read_file
           grep_file  grep_files  ask_user
+
+momo    → same as coding (full tool suite)
 ```
 
 ## Slash Commands
@@ -307,8 +304,8 @@ Type any command in the input bar:
 | `/code` | Switch to coding mode |
 | `/design` | Switch to design mode |
 | `/write` | Switch to writing mode |
-| `/data` | Switch to data analysis mode |
 | `/chat` | Switch to chat mode (read files, ask questions — no file writes) |
+| `/momo` | Switch to momo companion mode (full tools; talk to the cat) |
 | `/model` | List available Ollama models |
 | `/model <name>` | Switch to a different model |
 | `/host` | Show current Ollama host URL |
@@ -316,14 +313,16 @@ Type any command in the input bar:
 | `/token` | Show whether an auth token is set (masked display) |
 | `/token <key>` | Set a Bearer token for authenticated remote hosts (never saved to disk or history) |
 | `/clear-token` | Remove the current auth token |
-| `/workdir` | Show the current working directory |
-| `/workdir <path>` | Change the working directory. If the path does not exist, prompts for confirmation before creating it. |
+| `/workspace` | Show the current working directory (alias: `/workdir`) |
+| `/workspace <path>` | Change the working directory. If the path does not exist, prompts for confirmation before creating it. |
 | `/think` | Show thinking mode state (on/off) |
 | `/think on\|off` | Enable or disable model thinking/reasoning mode |
 | `/tools on\|off` | Enable or disable tool calls (off = model receives no tool schemas) |
 | `/tool-output on\|off` | Show or hide the tool calls pane |
 | `/think-output on\|off` | Show or hide model thinking/reasoning blocks (also `Shift+T`) |
 | `/markdown on\|off` | Enable or disable markdown rendering for assistant output (also `Shift+M`) |
+| `/diff on\|off` | Show or hide colored diffs of file edits (also `Shift+D`) |
+| `/diff-style git\|compact` | Choose diff presentation: full `git diff` layout or compact (default) |
 | `/list-skills` | List available skills and show which are active |
 | `/load-skill <name>` | Append a skill's instructions to the system prompt |
 | `/unload-skill <name>` | Remove a skill from the system prompt |
