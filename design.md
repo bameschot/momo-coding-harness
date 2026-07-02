@@ -109,6 +109,14 @@ Small models frequently confuse the file-writing tools — calling `write_file` 
 
 The `edit_file` tool absorbed the former `replace_all_in_file`: it changes one occurrence by default and every occurrence when `replace_all=true`.
 
+### Resilient edit matching (`_edit_file`)
+
+Small models frequently fail an exact `old_string` match — usually by copying `read_file`'s `  12: ` line-number prefix or by getting the leading whitespace wrong. When the exact substring match fails, `edit_file` tries, in order:
+
+1. **Prefix strip** — remove the `^\s*\d+:\s` read_file line-number prefix from `old_string`/`new_string` and retry the exact match.
+2. **Whitespace-tolerant unique match** (single-edit path only) — match the block line-by-line ignoring each line's leading/trailing whitespace; only acts when exactly one block matches, and transfers the file's real per-line indentation to the replacement (requires a 1:1 line edit so indentation transfer is unambiguous). Never edits an ambiguous or non-unique match.
+3. **Closest-match hint** — if all matching fails, the "not found" error appends the file lines most similar to `old_string` (via `difflib`) so the model can copy the exact text on its next attempt.
+
 ### File-edit diffs
 
 When a mutating tool (`edit_file`, `append_to_file`, `write_file`, `delete_file`, `move_file`) succeeds, the harness emits a `DiffEvent` instead of the terse `ToolResultEvent`: it snapshots the target file before and after the call and builds a unified diff (`diff.py`). The TUI renders it with a two-column old/new line-number gutter, colored additions/deletions, in compact or git style. On error or a no-op the plain `ToolResultEvent` is emitted instead.

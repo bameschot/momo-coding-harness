@@ -1,7 +1,9 @@
+import difflib
 import os
 import re
 import shlex
 import subprocess
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
@@ -408,6 +410,76 @@ def _append_to_file(path: str, content: str, *, workdir: Path) -> str:
     return "OK"
 
 
+# Leading "  12: " line-number prefix as emitted by read_file — models often copy
+# it into old_string even though it is not part of the file.
+_LINENO_PREFIX = re.compile(r'^\s*\d+:\s')
+
+
+def _strip_lineno_prefixes(s: str) -> str:
+    return "\n".join(_LINENO_PREFIX.sub("", ln, count=1) for ln in s.split("\n"))
+
+
+def _leading_ws(line: str) -> str:
+    return line[:len(line) - len(line.lstrip())]
+
+
+def _tolerant_replace(content: str, old_string: str, new_string: str) -> str | None:
+    """Whitespace-tolerant block replacement. Matches old_string against the file
+    line-by-line ignoring each line's leading/trailing whitespace, and only acts when
+    exactly one block matches (so it can never edit the wrong location).
+
+    Requires a 1:1 line edit (new_string has the same number of lines as old_string)
+    so each new line inherits the matched file line's actual leading whitespace — this
+    fixes the common case where the model reproduced the code but with wrong or missing
+    indentation. Returns the new file content, or None if there is no safe unique match."""
+    file_lines = content.splitlines(keepends=True)
+    old_lines = old_string.strip("\n").split("\n")
+    new_lines = new_string.strip("\n").split("\n")
+    k = len(old_lines)
+    if k == 0 or k > len(file_lines) or len(new_lines) != k:
+        return None
+    old_sig = [ln.strip() for ln in old_lines]
+    matches = [
+        i for i in range(len(file_lines) - k + 1)
+        if [file_lines[i + j].strip() for j in range(k)] == old_sig
+    ]
+    if len(matches) != 1:
+        return None
+    i0 = matches[0]
+    rebuilt = []
+    for j in range(k):
+        raw = file_lines[i0 + j]
+        nl = raw[len(raw.rstrip("\r\n")):]        # preserve the original line ending
+        indent = _leading_ws(raw)                 # transfer the file's real indentation
+        code = new_lines[j].strip()
+        rebuilt.append(indent + code + nl if code else nl)
+    return "".join(file_lines[:i0]) + "".join(rebuilt) + "".join(file_lines[i0 + k:])
+
+
+def _closest_lines_hint(content: str, old_string: str) -> str:
+    """Find the file lines most similar to old_string and return them verbatim so
+    the model can copy the exact text on its next attempt. Returns '' if nothing is
+    close enough."""
+    file_lines = content.splitlines()
+    old_nonblank = [ln for ln in old_string.split("\n") if ln.strip()]
+    if not old_nonblank or not file_lines:
+        return ""
+    # Match on the most distinctive (longest) line of old_string.
+    query = max(old_nonblank, key=lambda ln: len(ln.strip())).strip()
+    scored = sorted(
+        ((difflib.SequenceMatcher(None, query, ln.strip()).ratio(), ln) for ln in file_lines),
+        key=lambda x: x[0], reverse=True,
+    )
+    best = [ln[:200] for ratio, ln in scored[:3] if ratio >= 0.6]
+    if not best:
+        return ""
+    return (
+        " The closest lines in the file are below — copy old_string exactly from these, "
+        "including leading whitespace and WITHOUT the read_file line-number prefix:\n"
+        + "\n".join(best)
+    )
+
+
 def _edit_file(path: str, old_string: str, new_string: str,
                replace_all: bool = False, *, workdir: Path) -> str:
     p = _safe_path(path, workdir)
@@ -419,17 +491,36 @@ def _edit_file(path: str, old_string: str, new_string: str,
         return f"ERROR: file not found: {path}"
     except OSError as e:
         return f"ERROR: {e}"
-    count = content.count(old_string)
+
+    old, new = old_string, new_string
+    count = content.count(old)
+    # Fix 1: models often copy read_file's "  12: " line-number prefix into
+    # old_string. If the exact match fails, strip the prefix and retry.
     if count == 0:
-        return "ERROR: old_string not found in file"
+        s_old, s_new = _strip_lineno_prefixes(old), _strip_lineno_prefixes(new)
+        if s_old != old and content.count(s_old) > 0:
+            old, new, count = s_old, s_new, content.count(s_old)
+
+    if count == 0:
+        # Fix 2: whitespace-tolerant unique block match (single-edit path only).
+        # Try the raw strings first, then the prefix-stripped variants.
+        if not replace_all:
+            for o, n in ((old_string, new_string),
+                         (_strip_lineno_prefixes(old_string), _strip_lineno_prefixes(new_string))):
+                nc = _tolerant_replace(content, o, n)
+                if nc is not None:
+                    p.write_text(nc, encoding="utf-8")
+                    return "OK (whitespace-tolerant match)"
+        return "ERROR: old_string not found in file." + _closest_lines_hint(content, old_string)
+
     if replace_all:
-        p.write_text(content.replace(old_string, new_string), encoding="utf-8")
+        p.write_text(content.replace(old, new), encoding="utf-8")
         return f"Replaced {count} occurrence(s)"
     # Default: require exactly one match so the model can't accidentally replace
     # the wrong occurrence when the same string appears multiple times.
     if count > 1:
         return f"ERROR: old_string found {count} times; must match exactly once (set replace_all=true to replace all)"
-    p.write_text(content.replace(old_string, new_string, 1), encoding="utf-8")
+    p.write_text(content.replace(old, new, 1), encoding="utf-8")
     return "OK"
 
 
