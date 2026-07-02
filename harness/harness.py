@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import queue
 import re
@@ -47,6 +48,44 @@ _RX_MISTRAL   = re.compile(r'\[TOOL_CALL\]\s*(\[.*?\])',                       r
 _RX_COMMAND_R = re.compile(r'Action:\s*(\S+)\s*\nAction\s+Input:\s*(\{.*?\})', re.DOTALL)
 
 _JSON_DECODER = json.JSONDecoder()
+
+
+def _match_paren(s: str, i: int) -> int:
+    """Given s[i] == '(', return the index of the matching ')', skipping over
+    Python string literals (so parens/commas inside quotes are not counted).
+    Returns -1 if unbalanced.  Used to carve a `name(...)` call out of free text."""
+    depth = 0
+    n = len(s)
+    quote: str | None = None
+    triple = False
+    escaped = False
+    while i < n:
+        ch = s[i]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif triple:
+                if s[i:i + 3] == quote * 3:
+                    i += 2
+                    quote = None
+            elif ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            if s[i:i + 3] == ch * 3:
+                quote, triple = ch, True
+                i += 2
+            else:
+                quote, triple = ch, False
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
 
 
 def _strip_text_tool_calls(text: str) -> str:
@@ -179,6 +218,59 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
             if "content" in obj:
                 args = {k: v for k, v in obj.items() if k in ("path", "content")}
                 _append({"name": "write_file", "arguments": args})
+
+    # Python-call syntax: some models (notably gemma) emit tool calls as
+    # name(key='value', ...) — Python source, not JSON — sometimes wrapped in a
+    # print(...) call.  Anchor on each known tool name, carve out the balanced
+    # call with _match_paren, and parse it with `ast` so quoting/escaping in the
+    # argument values is handled correctly.
+    if not results:
+        # Declared parameter order per tool, so positional args like
+        # edit_file("app.py", "foo", "bar") can be mapped to their names.
+        param_order = {
+            t["function"]["name"]: list(t["function"]["parameters"].get("properties", {}).keys())
+            for t in tools
+        }
+        _call_pat = re.compile(
+            r'\b(' + '|'.join(re.escape(n) for n in sorted(known, key=len, reverse=True)) + r')\s*\('
+        )
+        for m in _call_pat.finditer(text):
+            fn = m.group(1)
+            open_idx = m.end() - 1            # position of the '(' the regex consumed
+            close_idx = _match_paren(text, open_idx)
+            if close_idx < 0:
+                continue
+            expr = fn + text[open_idx:close_idx + 1]
+            try:
+                node = ast.parse(expr, mode="eval").body
+            except SyntaxError:
+                continue
+            if (not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name)
+                    or node.func.id != fn):
+                continue
+            call_args: dict = {}
+            # Positional args → parameter names in declared order.
+            names = param_order.get(fn, [])
+            for i, an in enumerate(node.args):
+                if i < len(names):
+                    try:
+                        call_args[names[i]] = ast.literal_eval(an)
+                    except Exception:
+                        pass
+            # Keyword args (override/extend positionals).
+            for kw in node.keywords:
+                if kw.arg is None:
+                    continue
+                try:
+                    call_args[kw.arg] = ast.literal_eval(kw.value)
+                except Exception:
+                    pass  # non-literal value (f-string, expression) — skip that arg
+            # Require at least one resolved arg so a bare mention like read_file(x)
+            # in prose does not become an empty, argument-less call.
+            if call_args:
+                hit = _accept_args(fn, call_args)
+                if hit:
+                    _append(hit)
 
     if results:
         return results
