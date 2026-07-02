@@ -510,7 +510,15 @@ def _edit_file(path: str, old_string: str, new_string: str,
                 nc = _tolerant_replace(content, o, n)
                 if nc is not None:
                     p.write_text(nc, encoding="utf-8")
-                    return "OK (whitespace-tolerant match)"
+                    return "OK — 1 change applied (matched with whitespace tolerance)"
+        # Already-applied detection: if old_string is gone but a substantial
+        # new_string is already present, the edit was very likely made on an
+        # earlier turn. Report that as a non-error so the model stops re-trying
+        # the same change (a common cause of repeated "not found" errors).
+        for cand in (new_string, _strip_lineno_prefixes(new_string)):
+            if cand and cand != old_string and len("".join(cand.split())) >= 6 and cand in content:
+                return ("No change needed: the file already contains new_string — "
+                        "this edit appears to have been applied already.")
         return "ERROR: old_string not found in file." + _closest_lines_hint(content, old_string)
 
     if replace_all:
@@ -521,7 +529,7 @@ def _edit_file(path: str, old_string: str, new_string: str,
     if count > 1:
         return f"ERROR: old_string found {count} times; must match exactly once (set replace_all=true to replace all)"
     p.write_text(content.replace(old, new, 1), encoding="utf-8")
-    return "OK"
+    return "OK — 1 change applied"
 
 
 def _write_file(path: str, content: str, *, workdir: Path) -> str:

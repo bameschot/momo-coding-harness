@@ -116,6 +116,7 @@ Small models frequently fail an exact `old_string` match — usually by copying 
 1. **Prefix strip** — remove the `^\s*\d+:\s` read_file line-number prefix from `old_string`/`new_string` and retry the exact match.
 2. **Whitespace-tolerant unique match** (single-edit path only) — match the block line-by-line ignoring each line's leading/trailing whitespace; only acts when exactly one block matches, and transfers the file's real per-line indentation to the replacement (requires a 1:1 line edit so indentation transfer is unambiguous). Never edits an ambiguous or non-unique match.
 3. **Closest-match hint** — if all matching fails, the "not found" error appends the file lines most similar to `old_string` (via `difflib`) so the model can copy the exact text on its next attempt.
+4. **Already-applied detection** — if `old_string` is gone but a substantial `new_string` is already present, the edit was very likely made on an earlier turn; `edit_file` returns a non-error "No change needed" message so the model stops re-issuing the same edit (a common source of repeated "not found" errors when small models loop). Successful edits also return `"OK — 1 change applied"` rather than a bare `OK`, which further discourages redundant retries.
 
 ### File-edit diffs
 
