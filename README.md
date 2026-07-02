@@ -180,7 +180,7 @@ Chat mode also has `ask_user` but not `write_file`.
 | `append_to_file` | Append text to a file (creates if missing) |
 | `edit_file` | Change text inside a file: replace `old_string` with `new_string`. One occurrence by default (errors if it matches zero or multiple times); pass `replace_all: true` to replace every occurrence. |
 | `delete_file` | Delete a file |
-| `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 30 seconds by default. |
+| `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 15 minutes (900s) by default; the model may request a shorter timeout, and 900s is the hard cap. |
 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
 

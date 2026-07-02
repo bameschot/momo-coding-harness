@@ -87,7 +87,7 @@ These extend the three-phase Workflow above — they do not repeat it.
 | `append_to_file(path, content)` | Add text to the END of a file (creates if absent) | Only `path`+`content` |
 | `move_file(src, dst)` | Move or rename a file | — |
 | `delete_file(path)` | Delete a file | — |
-| `run_command(command, timeout?)` | Run a shell command | default timeout 30s |
+| `run_command(command, timeout?)` | Run a shell command | default & max timeout 900s (15 min) |
 | `ask_user(question)` | Pause and ask the user a clarifying question | Only when code cannot answer it |
 
 ### Choosing between write_file and edit_file
@@ -253,7 +253,7 @@ Example: `<tool_call>{"name": "move_file", "arguments": {"src": "old/path.ext", 
 | Parameter | Type | Required | Notes |
 |-----------|------|----------|-------|
 | `command` | string | yes | shell command to execute |
-| `timeout` | integer | no | timeout in seconds (default: 30) |
+| `timeout` | integer | no | timeout in seconds (default and maximum: 900 = 15 minutes) |
 
 Example: `<tool_call>{"name": "run_command", "arguments": {"command": "./run-tests.sh"}}</tool_call>`
 

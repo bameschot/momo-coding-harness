@@ -381,7 +381,7 @@ Example: `<tool_call>{"name": "move_file", "arguments": {"src": "old/path.py", "
 | Parameter | Type | Required | Notes |
 |-----------|------|----------|-------|
 | `command` | string | yes | shell command to execute |
-| `timeout` | integer | no | timeout in seconds (default: 30) |
+| `timeout` | integer | no | timeout in seconds (default and maximum: 900 = 15 minutes) |
 
 Example: `<tool_call>{"name": "run_command", "arguments": {"command": "python3 main.py"}}</tool_call>`
 

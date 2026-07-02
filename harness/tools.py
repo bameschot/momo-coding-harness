@@ -109,7 +109,7 @@ CODING_ONLY_TOOLS = [
         "Use for running scripts, tests, build tools, etc. The command runs with the "
         "working directory as its current directory.",
         {"command": {"type": "string", "description": "Shell command to execute (runs in the working directory)"},
-         "timeout": {"type": "integer", "description": "Timeout in seconds (default: 30)"}},
+         "timeout": {"type": "integer", "description": "Timeout in seconds (default and maximum: 900 = 15 minutes)"}},
         ["command"]),
 ]
 
@@ -560,7 +560,18 @@ def _delete_file(path: str, *, workdir: Path) -> str:
 
 
 
-def _run_command(command: str, timeout: int = 30, *, workdir: Path) -> str:
+_MAX_COMMAND_TIMEOUT = 900  # 15 minutes — upper bound for a single run_command
+
+
+def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: Path) -> str:
+    # Clamp to the 15-minute ceiling; fall back to the ceiling for missing/invalid
+    # values so a hung command can never block the worker thread indefinitely.
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError):
+        timeout = _MAX_COMMAND_TIMEOUT
+    if timeout <= 0 or timeout > _MAX_COMMAND_TIMEOUT:
+        timeout = _MAX_COMMAND_TIMEOUT
     try:
         r = subprocess.run(
             command, shell=True, cwd=workdir,
