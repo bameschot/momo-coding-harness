@@ -63,7 +63,7 @@ Tool results are appended as `{"role": "tool", ...}` messages. Thinking content 
 ### Iteration limits
 
 - Design mode: 40 iterations maximum.
-- All other modes (writing, data, coding, chat): 100 iterations maximum.
+- All other modes (writing, coding, chat, momo): 100 iterations maximum.
 
 On hitting the limit an `ErrorEvent` is emitted and the loop exits.
 
@@ -87,12 +87,31 @@ Thinking is disabled for one turn after: (a) the context window was cut off (`do
 
 ### Text tool-call recovery
 
-Some models emit tool calls as plain text rather than using the API's structured tool-call field. The harness applies a two-pass fallback before giving up:
+Some models emit tool calls as plain text rather than using the API's structured tool-call field. `_extract_text_tool_calls` applies successive fallbacks before giving up (each later tier only runs when the earlier ones found nothing):
 
 1. **Tagged / structured formats**: Recognises model-specific wrappers — Qwen3/Hermes `<tool_call>`, Functionary `<functioncall>` / `<function_call>`, Phi `<|tool_call|>`, DeepSeek `<｜tool▁call▁begin｜>`, Mistral `[TOOL_CALLS]` array, Command-R `Action:/Action Input:`.
-2. **Bare JSON anchored to tool names**: Pattern built dynamically from the current tool set; scans for `{"name": "<known_tool>", "arguments": {…}}` or `known_tool({…})` anywhere in the response. Only runs if pass 1 found nothing.
+2. **Nameless `<tool_call>` payloads**: some models (notably gemma) put the argument object directly inside the tag with no `{"name":…,"arguments":…}` wrapper. A payload carrying a `content` key is attributed to `write_file`; `raw_decode` reads the full object so braces inside `content` do not truncate parsing.
+3. **Python-call syntax**: gemma-family models often emit calls as Python source — `edit_file(path='a.py', old_string='x', new_string='y')` or positionally `edit_file("a.py", "x", "y")`, sometimes wrapped in `print(...)`. `_match_paren` carves out the balanced `name(...)` (skipping quoted strings), then `ast` parses it and `ast.literal_eval` recovers each argument. Positional args are mapped to the tool's declared parameter order; keyword args override. Bare mentions in prose are rejected because their values are not literals.
+4. **Bare JSON anchored to tool names**: pattern built dynamically from the current tool set; scans for `{"name": "<known_tool>", "arguments": {…}}` or `known_tool({…})` anywhere in the response.
 
-If a text tool call is recovered it is executed normally; if both passes fail the text is treated as a regular assistant response.
+If a text tool call is recovered it is executed normally; if every tier fails the text is treated as a regular assistant response.
+
+### Missing-path write rescue
+
+Some models emit `content` first and drop the trailing `path` on large writes. Before dispatch, a `write_file`/`append_to_file` call that has `content` but no `path` is rescued: `_derive_write_path` infers a filename from the document's first Markdown `# H1` (kebab-cased), falling back to `design.md` in design mode or `untitled.md` otherwise. A system note reports the inferred path.
+
+### Argument validation and tool auto-routing (`dispatch`)
+
+Small models frequently confuse the file-writing tools — calling `write_file` while passing `edit_file`'s `old_string`/`new_string`. `dispatch` (`tools.py`) guards against this from schema-derived maps (`_REQUIRED_ARGS`, `_KNOWN_ARGS`):
+
+- **Auto-route the unambiguous case** — `write_file` with `old_string`+`new_string` and no `content` clearly means an edit, so it is re-dispatched as `edit_file` (the result is prefixed with a routing note).
+- **Reject unknown arguments** with a clear message listing the valid parameters and a "did you mean" hint (e.g. *"write_file does not accept old_string … use edit_file"*), instead of letting Python raise a `TypeError` that leaks the internal function name.
+
+The `edit_file` tool absorbed the former `replace_all_in_file`: it changes one occurrence by default and every occurrence when `replace_all=true`.
+
+### File-edit diffs
+
+When a mutating tool (`edit_file`, `append_to_file`, `write_file`, `delete_file`, `move_file`) succeeds, the harness emits a `DiffEvent` instead of the terse `ToolResultEvent`: it snapshots the target file before and after the call and builds a unified diff (`diff.py`). The TUI renders it with a two-column old/new line-number gutter, colored additions/deletions, in compact or git style. On error or a no-op the plain `ToolResultEvent` is emitted instead.
 
 ### Tool content sanitization
 
@@ -123,7 +142,9 @@ Three panes stacked vertically:
 │  conversation, tool calls, thinking blocks             │
 │  [horizontal scrollbar when content > terminal width]  │
 ├─ status bar ──────────────────────────────────────────┤
-│  mode | model | ctx% | workdir | spinner when busy     │
+│  mode | model | host | ctx% | workdir | spinner when busy │
+│  (workdir shortened from the front with … when it does  │
+│   not fit; an animated companion bar sits above this)   │
 ├─ input area (5 rows) ─────────────────────────────────┤
 │  multi-line input; command history via ↑/↓             │
 └───────────────────────────────────────────────────────┘
@@ -159,7 +180,7 @@ Supported elements:
 
 Table columns are aligned per separator row (`:---` left, `---:` right, `:---:` centre). Headers are always centred. Numeric columns auto-right-align when no separator row is present. Tables render at full content width; the `_LineBuffer` h-scrollbar handles viewing when wider than the terminal.
 
-Toggle with `/toggle-markdown` or `Shift+M`. On by default.
+Toggle with `/markdown on|off` or `Shift+M`. On by default.
 
 ---
 
@@ -209,6 +230,8 @@ After both passes, removed messages are formatted and passed to the model in a o
 | `toggle_tools` | Toggle tool-call pane visibility |
 | `toggle_think` | Toggle thinking-block visibility |
 | `toggle_md` | Toggle markdown rendering |
+| `diff_output` / `diff_style` | Toggle edit-diff visibility; switch compact/git diff style |
+| `companion` | Show/hide the animated companion bar |
 | `replay_session` | Re-render loaded session messages into chat buffer |
 | `run_compact` | Start compact on worker thread (with `compact_summarise` flag) |
 | `confirm_prompt` / `confirm_action` | Show yes/no prompt; call action on confirm |
@@ -237,7 +260,7 @@ A NDJSON log file is written alongside each session at `~/.momo-harness/sessions
 
 JSON files at `~/.momo-harness/sessions/<timestamp>.json`. The timestamp format is `YYYY-MM-DDTHH-MM-SS` (hyphens in the time portion, not colons, for filesystem compatibility).
 
-Session fields: `created_at`, `model`, `mode`, `workdir`, `context_limit`, `active_skills`, `input_history`, `messages`.
+Session fields: `created_at`, `model`, `host`, `mode`, `workdir`, `context_limit`, `context_pct`, `active_skills`, `input_history`, `messages`. The Ollama `host` is restored on load (before the model context query runs against it); the auth token is deliberately never persisted.
 
 Sessions are auto-saved at the end of every `send()` call. On startup the most recent session (by filename, sorted newest-first) is restored unless `--fresh` is passed. The TUI replays the message history into the chat buffer at startup via `_replay_session()`.
 
@@ -254,9 +277,9 @@ The system prompt is built from `roles/<mode>.md` plus any active skill files fr
 | Mode | Role file | Tools | Purpose |
 |------|-----------|-------|---------|
 | `design` | `roles/designer.md` | read-only + `write_file` + `ask_user` | Interview-based design partner; explores codebase, writes specs |
-| `writing` | `roles/writer.md` | design tools + `append_to_file` + `replace_all_in_file` | Document editor; targeted edits, matches existing voice |
-| `data` | `roles/data.md` | design tools + `run_command` | Data analyst; inspects, processes, reports |
+| `writing` | `roles/writer.md` | design tools + `append_to_file` + `edit_file` | Document editor; targeted edits, matches existing voice |
 | `coding` | `roles/coder.md` | all tools | Engineer; full read/write/exec/git access |
 | `chat` | `roles/chat.md` | read-only + `ask_user` | Conversational Q&A over code and documents; never writes files |
+| `momo` | `roles/momo.md` | all tools | Cat companion; full tool access with a warm, curious persona |
 
-`{workdir}` in role files is substituted with the actual working directory path at load time (currently only `coder.md` and `data.md` use this token).
+`{workdir}` in role files is substituted with the actual working directory path at load time (currently only `coder.md` uses this token).

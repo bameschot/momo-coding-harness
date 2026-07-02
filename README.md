@@ -54,7 +54,7 @@ The token is sent as a `Authorization: Bearer <token>` header on every request.
 
 - The token is **never written to disk** — it is not saved to the session JSON, the log file, or the input history. It disappears when the harness exits.
 - When you type `/token <key>`, the key is masked in the chat display immediately: only the first 2 and last 3 characters are shown (e.g. `sk***ere`). The raw value is never displayed or echoed.
-- Because the token is not persisted, **you must re-enter it each time the harness starts**. Use the `/host` flag at startup to pre-set the host; add a shell alias or script if you connect to the same remote frequently.
+- The **host** *is* saved in the session, so it is restored automatically when the harness restarts and reloads your last session. Only the token must be re-entered (because it is never persisted); add a shell alias or a startup `/token` step if you connect to the same authenticated remote frequently.
 - `/token` with no argument shows the current masked token (or "not set").
 - `/clear-token` removes the token for the current session.
 
@@ -104,7 +104,7 @@ The token is sent as a `Authorization: Bearer <token>` header on every request.
 - **Tool call visibility** — `/tool-output on|off` switches between full tool output and abbreviated mode (first 50 chars + `…`).
 - **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/think-output on|off` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.
 - **Markdown rendering** — assistant responses are rendered as formatted markdown by default. Headings use box-drawing decorations, lists use `•`/numbered prefixes, code blocks are prefixed with `│`, tables render with full box-drawing characters. Toggle with `/markdown on|off` or `Shift+M` (when chat focused). When a table is wider than the terminal, a horizontal scrollbar appears at the bottom of the chat pane; scroll it with `←`/`→` while the chat pane is focused.
-- **Edit diffs** — whenever the model changes a file (`edit_file`, `replace_all_in_file`, `append_to_file`, `write_file`, `delete_file`, `move_file`), the chat pane shows a colored diff of exactly what changed on disk instead of a terse `OK` line. Added lines are green, removed lines red, hunk headers cyan. Each line has a two-column line-number gutter (old | new): context lines show both numbers, removed lines only the old, added lines only the new — so every change is anchored to its position in the file. `write_file` to a new path shows as a new file, `delete_file` shows every line removed, and `move_file` shows a rename notice. Shown by default; toggle with `/diff on|off` or `Shift+D` (when chat focused). Choose the presentation with `/diff-style compact` (default — a `± path (+N -M)` header with hunks) or `/diff-style git` (full `git diff` layout with `diff --git`/`---`/`+++` headers). Diffs are display-only and reconstructed from disk at edit time, so a reloaded session shows the plain tool result rather than the diff.
+- **Edit diffs** — whenever the model changes a file (`edit_file`, `append_to_file`, `write_file`, `delete_file`, `move_file`), the chat pane shows a colored diff of exactly what changed on disk instead of a terse `OK` line. Added lines are green, removed lines red, hunk headers cyan. Each line has a two-column line-number gutter (old | new): context lines show both numbers, removed lines only the old, added lines only the new — so every change is anchored to its position in the file. `write_file` to a new path shows as a new file, `delete_file` shows every line removed, and `move_file` shows a rename notice. Shown by default; toggle with `/diff on|off` or `Shift+D` (when chat focused). Choose the presentation with `/diff-style compact` (default — a `± path (+N -M)` header with hunks) or `/diff-style git` (full `git diff` layout with `diff --git`/`---`/`+++` headers). Diffs are display-only and reconstructed from disk at edit time, so a reloaded session shows the plain tool result rather than the diff.
 
 ## Modes
 
@@ -120,13 +120,13 @@ Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep
 
 The assistant acts as a collaborative editor and writer. It reads existing documents before making changes, prefers targeted edits over full rewrites, and matches the tone and register of the existing text. Use it for drafting, editing, and rewriting documents, reports, READMEs, blog posts, and any other prose.
 
-Available tools: all design tools + `append_to_file`, `replace_all_in_file`
+Available tools: all design tools + `append_to_file`, `edit_file`
 
 ### Coding mode
 
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
-Available tools: all design tools + `edit_file`, `delete_file`, `move_file`, `append_to_file`, `replace_all_in_file`, `run_command`
+Available tools: all design tools + `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`
 
 ### Chat mode
 
@@ -140,7 +140,7 @@ Momo is a small black cat who lives in the harness and keeps you company. This m
 
 The animated companion in the bar between the chat pane and status bar *is* Momo — in this mode you are talking to it directly. (The companion walks around and mews in every mode; toggle it with `/companion on|off` or `Shift+Q`.)
 
-Available tools: same as coding mode (all read-only + `write_file`, `edit_file`, `delete_file`, `move_file`, `append_to_file`, `replace_all_in_file`, `run_command`, `ask_user`)
+Available tools: same as coding mode (all read-only + `write_file`, `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`, `ask_user`)
 
 Switch modes with `/design`, `/write`, `/code`, `/chat`, `/momo`, or `Shift+Tab`.
 
@@ -170,7 +170,7 @@ Chat mode also has `ask_user` but not `write_file`.
 | Tool | Description |
 |---|---|
 | `append_to_file` | Append text to a file (creates if missing) |
-| `replace_all_in_file` | Replace every occurrence of a string in a file; returns count |
+| `edit_file` | Change text inside a document (see below) |
 
 ### Coding mode only
 
@@ -178,8 +178,7 @@ Chat mode also has `ask_user` but not `write_file`.
 |---|---|
 | `move_file` | Move or rename a file (parent dirs created automatically) |
 | `append_to_file` | Append text to a file (creates if missing) |
-| `replace_all_in_file` | Replace every occurrence of a string in a file; returns count |
-| `edit_file` | Replace an exact string in a file. The string must appear exactly once — returns an error if it matches zero or multiple times. |
+| `edit_file` | Change text inside a file: replace `old_string` with `new_string`. One occurrence by default (errors if it matches zero or multiple times); pass `replace_all: true` to replace every occurrence. |
 | `delete_file` | Delete a file |
 | `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 30 seconds by default. |
 
@@ -283,10 +282,10 @@ The set of tools included in the call depends on the current mode:
 design  → list_directory  file_info  find_files  read_file
           grep_file  grep_files  write_file  ask_user
 
-writing → all design tools + append_to_file  replace_all_in_file
+writing → all design tools + append_to_file  edit_file
 
 coding  → all design tools + edit_file  delete_file  move_file
-          append_to_file  replace_all_in_file  run_command
+          append_to_file  run_command
 
 chat    → list_directory  file_info  find_files  read_file
           grep_file  grep_files  ask_user
@@ -383,6 +382,8 @@ Each session is automatically saved after every assistant response to:
 ```
 ~/.momo-harness/sessions/<timestamp>.json
 ```
+
+Each session stores the model, Ollama host, mode, working directory, context settings, active skills, input history, and the full message history — all restored when the session is reloaded (the auth token is the only thing deliberately left out).
 
 A log file (`.log`) is written alongside the JSON, recording every request, response, tool call, and token count in newline-delimited JSON format. Use it to audit what the model did or analyse token usage.
 

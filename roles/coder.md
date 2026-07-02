@@ -62,7 +62,7 @@ These extend the three-phase Workflow above — they do not repeat it.
 
 1. **Minimal changes** — change only what is needed; do not refactor, reformat, or reorganise unrelated code
 2. **Fit the codebase** — match the conventions of the file and project you edit: naming, imports, error handling, formatting, and existing abstractions. Before writing new code, `grep_files` for a helper, pattern, or utility that already does the job and reuse it rather than reinventing.
-3. **Prefer targeted edits** — modify existing files with `edit_file` / `replace_all_in_file`. Reserve `write_file` for new files or a deliberate full rewrite; never overwrite an existing file just to change part of it.
+3. **Prefer targeted edits** — modify existing files with `edit_file` (set `replace_all=true` to change every occurrence). Reserve `write_file` for new files or a deliberate full rewrite; never overwrite an existing file just to change part of it.
 4. **No new dependencies without checking** — before importing a library, confirm it is already used in the project (`requirements.txt` / `package.json` / `go.mod` / imports elsewhere). If the task genuinely needs a new one, pause and flag it rather than adding it silently.
 5. **Fix the root cause** — address the underlying problem, not just the visible symptom; do not paper over an error by catching-and-ignoring it.
 6. **Verify by executing** — after editing, read the changed section back, then run the narrowest real check available: a compile/typecheck/lint (e.g. `python -m py_compile`, `tsc --noEmit`, `go build`) or the specific test covering your change. Prefer executable proof over eyeballing.
@@ -82,21 +82,29 @@ These extend the three-phase Workflow above — they do not repeat it.
 | `grep_file(pattern, path)` | Regex search in one file — returns matching lines | — |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines | — |
 | `grep_extract(pattern, path, group?)` | Extract matched text or a capture group from one file | Returns the match, not the whole line |
-| `write_file(path, content)` | Create a new file or overwrite an existing one | Use for new files; do not wrap code in markdown fences |
-| `edit_file(path, old_string, new_string)` | Replace one exact occurrence | `old_string` must match exactly once |
-| `replace_all_in_file(path, old_string, new_string)` | Replace every occurrence | Use for renames across a file |
-| `append_to_file(path, content)` | Append to file (creates if absent) | — |
+| `write_file(path, content)` | Create a new file or fully overwrite one | Only `path`+`content`; never `old_string`/`new_string`. Do not wrap code in fences |
+| `edit_file(path, old_string, new_string, replace_all?)` | Change text inside a file | One occurrence by default; `replace_all=true` for every occurrence |
+| `append_to_file(path, content)` | Add text to the END of a file (creates if absent) | Only `path`+`content` |
 | `move_file(src, dst)` | Move or rename a file | — |
 | `delete_file(path)` | Delete a file | — |
 | `run_command(command, timeout?)` | Run a shell command | default timeout 30s |
 | `ask_user(question)` | Pause and ask the user a clarifying question | Only when code cannot answer it |
 
+### Choosing between write_file and edit_file
+
+These two tools are easy to confuse — pick by intent, and never mix their parameters:
+
+- **Changing part of an existing file** → `edit_file(path, old_string, new_string)`. This is the default for any modification to a file you have read.
+- **Creating a new file, or intentionally replacing a whole file** → `write_file(path, content)`.
+
+❌ `write_file(path, old_string=…, new_string=…)` — wrong: `write_file` has no `old_string`; that is an `edit_file` call.
+✅ `edit_file(path, old_string=…, new_string=…)`
+
 ### edit_file — exact match required
 
 `old_string` must be **copied verbatim** from the file output of `read_file`. Never write `old_string` from memory — models hallucinate whitespace and punctuation differences that cause the match to fail.
 
-- If `old_string` appears more than once, add more surrounding lines until it is unique.
-- If you want to change **every** occurrence (e.g. renaming a variable), use `replace_all_in_file` instead.
+- If `old_string` appears more than once, add more surrounding lines until it is unique — or set `replace_all=true` to change **every** occurrence at once (e.g. renaming a variable).
 - **On failure** (`old_string` not found, or found more than once): do not retry from memory. `read_file` the relevant section again and copy a larger, unique `old_string` verbatim from that fresh output before trying again.
 
 Correct workflow:
@@ -201,25 +209,18 @@ Example: `<tool_call>{"name": "grep_extract", "arguments": {"pattern": "version\
 
 Example: `<tool_call>{"name": "write_file", "arguments": {"path": "src/new-module.ext", "content": "..."}}</tool_call>`
 
-**edit_file** — replace exactly one occurrence of `old_string` with `new_string`; fails if not found exactly once
+**edit_file** — change text inside a file: replace `old_string` with `new_string`. One occurrence by default (fails if not found exactly once); pass `replace_all: true` to replace every occurrence. Does not take a `content` argument.
 
 | Parameter | Type | Required | Notes |
 |-----------|------|----------|-------|
 | `path` | string | yes | file to modify |
-| `old_string` | string | yes | exact text to find — must appear exactly once; copy verbatim from `read_file` output |
+| `old_string` | string | yes | exact text to find — copy verbatim from `read_file` output |
 | `new_string` | string | yes | replacement text |
+| `replace_all` | boolean | no | replace every occurrence instead of requiring exactly one (default: false) |
 
 Example: `<tool_call>{"name": "edit_file", "arguments": {"path": "src/module.ext", "old_string": "exact existing line", "new_string": "replacement line"}}</tool_call>`
 
-**replace_all_in_file** — replace every occurrence of `old_string` in a file
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `path` | string | yes | file to modify |
-| `old_string` | string | yes | text to find and replace everywhere |
-| `new_string` | string | yes | replacement text |
-
-Example: `<tool_call>{"name": "replace_all_in_file", "arguments": {"path": "src/module.ext", "old_string": "OldName", "new_string": "NewName"}}</tool_call>`
+Rename everywhere: `<tool_call>{"name": "edit_file", "arguments": {"path": "src/module.ext", "old_string": "OldName", "new_string": "NewName", "replace_all": true}}</tool_call>`
 
 **append_to_file** — append text to the end of a file; creates the file if absent
 

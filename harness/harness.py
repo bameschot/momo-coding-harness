@@ -19,7 +19,7 @@ from .tools import DESIGN_TOOLS, WRITER_TOOLS, ALL_TOOLS, CHAT_TOOLS, dispatch
 # after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
 # affected path ("move_file" uses src/dst and is handled separately).
 _MUTATING_TOOLS = {
-    "edit_file", "replace_all_in_file", "append_to_file",
+    "edit_file", "append_to_file",
     "write_file", "delete_file", "move_file",
 }
 
@@ -507,7 +507,7 @@ def _writing_prompt(workdir: str = "") -> str:
     return _load_role("writer") or (
         "You are a writing assistant. Help the user write, edit, and improve documents. "
         "Read existing documents before editing them. "
-        "Prefer targeted replacements (replace_all_in_file) over full rewrites. "
+        "Prefer targeted replacements (edit_file) over full rewrites. "
         "Match the register and tone of the existing text unless instructed otherwise. "
         "Ask one focused question when intent is ambiguous. "
         "Save documents with write_file or extend them with append_to_file — "
@@ -656,7 +656,7 @@ class Harness:
         if not body:
             return False  # no visible change — fall back to the plain result line
         op_map = {
-            "edit_file": "edit", "replace_all_in_file": "edit",
+            "edit_file": "edit",
             "append_to_file": "append", "write_file": "write",
             "delete_file": "delete",
         }

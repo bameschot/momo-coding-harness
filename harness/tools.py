@@ -77,27 +77,25 @@ CODING_ONLY_TOOLS = [
         ["src", "dst"]),
 
     _fn("append_to_file",
-        "Append text to the end of a file. Creates the file if it does not exist.",
+        "Add text to the END of an existing file (creates it if absent). "
+        "Takes ONLY path and content. It cannot change existing text — to replace text "
+        "inside a file use edit_file; to overwrite the whole file use write_file.",
         {"path":    {"type": "string"},
-         "content": {"type": "string"}},
+         "content": {"type": "string", "description": "Text to add at the end of the file."}},
         ["path", "content"]),
 
-    _fn("replace_all_in_file",
-        "Replace every occurrence of old_string with new_string in a file. "
-        "Returns the number of replacements made. "
-        "Use for renaming a variable or symbol throughout a file; "
-        "use edit_file instead when the change should apply to exactly one location.",
-        {"path":       {"type": "string"},
-         "old_string": {"type": "string"},
-         "new_string": {"type": "string"}},
-        ["path", "old_string", "new_string"]),
-
     _fn("edit_file",
-        "Replace an exact occurrence of old_string with new_string in a file. "
-        "Fails if old_string is not found exactly once.",
+        "Change text INSIDE an existing file: replace old_string with new_string. "
+        "Use this tool (not write_file) whenever you are modifying part of a file you have read. "
+        "By default it replaces exactly one occurrence and fails if old_string is not found "
+        "exactly once; set replace_all=true to replace every occurrence (e.g. renaming a symbol "
+        "throughout the file). "
+        "Takes path, old_string, new_string, and optional replace_all — it does NOT take a "
+        "'content' argument (that is write_file).",
         {"path": {"type": "string"},
-         "old_string": {"type": "string", "description": "Exact text to find (must match exactly once)"},
-         "new_string": {"type": "string", "description": "Replacement text"}},
+         "old_string": {"type": "string", "description": "Exact text to find (copy it verbatim from read_file output)"},
+         "new_string": {"type": "string", "description": "Replacement text"},
+         "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default: false)"}},
         ["path", "old_string", "new_string"]),
 
     _fn("delete_file", "Delete a file",
@@ -115,7 +113,9 @@ CODING_ONLY_TOOLS = [
 
 SHARED_TOOLS = [
     _fn("write_file",
-        "Write content to a file, creating it or overwriting it if it already exists. "
+        "Create a NEW file, or COMPLETELY overwrite an existing one, with the given content. "
+        "Takes ONLY path and content. It cannot change part of a file and does NOT accept "
+        "old_string/new_string — to replace specific text in an existing file, use edit_file instead. "
         "Use this to save any file: scripts (.py, .sh), data files (.csv, .json, .jsonl), "
         "documents (.md, .txt), or any other content. "
         "The content parameter must contain the raw file content exactly as it should appear on disk — "
@@ -145,7 +145,7 @@ _by_name = {t["function"]["name"]: t for t in CODING_ONLY_TOOLS}
 
 WRITER_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS + [
     _by_name["append_to_file"],
-    _by_name["replace_all_in_file"],
+    _by_name["edit_file"],
 ]
 
 _shared_by_name = {t["function"]["name"]: t for t in SHARED_TOOLS}
@@ -408,7 +408,8 @@ def _append_to_file(path: str, content: str, *, workdir: Path) -> str:
     return "OK"
 
 
-def _replace_all_in_file(path: str, old_string: str, new_string: str, *, workdir: Path) -> str:
+def _edit_file(path: str, old_string: str, new_string: str,
+               replace_all: bool = False, *, workdir: Path) -> str:
     p = _safe_path(path, workdir)
     if isinstance(p, str):
         return p
@@ -421,27 +422,13 @@ def _replace_all_in_file(path: str, old_string: str, new_string: str, *, workdir
     count = content.count(old_string)
     if count == 0:
         return "ERROR: old_string not found in file"
-    p.write_text(content.replace(old_string, new_string), encoding="utf-8")
-    return f"Replaced {count} occurrence(s)"
-
-
-def _edit_file(path: str, old_string: str, new_string: str, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
-    if isinstance(p, str):
-        return p
-    try:
-        content = p.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return f"ERROR: file not found: {path}"
-    except OSError as e:
-        return f"ERROR: {e}"
-    count = content.count(old_string)
-    if count == 0:
-        return "ERROR: old_string not found in file"
-    # Require exactly one match so the model can't accidentally replace the
-    # wrong occurrence when the same string appears multiple times.
+    if replace_all:
+        p.write_text(content.replace(old_string, new_string), encoding="utf-8")
+        return f"Replaced {count} occurrence(s)"
+    # Default: require exactly one match so the model can't accidentally replace
+    # the wrong occurrence when the same string appears multiple times.
     if count > 1:
-        return f"ERROR: old_string found {count} times; must match exactly once"
+        return f"ERROR: old_string found {count} times; must match exactly once (set replace_all=true to replace all)"
     p.write_text(content.replace(old_string, new_string, 1), encoding="utf-8")
     return "OK"
 
@@ -496,13 +483,17 @@ def _run_command(command: str, timeout: int = 30, *, workdir: Path) -> str:
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
-# Required-argument map built from the tool schemas — used to generate clear
-# error messages before Python's TypeError exposes internal function names.
+# Required- and known-argument maps built from the tool schemas — used to generate
+# clear error messages before Python's TypeError exposes internal function names.
 _REQUIRED_ARGS: dict[str, list[str]] = {}
+_KNOWN_ARGS: dict[str, set[str]] = {}
 for _tl in (READ_ONLY_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS, WRITER_TOOLS):
     for _t in _tl:
         _tname = _t["function"]["name"]
+        _props = _t["function"]["parameters"].get("properties", {})
         _req   = _t["function"]["parameters"].get("required", [])
+        if _tname not in _KNOWN_ARGS:
+            _KNOWN_ARGS[_tname] = set(_props.keys())
         if _req and _tname not in _REQUIRED_ARGS:
             _REQUIRED_ARGS[_tname] = _req
 
@@ -517,7 +508,6 @@ _EXECUTORS = {
     "write_file":          _write_file,
     "move_file":          _move_file,
     "append_to_file":     _append_to_file,
-    "replace_all_in_file": _replace_all_in_file,
     "edit_file":          _edit_file,
     "delete_file":        _delete_file,
     "run_command":        _run_command,
@@ -528,6 +518,16 @@ def dispatch(name: str, args: dict, workdir: Path) -> str:
     fn = _EXECUTORS.get(name)
     if fn is None:
         return f"ERROR: unknown tool '{name}'"
+
+    # Auto-route a common small-model confusion: write_file called with edit-style
+    # old_string/new_string and no content clearly means an edit — run edit_file so
+    # the model's intent succeeds instead of failing on an unexpected argument.
+    if (name == "write_file" and "old_string" in args and "new_string" in args
+            and "content" not in args and "path" in args):
+        routed = {k: args[k] for k in ("path", "old_string", "new_string", "replace_all")
+                  if k in args}
+        return "(note: routed write_file to edit_file) " + dispatch("edit_file", routed, workdir)
+
     required = _REQUIRED_ARGS.get(name, [])
     missing = [r for r in required if r not in args]
     if missing:
@@ -535,6 +535,23 @@ def dispatch(name: str, args: dict, workdir: Path) -> str:
             f"ERROR: {name} called without required argument(s): {', '.join(missing)}. "
             f"Required: {', '.join(required)}. Retry the call with all required arguments."
         )
+
+    # Reject arguments the tool does not declare, with a clear message and a
+    # "did you mean" hint — rather than letting Python raise a TypeError that
+    # leaks the internal function name (e.g. write_file given old_string).
+    known = _KNOWN_ARGS.get(name, set())
+    unexpected = [a for a in args if a not in known]
+    if unexpected:
+        hint = ""
+        if {"old_string", "new_string"} & set(unexpected):
+            hint = " To change part of an existing file, use edit_file (old_string/new_string)."
+        elif "content" in unexpected and name in ("edit_file",):
+            hint = " To create or overwrite a whole file, use write_file (path/content)."
+        return (
+            f"ERROR: {name} does not accept argument(s): {', '.join(unexpected)}. "
+            f"Valid arguments: {', '.join(sorted(known))}.{hint}"
+        )
+
     try:
         return fn(**args, workdir=workdir)
     except TypeError as e:
