@@ -163,6 +163,23 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
         except json.JSONDecodeError:
             pass
 
+    # Nameless <tool_call> payloads: some models (notably gemma) emit the argument
+    # object directly inside the tag with no {"name":..., "arguments":...} wrapper.
+    # These carry no tool name, but a payload with a "content" key is a file write —
+    # attribute it to write_file when that tool is available.  raw_decode reads the
+    # full object, so braces inside the content value do not truncate parsing.
+    if "write_file" in known:
+        for m in re.finditer(r'<tool_call>\s*(\{)', text):
+            try:
+                obj, _ = _JSON_DECODER.raw_decode(text, m.start(1))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict) or obj.get("name") in known:
+                continue  # a named structure — already handled by the tiers above
+            if "content" in obj:
+                args = {k: v for k, v in obj.items() if k in ("path", "content")}
+                _append({"name": "write_file", "arguments": args})
+
     if results:
         return results
 
@@ -216,6 +233,20 @@ def _sanitize_tool_args(name: str, args: dict) -> dict:
         return {k: (f"[written to {args.get('path', 'file')}]" if k == "content" else v)
                 for k, v in args.items()}
     return args
+
+
+def _derive_write_path(content: str, mode: str) -> str:
+    """Infer a filename for a write_file/append_to_file call that arrived with
+    'content' but no 'path'.  Some models (notably gemma) emit the large content
+    argument first and drop the trailing 'path', which would otherwise fail the
+    required-argument check.  Prefer the document's first Markdown H1 as the name,
+    else fall back to a mode-appropriate default."""
+    m = re.search(r'^\s{0,3}#\s+(.+?)\s*$', content, re.MULTILINE)
+    if m:
+        slug = re.sub(r'[^a-z0-9]+', '-', m.group(1).lower()).strip('-')
+        if slug:
+            return f"{slug[:60]}.md"
+    return "design.md" if mode == "design" else "untitled.md"
 
 
 def _is_qwen(model: str) -> bool:
@@ -939,6 +970,17 @@ class Harness:
                 })
 
             for name, args in _calls:
+                # Rescue a file write that arrived with content but no path (some
+                # models drop the trailing 'path' after a large 'content' value):
+                # infer a filename instead of failing the required-argument check.
+                if (name in ("write_file", "append_to_file")
+                        and isinstance(args, dict)
+                        and args.get("content") and not args.get("path")):
+                    inferred = _derive_write_path(args["content"], self.mode)
+                    args = {**args, "path": inferred}
+                    self.event_queue.put(ChatEvent("system",
+                        f"write_file was missing 'path' — inferred '{inferred}' from the content."))
+
                 self.event_queue.put(ToolCallEvent(name, args))
                 self.logger.log_tool_call(self.mode, self.client.model, name, args)
 

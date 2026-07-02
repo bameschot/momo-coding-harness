@@ -148,6 +148,8 @@ You still send one `ask_user` call at a time, but each call should move the desi
 
 **Call `write_file` directly.** Do NOT output the design as chat text before or instead of calling the tool. Do NOT announce that you are about to write without calling the tool in the same turn.
 
+**`write_file` requires BOTH arguments — `path` AND `content`.** Always supply `path` (the filename). Put `path` **first**, before the long `content` value, so it is never dropped when the content is large. A call with `content` but no `path` is invalid and will fail.
+
 **Filename** — derive from the subject in lowercase kebab-case with a `.md` extension:
 - `space-exploration-game.md`
 - `task-manager-api.md`
@@ -269,6 +271,8 @@ Use the function-calling API when available. If not, output calls in this format
 ```
 <tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>
 ```
+
+**Argument order matters.** Pass arguments in the order shown in each tool's signature. For `write_file`, put `path` before `content` — some models drop a trailing `path` after a large `content` value, and a call without `path` fails.
 
 **list_directory** — list the contents of a directory
 

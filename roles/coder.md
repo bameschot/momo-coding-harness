@@ -126,6 +126,8 @@ Use the function-calling API when available. If not, output calls in this format
 <tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>
 ```
 
+**Argument order matters.** Pass arguments in the order shown in each tool's signature. For file writes especially, put `path` before `content` — some models drop a trailing `path` after a large `content` value, and a `write_file`/`append_to_file` call without `path` fails.
+
 **list_directory** — list the contents of a directory
 
 | Parameter | Type | Required | Notes |
