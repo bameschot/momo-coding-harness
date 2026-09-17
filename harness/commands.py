@@ -47,16 +47,22 @@ def handle(line: str, harness: Harness) -> CommandResult:
             models = harness.client.list_models()
             if not models:
                 return CommandResult(handled=True,
-                                     output=f"No models found — is Ollama reachable at {harness.client.host}?")
+                                     output=f"No models found — is {harness.client.provider_name} reachable at {harness.client.host}?")
             current = harness.client.model
             lines = [f"  {'*' if m == current else ' '} {m}" for m in models]
             return CommandResult(handled=True, output="Models:\n" + "\n".join(lines))
+        if not harness.client.can_switch_model:
+            return CommandResult(handled=True, output=(
+                f"{harness.client.provider_name} serves one model per server and cannot switch "
+                f"models at runtime (currently: {harness.client.model}). "
+                f"Restart the server with the model you want."))
         harness.set_model(arg)
         return CommandResult(handled=True, output=f"Model set to: {arg} (ctx: {harness.context_limit})")
 
     if cmd == "/host":
         if not arg:
-            return CommandResult(handled=True, output=f"Ollama host: {harness.client.host}")
+            return CommandResult(handled=True,
+                                 output=f"{harness.client.provider_name} host: {harness.client.host}")
         harness.client.set_host(arg)
         harness._emit_status()
         return CommandResult(handled=True, output=f"Host set to: {arg}")
@@ -417,10 +423,11 @@ def _copy_to_clipboard(text: str) -> str:
 
 _HELP = """
 Available commands:
-  /model              List available Ollama models
+  /model              List available models on the current backend
   /model <name>       Switch to a different model
-  /host               Show current Ollama host
-  /host <url>         Connect to a different Ollama instance
+  /host               Show current backend host (ollama or llama.cpp)
+  /host <url>         Connect to a different backend instance
+  (backend is chosen at startup: --provider ollama|llamacpp)
   /token              Show whether an auth token is set (masked)
   /token <key>        Set a Bearer token for authenticated remote hosts
   /clear-token        Remove the current auth token

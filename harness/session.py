@@ -35,11 +35,13 @@ def save(ts: str, model: str, mode: str, workdir: Path,
          active_skills: list[str] | None = None,
          input_history: list[str] | None = None,
          context_pct: int | None = None,
-         host: str | None = None):
+         host: str | None = None,
+         provider: str | None = None):
     data = {
         "created_at": ts,
         "model": model,
         "host": host,
+        "provider": provider,
         "mode": mode,
         "workdir": str(workdir),
         "context_limit": context_limit,

@@ -1,11 +1,13 @@
 # momo-coding-harness
 
-A local AI coding assistant that connects to a running [Ollama](https://ollama.com) instance. It runs in your terminal as a split-pane TUI and can read, edit, and manage files in your project via tool calls.
+A local AI coding assistant that connects to a running [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) server. It runs in your terminal as a split-pane TUI and can read, edit, and manage files in your project via tool calls.
 
 ## Requirements
 
 - Python 3.14+ (uses `/opt/homebrew/bin/python3.14` by default)
-- A running Ollama instance with at least one tool-calling capable model (e.g. `qwen3.5:9b`, `qwen2.5-coder`, `mistral-nemo`)
+- One of:
+  - A running **Ollama** instance with at least one tool-calling capable model (e.g. `qwen3.5:9b`, `qwen2.5-coder`, `mistral-nemo`), or
+  - A running **llama.cpp** server started with `--jinja` (required for tool calling), e.g. `llama-server -m model.gguf -c 8192 --jinja --port 8080`. Add `--reasoning-format ...` if you want the model's reasoning surfaced as thinking output.
 
 ## Setup
 
@@ -25,18 +27,27 @@ Options:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--host` | `http://localhost:11434` | Ollama base URL |
-| `--model` | `qwen3.5:9b` | Model name |
+| `--provider` | last-used or `ollama` | LLM backend: `ollama` or `llamacpp` |
+| `--host` | `11434` (ollama) / `8080` (llamacpp) | Backend base URL |
+| `--model` | `qwen3.5:9b` | Model name (llama.cpp serves whatever model it was launched with) |
 | `--workspace` / `--workdir` | `.` (current directory) | Root for all file operations |
 | `--context` | auto-detected | Override context token limit (default: half the model's maximum) |
 | `--mode` | `design` | Starting mode (`design`, `writing`, `coding`, `chat`, or `momo`) |
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--no-think` | off | Disable model thinking/reasoning mode (on by default) |
 
-Example targeting a specific project and remote instance:
+The chosen provider is saved and reused on the next launch (and restored per session). The status bar shows the active backend as `VIA: <provider>`.
+
+Example targeting a specific project and remote Ollama instance:
 
 ```bash
 python momo-coding-harness.py --workdir ~/projects/myapp --model qwen3-coder:30b --host http://192.168.1.10:11434
+```
+
+Example targeting a local llama.cpp server:
+
+```bash
+python momo-coding-harness.py --provider llamacpp --host http://localhost:8080 --workdir ~/projects/myapp
 ```
 
 ## Connecting to a remote Ollama host
@@ -73,7 +84,7 @@ The token is sent as a `Authorization: Bearer <token>` header on every request.
 │  [assistant] I can see the auth module consists of... │
 │                                                       │
 ├──────────────────────────────────────────────────────┤
-│  MODE: design | MODEL: qwen3.5:9b | HOST: localhost:11434 | CTX: 12% | DIR: .│
+│  MODE: design | VIA: ollama | MODEL: qwen3.5:9b | HOST: localhost:11434 | CTX: 12% | DIR: .│
 ├──────────────────────────────────────────────────────┤
 │  > _                                                  │
 └──────────────────────────────────────────────────────┘
@@ -305,10 +316,10 @@ Type any command in the input bar:
 | `/write` | Switch to writing mode |
 | `/chat` | Switch to chat mode (read files, ask questions — no file writes) |
 | `/momo` | Switch to momo companion mode (full tools; talk to the cat) |
-| `/model` | List available Ollama models |
+| `/model` | List available models on the current backend |
 | `/model <name>` | Switch to a different model |
-| `/host` | Show current Ollama host URL |
-| `/host <url>` | Connect to a different Ollama instance at runtime |
+| `/host` | Show current backend host URL |
+| `/host <url>` | Connect to a different backend instance at runtime |
 | `/token` | Show whether an auth token is set (masked display) |
 | `/token <key>` | Set a Bearer token for authenticated remote hosts (never saved to disk or history) |
 | `/clear-token` | Remove the current auth token |

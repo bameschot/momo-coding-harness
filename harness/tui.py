@@ -453,6 +453,7 @@ class TUI:
         self._st_mode  = harness.mode
         self._st_model = harness.client.model
         self._st_host  = harness.client.host
+        self._st_provider = harness.provider
         self._st_ctx   = 0
         self._st_dir   = str(harness.workdir)
         self._st_extra = ""             # trailing " | TOOLS: off" / " | RUN: confirm"
@@ -649,7 +650,7 @@ class TUI:
 
     def _compose_status(self, avail: int) -> str:
         """Build the status text, shortening DIR from the front to fit `avail` cols."""
-        head = (f"MODE: {self._st_mode} | MODEL: {self._st_model} | "
+        head = (f"MODE: {self._st_mode} | VIA: {self._st_provider} | MODEL: {self._st_model} | "
                 f"HOST: {self._st_host} | CTX: {self._st_ctx}% | DIR: ")
         budget = avail - len(head) - len(self._st_extra)
         return head + _shorten_path_left(self._st_dir, budget) + self._st_extra
@@ -994,6 +995,7 @@ class TUI:
                     self._st_mode  = ev.mode
                     self._st_model = ev.model
                     self._st_host  = ev.host
+                    self._st_provider = ev.provider or self._st_provider
                     self._st_ctx   = ev.ctx_pct
                     self._st_dir   = ev.workdir
                     self._st_extra = f"{tools_str}{run_str}"

@@ -11,8 +11,8 @@ from typing import Any
 
 from . import session as session_mod
 from .diff import build_diff_body
+from .llm import make_client
 from .logger import Logger
-from .ollama_client import OllamaClient
 from .tools import DESIGN_TOOLS, WRITER_TOOLS, ALL_TOOLS, CHAT_TOOLS, dispatch
 
 # Tools that mutate a file on disk — the harness snapshots the target before and
@@ -345,47 +345,6 @@ def _is_qwen(model: str) -> bool:
     return "qwen" in model.lower()
 
 
-def _xml_escape_str(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _xml_escape_args(obj: object) -> object:
-    """Recursively escape XML special chars in string values within a tool-call argument structure."""
-    if isinstance(obj, dict):
-        return {k: _xml_escape_args(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_xml_escape_args(v) for v in obj]
-    if isinstance(obj, str):
-        return _xml_escape_str(obj)
-    return obj
-
-
-def _xml_escape_for_ollama(messages: list[dict]) -> list[dict]:
-    """Return a shallow copy of messages with XML-special characters escaped for Qwen3's template.
-
-    Qwen3's Ollama template wraps tool results in <tool_response>…</tool_response> XML and
-    embeds past tool-call arguments in XML-like structure.  Unescaped < > & in either location
-    break the XML parser and produce a 500.  We escape only the copy sent to the API —
-    the stored messages keep the correct, unescaped content so the history is accurate."""
-    result = []
-    for m in messages:
-        role = m.get("role")
-        if role == "tool" and isinstance(m.get("content"), str):
-            m = dict(m)
-            m["content"] = _xml_escape_str(m["content"])
-        elif role == "assistant" and m.get("tool_calls"):
-            m = dict(m)
-            m["tool_calls"] = [
-                {"function": {
-                    "name": tc["function"]["name"],
-                    "arguments": _xml_escape_args(tc["function"]["arguments"]),
-                }}
-                for tc in m["tool_calls"]
-            ]
-        result.append(m)
-    return result
-
-
 _WRITE_INTENT = (
     "let me write", "i will write", "i'll write", "i'm going to write",
     "writing the design", "writing the spec", "writing it now",
@@ -447,6 +406,7 @@ class StatusEvent:
     tools_enabled: bool = True
     run_confirm: bool = False
     host: str = ""
+    provider: str = ""
 
 @dataclass
 class ErrorEvent:
@@ -586,13 +546,14 @@ _DEFAULT_CONTEXT = 32768  # fallback when the model does not report its context 
 
 
 class Harness:
-    def __init__(self, host: str, model: str, workdir: Path):
+    def __init__(self, host: str, model: str, workdir: Path, provider: str = "ollama"):
         self.workdir = workdir.resolve()
         self.mode = "design"
         self.context_limit = _DEFAULT_CONTEXT
         self._ts = session_mod.new_timestamp()
         self.logger = Logger(self._ts)
-        self.client = OllamaClient(host=host, model=model)
+        self.provider = provider
+        self.client = make_client(provider, host=host, model=model)
         self.event_queue: queue.Queue[Any] = queue.Queue()
         self._user_input_queue: queue.Queue[str] = queue.Queue()
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
@@ -797,7 +758,7 @@ class Harness:
         }]
         try:
             response = self.client.chat(prompt, [])
-            return getattr(response.message, "content", "") or ""
+            return response.content or ""
         except Exception:
             return ""
 
@@ -862,9 +823,11 @@ class Harness:
             )
 
             try:
+                # role="thinking" is a harness-internal representation; strip it
+                # before handing the canonical history to the provider adapter.
+                # Provider-specific outbound transforms (e.g. Ollama's Qwen XML
+                # escaping) happen inside the adapter's chat().
                 api_messages = [m for m in self.messages if m.get("role") != "thinking"]
-                if _is_qwen(self.client.model):
-                    api_messages = _xml_escape_for_ollama(api_messages)
                 think_this_turn = False if _suppress_think_next else self.think
                 _suppress_think_next = False
                 # num_ctx is the model's real window when known, so the model can
@@ -877,26 +840,27 @@ class Harness:
                 if self._cancel.is_set():
                     self.event_queue.put(ChatEvent("system", "Interrupted."))
                 else:
-                    self.event_queue.put(ErrorEvent(f"Ollama error: {e}"))
+                    self.event_queue.put(ErrorEvent(f"{self.client.provider_name} error: {e}"))
                 self._autosave()
                 self.event_queue.put(DoneEvent())
                 return
 
-            msg = response.message
-            prompt_tokens = getattr(response, "prompt_eval_count", None)
-            eval_tokens = getattr(response, "eval_count", None)
-            done_reason = getattr(response, "done_reason", None)  # "stop" | "length" | None
+            # response is a normalized ChatResponse — the adapter has already mapped
+            # its provider's wire format onto this shape.
+            prompt_tokens = response.prompt_tokens
+            eval_tokens = response.eval_tokens
+            done_reason = response.done_reason  # "stop" | "length" | None
 
             if prompt_tokens is not None:
                 self._token_estimate = (prompt_tokens or 0) + (eval_tokens or 0)
 
             # Extract thinking tokens from two sources:
-            # 1. msg.thinking — newer Ollama SDK field when think=True.
+            # 1. response.thinking — the adapter's reasoning field (Ollama's msg.thinking,
+            #    llama.cpp's reasoning_content) when reasoning is enabled.
             # 2. <think>…</think> tags — Qwen3/Qwen3.5 embed them even when think=False.
             # Neither must re-enter the context (stored as role="thinking", filtered at API call).
-            raw_thinking = getattr(msg, "thinking", "") or ""
-            raw_content  = getattr(msg, "content",  "") or ""
-            content, thinking_from_content = _extract_and_strip_thinking(raw_content)
+            raw_thinking = response.thinking
+            content, thinking_from_content = _extract_and_strip_thinking(response.content)
             if thinking_from_content and not raw_thinking:
                 raw_thinking = thinking_from_content
 
@@ -904,17 +868,8 @@ class Harness:
                 self.messages.append({"role": "thinking", "content": raw_thinking})
                 self.event_queue.put(ThinkEvent(raw_thinking))
 
-            # Normalize API tool calls to (name, args) tuples.  Older Ollama
-            # versions return arguments as a raw JSON string rather than a dict.
-            _calls: list[tuple[str, dict]] = []
-            for tc in (getattr(msg, "tool_calls", None) or []):
-                args = tc.function.arguments or {}
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        args = {}
-                _calls.append((tc.function.name, args))
+            # Native tool calls the adapter parsed from the API response.
+            _calls: list[tuple[str, dict]] = [(tc.name, tc.arguments) for tc in response.tool_calls]
 
             # Recover tool calls embedded as text when the model bypassed the
             # tool API.  Suppress the raw content in that case — the tool events
@@ -1032,34 +987,22 @@ class Harness:
             if not content:
                 tool_only_turns += 1
 
-            # Append the assistant turn.  Use Ollama's minimal tool_calls format:
+            # Append the assistant turn.  Use the minimal tool_calls format:
             # {"function": {"name": ..., "arguments": ...}} with no id or type
             # fields — Ollama's template engine rejects those in message history.
+            # _calls holds both native (adapter-parsed) and text-recovered calls;
+            # _strip_text_tool_calls scrubs any raw tool markup left in content so
+            # tagged/XML formats don't corrupt Qwen3's prompt on the next turn.
             _qwen = _is_qwen(self.client.model)
-            if msg.tool_calls:
-                self.messages.append({
-                    "role": "assistant",
-                    "content": _strip_text_tool_calls(content) or None,
-                    "tool_calls": [
-                        {"function": {"name": tc.function.name,
-                                      "arguments": (_sanitize_tool_args(
-                                          tc.function.name, tc.function.arguments)
-                                          if _qwen else tc.function.arguments)}}
-                        for tc in msg.tool_calls
-                    ],
-                })
-            else:
-                # Text-recovered calls — also strip tool-call markup from content
-                # so raw XML/tagged formats don't corrupt Qwen3's XML prompt.
-                self.messages.append({
-                    "role": "assistant",
-                    "content": _strip_text_tool_calls(content) or None,
-                    "tool_calls": [
-                        {"function": {"name": n,
-                                      "arguments": _sanitize_tool_args(n, a) if _qwen else a}}
-                        for n, a in _calls
-                    ],
-                })
+            self.messages.append({
+                "role": "assistant",
+                "content": _strip_text_tool_calls(content) or None,
+                "tool_calls": [
+                    {"function": {"name": n,
+                                  "arguments": _sanitize_tool_args(n, a) if _qwen else a}}
+                    for n, a in _calls
+                ],
+            })
 
             for name, args in _calls:
                 # Rescue a file write that arrived with content but no path (some
@@ -1169,6 +1112,7 @@ class Harness:
             tools_enabled=self.tools_enabled,
             run_confirm=self.run_confirm,
             host=self.client.host,
+            provider=self.provider,
         ))
 
     def list_available_skills(self) -> list[str]:
@@ -1205,8 +1149,9 @@ class Harness:
             self.input_history,
             context_pct=self.context_pct,
             host=self.client.host,
+            provider=self.provider,
         )
-        session_mod.save_prefs(model=self.client.model)
+        session_mod.save_prefs(model=self.client.model, provider=self.provider)
 
     def load_session(self, path: Path) -> str:
         data = session_mod.load(path)
@@ -1214,12 +1159,27 @@ class Harness:
         self.mode = data.get("mode", "design")
         self.workdir = Path(data.get("workdir", str(self.workdir)))
         self.context_pct = data.get("context_pct", None)
-        # Restore the host before set_model, since the context-length query below
-        # runs against it. Older sessions without a saved host keep the current one.
+        # Restore the provider first: if it changed, rebuild the client so the
+        # right adapter (and its default transport) is used.  The saved host is
+        # provider-specific, so it must be applied against the matching adapter.
+        saved_provider = data.get("provider")
         saved_host = data.get("host")
-        if saved_host:
-            self.client.set_host(saved_host)
-        self.client.set_model(data.get("model", self.client.model))
+        saved_model = data.get("model", self.client.model)
+        if saved_provider and saved_provider != self.provider:
+            self.provider = saved_provider
+            self.client = make_client(
+                saved_provider,
+                host=saved_host or self.client.host,
+                model=saved_model,
+                auth_token=self.client._auth_token,
+            )
+        else:
+            # Restore the host before set_model, since the context-length query
+            # below runs against it. Older sessions without a saved host keep the
+            # current one.
+            if saved_host:
+                self.client.set_host(saved_host)
+            self.client.set_model(saved_model)
         if self.context_pct is not None:
             self._sync_context_limit(emit=False)
         else:

@@ -8,16 +8,25 @@ from .harness import Harness
 from .tui import run_tui
 
 
+# Default base URL per backend when --host is not given.
+_DEFAULT_HOSTS = {
+    "ollama":   "http://localhost:11434",
+    "llamacpp": "http://localhost:8080",
+}
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="momo-coding-harness",
-        description="AI coding harness powered by Ollama",
+        description="AI coding harness for local LLMs (Ollama or llama.cpp)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--host",    default="http://localhost:11434", metavar="URL",
-                        help="Ollama base URL")
+    parser.add_argument("--provider", default=None, choices=["ollama", "llamacpp"],
+                        help="LLM backend (default: last-used or ollama)")
+    parser.add_argument("--host",    default=None, metavar="URL",
+                        help="Backend base URL (default: 11434 for ollama, 8080 for llamacpp)")
     parser.add_argument("--model",   default=None, metavar="NAME",
-                        help="Ollama model name (default: last-used model or qwen3.5:9b)")
+                        help="Model name (default: last-used model or qwen3.5:9b)")
     parser.add_argument("--workspace", "--workdir", default=".", metavar="PATH",
                         dest="workdir", help="Root directory for all file operations")
     parser.add_argument("--context", default=None, type=int, metavar="N",
@@ -37,8 +46,11 @@ def main():
         print(f"error: --workdir is not a directory: {workdir}", file=sys.stderr)
         sys.exit(1)
 
-    model = args.model or session_mod.load_prefs().get("model") or "qwen3.5:9b"
-    harness = Harness(host=args.host, model=model, workdir=workdir)
+    prefs = session_mod.load_prefs()
+    provider = args.provider or prefs.get("provider") or "ollama"
+    host = args.host or _DEFAULT_HOSTS.get(provider, _DEFAULT_HOSTS["ollama"])
+    model = args.model or prefs.get("model") or "qwen3.5:9b"
+    harness = Harness(host=host, model=model, workdir=workdir, provider=provider)
     if args.context is not None:
         harness.context_limit = args.context
     harness.max_tool_result = args.max_tool_result
