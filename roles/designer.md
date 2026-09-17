@@ -11,6 +11,9 @@ interview and the final design must fit *that system* — not a blank slate. If 
 empty or unrelated, treat the work as greenfield. Either way, do not ask the user for facts the
 files already answer.
 
+Reading a whole file is fine when it is easier. For genuinely large files, `grep_files`/`grep_file`
+to the relevant lines and `read_file` just that range instead of pulling the whole thing into context.
+
 ## How the loop works
 
 Each turn, decide what action to take:
@@ -159,6 +162,10 @@ You still send one `ask_user` call at a time, but each call should move the desi
 on the derived filename; if a file already exists there, `ask_user` whether to overwrite it or
 use a different name rather than clobbering it (for example, the repo's own `design.md`).
 
+**If your write gets cut off** (the design is long and a small context window truncates it), write
+tighter — trim each section to its essential content rather than padding — so the whole document
+fits in one `write_file` call.
+
 ### Design document structure
 
 Include every section that applies, and keep each one specific — avoid vague
@@ -261,96 +268,3 @@ Explicit list of things this design does not cover.
 
 #### Open questions
 Anything still unresolved that would affect the design or implementation.
-
----
-
-## Tool reference
-
-Use the function-calling API when available. If not, output calls in this format — the harness detects and executes them automatically:
-
-```
-<tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>
-```
-
-**Argument order matters.** Pass arguments in the order shown in each tool's signature. For `write_file`, put `path` before `content` — some models drop a trailing `path` after a large `content` value, and a call without `path` fails.
-
-**list_directory** — list the contents of a directory
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `path` | string | no | directory to list (default: `.`) |
-| `show_hidden` | boolean | no | include `.`-prefixed entries (default: false) |
-
-Example: `<tool_call>{"name": "list_directory", "arguments": {}}</tool_call>`
-
-**file_info** — metadata: existence, type, size, last-modified, line count
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `path` | string | yes | path to inspect |
-
-Example: `<tool_call>{"name": "file_info", "arguments": {"path": "readme.md"}}</tool_call>`
-
-**find_files** — find files matching a glob pattern
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `pattern` | string | yes | glob, e.g. `*.md` or `src/**/*.ext` |
-| `directory` | string | no | root directory to search (default: `.`) |
-
-Example: `<tool_call>{"name": "find_files", "arguments": {"pattern": "*.md"}}</tool_call>`
-
-**read_file** — read a file, optionally restricted to a line range
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `path` | string | yes | file to read |
-| `start_line` | integer | no | 1-based start line (default: 1) |
-| `end_line` | integer | no | 1-based end line inclusive (default: EOF) |
-
-Example: `<tool_call>{"name": "read_file", "arguments": {"path": "spec.md"}}</tool_call>`
-
-**grep_file** — regex search in one file, returns matching lines with line numbers
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `pattern` | string | yes | regex |
-| `path` | string | yes | file to search |
-
-Example: `<tool_call>{"name": "grep_file", "arguments": {"pattern": "## API", "path": "spec.md"}}</tool_call>`
-
-**grep_files** — recursive regex search across all files in a directory
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `pattern` | string | yes | regex |
-| `directory` | string | no | root directory (default: `.`) |
-
-Example: `<tool_call>{"name": "grep_files", "arguments": {"pattern": "TODO"}}</tool_call>`
-
-**grep_extract** — like grep_file, but returns only the matched text (or a capture group), not the whole line
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `pattern` | string | yes | regex; use a capture group to extract part of the match |
-| `path` | string | yes | file to search |
-| `group` | integer | no | capture group to return (default: 0 = whole match) |
-
-Example: `<tool_call>{"name": "grep_extract", "arguments": {"pattern": "^## (.+)", "path": "spec.md", "group": 1}}</tool_call>`
-
-**write_file** — write content to a file, creating or overwriting it
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `path` | string | yes | destination path with extension (e.g. `design.md`) |
-| `content` | string | yes | raw file content |
-
-Example: `<tool_call>{"name": "write_file", "arguments": {"path": "task-manager.md", "content": "# Task Manager\n..."}}</tool_call>`
-
-**ask_user** — pause and ask the user a clarifying question
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `question` | string | yes | one focused question per call |
-
-Example: `<tool_call>{"name": "ask_user", "arguments": {"question": "Should this support multiple users or a single user only?"}}</tool_call>`

@@ -1,4 +1,5 @@
 import difflib
+import json
 import os
 import re
 import shlex
@@ -36,26 +37,36 @@ READ_ONLY_TOOLS = [
     _fn("file_info",
         "Return metadata for a path: existence, type (file/directory/symlink), "
         "size in bytes, last-modified timestamp, and line count for text files.",
-        {"path": {"type": "string"}},
+        {"path": {"type": "string", "description": "Path to inspect"}},
         ["path"]),
 
-    _fn("find_files", "Find files matching a glob pattern under a directory",
-        {"pattern": {"type": "string", "description": "Glob pattern, e.g. '*.py'"},
+    _fn("find_files",
+        "Find files matching a glob pattern under a directory. A bare pattern with no '/' "
+        "(e.g. '*.py') is searched recursively through all subdirectories; use an explicit "
+        "path pattern (e.g. 'src/*.py') to restrict depth. Common noise directories (.git, "
+        ".venv, node_modules, __pycache__, dist, build, and similar) are skipped, so files "
+        "inside them are never returned. Results are capped at 100 files.",
+        {"pattern": {"type": "string", "description": "Glob pattern, e.g. '*.py' (recursive) or 'src/*.py' (one level)"},
          "directory": {"type": "string", "description": "Directory to search (default: .)"}},
         ["pattern"]),
 
     _fn("read_file", "Read a file, optionally restricting to a line range",
-        {"path": {"type": "string"},
+        {"path": {"type": "string", "description": "File to read"},
          "start_line": {"type": "integer", "description": "1-based start line (default: 1)"},
          "end_line": {"type": "integer", "description": "1-based end line inclusive (default: EOF)"}},
         ["path"]),
 
     _fn("grep_file", "Single-file regex search. Search for a regex pattern in one file, returns matching lines with line numbers.",
-        {"pattern": {"type": "string"}, "path": {"type": "string"}},
+        {"pattern": {"type": "string", "description": "Regular expression to search for"},
+         "path": {"type": "string", "description": "File to search"}},
         ["pattern", "path"]),
 
-    _fn("grep_files", "Multi-file recursive search. Search for a regex pattern across all files in a directory, returns file:line:content hits.",
-        {"pattern": {"type": "string"},
+    _fn("grep_files",
+        "Multi-file recursive search. Search for a regex pattern across all files in a directory, "
+        "returns file:line:content hits. Noise directories (.git, .venv, node_modules, __pycache__, "
+        "dist, build, and similar), binary files, and files larger than 2 MB are skipped and will "
+        "never appear in the results. Results are capped at 200 matches.",
+        {"pattern": {"type": "string", "description": "Regular expression to search for"},
          "directory": {"type": "string", "description": "Directory to search (default: .)"}},
         ["pattern"]),
 
@@ -64,7 +75,7 @@ READ_ONLY_TOOLS = [
         "(or a specific capture group) rather than the whole line. Use to pull values out of "
         "structured text, e.g. extract version strings, URLs, or identifiers.",
         {"pattern": {"type": "string", "description": "Regex; use a capture group to extract part of the match"},
-         "path":    {"type": "string"},
+         "path":    {"type": "string", "description": "File to search"},
          "group":   {"type": "integer", "description": "Capture group to return (default: 0 = whole match)"}},
         ["pattern", "path"]),
 
@@ -72,8 +83,9 @@ READ_ONLY_TOOLS = [
 
 CODING_ONLY_TOOLS = [
     _fn("move_file",
-        "Move or rename a file. Both source and destination must be inside the working directory. "
-        "Parent directories of the destination are created automatically.",
+        "Move or rename a file or directory. Both source and destination must be inside the "
+        "working directory. Parent directories of the destination are created automatically. "
+        "If the destination already exists it is overwritten, so check first when unsure.",
         {"src": {"type": "string", "description": "Current path"},
          "dst": {"type": "string", "description": "Target path"}},
         ["src", "dst"]),
@@ -82,7 +94,7 @@ CODING_ONLY_TOOLS = [
         "Add text to the END of an existing file (creates it if absent). "
         "Takes ONLY path and content. It cannot change existing text — to replace text "
         "inside a file use edit_file; to overwrite the whole file use write_file.",
-        {"path":    {"type": "string"},
+        {"path":    {"type": "string", "description": "File to append to (created if absent)"},
          "content": {"type": "string", "description": "Text to add at the end of the file."}},
         ["path", "content"]),
 
@@ -92,22 +104,33 @@ CODING_ONLY_TOOLS = [
         "By default it replaces exactly one occurrence and fails if old_string is not found "
         "exactly once; set replace_all=true to replace every occurrence (e.g. renaming a symbol "
         "throughout the file). "
+        "Copy old_string verbatim from read_file output; a leading line-number prefix (e.g. "
+        "'  12: ') is stripped automatically if you include it by mistake, and a single-occurrence "
+        "edit still matches when only indentation or surrounding whitespace differs. If old_string "
+        "is already absent because new_string is present, the tool reports the edit as already "
+        "applied rather than erroring — do not blindly retry. "
         "Takes path, old_string, new_string, and optional replace_all — it does NOT take a "
         "'content' argument (that is write_file).",
-        {"path": {"type": "string"},
+        {"path": {"type": "string", "description": "File to modify"},
          "old_string": {"type": "string", "description": "Exact text to find (copy it verbatim from read_file output)"},
          "new_string": {"type": "string", "description": "Replacement text"},
          "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default: false)"}},
         ["path", "old_string", "new_string"]),
 
-    _fn("delete_file", "Delete a file",
-        {"path": {"type": "string"}},
+    _fn("delete_file",
+        "Permanently delete a single file (this cannot be undone). Works on files only — it "
+        "will error on a directory. The path must be inside the working directory.",
+        {"path": {"type": "string", "description": "File to delete"}},
         ["path"]),
 
     _fn("run_command",
         "Run a shell command from the working directory. Returns stdout and stderr. "
         "Use for running scripts, tests, build tools, etc. The command runs with the "
-        "working directory as its current directory.",
+        "working directory as its current directory. It is NON-INTERACTIVE: no stdin is "
+        "connected, so a command that waits for input (e.g. 'git commit' with no -m, "
+        "'npm init', a prompt for a password) will hang until it times out — always pass "
+        "flags that avoid prompts. Long output is returned in full; exit code is appended "
+        "when non-zero.",
         {"command": {"type": "string", "description": "Shell command to execute (runs in the working directory)"},
          "timeout": {"type": "integer", "description": "Timeout in seconds (default and maximum: 900 = 15 minutes)"}},
         ["command"]),
@@ -666,3 +689,88 @@ def dispatch(name: str, args: dict, workdir: Path) -> str:
         return fn(**args, workdir=workdir)
     except TypeError as e:
         return f"ERROR: bad arguments for {name}: {e}"
+
+
+# ── tool reference rendering ──────────────────────────────────────────────────
+# Single source of truth for the human-readable tool reference that is embedded in
+# every role's system prompt. It is generated from the schemas above (by
+# render_tool_reference, called from the harness) so the reference can never drift
+# from the real tools. Previously each role .md file carried its own hand-copied
+# copy that had to be kept in sync by hand across five files.
+
+_TOOL_REFERENCE_INTRO = (
+    "## Tool reference\n\n"
+    "Use the function-calling API when available. If not, output calls in this format — "
+    "the harness detects and executes them automatically:\n\n"
+    "```\n"
+    '<tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>\n'
+    "```\n\n"
+    "**Argument order matters.** Pass arguments in the order shown in each tool's signature. "
+    "For file writes especially, put `path` before `content` — some models drop a trailing "
+    "`path` after a large `content` value, and a `write_file`/`append_to_file` call without "
+    "`path` fails."
+)
+
+# Canonical, correct example arguments per tool — kept here beside the schemas so a
+# tool and its example live in one place. Tools without an entry fall back to a
+# generated example built from their required parameters.
+_TOOL_EXAMPLES: dict[str, dict] = {
+    "list_directory": {},
+    "file_info":      {"path": "main.py"},
+    "find_files":     {"pattern": "*.py"},
+    "read_file":      {"path": "main.py", "start_line": 1, "end_line": 40},
+    "grep_file":      {"pattern": "def ", "path": "main.py"},
+    "grep_files":     {"pattern": "TODO"},
+    "grep_extract":   {"pattern": "def (\\w+)", "path": "main.py", "group": 1},
+    "write_file":     {"path": "hello.py", "content": "print('hello!')"},
+    "edit_file":      {"path": "main.py", "old_string": "existing line", "new_string": "replacement line"},
+    "append_to_file": {"path": "notes.md", "content": "\n## New section\n"},
+    "move_file":      {"src": "old/path.py", "dst": "new/path.py"},
+    "delete_file":    {"path": "old-file.py"},
+    "run_command":    {"command": "python -m pytest"},
+    "ask_user":       {"question": "Should I overwrite the existing file?"},
+}
+
+
+def _example_args(tool: dict) -> dict:
+    name = tool["function"]["name"]
+    if name in _TOOL_EXAMPLES:
+        return _TOOL_EXAMPLES[name]
+    # Fallback for a tool with no curated example: required params only, with
+    # type-appropriate placeholder values.
+    params = tool["function"]["parameters"]
+    props = params.get("properties", {})
+    out: dict = {}
+    for p in params.get("required", []):
+        ptype = props.get(p, {}).get("type", "string")
+        out[p] = {"boolean": True, "integer": 1}.get(ptype, f"<{p}>")
+    return out
+
+
+def render_tool_reference(tool_list: list[dict]) -> str:
+    """Render the Markdown tool reference for exactly the given tools. The harness
+    calls this per mode with that mode's tool set, so each role sees a reference
+    covering precisely the tools it actually has."""
+    sections = [_TOOL_REFERENCE_INTRO]
+    for tool in tool_list:
+        fn = tool["function"]
+        name = fn["name"]
+        desc = fn.get("description", "").strip()
+        params = fn["parameters"]
+        props = params.get("properties", {})
+        required = set(params.get("required", []))
+        lines = [f"**{name}** — {desc}", ""]
+        if props:
+            lines.append("| Parameter | Type | Required | Notes |")
+            lines.append("|-----------|------|----------|-------|")
+            for pname, pspec in props.items():
+                ptype = pspec.get("type", "string")
+                req = "yes" if pname in required else "no"
+                note = (pspec.get("description") or "").strip() or "—"
+                lines.append(f"| `{pname}` | {ptype} | {req} | {note} |")
+            lines.append("")
+        example = json.dumps({"name": name, "arguments": _example_args(tool)},
+                             ensure_ascii=False)
+        lines.append(f"Example: `<tool_call>{example}</tool_call>`")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)

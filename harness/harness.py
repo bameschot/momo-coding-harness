@@ -13,7 +13,7 @@ from . import session as session_mod
 from .diff import build_diff_body
 from .llm import make_client
 from .logger import Logger
-from .tools import DESIGN_TOOLS, WRITER_TOOLS, ALL_TOOLS, CHAT_TOOLS, dispatch
+from .tools import DESIGN_TOOLS, WRITER_TOOLS, ALL_TOOLS, CHAT_TOOLS, dispatch, render_tool_reference
 
 # Tools that mutate a file on disk — the harness snapshots the target before and
 # after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
@@ -569,6 +569,10 @@ class Harness:
         ]
         self._token_estimate = 0
         self._cancel = threading.Event()
+        # For a fixed-model backend, adopt the server's actually-loaded model before
+        # reading its context window, so the label and ctx message reflect reality
+        # rather than a stale saved name.
+        self._reconcile_fixed_model()
         self._sync_context_limit(emit=True)
 
     # ── public properties ─────────────────────────────────────────────────────
@@ -644,6 +648,20 @@ class Harness:
         if emit:
             self.event_queue.put(ChatEvent("system", msg))
 
+    def _reconcile_fixed_model(self):
+        """For a backend that can't switch models at runtime (llama.cpp serves the
+        single model it was launched with and ignores the request's `model` field),
+        the *server* — not a saved label from CLI args, prefs, or a restored session
+        — is the source of truth for what is loaded. Query it and adopt the real id
+        so the UI never shows a stale name after the server was relaunched with a
+        different model. No-op for switchable backends (Ollama) and when the server
+        is unreachable (list_models() returns [])."""
+        if self.client.can_switch_model:
+            return
+        loaded = self.client.list_models()
+        if loaded and loaded[0] != self.client.model:
+            self.client.set_model(loaded[0])
+
     def set_model(self, model: str):
         """Switch model and re-sync context limit from the new model's capabilities."""
         self.client.set_model(model)
@@ -657,6 +675,10 @@ class Harness:
         base = loader(str(self.workdir))
         if str(self.workdir) not in base:
             base += f"\n\nWorking directory: {self.workdir}"
+        # Append the tool reference generated from the schemas for exactly this
+        # mode's tool set, so the reference is always in sync with the real tools
+        # (the role .md files no longer carry a hand-copied version).
+        base += "\n\n---\n\n" + render_tool_reference(_MODE_TOOLS.get(self.mode, ALL_TOOLS))
         parts = []
         for name in self.active_skills:
             p = _SKILLS_DIR / f"{name}.md"
@@ -1180,6 +1202,9 @@ class Harness:
             if saved_host:
                 self.client.set_host(saved_host)
             self.client.set_model(saved_model)
+        # A fixed-model backend may now be serving a different model than the one
+        # saved in this session; trust the server over the saved label.
+        self._reconcile_fixed_model()
         if self.context_pct is not None:
             self._sync_context_limit(emit=False)
         else:

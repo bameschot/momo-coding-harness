@@ -64,6 +64,11 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True,
                                  output=f"{harness.client.provider_name} host: {harness.client.host}")
         harness.client.set_host(arg)
+        # A new host may be a different server serving a different model and context
+        # window — adopt the server's loaded model (fixed-model backends) and re-read
+        # its context size so the display matches reality.
+        harness._reconcile_fixed_model()
+        harness._sync_context_limit(emit=True)
         harness._emit_status()
         return CommandResult(handled=True, output=f"Host set to: {arg}")
 
