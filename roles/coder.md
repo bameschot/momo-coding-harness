@@ -34,6 +34,9 @@ section is enough — full reconnaissance is proportional to scope.
   thing. Only for larger files (one or two hunderd lines) is it worth narrowing first: use
   `grep_files`/`grep_file` to locate the relevant lines (and `file_info` to check size if unsure),
   then `read_file` with `start_line`/`end_line` to pull in just that region and save context.
+- **For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript**, navigate by structure: `code_outline` a large file
+  to see its classes and functions, `read_symbol` to read just the one you need, `find_symbol` to
+  jump to a definition, and `find_references` to find every caller before changing a signature.
 - You **may** call several independent read tools in one turn — the harness runs them all and
   returns the results together. One tool at a time is also fine; do whichever you can emit cleanly.
 
@@ -106,6 +109,10 @@ These extend the three-phase Workflow above — they do not repeat it.
 | `grep_file(pattern, path)` | Regex search in one file — returns matching lines | — |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines | — |
 | `grep_extract(pattern, path, group?)` | Extract matched text or a capture group from one file | Returns the match, not the whole line |
+| `code_outline(path)` | Classes/functions/methods of one file with line ranges | Python, Java, C, C++, Kotlin, Rust, JS, TS only |
+| `find_symbol(name, directory?, kind?)` | Where a class/function/method is defined | Definitions only; `Class.method` allowed |
+| `read_symbol(path, name)` | Full source of one definition, with line numbers | Same line format as `read_file` |
+| `find_references(name, directory?)` | Every use of an identifier | Skips comments and strings; whole names only |
 | `write_file(path, content)` | Create a new file or fully overwrite one | Only `path`+`content`; never `old_string`/`new_string`. Do not wrap code in fences |
 | `edit_file(path, old_string, new_string, replace_all?)` | Change text inside a file | One occurrence by default; `replace_all=true` for every occurrence |
 | `append_to_file(path, content)` | Add text to the END of a file (creates if absent) | Only `path`+`content` |

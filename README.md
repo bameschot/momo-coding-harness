@@ -131,7 +131,7 @@ Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep
 
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
-Available tools: all design tools + `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`
+Available tools: all design tools + `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`, and the code-navigation tools (`code_outline`, `find_symbol`, `read_symbol`, `find_references`)
 
 ### Plan mode
 
@@ -141,7 +141,7 @@ Switch to it with `/plan` (or `Shift+Tab`) and describe the feature or bug.
 
 #### 1. Investigate
 
-The assistant explores the code (`find_files`, `grep_files`, `read_file`, …) and follows the code path the change touches. For a bug it tries to reproduce the problem with `run_command` (run the failing test, the script, or a one-liner), and it finds how the project is tested. `run_command` is available so it can observe the system, not so it can change it; `/run-confirm on` makes every command ask first.
+The assistant explores the code (`find_files`, `grep_files`, `read_file`, `find_symbol`, `find_references`, …) and follows the code path the change touches. For a bug it tries to reproduce the problem with `run_command` (run the failing test, the script, or a one-liner), and it finds how the project is tested. `run_command` is available so it can observe the system, not so it can change it; `/run-confirm on` makes every command ask first.
 
 When the code can't answer a question that changes the plan (two valid designs, unclear scope, a destructive step), it asks you with `ask_user`, one question at a time.
 
@@ -244,6 +244,17 @@ Switch modes with `/design`, `/chat`, `/plan`, `/code`, `/momo`, or `Shift+Tab`.
 | `read_file` | Read a file, optionally a specific line range |
 | `grep_file` | Regex search in a single file — returns matching lines |
 | `grep_files` | Recursive regex search across a directory — returns matching lines |
+
+### Code navigation (coding, plan, momo modes)
+
+Syntax-aware tools built on [tree-sitter](https://tree-sitter.github.io/) for Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript (including JSX/TSX). The grammars are installed from `requirements.txt` and work offline. If tree-sitter is not installed, these tools are simply not offered.
+
+| Tool | Description |
+|---|---|
+| `code_outline` | Classes, functions and methods of one file, with line ranges and signatures |
+| `find_symbol` | Where a name (or `Class.method`) is defined across the project, never comments or call sites |
+| `read_symbol` | The full source of one definition, numbered like `read_file` |
+| `find_references` | Every use of an identifier, skipping comments and strings and tagging the definition `(def)` |
 ### Shared (design, coding, momo modes)
 
 | Tool | Description |
@@ -365,11 +376,12 @@ design  → list_directory  file_info  find_files  read_file
 
 coding  → all design tools + edit_file  delete_file  move_file
           append_to_file  run_command
+          code_outline  find_symbol  read_symbol  find_references
 
 chat    → list_directory  file_info  find_files  read_file
           grep_file  grep_files  ask_user
 
-plan    → investigating: read-only tools + run_command  ask_user  create_plan
+plan    → investigating: read-only tools + code navigation + run_command  ask_user  create_plan
           executing:     same as coding + complete_step  revise_plan
 
 momo    → same as coding (full tool suite)

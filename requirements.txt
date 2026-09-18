@@ -1,1 +1,13 @@
 ollama>=0.5,<1
+# Code navigation (code_outline / find_symbol / read_symbol / find_references).
+# Per-language grammar wheels are bundled and work offline; the harness still
+# runs without them, the code-navigation tools are just not offered.
+tree-sitter>=0.25,<0.27
+tree-sitter-python>=0.25
+tree-sitter-java>=0.23
+tree-sitter-c>=0.24
+tree-sitter-cpp>=0.23
+tree-sitter-kotlin>=1.1
+tree-sitter-rust>=0.24
+tree-sitter-javascript>=0.25
+tree-sitter-typescript>=0.23

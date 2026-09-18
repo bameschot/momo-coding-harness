@@ -8,6 +8,8 @@ import textwrap
 from datetime import datetime
 from pathlib import Path
 
+from . import code_nav
+
 
 # ── schema helpers ───────────────────────────────────────────────────────────
 
@@ -80,6 +82,47 @@ READ_ONLY_TOOLS = [
         ["pattern", "path"]),
 
 ]
+
+# Syntax-aware navigation (tree-sitter).  Empty when tree-sitter is not
+# installed, so no mode ever offers a tool that cannot run.
+_CODE_NAV_LANGS = "Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript"
+CODE_NAV_TOOLS = [
+    _fn("code_outline",
+        f"Show the structure of one source file ({_CODE_NAV_LANGS}): every class, function and "
+        "method with its line range and signature line, indented by nesting. Use it to "
+        "understand a file without reading all of it, then read_symbol or read_file the part you need.",
+        {"path": {"type": "string", "description": "Source file to outline"}},
+        ["path"]),
+
+    _fn("find_symbol",
+        f"Find where a class, function or method is DEFINED across the project ({_CODE_NAV_LANGS} "
+        "files). Unlike grep_files it only returns real definitions, never comments, strings or "
+        "call sites. Returns file:L<start>-<end>, kind, qualified name and signature line. "
+        "Results are capped at 100.",
+        {"name":      {"type": "string", "description": "Name to find, e.g. 'send' or a qualified 'Harness.send'"},
+         "directory": {"type": "string", "description": "Directory (or single file) to search (default: .)"},
+         "kind":      {"type": "string", "description": "Only this kind: class, interface, enum, struct, trait, impl, object, function, method, ... (default: any)"}},
+        ["name"]),
+
+    _fn("read_symbol",
+        "Read the complete source of ONE class, function or method from a file, with line numbers "
+        "in the same format as read_file (so you can copy text for edit_file). Use a qualified name "
+        "like 'Class.method' when the bare name is ambiguous; if it still matches several "
+        "definitions you get their line ranges instead.",
+        {"path": {"type": "string", "description": "Source file containing the definition"},
+         "name": {"type": "string", "description": "Name of the definition, e.g. 'parse' or 'Parser.parse'"}},
+        ["path", "name"]),
+
+    _fn("find_references",
+        f"Find every place an identifier is used across the project ({_CODE_NAV_LANGS} files): "
+        "calls, reads, type uses and the definition itself (tagged '(def)'). Each hit names the "
+        "function or class it sits in, e.g. '[in Parser.parse]'. Matches whole "
+        "identifiers only and skips comments and strings, so it is more exact than grep_files. "
+        "Use before renaming or changing a function's signature. Results are capped at 200.",
+        {"name":      {"type": "string", "description": "Identifier to find, e.g. 'parse_config'"},
+         "directory": {"type": "string", "description": "Directory (or single file) to search (default: .)"}},
+        ["name"]),
+] if code_nav.AVAILABLE else []
 
 CODING_ONLY_TOOLS = [
     _fn("move_file",
@@ -163,7 +206,7 @@ SHARED_TOOLS = [
 ]
 
 DESIGN_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS
-ALL_TOOLS    = READ_ONLY_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
+ALL_TOOLS    = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
 
 _by_name = {t["function"]["name"]: t for t in CODING_ONLY_TOOLS}
 
@@ -217,7 +260,7 @@ _plan_by_name = {t["function"]["name"]: t for t in PLAN_TOOLS}
 
 # Investigation may run commands (reproduce a bug, check the test baseline) but
 # must not edit files until the plan is approved.
-PLAN_INVESTIGATE_TOOLS = READ_ONLY_TOOLS + [
+PLAN_INVESTIGATE_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [
     _shared_by_name["ask_user"],
     _by_name["run_command"],
     _plan_by_name["create_plan"],
@@ -669,7 +712,7 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
 # clear error messages before Python's TypeError exposes internal function names.
 _REQUIRED_ARGS: dict[str, list[str]] = {}
 _KNOWN_ARGS: dict[str, set[str]] = {}
-for _tl in (READ_ONLY_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS):
+for _tl in (READ_ONLY_TOOLS, CODE_NAV_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS):
     for _t in _tl:
         _tname = _t["function"]["name"]
         _props = _t["function"]["parameters"].get("properties", {})
@@ -694,6 +737,13 @@ _EXECUTORS = {
     "delete_file":        _delete_file,
     "run_command":        _run_command,
 }
+if code_nav.AVAILABLE:
+    _EXECUTORS.update({
+        "code_outline":       code_nav.code_outline,
+        "find_symbol":        code_nav.find_symbol,
+        "read_symbol":        code_nav.read_symbol,
+        "find_references":    code_nav.find_references,
+    })
 
 
 def dispatch(name: str, args: dict, workdir: Path) -> str:
@@ -771,6 +821,10 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "grep_file":      {"pattern": "def ", "path": "main.py"},
     "grep_files":     {"pattern": "TODO"},
     "grep_extract":   {"pattern": "def (\\w+)", "path": "main.py", "group": 1},
+    "code_outline":   {"path": "src/parser.py"},
+    "find_symbol":    {"name": "Parser.parse"},
+    "read_symbol":    {"path": "src/parser.py", "name": "Parser.parse"},
+    "find_references": {"name": "parse_config"},
     "write_file":     {"path": "hello.py", "content": "print('hello!')"},
     "edit_file":      {"path": "main.py", "old_string": "existing line", "new_string": "replacement line"},
     "append_to_file": {"path": "notes.md", "content": "\n## New section\n"},
