@@ -1,11 +1,16 @@
 import argparse
 import curses
+import secrets
+import signal
 import sys
+import time
 from pathlib import Path
 
 from . import session as session_mod
-from .harness import Harness
+from .controller import Controller
+from .harness import Harness, ChatEvent
 from .tui import run_tui
+from .web.server import is_loopback, start_web_server
 
 
 # Default base URL per backend when --host is not given.
@@ -39,7 +44,21 @@ def main():
                         help="Start a new session instead of restoring the last one")
     parser.add_argument("--no-think", action="store_true", default=False,
                         help="Disable model thinking/reasoning mode (default: on)")
+    parser.add_argument("--no-stream", action="store_true", default=False,
+                        help="Wait for complete replies instead of streaming them as they are generated")
+    parser.add_argument("--web", action=argparse.BooleanOptionalAction, default=True,
+                        help="Serve the browser chat UI alongside the TUI")
+    parser.add_argument("--web-host", default="127.0.0.1", metavar="HOST",
+                        help="Interface for the web UI (non-loopback hosts require an access token)")
+    parser.add_argument("--web-port", default=8765, type=int, metavar="PORT",
+                        help="Port for the web UI")
+    parser.add_argument("--web-token", default=None, metavar="TOKEN",
+                        help="Access token for the web UI (default: generated when --web-host is not loopback)")
+    parser.add_argument("--headless", action="store_true", default=False,
+                        help="Run only the web UI (no terminal UI)")
     args = parser.parse_args()
+    if args.headless and not args.web:
+        parser.error("--headless needs the web UI; drop --no-web")
 
     workdir = Path(args.workdir).expanduser().resolve()
     if not workdir.is_dir():
@@ -56,6 +75,8 @@ def main():
     harness.max_tool_result = args.max_tool_result
     if args.no_think:
         harness.think = False
+    if args.no_stream:
+        harness.stream = False
 
     # Restore last session unless --fresh
     sessions = session_mod.list_sessions()
@@ -64,14 +85,41 @@ def main():
     else:
         harness.set_mode(args.mode)
 
+    # One Controller drives the harness for every frontend (TUI and web).
+    controller = Controller(harness)
+
+    web = None
+    if args.web:
+        token = args.web_token or (None if is_loopback(args.web_host) else secrets.token_urlsafe(24))
+        try:
+            web = start_web_server(controller, args.web_host, args.web_port, token)
+            controller.web_url = web.url
+            harness.event_queue.put(ChatEvent("system", f"Web UI: {web.url}"))
+        except OSError as e:
+            msg = f"Web UI failed to start on {args.web_host}:{args.web_port}: {e}"
+            if args.headless:
+                print(f"error: {msg}", file=sys.stderr)
+                sys.exit(1)
+            harness.event_queue.put(ChatEvent("system", msg))
+
     try:
-        curses.wrapper(run_tui, harness)
+        if args.headless:
+            # Treat SIGTERM (service managers, `kill`) like Ctrl+C so the session is saved.
+            def _on_term(signum, frame):
+                raise KeyboardInterrupt
+            signal.signal(signal.SIGTERM, _on_term)
+            print(f"momo web UI: {web.url}\nPress Ctrl+C to stop.", flush=True)
+            while True:
+                time.sleep(3600)
+        else:
+            curses.wrapper(run_tui, harness, controller)
     except SystemExit:
         pass
     except KeyboardInterrupt:
         harness._autosave()
-        harness.logger.close()
     finally:
+        if web is not None:
+            web.close()
         harness.logger.close()
 
 

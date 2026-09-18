@@ -27,6 +27,7 @@ class CommandResult:
     run_compact: bool = False               # TUI runs compact on worker thread
     compact_summarise: bool = True          # passed to compact_threaded()
     run_plan: bool = False                  # TUI runs execute_plan_threaded() on a worker thread
+    retry: bool = False                     # controller re-sends the last user message
 
 
 def handle(line: str, harness: Harness) -> CommandResult:
@@ -128,6 +129,12 @@ def handle(line: str, harness: Harness) -> CommandResult:
     if cmd == "/momo":
         harness.set_mode("momo")
         return CommandResult(handled=True, output="Switched to momo mode")
+
+    if cmd == "/new":
+        return CommandResult(handled=True, output=harness.new_session(), replay_session=True)
+
+    if cmd == "/retry":
+        return CommandResult(handled=True, retry=True)
 
     if cmd == "/clear":
         system_msg = harness.messages[0]
@@ -470,6 +477,8 @@ Available commands:
   /chat               Switch to chat mode (read files, ask questions)
   /momo               Switch to momo companion mode (talk to the cat)
   /clear              Clear conversation history
+  /new                Save this session and start a new, empty one
+  /retry              Re-send your last message (drops the reply it got)
   /workspace          Show current working directory (alias: /workdir)
   /workspace <path>   Set working directory for file operations
   /tool-output on|off   Show or hide the tool calls pane

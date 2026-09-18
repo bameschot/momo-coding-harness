@@ -6,14 +6,14 @@ import os
 import queue
 import random
 import sys
-import threading
 import time
 import textwrap
 from pathlib import Path
 from typing import Any
 
-from .commands import handle as handle_command
 from . import md_render
+from .controller import Controller
+from .events import BusyEvent, DeltaEvent, ResetEvent, StreamEndEvent, UserEvent
 from .harness import (
     Harness, ChatEvent, ToolCallEvent, ToolResultEvent,
     StatusEvent, ErrorEvent, DoneEvent, AskUserEvent, ThinkEvent, DiffEvent,
@@ -103,167 +103,10 @@ _CAT_W              = 8    # visible width of every frame line
 _COMPANION_H        = 4    # 4 art rows
 _COMPANION_INTERVAL = 0.12  # seconds per animation tick
 
-_MOMO_WR = [   # walking right — two alternating leg frames
-    ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " /\\/\\/\\ "],
-    ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " \\/\\/\\/ "],
-]
-_MOMO_WL = [   # walking left — two alternating leg frames
-    [" /\\   \\ ", "(' )  ( ", "(  ¯¯ ) ", " /\\/\\/\\ "],
-    [" /\\   \\ ", "(' )  ( ", "(  ¯¯ ) ", " \\/\\/\\/ "],
-]
-_MOMO_SIT = [  # sitting — normal, blink
-    ["\\    /\\ ", " )  ( ')", "(  /  ) ", " \\(__)| "],
-    ["\\    /\\ ", " )  ( -)", "(  /  ) ", " \\(__)| "],
-]
-_MOMO_SIT_L = [  # sitting facing left — normal, blink
-    [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", "|(__)/ "],
-    [" /\\   \\ ", "(- )  ( ", "(  \\  ) ", "|(__)/ "],
-]
-_MOMO_WR_BLINK = ["\\    /\\ ", " )  ( -)", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-right blink
-_MOMO_WL_BLINK = [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-left blink
-# key: (mode, is_thinking)  value: list of strings each ≤ 25 visible chars
-_SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
-    ("coding",  False): [
-        "< mew~", "< purrr", "< found a bug!",
-        "< git commit!", "< tests pass?", "< grep is love",
-        "< ship it!", "< refactor?", "< code review!",
-        "< off by one!", "< vim or emacs?",
-        "< lgtm!", "< rubber duck?",
-        "< dry it up!", "< lint errors!",
-        "< push to main?", "< branch first!",
-        "< stash it!", "< rebase time!",
-        "< merge conflict?", "< squash it!",
-        "< todo fixme!", "< purrr~",
-        "< hot reload?", "< benchmarks!",
-        "< profiler!", "< coverage!",
-        "< make clean?", "< chmod +x!",
-        "< mew mew~",
-    ],
-    ("coding",  True): [
-        "< mew?", "< compiling...", "< stack trace!",
-        "< segfault...", "< null pointer!",
-        "< linker error!", "< undefined!",
-        "< syntax error?", "< type mismatch",
-        "< core dumped!", "< infinite loop?",
-        "< race condition?", "< deadlock...",
-        "< heap overflow!", "< bus error!",
-        "< stack overflow!", "< exception!",
-        "< unhandled err!", "< oom killed...",
-        "< traceback!", "< mew...",
-        "< assertion fail", "< divide by zero?",
-        "< abi mismatch!", "< memory leak...",
-        "< watchdog!", "< panic!",
-        "< signal caught!", "< debugger...",
-        "< step through?",
-    ],
-    ("design",  False): [
-        "< mew~", "< nice api!", "< solid design!",
-        "< decouple it!", "< dry principle",
-        "< event driven?", "< schema first!",
-        "< purrr", "< interface?", "< abstract it!",
-        "< single concern", "< clean code!",
-        "< patterns!", "< microservices?",
-        "< idempotent!", "< immutable!",
-        "< hexagonal?", "< monolith?",
-        "< async!", "< solid!",
-        "< loose coupling", "< extension pts?",
-        "< separation?", "< dependency inj?",
-        "< pure functions?", "< state machine?",
-        "< event sourcing?", "< cqrs?",
-        "< mew mew~", "< purrr~",
-    ],
-    ("design",  True): [
-        "< mew mew mew", "< hmm...", "< thinking hard",
-        "< trade-offs...", "< let me think",
-        "< edge cases!", "< iterate!",
-        "< coupling...", "< dependency?",
-        "< mew?", "< complexity...",
-        "< layering...", "< contracts!",
-        "< invariants...", "< mew mew",
-        "< abstractions?", "< modelling...",
-        "< boundaries?", "< purrr...",
-        "< cohesion?", "< simplify...",
-        "< risk analysis?", "< first principles",
-        "< tech debt...", "< scope creep?",
-        "< bottleneck?", "< scalability?",
-        "< feedback loop?", "< mew~",
-        "< purrr~",
-    ],
-    ("chat",    False): [
-        "< tell me more!", "< interesting!", "< got it!",
-        "< ooh!", "< makes sense!", "< mew~",
-        "< say more!", "< purrr", "< keep going!",
-        "< I see!", "< right right!", "< nice!",
-        "< elaborate?", "< and then?", "< really?",
-        "< noted!", "< curious!", "< for sure!",
-        "< neat!", "< love it!", "< mhm!",
-        "< yep!", "< ah ha!", "< go on!",
-        "< understood!", "< mew mew~", "< clever!",
-        "< fascinating!", "< ok ok!", "< purrr~",
-    ],
-    ("chat",    True): [
-        "< reading...", "< let me check", "< searching...",
-        "< hmm...", "< found it!", "< scanning...",
-        "< parsing...", "< mew?", "< cross-checking",
-        "< grepping...", "< hold on...", "< one sec...",
-        "< digging in...", "< inspecting!", "< ah interesting",
-        "< found a ref", "< following up", "< tracing it...",
-        "< mew mew?", "< mapping it...", "< connecting dots",
-        "< hmm hmm...", "< checking...", "< pattern match!",
-        "< got a clue!", "< narrowing...", "< almost there",
-        "< verifying...", "< cross ref...", "< purrr...",
-    ],
-    ("plan",    False): [
-        "< what's the plan?", "< mew~", "< step by step!",
-        "< checklist!", "< purrr", "< plan approved?",
-        "< one step at a time", "< ready when you are", "< looks solid!",
-        "< tick tick!", "< mew mew~", "< measure twice",
-        "< cut once!", "< y to run it!", "< edit the plan?",
-        "< any feedback?", "< read it first!", "< good goal!",
-        "< small steps!", "< tests last?", "< /plan run?",
-        "< plan saved!", "< approve pls?", "< nice & tidy!",
-        "< all boxes [x]!", "< plan complete!", "< what's next?",
-        "< bug or feature?", "< tell me more!", "< purrr~",
-    ],
-    ("plan",    True): [
-        "< investigating...", "< sniff sniff", "< tracing...",
-        "< step done?", "< checking box!", "< following plan",
-        "< hmm...", "< next step!", "< reproducing...",
-        "< mapping it...", "< verifying...", "< purrr...",
-        "< root cause?", "< found the bug!", "< reading code...",
-        "< grepping...", "< writing steps...", "< [~] in progress",
-        "< ticking [x]!", "< which step now?", "< stay on track!",
-        "< no step skip!", "< complete_step!", "< revise plan?",
-        "< running tests...", "< almost done!", "< hmm hmm...",
-        "< one more step", "< mew?", "< *checks list*",
-    ],
-    ("momo",   False): [
-        "< mew~", "< purrr~", "< hi there!",
-        "< whatcha doing?", "< ooh!", "< shiny!",
-        "< sniff sniff", "< found a bug?", "< cuddle break?",
-        "< mew mew~", "< sunny spot!", "< outside?",
-        "< zoomies!", "< nap time?", "< treat?",
-        "< bird outside!", "< *chirps*", "< brrp!",
-        "< purrr purrr", "< headbutt!", "< mew!",
-        "< you okay?", "< proud of you!", "< good job!",
-        "< mew mew mew", "< *kneads*", "< snooze...",
-        "< i'm here!", "< tell me more!", "< oh no!",
-        "< mew~",
-    ],
-    ("momo",   True): [
-        "< reading...", "< sniff sniff", "< hmm...",
-        "< looking...", "< mew?", "< found it?",
-        "< scanning...", "< curious...", "< one sec...",
-        "< *stares*", "< parsing...", "< mew mew?",
-        "< digging in!", "< hold on...", "< oh interesting",
-        "< following...", "< tracing...", "< almost!",
-        "< mew...", "< inspecting!", "< got a clue!",
-        "< cross ref...", "< hmm hmm", "< checking...",
-        "< purrr...", "< nearly there", "< ah!",
-        "< verifying...", "< *sniffs file*", "< mew!",
-    ],
-}
-_SPEECH_TEXTS_DEFAULT = ["< mew~", "< purrr", "< mew mew"]  # fallback for unknown modes
+from .companion import (  # noqa: E402  (shared with the web UI)
+    _MOMO_WR, _MOMO_WL, _MOMO_SIT, _MOMO_SIT_L, _MOMO_WR_BLINK, _MOMO_WL_BLINK,
+    _SPEECH_TEXTS, _SPEECH_TEXTS_DEFAULT,
+)
 
 
 # ── extended key support ─────────────────────────────────────────────────────
@@ -423,9 +266,15 @@ def _compute_layout(rows: int, cols: int, companion_h: int = 0) -> dict:
 # ── main TUI ──────────────────────────────────────────────────────────────────
 
 class TUI:
-    def __init__(self, stdscr, harness: Harness):
+    def __init__(self, stdscr, harness: Harness, controller: Controller):
         self.stdscr = stdscr
         self.harness = harness
+        self.controller = controller                # shared with the web UI
+        self._events = harness.event_queue.subscribe()  # replays the backlog first
+        # Streaming preview: lines from _stream_start on are a live render of the
+        # reply being generated; they are replaced when the final events arrive.
+        self._stream_start: int | None = None
+        self._stream_text = {"thinking": "", "content": ""}
         self._chat_buf    = _LineBuffer()
         self._chat_events: list[tuple] = []  # raw events for toggle rebuild
         self._tools_expanded: bool = True    # True = full tool output; False = abbreviated
@@ -448,12 +297,9 @@ class TUI:
         self._st_dir   = str(harness.workdir)
         self._st_extra = ""             # trailing " | TOOLS: off" / " | RUN: confirm"
         self._ctx_color = _C_STATUS
-        self._busy      = False
         self._too_small = False   # set when the terminal is too small to host the layout
         self._spinner_frame = 0
         self._spinner_ts    = 0.0
-        self._pending_confirm: "callable | None" = None  # set while waiting for y/N
-        self._waiting_for_input: bool = False             # set while model is blocked on ask_user
         self._companion_visible:       bool       = True
         self._companion_x:             int        = 4
         self._companion_dir:           int        = 1
@@ -498,6 +344,16 @@ class TUI:
         rows, cols = stdscr.getmaxyx()
         self._layout = _compute_layout(rows, cols, companion_h=_COMPANION_H)
         self._build_windows()
+
+    # Busy / waiting state is owned by the Controller so the TUI and the web UI
+    # agree on it (a turn started from the browser shows as busy here too).
+    @property
+    def _busy(self) -> bool:
+        return self.controller.busy
+
+    @property
+    def _waiting_for_input(self) -> bool:
+        return self.controller.waiting
 
     def _build_windows(self):
         # Called on startup and on every resize / companion toggle.  Previous
@@ -939,6 +795,7 @@ class TUI:
         # Re-render all events from scratch. Called when display options change
         # (e.g. tool expand/collapse toggle) so the layout is consistent.
         self._chat_buf = _LineBuffer()
+        streaming = self._stream_start is not None
         for ev in self._chat_events:
             if ev[0] == "chat":
                 self._render_chat(ev[1], ev[2])
@@ -950,26 +807,52 @@ class TUI:
                 self._render_think(ev[1])
             elif ev[0] == "diff":
                 self._render_diff(ev[1])
+        if streaming:  # keep the live preview below the rebuilt transcript
+            self._stream_start = len(self._chat_buf._lines)
+            self._render_stream_preview()
 
     # ── event processing ──────────────────────────────────────────────────────
 
     def _drain_events(self):
         # Drain the entire queue before redrawing — one redraw per poll cycle
         # is sufficient and avoids screen flicker from partial updates.
-        # Thread safety: event_queue is a queue.Queue; get_nowait() is
-        # thread-safe.  All other state (_chat_buf, _busy, etc.) is only mutated
+        # Thread safety: the subscription is a queue.Queue; get_nowait() is
+        # thread-safe.  All other state (_chat_buf, etc.) is only mutated
         # here and in the key-handler path, both of which run on the main thread,
         # so no additional locking is required.
         changed = False
+        stream_dirty = False
         # Buffer index just before the last ChatEvent rendered this cycle.
         # Used below to scroll the start of the new message into view.
         last_chat_start: int | None = None
         try:
             while True:
-                ev = self.harness.event_queue.get_nowait()
+                ev = self._events.get_nowait()
                 if isinstance(ev, ChatEvent):
                     last_chat_start = len(self._chat_buf._lines)
                     self._add_chat(ev.role, ev.text)
+                    changed = True
+                elif isinstance(ev, UserEvent):
+                    last_chat_start = len(self._chat_buf._lines)
+                    self._add_chat("user", ev.text)
+                    changed = True
+                elif isinstance(ev, ResetEvent):
+                    self._chat_events = []
+                    self._chat_buf = _LineBuffer()
+                    self._end_stream_preview()
+                    last_chat_start = None
+                    changed = True
+                elif isinstance(ev, DeltaEvent):
+                    if self._stream_start is None:
+                        self._stream_start = len(self._chat_buf._lines)
+                    self._stream_text[ev.kind] = self._stream_text.get(ev.kind, "") + ev.text
+                    stream_dirty = True
+                    changed = True
+                elif isinstance(ev, StreamEndEvent):
+                    self._end_stream_preview()
+                    stream_dirty = False
+                    changed = True
+                elif isinstance(ev, BusyEvent):
                     changed = True
                 elif isinstance(ev, ToolCallEvent):
                     self._add_tool_call(ev.name, ev.args)
@@ -998,20 +881,19 @@ class TUI:
                     changed = True
                 elif isinstance(ev, AskUserEvent):
                     self._add_chat("assistant", ev.question)
-                    self._waiting_for_input = True
                     changed = True
                 elif isinstance(ev, DoneEvent):
-                    self._busy = False
-                    self._waiting_for_input = False
                     self._spinner_frame = 0
                     changed = True
                 elif isinstance(ev, ErrorEvent):
                     last_chat_start = len(self._chat_buf._lines)
                     self._add_chat("system", f"ERROR: {ev.text}")
-                    self._busy = False
                     changed = True
         except queue.Empty:
             pass
+
+        if stream_dirty:
+            self._render_stream_preview()
 
         # Place the start of the new message at the top of the viewport so the
         # beginning is always visible rather than the end.
@@ -1019,6 +901,22 @@ class TUI:
             self._chat_buf.scroll_to_top_of(last_chat_start, self._layout["chat_h"])
 
         return changed
+
+    def _render_stream_preview(self):
+        """Redraw the in-progress reply below the final transcript lines."""
+        del self._chat_buf._lines[self._stream_start:]
+        if self._stream_text.get("thinking"):
+            self._render_think(self._stream_text["thinking"])
+        if self._stream_text.get("content"):
+            self._render_chat("assistant", self._stream_text["content"] + " ▍")
+        self._chat_buf.scroll_to_bottom()
+
+    def _end_stream_preview(self):
+        if self._stream_start is not None:
+            del self._chat_buf._lines[self._stream_start:]
+            self._chat_buf.scroll_to_bottom()
+        self._stream_start = None
+        self._stream_text = {"thinking": "", "content": ""}
 
     # ── input handling ────────────────────────────────────────────────────────
 
@@ -1048,10 +946,7 @@ class TUI:
         self._redraw()
 
     def _toggle_run_confirm(self):
-        self.harness.run_confirm = not self.harness.run_confirm
-        state = "on" if self.harness.run_confirm else "off"
-        self._add_chat("system", f"run_command confirmation: {state}")
-        self.harness._emit_status()
+        self.controller.toggle_run_confirm()
         self._drain_events()  # consume the StatusEvent so the bar updates now
         self._redraw()
 
@@ -1202,178 +1097,32 @@ class TUI:
             self._input = self._history_stash
         self._cursor = len(self._input)
 
-    def _replay_session(self):
-        """Render all stored session messages into the chat buffer, then show a status notice."""
-        # Build a lookup from tool_call_id → name so tool result messages can
-        # be labelled correctly regardless of ordering (parallel tool calls).
-        call_id_to_name: dict[str, str] = {}
-        for msg in self.harness.messages:
-            for tc in (msg.get("tool_calls") or []):
-                cid  = tc.get("id") or ""
-                name = tc["function"]["name"]
-                if cid:
-                    call_id_to_name[cid] = name
-
-        for msg in self.harness.messages:
-            role = msg.get("role")
-            content = msg.get("content") or ""
-            if role == "system":
-                continue
-            elif role == "thinking":
-                self._add_think(content)
-            elif role == "user":
-                self._add_chat("user", content)
-            elif role == "assistant":
-                if content:
-                    self._add_chat("assistant", content)
-                for tc in (msg.get("tool_calls") or []):
-                    name = tc["function"]["name"]
-                    args = tc["function"].get("arguments") or {}
-                    self._add_tool_call(name, args)
-            elif role == "tool":
-                cid  = msg.get("tool_call_id") or ""
-                name = call_id_to_name.get(cid) or msg.get("name") or ""
-                self._add_tool_result(name, content)
-        h = self.harness
-        notice = (
-            f"Session loaded: {h.session_path().name} ({len(h.messages)} messages)\n"
-            f"Model: {h.client.model} | Mode: {h.mode} | Dir: {h.workdir}"
-        )
-        self._add_chat("system", notice)
-        self._chat_buf.scroll_to_bottom()
-        self._redraw()
-
     def _submit(self):
-        text = self._input.strip()
+        text = self._input
         self._input = ""
         self._cursor = 0
         self._history_idx = -1
         self._history_stash = ""
-        if not text:
-            return
-
-        # Sensitive commands: never add to history or show raw text in chat
-        _tcmd_parts = text.strip().split(None, 1)
-        if _tcmd_parts and _tcmd_parts[0].lower() == "/token" and len(_tcmd_parts) > 1:
-            raw = _tcmd_parts[1]
-            n = len(raw)
-            masked = (raw[:2] + "*" * (n - 5) + raw[-3:]) if n > 5 else "*" * n
-            self._add_chat("user", f"/token {masked}")
-            result = handle_command(text, self.harness)
-            if result.output:
-                self._add_chat("system", result.output)
-            self._redraw()
-            return
-
-        if not self._history or self._history[-1] != text:
-            self._history.append(text)
-
-        # show what the user typed (common to all paths below)
-        self._add_chat("user", text)
-
-        # handle pending y/N confirmation
-        if self._pending_confirm is not None:
-            action = self._pending_confirm
-            self._pending_confirm = None
-            if text.lower() in ("y", "yes"):
-                output = action()
-                if output:
-                    self._add_chat("system", output)
-            else:
-                self._add_chat("system", "Cancelled.")
-            self._redraw()
-            return
-
-        if text.startswith("/"):
-            # Block commands that mutate harness.messages while a worker thread
-            # (send/compact) is still running — both threads would edit the same
-            # list and corrupt the turn structure. Read-only commands are fine.
-            if self._busy and not self._waiting_for_input:
-                _cparts = text.strip().split(None, 1)
-                _c0 = _cparts[0].lower()
-                _mutating = _c0 in ("/clear", "/compact", "/fast-compact") or (
-                    _c0 == "/session" and len(_cparts) > 1)
-                if _mutating:
-                    self._add_chat("system",
-                        "Busy — finish the response or interrupt (Shift+C) before running that command.")
-                    self._redraw()
-                    return
-            result = handle_command(text, self.harness)
-            if result.exit_app:
-                raise SystemExit(0)
-            if result.handled:
-                if result.tool_output is not None:
-                    self._tools_expanded = result.tool_output
-                    self._rebuild_chat_buf()
-                    self._redraw()
-                    return
-                if result.think_output is not None:
-                    self._think_expanded = result.think_output
-                    self._rebuild_chat_buf()
-                    self._redraw()
-                    return
-                if result.md_render is not None:
-                    self._md_expanded = result.md_render
-                    self._rebuild_chat_buf()
-                    self._redraw()
-                    return
-                if result.diff_output is not None:
-                    self._diff_expanded = result.diff_output
-                    self._rebuild_chat_buf()
-                    self._redraw()
-                    return
-                if result.diff_style is not None:
-                    self._set_diff_style(result.diff_style)
-                    return
-                if result.companion is not None:
-                    if result.companion != self._companion_visible:
-                        self._toggle_companion()
-                    return
-                if result.replay_session:
-                    self._replay_session()
-                    return
-                if result.run_plan:
-                    self._busy = True
-                    self._redraw()
-                    t = threading.Thread(target=self.harness.execute_plan_threaded, daemon=True)
-                    t.start()
-                    return
-                if result.run_compact:
-                    self._add_chat("system", "Compacting context...")
-                    self._busy = True
-                    self._redraw()
-                    t = threading.Thread(
-                        target=self.harness.compact_threaded,
-                        args=(result.compact_summarise,),
-                        daemon=True,
-                    )
-                    t.start()
-                    return
-                if result.confirm_prompt:
-                    self._pending_confirm = result.confirm_action
-                    self._add_chat("system", result.confirm_prompt + " [y/N]")
-                elif result.output:
-                    self._add_chat("system", result.output)
-                self._redraw()
-                return
-            self._add_chat("system", f"Unknown command: {text}")
-            self._redraw()
-            return
-
-        if self._busy:
-            if self._waiting_for_input:
-                self._waiting_for_input = False
-                self.harness.provide_user_input(text)
-                self._redraw()
-                return
-            self._add_chat("system", "Busy — waiting for response...")
-            self._redraw()
-            return
-
-        self._busy = True
-        self._redraw()  # show user message before thread starts
-        t = threading.Thread(target=self.harness.send, args=(text,), daemon=True)
-        t.start()
+        outcome = self.controller.submit(text, source="tui")
+        if outcome.exit_app:
+            raise SystemExit(0)
+        v = outcome.view
+        if "tool_output" in v:
+            self._tools_expanded = v["tool_output"]
+        if "think_output" in v:
+            self._think_expanded = v["think_output"]
+        if "md_render" in v:
+            self._md_expanded = v["md_render"]
+        if "diff_output" in v:
+            self._diff_expanded = v["diff_output"]
+        if "diff_style" in v:
+            self._diff_style = v["diff_style"]
+        if "companion" in v and v["companion"] != self._companion_visible:
+            self._toggle_companion()  # rebuilds and redraws
+        elif v:
+            self._rebuild_chat_buf()
+        self._drain_events()  # show the echoed input / command output right away
+        self._redraw()
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
@@ -1383,13 +1132,12 @@ class TUI:
         # does this on every resize; the startup path must do the same.
         self.stdscr.clear()
         self.stdscr.noutrefresh()
-        # emit initial status
+        # emit initial status; a pre-loaded session was already pushed onto the
+        # bus by the Controller and arrives here through the backlog replay.
         self.harness._emit_status()
-        # if a session was pre-loaded before the TUI started, replay it now
-        if len(self.harness.messages) > 1:
-            self._replay_session()
-        else:
-            self._redraw()
+        self._drain_events()
+        self._chat_buf.scroll_to_bottom()
+        self._redraw()
 
         _pushed_ch: int | None = None  # character pushed back after paste peek
 
@@ -1452,7 +1200,7 @@ class TUI:
             if ch == curses.KEY_BTAB:
                 idx = _MODE_CYCLE.index(self.harness.mode) if self.harness.mode in _MODE_CYCLE else 0
                 new_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
-                self.harness.set_mode(new_mode)
+                self.controller.set_mode(new_mode)
                 self._drain_events()  # consume the StatusEvent set_mode just enqueued
                 self._redraw()
                 continue
@@ -1585,8 +1333,7 @@ class TUI:
 
             # Shift+C interrupts the running LLM (chat focus only)
             if ch == ord('C') and self._focus == "chat":
-                if self._busy and not self._waiting_for_input:
-                    self.harness.cancel()
+                self.controller.cancel()
                 continue
 
             # Shift+P toggles run_command confirmation (chat focus only)
@@ -1675,6 +1422,9 @@ class TUI:
                 self._redraw_input_only()
 
 
-def run_tui(stdscr, harness: Harness):
-    tui = TUI(stdscr, harness)
-    tui.run()
+def run_tui(stdscr, harness: Harness, controller: Controller):
+    tui = TUI(stdscr, harness, controller)
+    try:
+        tui.run()
+    finally:
+        tui._events.close()

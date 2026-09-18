@@ -1,0 +1,1279 @@
+// momo web UI — mirrors the curses TUI (harness/tui.py) over SSE + JSON POSTs.
+// No dependencies. All model/tool text is HTML-escaped before it reaches the DOM.
+
+import { esc, highlight, langFromPath } from "./highlight.js";
+import { renderMarkdown } from "./markdown.js";
+
+const $ = (sel) => document.querySelector(sel);
+const transcript = $("#transcript");
+const input = $("#input");
+
+// ── view options (per browser, like the TUI's local toggles) ──────────────────
+const VIEW_DEFAULTS = { tools: true, think: true, md: true, diff: true, diffStyle: "compact", companion: true };
+const view = { ...VIEW_DEFAULTS, ...loadJSON("momo.view", {}) };
+// CommandResult view fields → our keys
+const VIEW_MAP = { tool_output: "tools", think_output: "think", md_render: "md",
+                   diff_output: "diff", diff_style: "diffStyle", companion: "companion" };
+
+function loadJSON(key, dflt) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? dflt; } catch { return dflt; }
+}
+function saveView() {
+  try { localStorage.setItem("momo.view", JSON.stringify(view)); } catch { /* private mode */ }
+}
+
+// ── shared state ──────────────────────────────────────────────────────────────
+let events = [];            // transcript events, for re-rendering on view changes
+let state = null;           // last /api/state snapshot
+let status = {};            // last status event
+let busy = false, waiting = false;
+let history = [], histIdx = -1, histStash = "";
+let queue = [];             // messages typed while busy: {text, atts}
+let editing = null;         // {attachments: [names]} while editing the last message
+let connectedAt = 0;        // ignore backlog replay for notifications
+let unseen = false;         // new activity while the tab was hidden
+let busySince = 0;
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+async function post(path, body = {}) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+// ── copy buttons on code blocks ───────────────────────────────────────────────
+async function copyText(text) {
+  // The async clipboard API needs a secure context: localhost is one, but plain
+  // http on a LAN address (--web-host 0.0.0.0) is not — fall back to execCommand.
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = el("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+  document.body.append(ta);
+  ta.select();
+  try {
+    if (!document.execCommand("copy")) throw new Error("copy command was refused");
+  } finally {
+    ta.remove();
+  }
+}
+
+function addCopyButtons(root) {
+  for (const pre of root.querySelectorAll("pre")) {
+    const code = pre.querySelector("code");
+    if (!code || pre.parentElement.classList.contains("code-block")) continue;
+    const box = el("div", "code-block");
+    pre.replaceWith(box);
+    const bar = el("div", "code-bar");
+    const lang = code.dataset.lang;
+    const btn = el("button", "copy-btn", "Copy");
+    btn.type = "button";
+    btn.title = "Copy code";
+    btn.setAttribute("aria-label", lang ? `Copy ${lang} code` : "Copy code");
+    let timer;
+    btn.onclick = async () => {
+      try {
+        await copyText(code.textContent);
+        btn.textContent = "Copied ✓";
+        btn.classList.add("done");
+      } catch {
+        btn.textContent = "Copy failed";
+      }
+      clearTimeout(timer);
+      timer = setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1600);
+    };
+    bar.append(el("span", "code-lang", lang || ""), btn);
+    box.append(bar, pre);
+  }
+}
+
+// ── transcript rendering ──────────────────────────────────────────────────────
+// Render context: tool calls waiting for their result, and the open ask card.
+let pendingTools = [];
+let openAsk = null;
+
+function resetRenderContext() { pendingTools = []; openAsk = null; }
+
+function renderEvent(ev) {
+  switch (ev.type) {
+    case "user": return renderUser(ev.text);
+    case "chat": return renderChat(ev.role, ev.text);
+    case "error": return renderChat("system", `ERROR: ${ev.text}`, "error");
+    case "think": return renderThink(ev.text);
+    case "tool_call": return renderToolCall(ev.name, ev.args);
+    case "tool_result": return renderToolResult(ev.name, ev.result);
+    case "diff": return renderDiff(ev);
+    case "ask_user": return renderAsk(ev.question);
+  }
+  return null;
+}
+
+function renderUser(text) {
+  const wasAnswer = !!openAsk;
+  if (openAsk) { markAnswered(openAsk, text); openAsk = null; }
+  const wrap = el("div", "msg user");
+  // Answers to questions and /commands can't be retried or edited.
+  if (wasAnswer || text.startsWith("/")) wrap.dataset.noActions = "1";
+  const bubble = el("div", "bubble");
+  // "📎 name (N chars)" lines are attachment summaries — show them as chips.
+  text.split("\n").forEach((line, i) => {
+    if (i) bubble.append("\n");
+    bubble.append(line.startsWith("📎 ") ? el("span", "att-line", line) : line);
+  });
+  wrap.append(bubble);
+  return wrap;
+}
+
+function renderChat(role, text, extra = "") {
+  const wrap = el("div", `msg ${role} ${extra}`.trim());
+  if (role === "assistant") {
+    if (view.md) {
+      wrap.classList.add("md");
+      wrap.innerHTML = renderMarkdown(text);
+      addCopyButtons(wrap);
+    } else {
+      wrap.classList.add("plain");
+      wrap.textContent = text;
+    }
+    wrap.append(msgActions([["Copy", "Copy this reply as Markdown", async (btn) => {
+      try { await copyText(text); flash(btn, "Copied ✓"); } catch { flash(btn, "Copy failed"); }
+    }]]));
+    return wrap;
+  }
+  wrap.textContent = text;
+  // `[y/N]` confirmation prompts from /commands get quick-answer buttons.
+  if (role === "system" && / \[y\/N\]$/.test(text)) return askCard(text, true, "Confirm");
+  return wrap;
+}
+
+function renderThink(text) {
+  if (!view.think) return null;
+  const d = el("details", "think");
+  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+  d.append(el("summary", "", `thinking (${words} words)`), el("div", "think-body", text));
+  return d;
+}
+
+function argsBrief(args) {
+  const parts = Object.entries(args || {}).map(([k, v]) => {
+    let s = typeof v === "string" ? v : JSON.stringify(v);
+    if (s.length > 60) s = s.slice(0, 57) + "…";
+    return `${k}=${JSON.stringify(s)}`;
+  });
+  return parts.join("  ");
+}
+
+function renderToolCall(name, args) {
+  if (!view.tools) {
+    // Collapsed tool output: one abbreviated line, like the TUI.
+    const full = `▶ ${name}(${JSON.stringify(args)})`;
+    const row = el("div", "tool");
+    const head = el("div", "tool-head");
+    head.append(el("span", "targs", full.length > 80 ? full.slice(0, 80) + "…" : full));
+    row.append(head);
+    return row;
+  }
+  const d = el("details", "tool");
+  const s = el("summary");
+  const st = el("span", "tstate run", "running");
+  s.append(el("span", "", "▶"), el("span", "tname", name), el("span", "targs", argsBrief(args)), st);
+  const body = el("div", "tool-body");
+  body.append(el("pre", "args", JSON.stringify(args, null, 2)));
+  d.append(s, body);
+  pendingTools.push({ name, el: d, state: st, body });
+  return d;
+}
+
+function clampedPre(text, maxLines) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text).split("\n");
+  const pre = el("pre", "", lines.slice(0, maxLines).join("\n") || "(empty)");
+  frag.append(pre);
+  if (lines.length > maxLines) {
+    const more = el("button", "more", `show all (${lines.length - maxLines} more lines)`);
+    more.type = "button";
+    more.onclick = () => { pre.textContent = text; more.remove(); };
+    frag.append(more);
+  }
+  return frag;
+}
+
+function renderToolResult(name, result) {
+  if (!view.tools) return null;
+  const idx = pendingTools.findIndex((t) => t.name === name);
+  const text = String(result ?? "");
+  const isErr = /^ERROR/.test(text);
+  const lines = text.split("\n").length;
+  if (idx >= 0) {
+    const t = pendingTools.splice(idx, 1)[0];
+    t.state.className = `tstate ${isErr ? "err" : "ok"}`;
+    t.state.textContent = isErr ? "✗ error" : `${lines} line${lines === 1 ? "" : "s"}`;
+    t.body.append(clampedPre(text, 20));
+    if (isErr) t.el.open = true;
+    return null;
+  }
+  // Orphan result (e.g. replay without its call) — render standalone.
+  const d = el("details", "tool");
+  const s = el("summary");
+  s.append(el("span", "", "→"), el("span", "tname", name || "result"),
+           el("span", "targs", ""), el("span", `tstate ${isErr ? "err" : "ok"}`, `${lines} lines`));
+  const body = el("div", "tool-body");
+  body.append(clampedPre(text, 20));
+  d.append(s, body);
+  return d;
+}
+
+const DIFF_MAX = 40;
+const MUTATING = new Set(["edit_file", "append_to_file", "write_file", "delete_file", "move_file"]);
+function renderDiff(ev) {
+  // A diff replaces the terse result of its mutating tool call.
+  const idx = pendingTools.findIndex((t) => MUTATING.has(t.name));
+  if (idx >= 0 && view.tools) {
+    const t = pendingTools.splice(idx, 1)[0];
+    t.state.className = "tstate ok";
+    t.state.textContent = "applied";
+  }
+  if (!view.diff) return null;
+  const box = el("div", "diff");
+  if (ev.op === "move") {
+    const h = el("div", "diff-head");
+    h.textContent = `± renamed ${ev.path} → ${ev.dst}`;
+    box.append(h);
+    return box;
+  }
+  const head = el("div", "diff-head");
+  if (view.diffStyle === "git") {
+    head.classList.add("git");
+    head.append(el("div", "", `diff --git a/${ev.path} b/${ev.path}`),
+                el("div", "minus", `--- ${ev.is_new ? "/dev/null" : "a/" + ev.path}`),
+                el("div", "plus", `+++ ${ev.op === "delete" ? "/dev/null" : "b/" + ev.path}`));
+  } else {
+    head.append(el("span", "", `± ${ev.path}`));
+    const stat = el("span", "stat");
+    if (ev.is_new) stat.innerHTML = `(new file <span class="add">+${ev.added}</span>)`;
+    else if (ev.op === "delete") stat.innerHTML = `(deleted <span class="del">−${ev.removed}</span>)`;
+    else stat.innerHTML = `(<span class="add">+${ev.added}</span> <span class="del">−${ev.removed}</span>)`;
+    head.append(stat);
+  }
+  box.append(head);
+
+  const body = el("div", "diff-body");
+  const numW = Math.max(1, ...ev.body.flatMap(([, o, n]) => [o, n]).filter((x) => x != null).map((x) => String(x).length));
+  const fmt = (n) => (n == null ? "" : String(n)).padStart(numW);
+  const addLines = (rows) => {
+    for (const [kind, o, n, text] of rows) {
+      const row = el("div", `dl ${kind}`);
+      row.append(el("span", "gut", `${fmt(o)} ${fmt(n)}`), el("span", "txt", text));
+      body.append(row);
+    }
+  };
+  addLines(ev.body.slice(0, DIFF_MAX));
+  box.append(body);
+  if (ev.body.length > DIFF_MAX) {
+    const more = el("button", "more", `show ${ev.body.length - DIFF_MAX} more diff lines`);
+    more.type = "button";
+    more.onclick = () => { addLines(ev.body.slice(DIFF_MAX)); more.remove(); };
+    box.append(more);
+  }
+  return box;
+}
+
+function renderAsk(question) {
+  const yn = /Reply 'y'|y = run it|\[y\/N\]/.test(question);
+  return askCard(question, yn, "momo asks");
+}
+
+function askCard(question, yn, title) {
+  const card = el("div", "ask");
+  card.append(el("div", "ask-title", `? ${title}`), el("div", "ask-q", question));
+  if (yn) {
+    const actions = el("div", "ask-actions");
+    const yes = el("button", "primary", "Yes (y)");
+    const no = el("button", "", "No");
+    yes.type = no.type = "button";
+    yes.onclick = () => send("y");
+    no.onclick = () => send("n");
+    actions.append(yes, no);
+    card.append(actions);
+  }
+  openAsk = card;
+  return card;
+}
+
+function markAnswered(card, answer) {
+  card.classList.add("answered");
+  card.querySelector(".ask-actions")?.remove();
+  card.querySelector(".ask-title").textContent += ` — answered: ${answer.length > 40 ? answer.slice(0, 40) + "…" : answer}`;
+}
+
+// ── message actions ───────────────────────────────────────────────────────────
+function msgActions(items, cls = "") {
+  const bar = el("div", `msg-actions ${cls}`.trim());
+  for (const [label, title, fn] of items) {
+    const b = el("button", "", label);
+    b.type = "button";
+    b.title = title;
+    b.onclick = () => fn(b);
+    bar.append(b);
+  }
+  return bar;
+}
+
+function flash(btn, text) {
+  const orig = btn.dataset.label || btn.textContent;
+  btn.dataset.label = orig;
+  btn.textContent = text;
+  setTimeout(() => { btn.textContent = orig; }, 1400);
+}
+
+// Retry / Edit sit on the last message you typed (not answers or /commands).
+function refreshUserActions() {
+  transcript.querySelectorAll(".user-actions").forEach((n) => n.remove());
+  const users = [...transcript.querySelectorAll(".msg.user:not([data-no-actions])")];
+  const last = users[users.length - 1];
+  if (!last) return;
+  last.append(msgActions([
+    ["↻ Retry", "Send this message again and replace the reply", () => post("api/retry").catch(showError)],
+    ["✎ Edit", "Edit this message and send it again", startEdit],
+  ], "user-actions"));
+}
+
+async function startEdit() {
+  let info;
+  try {
+    const r = await fetch("api/last-user");
+    info = await r.json();
+  } catch (e) { return showError(e); }
+  if (!info || info.typed === undefined) return;
+  editing = { attachments: info.attachments || [] };
+  input.value = info.typed;
+  $("#edit-atts").textContent = editing.attachments.length
+    ? ` (keeps ${editing.attachments.map((n) => "📎 " + n).join(", ")})` : "";
+  $("#edit-banner").hidden = false;
+  autosize();
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function stopEdit() {
+  editing = null;
+  $("#edit-banner").hidden = true;
+}
+$("#edit-cancel").onclick = () => { stopEdit(); input.value = ""; autosize(); input.focus(); };
+
+function showError(e) {
+  handleEvents([{ type: "error", text: `could not reach momo: ${e.message || e}` }]);
+}
+
+// ── scrolling ─────────────────────────────────────────────────────────────────
+const nearBottom = () => transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+
+function appendNodes(nodes) {
+  const pinned = nearBottom();
+  let lastAssistant = null;
+  for (const n of nodes) {
+    if (live$) transcript.insertBefore(n, live$.box);
+    else transcript.append(n);
+    if (n.classList?.contains("assistant")) lastAssistant = n;
+  }
+  if (!nodes.length) return;
+  refreshUserActions();
+  if (pinned) {
+    // Long replies: show their beginning rather than their end (as the TUI does).
+    if (lastAssistant && lastAssistant.offsetHeight > transcript.clientHeight * 0.8) {
+      transcript.scrollTop = lastAssistant.offsetTop - 12;
+    } else {
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+  } else {
+    $("#new-msgs").hidden = false;
+  }
+}
+
+transcript.addEventListener("scroll", () => { if (nearBottom()) $("#new-msgs").hidden = true; });
+$("#new-msgs").onclick = () => { transcript.scrollTop = transcript.scrollHeight; $("#new-msgs").hidden = true; };
+
+function rerenderAll() {
+  const atBottom = nearBottom();
+  const keep = live$?.box;  // a view toggle mid-stream keeps the live preview
+  transcript.replaceChildren();
+  resetRenderContext();
+  const frag = document.createDocumentFragment();
+  for (const ev of events) {
+    const n = renderEvent(ev);
+    if (n) frag.append(n);
+  }
+  transcript.append(frag);
+  if (keep) transcript.append(keep);
+  refreshUserActions();
+  if (openAsk && !waiting && !openAsk.classList.contains("answered")) {
+    // Replayed question that has since been answered elsewhere — keep, but no buttons.
+    openAsk.querySelector(".ask-actions")?.remove();
+  }
+  if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+}
+
+// ── status / busy ─────────────────────────────────────────────────────────────
+const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+let spinI = 0;
+
+function applyStatus(s) {
+  const planChanged = s.plan_progress !== status.plan_progress;
+  status = s;
+  const modeSel = $("#mode");
+  if (modeSel.value !== s.mode) modeSel.value = s.mode;
+  const pp = $("#plan-progress");
+  pp.hidden = !s.plan_progress;
+  pp.textContent = s.plan_progress;
+  $("#model").textContent = s.model;
+  $("#host").textContent = `${s.provider}@${s.host.replace(/^https?:\/\//, "")}`;
+  $("#workdir").textContent = s.workdir;
+  $("#workdir").title = s.workdir;
+  $("#ctx-pct").textContent = `${s.ctx_pct}%`;
+  $("#ctx-fill").style.width = `${Math.min(100, s.ctx_pct)}%`;
+  $(".ctx").className = `ctx ${s.ctx_color}`;
+  $("#tools-badge").hidden = s.tools_enabled;
+  const run = $("#run-badge");
+  run.textContent = s.run_confirm ? "RUN: confirm" : "RUN: auto";
+  run.classList.toggle("on", s.run_confirm);
+  updateTitle();
+  if (planChanged) refreshState();
+}
+
+function updateTitle() {
+  document.title = `${unseen ? "(•) " : ""}momo · ${status.mode || ""}${busy ? " …" : ""}`;
+}
+
+// ── notifications (only while the tab is hidden) ──────────────────────────────
+let notifyOn = loadJSON("momo.notify", false) && "Notification" in window && Notification.permission === "granted";
+const live = () => Date.now() - connectedAt > 2000;  // skip the backlog replay after (re)connect
+
+function notify(title, body) {
+  if (!document.hidden || !live()) return;
+  unseen = true;
+  updateTitle();
+  if (!notifyOn) return;
+  try {
+    const n = new Notification(title, { body: body.slice(0, 180), tag: "momo", renotify: true });
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch { /* some browsers only allow notifications from a service worker */ }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && unseen) { unseen = false; updateTitle(); }
+});
+
+$("#notify").checked = notifyOn;
+$("#notify").onchange = async (e) => {
+  if (e.target.checked) {
+    if (!("Notification" in window)) { e.target.checked = false; return attNote("This browser has no notifications."); }
+    const perm = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+    notifyOn = perm === "granted";
+    e.target.checked = notifyOn;
+    if (!notifyOn) attNote("Notifications are blocked for this page in the browser settings.");
+  } else notifyOn = false;
+  try { localStorage.setItem("momo.notify", JSON.stringify(notifyOn)); } catch { /* ignore */ }
+};
+
+function lastAssistantText() {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].type === "chat" && events[i].role === "assistant") return events[i].text;
+  }
+  return "";
+}
+
+function applyBusy(b, w) {
+  const wasBusy = busy;
+  if (b && !wasBusy) busySince = Date.now();
+  busy = b; waiting = w;
+  document.body.classList.toggle("is-busy", busy);
+  if (wasBusy && !busy) {
+    if (Date.now() - busySince > 8000) {
+      notify("momo finished", lastAssistantText().split("\n").find((l) => l.trim()) || "The turn is complete.");
+    }
+    // Send the next queued message once the turn is over.
+    if (queue.length) setTimeout(sendNextQueued, 150);
+  }
+  $("#stop").hidden = !(busy && !waiting);
+  const bz = $("#busy");
+  bz.classList.toggle("waiting", waiting);
+  if (!busy) bz.textContent = "";
+  else if (waiting) bz.textContent = "? waiting for your answer";
+  input.placeholder = waiting ? "Answer momo…" : busy ? "momo is working… (Esc to interrupt)" : "Message momo…  (/ for commands)";
+  if (!waiting && openAsk && !openAsk.classList.contains("answered")) openAsk.querySelector(".ask-actions")?.remove();
+  if (waiting) input.focus();
+  updateTitle();
+}
+
+setInterval(() => {
+  if (busy && !waiting) $("#busy").textContent = `${SPIN[spinI++ % SPIN.length]} thinking`;
+}, 100);
+
+// ── event stream ──────────────────────────────────────────────────────────────
+let es;
+function connect() {
+  es = new EventSource("api/events");
+  es.onopen = () => {
+    // Every (re)connect replays the full backlog: start from a clean slate.
+    connectedAt = Date.now();
+    events = [];
+    rerenderAll();
+    $("#conn-dot").classList.add("on");
+    $("#conn-dot").title = "Connected";
+    refreshState();
+  };
+  es.onerror = () => {
+    $("#conn-dot").classList.remove("on");
+    $("#conn-dot").title = "Disconnected — retrying";
+  };
+  let batch = [];
+  let scheduled = false;
+  es.onmessage = (m) => {
+    batch.push(JSON.parse(m.data));
+    if (!scheduled) {
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        const evs = batch;
+        batch = [];
+        handleEvents(evs);
+      });
+    }
+  };
+}
+
+function handleEvents(evs) {
+  const nodes = [];
+  for (const ev of evs) {
+    switch (ev.type) {
+      case "status": applyStatus(ev); break;
+      case "busy": applyBusy(ev.busy, ev.waiting); break;
+      case "done": break;
+      case "delta": streamDelta(ev); break;
+      case "stream_end": endStream(); break;
+      case "reset":
+        endStream();
+        events = [];
+        transcript.replaceChildren();
+        nodes.length = 0;
+        resetRenderContext();
+        break;
+      default: {
+        events.push(ev);
+        if (ev.type === "user") pushHistory(ev.text);
+        if (ev.type === "ask_user") notify("momo has a question", ev.question);
+        else if (document.hidden && live() && !unseen) { unseen = true; updateTitle(); }
+        const n = renderEvent(ev);
+        if (n) nodes.push(n);
+      }
+    }
+  }
+  appendNodes(nodes);
+}
+
+// ── streaming preview ─────────────────────────────────────────────────────────
+// Deltas render into a live block that is not part of events[]; when the stream
+// ends it is removed and the final think/chat events render as usual.
+let live$ = null;
+
+function streamDelta(ev) {
+  const pinned = nearBottom();
+  if (!live$) {
+    live$ = { box: el("div", "live-stream"), think: null, content: null };
+    transcript.append(live$.box);
+  }
+  if (ev.kind === "thinking") {
+    if (!view.think) return;
+    if (!live$.think) {
+      live$.think = el("details", "think live");
+      live$.think.open = true;
+      live$.think.append(el("summary", "", "thinking…"), el("div", "think-body"));
+      live$.box.prepend(live$.think);
+    }
+    live$.think.lastChild.textContent += ev.text;
+  } else {
+    if (!live$.content) {
+      live$.content = el("div", "msg assistant plain streaming");
+      live$.box.append(live$.content);
+      if (live$.think) live$.think.open = false;  // the answer started; fold the reasoning
+    }
+    live$.content.textContent += ev.text;
+  }
+  if (pinned) transcript.scrollTop = transcript.scrollHeight;
+}
+
+function endStream() {
+  live$?.box.remove();
+  live$ = null;
+}
+
+async function refreshState() {
+  try {
+    const r = await fetch("api/state");
+    if (!r.ok) return;
+    state = await r.json();
+  } catch { return; }
+  const sel = $("#mode");
+  if (!sel.options.length) {
+    for (const m of state.modes) sel.append(new Option(m, m));
+  }
+  if (!history.length) history = [...state.history];
+  applyStatus(state.status);
+  applyBusy(state.busy, state.waiting);
+  $("#think-mode").checked = state.think;
+  $("#plan-btn").hidden = !state.plan;
+  $("#plan-body").innerHTML = state.plan ? renderMarkdown(state.plan) : "<p class='muted'>No active plan.</p>";
+  addCopyButtons($("#plan-body"));
+  $("#plan-phase").textContent = state.plan_phase || "";
+  companion.frames = state.companion;
+  renderSkills();
+}
+
+function renderSkills() {
+  const box = $("#skills-list");
+  const { available = [], active = [] } = state?.skills || {};
+  if (!available.length) { box.replaceChildren(el("span", "muted", "No skills found.")); return; }
+  box.replaceChildren(...available.map((name) => {
+    const lab = el("label");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.checked = active.includes(name);
+    cb.onchange = async () => {
+      await send(`/${cb.checked ? "load" : "unload"}-skill ${name}`);
+      setTimeout(refreshState, 200);
+    };
+    lab.append(cb, " " + name);
+    return lab;
+  }));
+}
+
+// ── sending ───────────────────────────────────────────────────────────────────
+async function send(text, atts = []) {
+  if (!text.trim() && !atts.length) return false;
+  try {
+    const r = await post("api/submit", { text, attachments: atts });
+    applyView(r.view || {});
+    return true;
+  } catch (e) {
+    handleEvents([{ type: "error", text: `could not reach momo: ${e.message}` }]);
+    return false;
+  }
+}
+
+function applyView(v) {
+  let changed = false;
+  for (const [k, val] of Object.entries(v)) {
+    const key = VIEW_MAP[k];
+    if (key && view[key] !== val) { view[key] = val; changed = true; }
+  }
+  if (changed) { saveView(); syncViewMenu(); rerenderAll(); }
+}
+
+function toggleView(key) {
+  if (key === "diffStyle") view.diffStyle = view.diffStyle === "git" ? "compact" : "git";
+  else view[key] = !view[key];
+  saveView(); syncViewMenu(); rerenderAll();
+}
+
+function pushHistory(text) {
+  if (text.startsWith("/token ")) return;
+  if (history[history.length - 1] !== text) history.push(text);
+}
+
+// ── composer ──────────────────────────────────────────────────────────────────
+function autosize() {
+  input.style.height = "auto";
+  input.style.height = input.scrollHeight + "px";
+  input.classList.toggle("cmd", input.value.startsWith("/"));
+}
+
+async function submitInput() {
+  const text = input.value;
+  const isCmd = text.trim().startsWith("/");
+  const ready = attachments.filter((a) => a.status === "ready");
+  if (!isCmd && attachments.some((a) => a.status === "loading")) {
+    attNote("Still converting attachments — send again in a moment.");
+    return;
+  }
+  if (editing && !isCmd) {
+    input.value = "";
+    autosize();
+    stopEdit();
+    try { await post("api/edit", { text }); } catch (e) { showError(e); input.value = text; autosize(); }
+    return;
+  }
+  if (!text.trim() && !ready.length) return;
+  // Busy with a turn: queue plain messages instead of bouncing them.
+  if (busy && !waiting && !isCmd) {
+    queue.push({ text, atts: ready.map((a) => ({ name: a.name, text: a.text })) });
+    attachments = attachments.filter((a) => a.status !== "ready");
+    input.value = "";
+    histIdx = -1; histStash = "";
+    autosize();
+    closeSuggest();
+    renderChips();
+    renderQueue();
+    return;
+  }
+  input.value = "";
+  histIdx = -1; histStash = "";
+  autosize();
+  closeSuggest();
+  // Commands never carry attachments; they stay queued for the next message.
+  const atts = isCmd ? [] : ready.map((a) => ({ name: a.name, text: a.text }));
+  const ok = await send(text, atts);
+  if (ok && atts.length) {
+    attachments = attachments.filter((a) => a.status === "loading");
+    renderChips();
+  } else if (!ok && !input.value) {
+    input.value = text;  // keep what the user typed if the request failed
+    autosize();
+  }
+}
+
+// ── queued messages ───────────────────────────────────────────────────────────
+async function sendNextQueued() {
+  if (busy || !queue.length) return;
+  const item = queue.shift();
+  renderQueue();
+  const ok = await send(item.text, item.atts);
+  if (!ok) { queue.unshift(item); renderQueue(); }
+}
+
+function renderQueue() {
+  const box = $("#queue");
+  box.replaceChildren(...queue.map((q, i) => {
+    const chip = el("span", "att queued");
+    const preview = (q.text.trim() || q.atts.map((a) => a.name).join(", ")).replace(/\s+/g, " ");
+    const name = el("span", "att-name", `⏳ ${preview}`);
+    name.title = q.text;
+    const meta = el("span", "att-meta", i === 0 ? "sends when momo is done" : `#${i + 1} in queue`);
+    const edit = el("button", "att-x", "✎");
+    edit.type = "button";
+    edit.title = "Edit (moves it back into the input box)";
+    edit.onclick = () => {
+      queue.splice(i, 1);
+      input.value = q.text;
+      for (const a of q.atts) attachments.push({ id: ++attSeq, status: "ready", name: a.name, text: a.text, chars: a.text.length });
+      renderQueue(); renderChips(); autosize(); input.focus();
+    };
+    const x = el("button", "att-x", "✕");
+    x.type = "button";
+    x.title = "Remove from queue";
+    x.onclick = () => { queue.splice(i, 1); renderQueue(); };
+    chip.append(name, meta, edit, x);
+    return chip;
+  }));
+  box.hidden = !queue.length;
+}
+
+// ── attachments ───────────────────────────────────────────────────────────────
+// Files are converted to text by the server (/api/upload: text decoding, PDF
+// extraction) as soon as they are picked, then sent with the next message.
+const MAX_UPLOAD = 25e6;
+let attachments = [];   // {id, name, status: "loading"|"ready"|"error", text, chars, pages, truncated, error}
+let attSeq = 0;
+
+const fmtK = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
+
+function addFiles(files) {
+  for (const f of files) uploadOne(f);
+}
+
+async function uploadOne(file) {
+  const a = { id: ++attSeq, name: file.name || "pasted.txt", status: "loading" };
+  attachments.push(a);
+  renderChips();
+  try {
+    if (file.size > MAX_UPLOAD) throw new Error(`too large (max ${MAX_UPLOAD / 1e6} MB)`);
+    const r = await fetch("api/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream", "X-Filename": encodeURIComponent(a.name) },
+      body: file,
+    });
+    const j = await r.json().catch(() => ({ error: `upload failed (${r.status})` }));
+    if (!r.ok) throw new Error(j.error || `upload failed (${r.status})`);
+    Object.assign(a, { status: "ready", text: j.text, chars: j.chars, pages: j.pages, truncated: j.truncated, kind: j.kind });
+  } catch (e) {
+    Object.assign(a, { status: "error", error: e.message });
+  }
+  renderChips();
+}
+
+function renderChips() {
+  const box = $("#attachments");
+  box.replaceChildren(...attachments.map((a) => {
+    const chip = el("span", `att ${a.status}`);
+    const icon = a.kind === "pdf" || /\.pdf$/i.test(a.name) ? "📕" : "📄";
+    const name = el("span", "att-name", `${icon} ${a.name}`);
+    name.title = a.name;
+    let meta;
+    if (a.status === "loading") meta = /\.pdf$/i.test(a.name) ? "converting PDF…" : "reading…";
+    else if (a.status === "error") meta = a.error;
+    else {
+      const tokens = Math.ceil(a.chars / 4);  // rough estimate, same heuristic as the harness
+      meta = `${a.pages ? `${a.pages} pages · ` : ""}${fmtK(a.chars)} chars · ~${fmtK(tokens)} tokens${a.truncated ? " · truncated" : ""}`;
+      const limit = state?.context_limit || 0;
+      if (limit && tokens > limit * 0.25) {
+        chip.classList.add("warn");
+        chip.title = `Large attachment: about ${Math.round((tokens / limit) * 100)}% of the context window`;
+      }
+    }
+    const x = el("button", "att-x", "✕");
+    x.type = "button";
+    x.title = `Remove ${a.name}`;
+    x.setAttribute("aria-label", `Remove ${a.name}`);
+    x.onclick = () => { attachments = attachments.filter((b) => b !== a); renderChips(); input.focus(); };
+    chip.append(name, el("span", "att-meta", meta), x);
+    return chip;
+  }));
+  box.hidden = !attachments.length;
+}
+
+let attNoteTimer;
+function attNote(msg) {
+  const box = $("#attachments");
+  box.querySelector(".att-note")?.remove();
+  const n = el("span", "att-note", msg);
+  box.append(n);
+  box.hidden = false;
+  clearTimeout(attNoteTimer);
+  attNoteTimer = setTimeout(() => { n.remove(); box.hidden = !attachments.length; }, 3000);
+}
+
+$("#attach").onclick = () => $("#file-input").click();
+$("#file-input").onchange = (e) => { addFiles([...e.target.files]); e.target.value = ""; input.focus(); };
+
+// Paste files (e.g. copied in Finder) straight into the input box.
+input.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
+
+// Drag and drop anywhere on the page.
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+document.addEventListener("dragenter", (e) => { if (hasFiles(e)) { dragDepth++; $("#drop-hint").hidden = false; } });
+document.addEventListener("dragleave", (e) => { if (hasFiles(e) && --dragDepth <= 0) { dragDepth = 0; $("#drop-hint").hidden = true; } });
+document.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+document.addEventListener("drop", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();  // never let the browser navigate to the dropped file
+  dragDepth = 0;
+  $("#drop-hint").hidden = true;
+  addFiles([...e.dataTransfer.files]);
+  input.focus();
+});
+
+let sugg = [], suggIdx = -1;
+let pathTimer = null;
+const AT_RX = /(?:^|\s)@([\w./~+-]*)$/;
+
+// Suggestions: "/" completes commands, "@" completes workspace paths.
+function updateSuggest() {
+  const v = input.value;
+  const at = v.slice(0, input.selectionStart).match(AT_RX);
+  if (at) return schedulePathSearch(at[1]);
+  clearTimeout(pathTimer);
+  if (!state || !v.startsWith("/") || v.includes("\n") || /\s\S*\s/.test(v)) return closeSuggest();
+  const word = v.split(/\s/)[0].toLowerCase();
+  sugg = state.commands.filter((c) => c.cmd.startsWith(word) || c.usage.startsWith(v));
+  if (!sugg.length || (sugg.length === 1 && sugg[0].usage === v.trim())) return closeSuggest();
+  renderSuggest();
+}
+
+function schedulePathSearch(q) {
+  clearTimeout(pathTimer);
+  pathTimer = setTimeout(async () => {
+    let results = [];
+    try {
+      const r = await fetch(`api/files/search?q=${encodeURIComponent(q)}`);
+      results = (await r.json()).results || [];
+    } catch { return; }
+    const now = input.value.slice(0, input.selectionStart).match(AT_RX);
+    if (!now || now[1] !== q) return;  // the user typed on — a newer search is coming
+    sugg = results.map((p) => ({ usage: p, desc: "", path: p }));
+    if (!sugg.length) return closeSuggest();
+    suggIdx = Math.min(suggIdx, sugg.length - 1);
+    renderSuggest();
+  }, 150);
+}
+
+function renderSuggest() {
+  const box = $("#suggest");
+  suggIdx = Math.min(suggIdx, sugg.length - 1);
+  box.replaceChildren(...sugg.map((c, i) => {
+    const row = el("div", i === suggIdx ? "sel" : "");
+    row.setAttribute("role", "option");
+    row.append(el("span", "u", c.path ? `@ ${c.usage}` : c.usage), el("span", "d", c.desc));
+    row.onmousedown = (e) => { e.preventDefault(); pickSuggest(i); };
+    return row;
+  }));
+  box.hidden = false;
+  box.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
+}
+function closeSuggest() { $("#suggest").hidden = true; sugg = []; suggIdx = -1; clearTimeout(pathTimer); }
+function pickSuggest(i) {
+  const c = sugg[i];
+  if (c.path) {
+    insertPath(c.path, true);
+  } else {
+    const takesArg = c.usage.includes(" ") && !c.usage.includes(" | ");
+    input.value = c.cmd + (takesArg ? " " : "");
+  }
+  closeSuggest();
+  autosize();
+  input.focus();
+}
+
+// Put a workspace path into the input: replace a pending "@query", else insert at the caret.
+function insertPath(path, replaceAt = false) {
+  const pos = input.selectionStart ?? input.value.length;
+  let before = input.value.slice(0, pos);
+  const after = input.value.slice(pos);
+  const token = `\`${path}\``;
+  if (replaceAt && AT_RX.test(before)) before = before.replace(/@[\w./~+-]*$/, token);
+  else before += (before && !/\s$/.test(before) ? " " : "") + token;
+  const glue = after.startsWith(" ") ? "" : " ";
+  input.value = before + glue + after;
+  const caret = before.length + glue.length;
+  input.setSelectionRange(caret, caret);
+  autosize();
+}
+
+input.addEventListener("input", () => { autosize(); suggIdx = -1; updateSuggest(); });
+
+input.addEventListener("keydown", (e) => {
+  const open = !$("#suggest").hidden;
+  if (open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    e.preventDefault();
+    suggIdx = (suggIdx + (e.key === "ArrowDown" ? 1 : -1) + sugg.length) % sugg.length;
+    renderSuggest();
+    return;
+  }
+  if (open && (e.key === "Tab" || (e.key === "Enter" && suggIdx >= 0))) {
+    e.preventDefault();
+    pickSuggest(Math.max(0, suggIdx));
+    return;
+  }
+  if (e.key === "Escape") {
+    if (open) closeSuggest();
+    else if (editing) $("#edit-cancel").click();
+    else if (busy && !waiting) post("api/cancel").catch(() => {});
+    return;
+  }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    submitInput();
+    return;
+  }
+  if (e.key === "Tab" && e.shiftKey) {
+    e.preventDefault();
+    cycleMode();
+    return;
+  }
+  // History at the text boundaries, like the TUI.
+  if (e.key === "ArrowUp" && input.selectionStart === 0 && input.selectionEnd === 0 && history.length) {
+    e.preventDefault();
+    if (histIdx === -1) { histStash = input.value; histIdx = history.length - 1; }
+    else if (histIdx > 0) histIdx--;
+    input.value = history[histIdx];
+    autosize();
+    input.setSelectionRange(0, 0);
+  } else if (e.key === "ArrowDown" && histIdx !== -1 && input.selectionStart === input.value.length) {
+    e.preventDefault();
+    if (histIdx < history.length - 1) input.value = history[++histIdx];
+    else { histIdx = -1; input.value = histStash; }
+    autosize();
+  }
+});
+
+$("#send").onclick = submitInput;
+$("#stop").onclick = () => post("api/cancel").catch(() => {});
+
+function cycleMode() {
+  if (!state) return;
+  const modes = state.modes;
+  const next = modes[(modes.indexOf(status.mode) + 1) % modes.length];
+  post("api/mode", { mode: next }).catch(() => {});
+}
+$("#mode").onchange = (e) => post("api/mode", { mode: e.target.value }).catch(() => {});
+$("#run-badge").onclick = () => send(`/run-confirm ${status.run_confirm ? "off" : "on"}`);
+$("#tools-badge").onclick = () => send("/tools on");
+
+// Shift+letter shortcuts when focus is outside the text box (TUI: chat focus).
+document.addEventListener("keydown", (e) => {
+  if (e.target === input || e.target.matches?.("input, select, textarea")) return;
+  if (e.key === "Escape") {
+    if (!$("#view-menu").hidden || !$("#model-menu").hidden) return closeMenu();
+    for (const d of ["#plan-drawer", "#sessions-drawer", "#files-drawer"]) {
+      if (!$(d).hidden) return ($(d).hidden = true);
+    }
+    if (busy && !waiting) post("api/cancel").catch(() => {});
+    return;
+  }
+  if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+  const map = { T: "think", M: "md", D: "diff", Q: "companion" };
+  if (map[e.key]) { e.preventDefault(); toggleView(map[e.key]); }
+  else if (e.key === "P") { e.preventDefault(); $("#run-badge").click(); }
+  else if (e.key === "C") { e.preventDefault(); post("api/cancel").catch(() => {}); }
+  else if (e.key === "Tab") { e.preventDefault(); cycleMode(); }
+});
+
+// ── view menu ─────────────────────────────────────────────────────────────────
+function syncViewMenu() {
+  for (const cb of document.querySelectorAll("[data-view]")) cb.checked = !!view[cb.dataset.view];
+  for (const r of document.querySelectorAll("input[name=diff-style]")) r.checked = r.value === view.diffStyle;
+  $("#composer").classList.toggle("no-companion", !view.companion);
+  $("#companion").hidden = !view.companion;
+}
+function closeMenu() {
+  $("#view-menu").hidden = true;
+  $("#model-menu").hidden = true;
+  $("#view-btn").setAttribute("aria-expanded", "false");
+}
+$("#view-btn").onclick = (e) => {
+  e.stopPropagation();
+  const m = $("#view-menu");
+  m.hidden = !m.hidden;
+  $("#view-btn").setAttribute("aria-expanded", String(!m.hidden));
+};
+document.addEventListener("click", (e) => {
+  if (!$("#view-menu").contains(e.target) && !$("#model-menu").contains(e.target)) closeMenu();
+});
+for (const cb of document.querySelectorAll("[data-view]")) {
+  cb.onchange = () => { view[cb.dataset.view] = cb.checked; saveView(); syncViewMenu(); rerenderAll(); };
+}
+for (const r of document.querySelectorAll("input[name=diff-style]")) {
+  r.onchange = () => { view.diffStyle = r.value; saveView(); rerenderAll(); };
+}
+$("#think-mode").onchange = (e) => send(`/think ${e.target.checked ? "on" : "off"}`);
+
+// ── plan drawer ───────────────────────────────────────────────────────────────
+$("#plan-btn").onclick = () => { refreshState(); $("#plan-drawer").hidden = false; };
+$("#plan-progress").onclick = $("#plan-btn").onclick;
+$("#plan-close").onclick = () => ($("#plan-drawer").hidden = true);
+for (const b of document.querySelectorAll("#plan-drawer [data-cmd]")) {
+  b.onclick = () => { send(b.dataset.cmd); $("#plan-drawer").hidden = true; };
+}
+
+// ── model picker ──────────────────────────────────────────────────────────────
+$("#model").onclick = async (e) => {
+  e.stopPropagation();
+  const menu = $("#model-menu");
+  if (!menu.hidden) return closeMenu();
+  closeMenu();
+  menu.replaceChildren(el("div", "menu-title", "Model"), el("div", "muted", "Loading models…"));
+  menu.hidden = false;
+  let info;
+  try {
+    info = await (await fetch("api/models")).json();
+  } catch (err) {
+    menu.lastChild.textContent = `Could not list models: ${err.message}`;
+    return;
+  }
+  const rows = [el("div", "menu-title", `Model · ${info.provider}`)];
+  if (!info.can_switch) {
+    rows.push(el("div", "muted small", `${info.provider} serves one model per server — restart it to change models.`));
+  }
+  if (!info.models.length) rows.push(el("div", "muted", `No models found — is ${info.provider} reachable?`));
+  for (const m of info.models) {
+    const b = el("button", `menu-item${m === info.current ? " current" : ""}`, `${m === info.current ? "● " : ""}${m}`);
+    b.type = "button";
+    b.disabled = !info.can_switch || m === info.current;
+    b.onclick = () => { closeMenu(); send(`/model ${m}`); };
+    rows.push(b);
+  }
+  menu.replaceChildren(...rows);
+};
+
+// ── left drawers: sessions and workspace files ────────────────────────────────
+function openDrawer(id) {
+  for (const d of ["#sessions-drawer", "#files-drawer"]) $(d).hidden = d !== id || !$(d).hidden;
+  return !$(id).hidden;
+}
+for (const b of document.querySelectorAll(".drawer-close")) b.onclick = () => (b.closest("aside").hidden = true);
+
+const ago = (t) => {
+  const s = Math.max(0, Date.now() / 1000 - t);
+  if (s < 90) return "just now";
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  if (s < 129600) return `${Math.round(s / 3600)} h ago`;
+  return new Date(t * 1000).toLocaleDateString();
+};
+
+$("#sessions-btn").onclick = async () => {
+  if (!openDrawer("#sessions-drawer")) return;
+  const list = $("#sessions-list");
+  list.replaceChildren(el("div", "muted", "Loading…"));
+  let data;
+  try { data = await (await fetch("api/sessions")).json(); } catch (e) { list.firstChild.textContent = e.message; return; }
+  if (!data.sessions.length) { list.replaceChildren(el("div", "muted", "No saved sessions yet.")); return; }
+  list.replaceChildren(...data.sessions.map((x) => {
+    const row = el("button", `session-row${x.name === data.current ? " current" : ""}`);
+    row.type = "button";
+    row.title = `${x.name}\n${x.workdir}`;
+    row.append(el("span", "session-preview", x.preview || "(no messages)"),
+               el("span", "session-meta", `${x.mode} · ${x.model} · ${x.messages} msgs · ${ago(x.mtime)}`));
+    row.onclick = () => {
+      if (x.name === data.current) return;
+      $("#sessions-drawer").hidden = true;
+      send(`/session ${x.name}`);
+    };
+    return row;
+  }));
+};
+$("#new-session").onclick = () => { $("#sessions-drawer").hidden = true; send("/new"); };
+
+const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+
+async function loadDir(path, container) {
+  container.replaceChildren(el("div", "muted small", "Loading…"));
+  let data;
+  try {
+    const r = await fetch(`api/files?path=${encodeURIComponent(path)}&hidden=${$("#files-hidden").checked ? 1 : 0}`);
+    data = await r.json();
+    if (!r.ok) throw new Error(data.error);
+  } catch (e) { container.replaceChildren(el("div", "muted small", e.message)); return; }
+  if (!data.entries.length) { container.replaceChildren(el("div", "muted small", "(empty)")); return; }
+  container.replaceChildren(...data.entries.map((e) => {
+    const rel = path ? `${path}/${e.name}` : e.name;
+    const row = el("div", `tree-item ${e.type}`);
+    const btn = el("button", "tree-row");
+    btn.type = "button";
+    btn.title = rel;
+    btn.append(el("span", "tree-icon", e.type === "dir" ? "▸" : "·"), el("span", "tree-name", e.name),
+               el("span", "tree-size", e.type === "file" ? fmtSize(e.size) : ""));
+    row.append(btn);
+    if (e.type === "dir") {
+      const kids = el("div", "tree-kids");
+      kids.hidden = true;
+      row.append(kids);
+      btn.onclick = () => {
+        kids.hidden = !kids.hidden;
+        btn.firstChild.textContent = kids.hidden ? "▸" : "▾";
+        if (!kids.hidden && !kids.childElementCount) loadDir(rel, kids);
+      };
+    } else {
+      btn.onclick = () => openPreview(rel);
+    }
+    return row;
+  }));
+}
+
+$("#files-btn").onclick = () => {
+  if (!openDrawer("#files-drawer")) return;
+  $("#file-preview").hidden = true;
+  $("#files-tree").hidden = false;
+  loadDir("", $("#files-tree"));
+};
+$("#files-hidden").onchange = () => loadDir("", $("#files-tree"));
+
+let previewFile = null;
+async function openPreview(rel) {
+  let f;
+  try {
+    const r = await fetch(`api/file?path=${encodeURIComponent(rel)}`);
+    f = await r.json();
+    if (!r.ok) throw new Error(f.error);
+  } catch (e) { return attNote(e.message); }
+  previewFile = f;
+  $("#files-tree").hidden = true;
+  $("#file-preview").hidden = false;
+  $("#preview-name").textContent = rel;
+  $("#preview-name").title = rel;
+  const lines = f.text.split("\n").length;
+  $("#preview-meta").textContent = `${f.pages ? f.pages + " pages · " : ""}${lines} lines${f.truncated ? " · truncated" : ""}`;
+  $(".preview-gutter").textContent = Array.from({ length: lines }, (_, i) => i + 1).join("\n");
+  $(".preview-code code").innerHTML = f.kind === "pdf" ? esc(f.text) : highlight(f.text, langFromPath(rel) || "none");
+  $(".preview-scroll").scrollTop = 0;
+}
+$("#preview-back").onclick = () => { $("#file-preview").hidden = true; $("#files-tree").hidden = false; };
+$("#preview-attach").onclick = () => {
+  const f = previewFile;
+  if (!f) return;
+  attachments.push({ id: ++attSeq, status: "ready", name: f.name, text: f.text, chars: f.chars,
+                     pages: f.pages, truncated: f.truncated, kind: f.kind });
+  renderChips();
+  flash($("#preview-attach"), "Attached ✓");
+};
+$("#preview-insert").onclick = () => { if (previewFile) { insertPath(previewFile.path); input.focus(); } };
+$("#preview-copy").onclick = async () => {
+  if (!previewFile) return;
+  try { await copyText(previewFile.text); flash($("#preview-copy"), "Copied ✓"); } catch { flash($("#preview-copy"), "Copy failed"); }
+};
+
+// ── momo companion (same frames and speech lines as the TUI) ─────────────────
+const companion = {
+  frames: null, x: 4, dir: 1, st: "walk", sitTicks: 0, step: 0,
+  blink: 0, mewTicks: 0, mew: "", frame: null,
+};
+function tickCompanion() {
+  const c = companion, F = c.frames, pre = $("#companion");
+  if (!F || !view.companion || pre.offsetParent === null) return;
+  const charW = 6.6; // ≈ 11px monospace advance
+  const cols = Math.max(20, Math.floor(pre.clientWidth / charW));
+  const catW = 8, maxX = Math.max(0, cols - 2 - catW);
+  if (c.st === "walk") {
+    c.step ^= 1;
+    c.x = Math.max(0, Math.min(c.x + c.dir, maxX));
+    if (c.x === 0 || c.x === maxX || Math.random() < 0.02) {
+      c.st = "sit";
+      c.sitTicks = 50 + Math.floor(Math.random() * 50);
+      c.blink = 0;
+      if (Math.random() < 0.75) {
+        const pool = F.speech[`${status.mode}|${busy && !waiting ? 1 : 0}`] || F.speech_default;
+        c.mew = pool[Math.floor(Math.random() * pool.length)];
+        c.mewTicks = 18 + Math.floor(Math.random() * 14);
+      }
+    }
+    if (c.blink > 0) {
+      c.blink--;
+      c.frame = c.dir > 0 ? F.walk_right_blink : F.walk_left_blink;
+    } else {
+      c.frame = (c.dir > 0 ? F.walk_right : F.walk_left)[c.step];
+      if (Math.random() < 0.03) c.blink = 2;
+    }
+  } else {
+    if (--c.sitTicks <= 0) {
+      c.dir = c.x <= 2 ? 1 : c.x >= maxX - 2 ? -1 : (Math.random() < 0.5 ? -1 : 1);
+      c.st = "walk";
+      c.mewTicks = 0;
+    }
+    const sit = c.dir < 0 ? F.sit_left : F.sit;
+    c.frame = sit[Math.random() < 0.08 ? 1 : 0];
+    if (c.mewTicks > 0) c.mewTicks--;
+  }
+  const rows = c.frame.map((l) => " ".repeat(c.x + 1) + l);
+  if (c.mewTicks > 0 && c.st === "sit") {
+    if (c.dir < 0) {
+      const t = c.mew.startsWith("< ") ? c.mew.slice(2) + " >" : c.mew;
+      const mx = c.x + 1 - t.length - 1;
+      if (mx >= 0) rows[1] = " ".repeat(mx) + t + " " + c.frame[1];
+    } else {
+      rows[1] = rows[1].padEnd(c.x + 1 + catW) + " " + c.mew;
+    }
+  }
+  pre.textContent = rows.join("\n");
+}
+setInterval(tickCompanion, 120);
+
+// ── boot ──────────────────────────────────────────────────────────────────────
+syncViewMenu();
+autosize();
+connect();
+input.focus();

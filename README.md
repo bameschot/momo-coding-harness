@@ -35,6 +35,12 @@ Options:
 | `--mode` | `design` | Starting mode (`design`, `chat`, `plan`, `coding`, or `momo`) |
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--no-think` | off | Disable model thinking/reasoning mode (on by default) |
+| `--no-stream` | off | Wait for complete replies instead of streaming them as they are generated (streaming is on by default, in the TUI and the web UI) |
+| `--web` / `--no-web` | on | Serve the browser chat UI alongside the TUI |
+| `--web-host` | `127.0.0.1` | Interface for the web UI (a non-loopback host requires an access token) |
+| `--web-port` | `8765` | Port for the web UI |
+| `--web-token` | generated off-loopback | Access token for the web UI |
+| `--headless` | off | Run only the web UI, without the terminal UI |
 
 The chosen provider is saved and reused on the next launch (and restored per session). The status bar shows the active backend as `VIA: <provider>`.
 
@@ -69,6 +75,234 @@ The token is sent as a `Authorization: Bearer <token>` header on every request.
 - `/token` with no argument shows the current masked token (or "not set").
 - `/clear-token` removes the token for the current session.
 
+## Web UI
+
+Besides the terminal UI, the harness serves a browser chat window that can do everything the TUI can. It starts automatically at <http://127.0.0.1:8765>, and its URL is printed as a `[system]` line in the TUI chat pane.
+
+The web UI has **no external dependencies**. It is plain HTML/CSS/JavaScript served by Python's standard-library HTTP server, with no CDN scripts or web fonts and no build step. It works fully offline.
+
+### Starting and stopping
+
+| Command | Result |
+|---|---|
+| `python momo-coding-harness.py` | TUI **and** web UI (default) |
+| `python momo-coding-harness.py --no-web` | TUI only, no server |
+| `python momo-coding-harness.py --headless` | Web UI only, no TUI. Prints the URL. Ctrl+C (or SIGTERM) saves the session and stops |
+| `python momo-coding-harness.py --web-port 9000` | Serve on another port |
+| `python momo-coding-harness.py --web-host 0.0.0.0` | Reachable from other machines. Requires an access token (see [Security](#security)) |
+
+| Flag | Default | Description |
+|---|---|---|
+| `--web` / `--no-web` | on | Serve the web UI alongside the TUI |
+| `--web-host` | `127.0.0.1` | Interface to bind. Any non-loopback host requires an access token |
+| `--web-port` | `8765` | Port to listen on |
+| `--web-token` | generated when needed | Use a fixed access token instead of a random one |
+| `--headless` | off | Run the web UI without the terminal UI |
+
+If the port is already in use, the TUI still starts and shows `Web UI failed to start on …` in the chat pane. In `--headless` mode the harness exits with an error.
+
+### One session, two windows
+
+The browser and the terminal are two views of **the same session**, not separate conversations:
+
+- A message typed in either window appears in both, and so do the model's replies, tool calls, diffs and command output.
+- While the model works, both windows show it as busy. A message sent from either one while busy gets the usual `Busy — waiting for response...` reply.
+- A question from the model (`ask_user`, a `run_command` confirmation, plan approval, or a `[y/N]` prompt from a command) can be answered from **either** window.
+- Mode, model, host, context usage and plan progress are shared, so a change in one window shows up in the other.
+- **View options are per window.** Hiding thinking output in the browser doesn't hide it in the TUI, and vice versa. The browser remembers its view options between visits (in `localStorage`).
+- When a page is opened or reloaded, it replays the conversation so far. Loading a session with `/session <name>` from either window refreshes both.
+
+### Layout
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ ☰ 📁 ● momo  [ coding ▾ ]  exec 2/5  qwen3.5:9b ▾  ollama@localhost  ⚙ │  ← status bar
+│ ~/projects/myapp                     CTX ▓▓▓▓▓▓░░░░ 58%   RUN: confirm   │
+├──────────────────────────────────────────────────────────────────────────┤
+│                              ┌───────────────────────────────────────┐   │
+│                              │ add a --verbose flag to main.py       │   │  ← your message
+│                              └───────────────────────────────────────┘   │
+│  ▸ thinking (412 words)                                                  │  ← click to expand
+│  I'll look at the argument parser first.                   [Copy]        │  ← reply (markdown)
+│  ▶ read_file  path="main.py"                               ✓ 82 lines    │  ← click for args + result
+│  ± main.py  (+2 −0)                                                      │  ← edit diff
+│  │ 38 38 │     parser.add_argument("--no-think", ...)                  │ │
+│  │    39 │ +   parser.add_argument("--verbose", action="store_true")   │ │
+│  ┌─ ? momo asks ─────────────────────────────────────────────────────┐  │
+│  │ Run this command? … $ pytest -q             [ Yes (y) ]  [ No ]   │  │  ← question card
+│  └───────────────────────────────────────────────────────────────────┘  │
+├──────────────────────────────────────────────────────────────────────────┤
+│   /\   \  < mew~                                                         │  ← momo companion
+│ ┌──────────────────────────────────────────────────────────────────────┐ │
+│ ⏳ queued: also update the README                          ✎ ✕          │  ← queued while busy
+│ │ Message momo…  (/ commands · @ files)                                │ │  ← input box
+│ └──────────────────────────────────────────────────────────────────────┘ │
+│ ⠋ thinking                                          [■ Stop] [Send ↵]    │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Status bar**
+  - **☰** opens the [session drawer](#sessions) and **📁** opens the [workspace browser](#workspace-files).
+  - The **connection dot** is green while the page is connected to the harness and red while it reconnects. It reconnects on its own after a harness restart.
+  - The **mode picker** switches between design, chat, plan, coding and momo, like `/design`, `/code` and so on, or Shift+Tab.
+  - **Plan progress** (e.g. `exec 2/5`, `awaiting approval`) appears in plan mode. Clicking it, or the **Plan** button, opens the plan drawer.
+  - Clicking the **model name** opens a model picker listing the models on the backend, like `/model`. llama.cpp serves a single model, so there the list is informational.
+  - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
+  - The **CTX meter** turns yellow at ≥ 75% and red at ≥ 90%, as in the TUI.
+  - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on.
+  - **⚙** opens the view options (below).
+- **Conversation**
+  - Replies **stream in** as they're generated, with a blinking cursor. Reasoning streams into an open *thinking…* block that folds away once the answer starts. When the reply is complete, it's re-rendered as markdown. Use `--no-stream` to turn streaming off.
+  - Your messages are right-aligned bubbles. Replies are rendered as markdown: headings, lists, task lists, tables, code blocks, quotes and links. `[system]` lines and errors are monospace. Wide tables keep readable column widths and scroll sideways in their own box, with edge shadows showing there's more.
+  - **Code blocks** show their language (e.g. `python`) in the top-left and a **Copy** button in the top-right, in replies and in the plan drawer. The button copies the block's exact contents to *your browser's* clipboard and briefly shows **Copied ✓**. It is faint until you hover over the block or reach it with Tab, and always fully visible on touch screens. It also works when the page is opened over plain HTTP from another machine (`--web-host 0.0.0.0`), where browsers block the modern clipboard API.
+  - **Thinking** blocks are collapsed to a `▸ thinking (N words)` line. Click to read them.
+  - **Tool calls** are one line each, with name, key arguments and outcome (`✓ 82 lines`, `✗ error`, `applied`). Click to see the full arguments and the result, which shows its first 20 lines with a *show all* link. Failed calls open automatically.
+  - **Edit diffs** show the old and new line-number gutter with added lines in green, removed in red and hunks in cyan, in compact or git style. They are capped at 40 lines with a *show more* link.
+  - **Question cards** highlight the model's questions. Yes/No questions get **Yes (y)** / **No** buttons. Anything else, such as feedback on a plan, is typed into the input box. Once answered, the card shows the answer.
+  - **Message actions** appear on hover, and are always visible on touch screens. Every reply has **Copy**, which copies the reply as Markdown. Your last message has **↻ Retry** and **✎ Edit**:
+    - **Retry** sends the same message again and replaces the reply it got. Attachments are included.
+    - **Edit** puts the typed text back into the input box, shown with an *Editing your last message* banner. Enter sends the edited version, and the original attachments are kept. ✕ or Esc cancels.
+    - Both drop the old reply, and everything after it, from the conversation the model sees. They aren't offered while the model is working or a plan is executing, nor on answers to questions or on `/commands`. The TUI has `/retry`.
+  - When you've scrolled up, new messages don't pull you down. A **↓ New messages** button appears instead. Long replies are shown from their beginning.
+- **Plan drawer** shows the current plan with its checklist and **Run**, **Resume** and **Cancel plan** buttons, which send `/plan run`, `/plan resume` and `/plan cancel`.
+- **Input box**
+  - It grows with its content. Text starting with `/` is highlighted as a command.
+  - Typing `/` opens **command autocomplete** with the usage and description of every slash command. Use ↑/↓ to pick one and Tab or Enter to insert it.
+  - Typing `@` followed by part of a file name opens **path autocomplete**, a fuzzy search over the workspace. Picking a file inserts its path, e.g. `` `src/app/main.py` ``. Only the path is inserted: the model reads the file itself with its tools. To send the contents, attach the file instead.
+  - Messages sent **while the model is working** are queued instead of rejected. They appear as ⏳ chips above the input and are sent one per turn once the model is done. ✎ moves a queued message back into the input box and ✕ removes it. `/commands` still run immediately, and while the model is waiting for your answer, what you type is the answer.
+  - The placeholder changes to `Answer momo…` when the model is waiting for your reply.
+  - A spinner and a **■ Stop** button appear while the model is working.
+  - **📎** attaches files (see [Attaching files](#attaching-files)).
+- **momo companion** walks along the top of the input box, with the same frames and mode-specific speech as in the TUI. It is hidden on narrow screens.
+
+The layout adapts to phone-width screens: the status bar collapses to mode, CTX and ⚙. It follows the system light or dark theme.
+
+### Attaching files
+
+Click **📎** next to the input box, drag files anywhere onto the page, or paste them (e.g. copied in Finder) into the input box. Each file becomes a chip above the input and is sent with your next message when you press Enter. You can send files without typing anything.
+
+- **Text-based files**, such as source code, JSON, CSV, XML, YAML, Markdown and logs, are included as text. UTF-8 is expected. UTF-16/32 files with a byte-order mark and legacy Windows-1252 text are converted too.
+- **PDFs** are converted to plain text on the machine running the harness, with a `[page N]` marker before each page. This needs the `pypdf` package (in `requirements.txt`). Scanned PDFs that contain only images have no text to extract and are rejected with a message.
+- **Binary files** such as images, archives and executables are rejected.
+- Conversion starts as soon as a file is picked. Each chip shows its size, page count and an estimated token count, and turns amber when the file would take more than a quarter of the context window. Use ✕ to remove a file before sending.
+- Limits: 25 MB per file, and at most 1,000,000 characters of text per file (the rest is cut off, and the chip says *truncated*).
+
+The model receives the full content, wrapped in `<attachment name="…" chars="…">…</attachment>` blocks after your text. The conversation, in both the browser and the TUI, shows a compact `📎 data.csv (1,234 chars)` line instead. Only the typed text goes into the input history. Attachments can't be combined with a `/command`: they stay queued until the next message. They also work when answering a question from the model.
+
+### Sessions
+
+**☰** opens the session drawer. It lists the 50 most recent saved sessions, each with its first message, mode, model, message count and age. The current one is highlighted.
+
+- Click a session to load it in both windows, like `/session <name>`.
+- **＋ New** saves the current session and starts an empty one, like the new `/new` command, which also works in the TUI. Model, host and mode stay the same.
+- Neither is possible while the model is working.
+
+### Workspace files
+
+**📁** opens a read-only browser of the workspace (the `--workdir`). Folders expand as you click them. Build and dependency folders such as `.git`, `.venv`, `node_modules` and `dist` are left out, and hidden files are shown only with the *hidden files* checkbox.
+
+Clicking a file opens a preview with line numbers and syntax highlighting. PDFs are shown as their extracted text. From the preview you can:
+- **📎 Attach** the file to your next message, exactly like uploading it
+- **Insert path** into the input box
+- **Copy** the contents
+
+The browser can't leave the workspace: `..` paths and symlinks pointing outside are refused. Files over 5 MB aren't previewed, and binary files show an error.
+
+### Syntax highlighting
+
+Code blocks in replies, and files in the workspace preview, are colour-highlighted in both light and dark themes. Supported: Python, JavaScript/TypeScript, JSON, shell, Java, Kotlin, C/C++, Rust, Go, SQL, YAML, TOML, HTML/XML, CSS, diffs and Markdown headings, plus common aliases such as `py`, `ts`, `sh`, `yml` and `cpp`. Blocks without a language are highlighted only when they're obviously JSON or a shell session (`$ …`). The highlighter is built in, with no external libraries. The **Copy** button always copies the plain code.
+
+### Notifications
+
+Tick **Notify me** in the ⚙ menu to get a desktop notification when the model finishes a turn that took longer than 8 seconds, or asks you a question. Notifications only fire while the momo tab is in the background. Clicking one brings the tab back. The browser asks for permission the first time.
+
+Even without notifications, the tab title shows **(•)** while there is unseen activity in a background tab.
+
+### View options (⚙)
+
+| Option | TUI equivalent | Effect |
+|---|---|---|
+| Tool output | `/tool-output on\|off` | Off: each tool call becomes one abbreviated line with no result |
+| Thinking | `/think-output on\|off`, Shift+T | Show or hide thinking blocks |
+| Markdown | `/markdown on\|off`, Shift+M | Rendered markdown or plain text for replies |
+| Edit diffs | `/diff on\|off`, Shift+D | Show or hide diffs of file edits |
+| Companion | `/companion on\|off`, Shift+Q | Show or hide momo |
+| Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
+| Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
+| Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
+| Notify me | — | Desktop notifications, see [Notifications](#notifications) |
+| ⤓ Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
+
+Typing the TUI command in the browser (e.g. `/think-output off`) has the same effect as the menu.
+
+### Keyboard shortcuts
+
+| Key | Where | Action |
+|---|---|---|
+| Enter | input box | Send (with any attached files) |
+| Cmd/Ctrl+V | input box | Paste copied files as attachments |
+| Shift+Enter | input box | New line |
+| ↑ / ↓ | input box, cursor at start / end | Previous / next entry in the input history (shared with the TUI) |
+| / | input box | Open command autocomplete (↑/↓ select, Tab or Enter insert, Esc close) |
+| @ | input box | Open workspace path autocomplete |
+| Esc | anywhere | Interrupt the running response (like Shift+C in the TUI). Also closes menus and drawers, and cancels editing a message |
+| Shift+Tab | anywhere | Cycle mode |
+| Shift+T / M / D / Q | outside the input box | Toggle thinking / markdown / diffs / companion |
+| Shift+P | outside the input box | Toggle `run_command` confirmation |
+| Shift+C | outside the input box | Interrupt the running response |
+
+### What differs from the TUI
+
+- `/exit` and `/quit` don't work from the browser. Close the tab, or quit from the terminal (or press Ctrl+C in `--headless` mode).
+- `/copy` copies to the clipboard of the machine running the harness, not the browser's. To copy code into your browser's clipboard, use the **Copy** button on a code block.
+- `/export` writes into the workspace on the machine running the harness.
+- Diffs of file edits are display-only and aren't stored in the session, same as in the TUI. After a restart, an edit shows its plain tool result instead.
+
+### Security
+
+The web UI can do anything the harness can, including editing files and running shell commands in the workspace, so access is locked down:
+
+- **Loopback only by default.** The server binds to `127.0.0.1`, so only your own machine can reach it. Requests whose `Host` header isn't a loopback name are rejected. This stops malicious web pages that point a domain at `127.0.0.1` (DNS rebinding).
+- **Same-origin requests only.** Requests that change anything must be JSON and must come from the page itself. Cross-site requests from other pages open in your browser are rejected.
+- **Access token off-loopback.** With `--web-host` set to anything else (e.g. `0.0.0.0` or a LAN address), a random token is generated and the URL printed by the harness includes `?token=…`. Opening that URL once swaps the token for an HttpOnly, SameSite=Strict cookie and removes it from the address bar. Requests without it get `401 Unauthorized`. Use `--web-token` to choose a fixed token. Scripts can send it as `Authorization: Bearer <token>`.
+- Traffic is plain HTTP. Exposing the harness beyond a trusted network needs a TLS-terminating reverse proxy or an SSH tunnel (`ssh -L 8765:127.0.0.1:8765 host`), which is also the simplest way to reach a remote harness without opening it up.
+- `/token` values typed in the browser are masked in both windows and never added to the history, exactly as in the TUI.
+
+### HTTP API
+
+The page talks to the harness through a small JSON API, which can also be scripted, e.g. with `curl`:
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/state` | Snapshot: status fields, busy/waiting flags, modes, slash commands, skills, the current plan, input history |
+| `GET /api/events` | Server-Sent Events stream. It replays the conversation, then streams live events (`user`, `chat`, `think`, `tool_call`, `tool_result`, `diff`, `ask_user`, `status`, `busy`, `done`, `error`, `reset`, plus the live-only `delta` / `stream_end` while a reply streams) as JSON |
+| `POST /api/submit` `{"text": "..."}` | Exactly like typing in the input box: a message, a `/command`, or an answer to a pending question. Optional `"attachments": [{"name", "text"}]` adds files. Returns the view changes the command requested |
+| `POST /api/cancel` | Interrupt the running response |
+| `POST /api/mode` `{"mode": "coding"}` | Switch mode |
+| `POST /api/retry` | Re-send the last user message (like `/retry`) |
+| `POST /api/edit` `{"text": "..."}` | Replace the typed part of the last user message, keep its attachments, and re-send |
+| `GET /api/last-user` | The last user message's typed text and attachment names |
+| `GET /api/sessions` | Recent sessions: `{current, sessions: [{name, mtime, mode, model, provider, workdir, messages, preview}]}` |
+| `GET /api/models` | `{current, models, can_switch, provider}` |
+| `GET /api/export` | The conversation as a Markdown download |
+| `GET /api/files?path=&hidden=0\|1` | Workspace directory listing |
+| `GET /api/file?path=` | A workspace file converted to text (same conversion as uploads) |
+| `GET /api/files/search?q=` | Fuzzy workspace path search (top 30) |
+| `POST /api/upload` | Raw file bytes (`Content-Type: application/octet-stream`, URL-encoded name in `X-Filename`). Returns `{name, text, kind, chars, pages, truncated}`, or `{error}` with status 422 for binary or unreadable files |
+
+```bash
+curl -s localhost:8765/api/state | jq .status
+curl -s -X POST localhost:8765/api/submit -H 'Content-Type: application/json' -d '{"text": "/context"}'
+curl -sN localhost:8765/api/events          # watch the live event stream
+```
+
+### Troubleshooting
+
+- **`Web UI failed to start … Address already in use`**: another harness, or another program, is using the port. Pick another with `--web-port`.
+- **`403 Forbidden: unexpected Host header`**: open the page via `localhost` or `127.0.0.1`, not a machine name. To use a machine name or LAN address, start with `--web-host <addr>` (token mode).
+- **`401 Unauthorized`**: the server runs in token mode. Open the exact URL the harness printed, including `?token=…`.
+- **Red connection dot**: the harness isn't running, or it restarted. The page reconnects automatically once it's back.
+
 ## TUI Layout
 
 ```
@@ -91,6 +325,7 @@ The token is sent as a `Authorization: Bearer <token>` header on every request.
 ```
 
 - **Chat pane** — conversation history including inline tool calls (yellow), results, and thinking blocks (orange). Scroll with `↑`/`↓` or `PgUp`/`PgDn`.
+- **Streaming** — replies appear as they are generated, ending in a `▍` cursor, and are replaced by the fully rendered message when complete. Disable with `--no-stream`.
 - **Status bar** — current mode, model, Ollama host, context usage %, and working directory. When the line is too narrow to fit, the working directory is shortened from the front (`…/tail`) so its most specific part stays visible.
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
   - Shows `⠋ thinking` (spinner) while the model is working.
@@ -428,6 +663,8 @@ Type any command in the input bar:
 | `/compact` | Compact context — removes old messages and summarises them with the LLM |
 | `/fast-compact` | Compact context without LLM summarisation (instant) |
 | `/clear` | Clear conversation history |
+| `/new` | Save this session and start a new, empty one (same model, host and mode) |
+| `/retry` | Re-send your last message, replacing the reply it got |
 | `/cost` | Show token usage for this session, aggregated by mode and model (in/out/total tokens per combination) |
 | `/sessions` | List up to 20 recent sessions with mode and model |
 | `/session` | Show the current session file path |

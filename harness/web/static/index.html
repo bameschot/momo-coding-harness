@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>momo</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext x='0' y='13' font-size='13'%3E%F0%9F%90%88%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="status">
+  <div class="status-row">
+    <button id="sessions-btn" class="icon-btn" type="button" title="Sessions" aria-label="Sessions">☰</button>
+    <button id="files-btn" class="icon-btn" type="button" title="Workspace files" aria-label="Workspace files">📁</button>
+    <span class="brand"><span id="conn-dot" class="dot" title="Disconnected"></span>momo</span>
+    <label class="mode-pick">
+      <span class="sr-only">Mode</span>
+      <select id="mode" title="Mode (Shift+Tab cycles)"></select>
+    </label>
+    <span id="plan-progress" class="chip" hidden></span>
+    <button id="model" class="field strong model-btn" type="button" title="Switch model" aria-haspopup="true"></button>
+    <span id="host" class="field muted collapse"></span>
+    <span class="spacer"></span>
+    <button id="plan-btn" class="chip button" type="button" hidden>Plan</button>
+    <button id="view-btn" class="icon-btn" type="button" title="View options" aria-haspopup="true" aria-expanded="false">⚙</button>
+  </div>
+  <div class="status-row second">
+    <span id="workdir" class="field muted mono collapse" dir="rtl"></span>
+    <span class="spacer"></span>
+    <span class="ctx" title="Context used">
+      <span class="ctx-label">CTX</span>
+      <span class="meter"><span id="ctx-fill"></span></span>
+      <span id="ctx-pct" class="mono">0%</span>
+    </span>
+    <button id="tools-badge" class="chip button warn" type="button" title="Tools are disabled — click to enable" hidden>TOOLS: off</button>
+    <button id="run-badge" class="chip button" type="button" title="Toggle run_command confirmation (Shift+P)">RUN: auto</button>
+  </div>
+  <div id="view-menu" class="menu" role="menu" hidden>
+    <div class="menu-title">View</div>
+    <label><input type="checkbox" data-view="tools"> Tool output <kbd>/tool-output</kbd></label>
+    <label><input type="checkbox" data-view="think"> Thinking <kbd>Shift+T</kbd></label>
+    <label><input type="checkbox" data-view="md"> Markdown <kbd>Shift+M</kbd></label>
+    <label><input type="checkbox" data-view="diff"> Edit diffs <kbd>Shift+D</kbd></label>
+    <label><input type="checkbox" data-view="companion"> Companion <kbd>Shift+Q</kbd></label>
+    <div class="menu-sub">Diff style</div>
+    <div class="seg" role="radiogroup">
+      <label><input type="radio" name="diff-style" value="compact"> compact</label>
+      <label><input type="radio" name="diff-style" value="git"> git</label>
+    </div>
+    <div class="menu-sub">Model</div>
+    <label><input type="checkbox" id="think-mode"> Thinking mode <kbd>/think</kbd></label>
+    <div class="menu-sub">Skills</div>
+    <div id="skills-list" class="skills-list"><span class="muted">No skills found.</span></div>
+    <div class="menu-sub">Other</div>
+    <label><input type="checkbox" id="notify"> Notify me when momo finishes or asks</label>
+    <a id="export-link" class="menu-link" href="api/export" download>⤓ Download conversation (.md)</a>
+  </div>
+  <div id="model-menu" class="menu model-menu" role="menu" hidden></div>
+</header>
+
+<main id="transcript" tabindex="-1" aria-live="polite" aria-label="Conversation"></main>
+<button id="new-msgs" class="pill" type="button" hidden>↓ New messages</button>
+
+<aside id="sessions-drawer" class="drawer left" aria-label="Sessions" hidden>
+  <div class="drawer-head">
+    <strong>Sessions</strong>
+    <span class="spacer"></span>
+    <button id="new-session" type="button" class="primary small">＋ New</button>
+    <button class="icon-btn drawer-close" type="button" title="Close">✕</button>
+  </div>
+  <div id="sessions-list" class="drawer-body"></div>
+</aside>
+
+<aside id="files-drawer" class="drawer left" aria-label="Workspace files" hidden>
+  <div class="drawer-head">
+    <strong>Workspace</strong>
+    <label class="small muted"><input type="checkbox" id="files-hidden"> hidden files</label>
+    <span class="spacer"></span>
+    <button class="icon-btn drawer-close" type="button" title="Close">✕</button>
+  </div>
+  <div id="files-tree" class="drawer-body tree"></div>
+  <div id="file-preview" class="file-preview" hidden>
+    <div class="preview-head">
+      <button id="preview-back" class="icon-btn" type="button" title="Back to files">←</button>
+      <span id="preview-name" class="mono field"></span>
+    </div>
+    <div class="preview-actions">
+      <button id="preview-attach" type="button" class="primary small">📎 Attach</button>
+      <button id="preview-insert" type="button" class="small">Insert path</button>
+      <button id="preview-copy" type="button" class="small">Copy</button>
+      <span id="preview-meta" class="muted small"></span>
+    </div>
+    <div class="preview-scroll"><pre class="preview-gutter" aria-hidden="true"></pre><pre class="preview-code"><code></code></pre></div>
+  </div>
+</aside>
+
+<aside id="plan-drawer" aria-label="Plan" hidden>
+  <div class="drawer-head">
+    <strong>Plan</strong>
+    <span id="plan-phase" class="chip"></span>
+    <span class="spacer"></span>
+    <button id="plan-close" class="icon-btn" type="button" title="Close">✕</button>
+  </div>
+  <div id="plan-body" class="md"></div>
+  <div class="drawer-actions">
+    <button type="button" data-cmd="/plan run" class="primary">Run</button>
+    <button type="button" data-cmd="/plan resume">Resume</button>
+    <button type="button" data-cmd="/plan cancel" class="danger">Cancel plan</button>
+  </div>
+</aside>
+
+<footer id="composer">
+  <pre id="companion" aria-hidden="true"></pre>
+  <div id="suggest" class="suggest" role="listbox" hidden></div>
+  <div id="queue" class="attachments" aria-live="polite" hidden></div>
+  <div id="edit-banner" class="edit-banner" hidden>
+    <span>✎ Editing your last message<span id="edit-atts"></span> — Enter re-sends it</span>
+    <button id="edit-cancel" type="button" class="icon-btn" title="Cancel editing">✕</button>
+  </div>
+  <div id="attachments" class="attachments" aria-live="polite" hidden></div>
+  <div class="input-wrap">
+    <button id="attach" class="attach-btn" type="button" title="Attach text files or PDFs (or drop / paste them here)" aria-label="Attach files">📎</button>
+    <input id="file-input" type="file" multiple hidden>
+    <textarea id="input" rows="1" placeholder="Message momo…  (/ for commands)" autocomplete="off" spellcheck="false"></textarea>
+  </div>
+  <div id="drop-hint" class="drop-hint" hidden>Drop files to attach — text files and PDFs</div>
+  <div class="composer-bar">
+    <span id="busy" class="busy"></span>
+    <span class="hint muted">Enter to send · Shift+Enter newline · / commands · @ files · Esc to interrupt</span>
+    <span class="spacer"></span>
+    <button id="stop" type="button" class="danger" hidden>■ Stop</button>
+    <button id="send" type="button" class="primary">Send ↵</button>
+  </div>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

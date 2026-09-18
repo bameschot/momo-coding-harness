@@ -11,3 +11,6 @@ tree-sitter-kotlin>=1.1
 tree-sitter-rust>=0.24
 tree-sitter-javascript>=0.25
 tree-sitter-typescript>=0.23
+# PDF attachments in the web UI (converted to plain text for the model). Pure
+# Python, no dependencies; without it text-file attachments still work.
+pypdf>=6,<7

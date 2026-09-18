@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Callable
+
+# Streaming callback: on_delta(kind, text) with kind 'content' or 'thinking'.
+DeltaCallback = Callable[[str, str], None]
 
 
 @dataclass
@@ -46,7 +50,10 @@ class LLMClient(ABC):
 
     @abstractmethod
     def chat(self, messages: list[dict], tools: list[dict],
-             think: bool | None = None, num_ctx: int | None = None) -> ChatResponse:
+             think: bool | None = None, num_ctx: int | None = None,
+             on_delta: DeltaCallback | None = None) -> ChatResponse:
+        """Run one completion. With `on_delta`, stream: call it with each piece of
+        content/thinking as it arrives. Either way, return the complete response."""
         ...
 
     @abstractmethod

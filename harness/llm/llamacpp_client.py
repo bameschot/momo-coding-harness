@@ -105,7 +105,8 @@ class LlamaCppClient(LLMClient):
         return out
 
     def chat(self, messages: list[dict], tools: list[dict],
-             think: bool | None = None, num_ctx: int | None = None) -> ChatResponse:
+             think: bool | None = None, num_ctx: int | None = None,
+             on_delta=None) -> ChatResponse:
         payload: dict = {
             "model": self.model,
             "messages": self._to_openai_messages(messages),
@@ -122,10 +123,74 @@ class LlamaCppClient(LLMClient):
         elif think is True:
             payload["chat_template_kwargs"] = {"enable_thinking": True}
 
-        response = self._client.post("/v1/chat/completions",
-                                     json=payload, headers=self._headers())
-        response.raise_for_status()
-        return self._normalize(response.json())
+        if on_delta is None:
+            response = self._client.post("/v1/chat/completions",
+                                         json=payload, headers=self._headers())
+            response.raise_for_status()
+            return self._normalize(response.json())
+
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+        with self._client.stream("POST", "/v1/chat/completions",
+                                 json=payload, headers=self._headers()) as response:
+            if response.status_code >= 400:
+                response.read()
+                response.raise_for_status()
+            return self._consume_stream(response.iter_lines(), on_delta)
+
+    @staticmethod
+    def _consume_stream(lines, on_delta) -> ChatResponse:
+        """Parse an OpenAI-style SSE stream: content / reasoning deltas, tool calls
+        whose `arguments` arrive in fragments (merged by index), and final usage."""
+        content: list[str] = []
+        reasoning: list[str] = []
+        calls: dict[int, dict] = {}
+        finish = None
+        usage: dict = {}
+        for line in lines:
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except ValueError:
+                continue
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if (t := delta.get("reasoning_content")):
+                    reasoning.append(t)
+                    on_delta("thinking", t)
+                if (t := delta.get("content")):
+                    content.append(t)
+                    on_delta("content", t)
+                for tc in delta.get("tool_calls") or []:
+                    slot = calls.setdefault(tc.get("index", len(calls)), {"name": "", "args": ""})
+                    fn = tc.get("function") or {}
+                    if fn.get("name") and not slot["name"]:
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["args"] += fn["arguments"]
+                if choice.get("finish_reason"):
+                    finish = choice["finish_reason"]
+        tool_calls = []
+        for _, slot in sorted(calls.items()):
+            try:
+                args = json.loads(slot["args"]) if slot["args"].strip() else {}
+            except ValueError:
+                args = {}
+            tool_calls.append(ToolCall(name=slot["name"], arguments=args if isinstance(args, dict) else {}))
+        return ChatResponse(
+            content="".join(content),
+            thinking="".join(reasoning),
+            tool_calls=tool_calls,
+            prompt_tokens=usage.get("prompt_tokens"),
+            eval_tokens=usage.get("completion_tokens"),
+            done_reason=finish,
+        )
 
     @staticmethod
     def _normalize(data: dict) -> ChatResponse:

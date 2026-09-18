@@ -5,12 +5,14 @@ import json
 import queue
 import re
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import session as session_mod
 from .diff import build_diff_body
+from .events import EventBus, BusyEvent, DeltaEvent, StreamEndEvent
 from .llm import make_client
 from .logger import Logger
 from .plan import Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file, delete_plan_file
@@ -578,10 +580,12 @@ class Harness:
         self.logger = Logger(self._ts)
         self.provider = provider
         self.client = make_client(provider, host=host, model=model)
-        self.event_queue: queue.Queue[Any] = queue.Queue()
+        self.event_queue = EventBus()  # fan-out to every frontend (TUI, web)
         self._user_input_queue: queue.Queue[str] = queue.Queue()
+        self.awaiting_input: bool = False  # True while the worker blocks in _ask_user
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
         self.think: bool = True    # enable model thinking/reasoning mode; configurable via /think or --think
+        self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
         self.run_confirm: bool = False  # when True, prompt y/N before each run_command; toggle via /run-confirm or Shift+P
         self.active_skills: list[str] = []
@@ -616,8 +620,20 @@ class Harness:
             self.client.set_model(value)
 
     def provide_user_input(self, text: str):
-        """Called from the TUI thread when the user answers a mid-task ask_user question."""
+        """Called from a frontend thread when the user answers a mid-task question."""
+        self.awaiting_input = False
         self._user_input_queue.put(text)
+
+    def _ask_user(self, question: str) -> str:
+        """Emit an AskUserEvent and block the worker thread until a frontend answers."""
+        self.awaiting_input = True
+        self.event_queue.put(AskUserEvent(question))
+        # Only ever called from a worker thread, so the harness is busy by definition.
+        self.event_queue.put(BusyEvent(busy=True, waiting=True))
+        try:
+            return self._user_input_queue.get()
+        finally:
+            self.awaiting_input = False
 
     # ── file-edit diffs ─────────────────────────────────────────────────────────
 
@@ -936,9 +952,15 @@ class Harness:
                 # num_ctx is the model's real window when known, so the model can
                 # use its full context; context_limit governs compaction separately.
                 num_ctx = self.model_max_ctx or self.context_limit
-                response = self.client.chat(api_messages, tools,
-                                            think=think_this_turn,
-                                            num_ctx=num_ctx)
+                stream_kw = {"on_delta": self._delta_sink()} if self.stream else {}
+                try:
+                    response = self.client.chat(api_messages, tools,
+                                                think=think_this_turn,
+                                                num_ctx=num_ctx, **stream_kw)
+                finally:
+                    if stream_kw:
+                        stream_kw["on_delta"].flush()
+                        self.event_queue.put(StreamEndEvent())
             except Exception as e:
                 if self._cancel.is_set():
                     self.event_queue.put(ChatEvent("system", "Interrupted."))
@@ -1152,9 +1174,7 @@ class Harness:
                     # Block the worker thread until the TUI routes the user's answer back.
                     # The TUI detects AskUserEvent, switches to waiting-for-input state,
                     # and calls provide_user_input() when the user submits a response.
-                    question = args.get("question", "")
-                    self.event_queue.put(AskUserEvent(question))
-                    answer = self._user_input_queue.get()
+                    answer = self._ask_user(args.get("question", ""))
                     result = f"User answered: {answer}"
                 elif name == "create_plan":
                     result = self._handle_create_plan(args)
@@ -1173,9 +1193,9 @@ class Harness:
                     # (reusing the ask_user input plumbing) before executing.
                     if name == "run_command" and self.run_confirm:
                         cmd = args.get("command", "")
-                        self.event_queue.put(AskUserEvent(
-                            f"Run this command? Reply 'y' to allow, anything else to decline.\n  $ {cmd}"))
-                        answer = self._user_input_queue.get().strip().lower()
+                        answer = self._ask_user(
+                            f"Run this command? Reply 'y' to allow, anything else to decline.\n  $ {cmd}"
+                        ).strip().lower()
                         if answer in ("y", "yes"):
                             result = dispatch(name, args, self.workdir)
                         else:
@@ -1251,6 +1271,61 @@ class Harness:
 
     # ── plan mode ─────────────────────────────────────────────────────────────
 
+    def _delta_sink(self):
+        """Streaming callback that coalesces deltas (~50 ms / 200 chars) before
+        putting them on the bus, so frontends are not flooded token by token."""
+        buf: list[str] = []
+        state = {"kind": None, "ts": time.monotonic()}
+
+        def flush():
+            if buf and state["kind"]:
+                self.event_queue.put(DeltaEvent(state["kind"], "".join(buf)))
+            buf.clear()
+            state["ts"] = time.monotonic()
+
+        def emit(kind: str, text: str):
+            if not text:
+                return
+            if kind != state["kind"]:
+                flush()
+                state["kind"] = kind
+            buf.append(text)
+            if time.monotonic() - state["ts"] >= 0.05 or sum(map(len, buf)) >= 200:
+                flush()
+
+        # Qwen-style models put reasoning inside <think>…</think> in the content
+        # stream; route it to "thinking" live, as the final response does. Tags may
+        # be split across chunks, so a possible partial tag is held back.
+        tag = {"in": False, "carry": ""}
+
+        def on_delta(kind: str, text: str):
+            if kind != "content":
+                emit(kind, text)
+                return
+            text = tag["carry"] + text
+            tag["carry"] = ""
+            while text:
+                marker = "</think>" if tag["in"] else "<think>"
+                idx = text.find(marker)
+                if idx == -1:
+                    keep = next((k for k in range(min(len(marker) - 1, len(text)), 0, -1)
+                                 if marker.startswith(text[-k:])), 0)
+                    emit("thinking" if tag["in"] else "content", text[:len(text) - keep])
+                    tag["carry"] = text[len(text) - keep:]
+                    return
+                emit("thinking" if tag["in"] else "content", text[:idx])
+                tag["in"] = not tag["in"]
+                text = text[idx + len(marker):]
+
+        def finish():
+            if tag["carry"]:
+                emit("thinking" if tag["in"] else "content", tag["carry"])
+                tag["carry"] = ""
+            flush()
+
+        on_delta.flush = finish
+        return on_delta
+
     def _refresh_system_prompt(self):
         self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
 
@@ -1313,10 +1388,10 @@ class Harness:
                          goal=str(args.get("goal") or "").strip(), steps=steps)
         self._sync_plan_file()
         self.event_queue.put(ChatEvent("assistant", self.plan.to_markdown()))
-        self.event_queue.put(AskUserEvent(
+        answer = self._ask_user(
             f"Execute this plan? y = run it · n = keep it for later (/plan run) · "
-            f"anything else = feedback to revise it. You can edit {PLAN_FILENAME} before answering."))
-        answer = self._user_input_queue.get().strip()
+            f"anything else = feedback to revise it. You can edit {PLAN_FILENAME} before answering."
+        ).strip()
         low = answer.lower().rstrip(".!")
         if low in ("y", "yes", "ok", "go", "run", "approve", "approved"):
             err = self.approve_plan()
@@ -1443,8 +1518,12 @@ class Harness:
         return "draft"
 
     def _emit_status(self):
+        self.event_queue.put(self.status_event())
+
+    def status_event(self) -> StatusEvent:
+        """Snapshot of the status-bar fields (also served to the web UI)."""
         pct = self._ctx_pct()
-        self.event_queue.put(StatusEvent(
+        return StatusEvent(
             mode=self.mode,
             model=self.client.model,
             workdir=str(self.workdir),
@@ -1455,7 +1534,7 @@ class Harness:
             host=self.client.host,
             provider=self.provider,
             plan_progress=self._plan_progress(),
-        ))
+        )
 
     def list_available_skills(self) -> list[str]:
         if not _SKILLS_DIR.exists():
@@ -1512,14 +1591,26 @@ class Harness:
         saved_provider = data.get("provider")
         saved_host = data.get("host")
         saved_model = data.get("model", self.client.model)
+        new_client = None
         if saved_provider and saved_provider != self.provider:
+            try:
+                new_client = make_client(
+                    saved_provider,
+                    host=saved_host or self.client.host,
+                    model=saved_model,
+                    auth_token=self.client._auth_token,
+                )
+            except ValueError:
+                # Unknown provider in the session file: keep the current backend
+                # (and its host/model) rather than failing to start.
+                self.event_queue.put(ChatEvent("system",
+                    f"Session used unknown provider {saved_provider!r}; "
+                    f"staying on {self.provider} ({self.client.host})."))
+        if new_client is not None:
             self.provider = saved_provider
-            self.client = make_client(
-                saved_provider,
-                host=saved_host or self.client.host,
-                model=saved_model,
-                auth_token=self.client._auth_token,
-            )
+            self.client = new_client
+        elif saved_provider and saved_provider != self.provider:
+            pass  # unknown provider — its host/model don't apply to the current backend
         else:
             # Restore the host before set_model, since the context-length query
             # below runs against it. Older sessions without a saved host keep the
@@ -1553,3 +1644,30 @@ class Harness:
 
     def session_path(self) -> Path:
         return session_mod.session_path(self._ts)
+
+    def new_session(self) -> str:
+        """Save the current session and start an empty one (same model/host/mode)."""
+        if len(self.messages) > 1:
+            self._autosave()
+        self.logger.close()
+        self._ts = session_mod.new_timestamp()
+        self.logger = Logger(self._ts)
+        self.plan = None
+        self.plan_phase = "investigating"
+        self.messages = [{"role": "system", "content": self._build_system_prompt()}]
+        self._token_estimate = self._estimate()
+        self._emit_status()
+        return f"Started a new session: {self.session_path().name}"
+
+    def truncate_at_last_user(self) -> str | None:
+        """Drop the last user message and everything after it (replies, tool calls,
+        thinking). Returns that message's content, or None if there is none."""
+        for i in range(len(self.messages) - 1, 0, -1):
+            if self.messages[i].get("role") == "user":
+                content = self.messages[i].get("content") or ""
+                del self.messages[i:]
+                self._token_estimate = self._estimate()
+                self._autosave()
+                self._emit_status()
+                return content
+        return None

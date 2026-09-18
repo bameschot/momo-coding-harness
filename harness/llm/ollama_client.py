@@ -80,7 +80,8 @@ class OllamaClient(LLMClient):
         self._client = self._make_client()
 
     def chat(self, messages: list[dict], tools: list[dict],
-             think: bool | None = None, num_ctx: int | None = None) -> ChatResponse:
+             think: bool | None = None, num_ctx: int | None = None,
+             on_delta=None) -> ChatResponse:
         # Qwen3's Ollama chat template embeds message content into XML; escape the
         # copy we send so tool results/args with < > & don't break its parser.
         if _is_qwen(self.model):
@@ -92,14 +93,40 @@ class OllamaClient(LLMClient):
             kwargs["options"] = {"num_ctx": num_ctx}
         if think is not None:
             kwargs["think"] = think
-        response = self._client.chat(**kwargs)
-        return self._normalize(response)
+        if on_delta is None:
+            return self._normalize(self._client.chat(**kwargs))
+        return self._consume_stream(self._client.chat(**kwargs, stream=True), on_delta)
+
+    @classmethod
+    def _consume_stream(cls, chunks, on_delta) -> ChatResponse:
+        """Accumulate streamed chunks; the final chunk (done=True) carries the stats."""
+        content: list[str] = []
+        thinking: list[str] = []
+        raw_calls: list = []
+        last = None
+        for chunk in chunks:
+            msg = chunk.message
+            if (t := getattr(msg, "thinking", None)):
+                thinking.append(t)
+                on_delta("thinking", t)
+            if (c := getattr(msg, "content", None)):
+                content.append(c)
+                on_delta("content", c)
+            raw_calls.extend(getattr(msg, "tool_calls", None) or [])
+            last = chunk
+        return ChatResponse(
+            content="".join(content),
+            thinking="".join(thinking),
+            tool_calls=cls._convert_calls(raw_calls),
+            prompt_tokens=getattr(last, "prompt_eval_count", None),
+            eval_tokens=getattr(last, "eval_count", None),
+            done_reason=getattr(last, "done_reason", None),
+        )
 
     @staticmethod
-    def _normalize(response) -> ChatResponse:
-        msg = response.message
+    def _convert_calls(raw_calls) -> list[ToolCall]:
         calls: list[ToolCall] = []
-        for tc in (getattr(msg, "tool_calls", None) or []):
+        for tc in raw_calls:
             args = tc.function.arguments or {}
             # Older Ollama versions return arguments as a raw JSON string.
             if isinstance(args, str):
@@ -108,6 +135,12 @@ class OllamaClient(LLMClient):
                 except Exception:
                     args = {}
             calls.append(ToolCall(name=tc.function.name, arguments=args))
+        return calls
+
+    @classmethod
+    def _normalize(cls, response) -> ChatResponse:
+        msg = response.message
+        calls = cls._convert_calls(getattr(msg, "tool_calls", None) or [])
         return ChatResponse(
             content=getattr(msg, "content", "") or "",
             thinking=getattr(msg, "thinking", "") or "",
