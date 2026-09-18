@@ -31,7 +31,7 @@ small, clearly scoped fix (e.g. a single known line in one file), a `read_file` 
 section is enough — full reconnaissance is proportional to scope.
 
 - **Reading a whole file is fine when it is easier** — for most files just `read_file` the whole
-  thing. Only for genuinely large files (many hundreds of lines) is it worth narrowing first: use
+  thing. Only for larger files (one or two hunderd lines) is it worth narrowing first: use
   `grep_files`/`grep_file` to locate the relevant lines (and `file_info` to check size if unsure),
   then `read_file` with `start_line`/`end_line` to pull in just that region and save context.
 - You **may** call several independent read tools in one turn — the harness runs them all and
