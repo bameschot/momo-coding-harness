@@ -114,7 +114,8 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
   font-size: 13px;
   z-index: 5;
 }
-.status-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.status-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.status-row .icon-btn + .brand { margin-left: 4px; }
 .status-row.second { margin-top: 4px; }
 .brand { font-weight: 700; display: flex; align-items: center; gap: 6px; font-size: 14px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); display: inline-block; }
@@ -134,8 +135,21 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
 .chip.button:hover { border-color: var(--focus); }
 .chip.warn { color: var(--warn); border-color: currentColor; }
 .chip.on { color: var(--warn); border-color: currentColor; }
-.icon-btn { background: none; border: 1px solid transparent; border-radius: 6px; cursor: pointer; padding: 2px 6px; font-size: 15px; }
-.icon-btn:hover { border-color: var(--border); background: var(--surface-2); }
+/* ── icons (SVG sprite in index.html) ───────────────────────────────────── */
+.icon {
+  width: 18px; height: 18px; flex: none; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
+}
+.icon.sm { width: 14px; height: 14px; display: inline-block; vertical-align: -2px; }
+/* Every icon-only button is the same square, so the top bar lines up. */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 30px; height: 30px; padding: 0; cursor: pointer; color: var(--muted);
+  background: none; border: 1px solid transparent; border-radius: 7px;
+}
+.icon-btn:hover { color: var(--text); border-color: var(--border); background: var(--surface-2); }
+.icon-btn[aria-expanded="true"] { color: var(--text); background: var(--surface-2); }
+.with-icon { display: inline-flex; align-items: center; gap: 6px; }
 .ctx { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 .ctx-label { color: var(--muted); font-family: var(--mono); }
 .meter { width: 90px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; border: 1px solid var(--border); }
@@ -295,10 +309,11 @@ details.think .think-body { white-space: pre-wrap; opacity: .8; border-left: 2px
 #composer.no-companion { padding-top: 10px; }
 .input-wrap { display: flex; align-items: flex-start; gap: 6px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); padding: 8px 12px 8px 6px; }
 .attach-btn {
-  flex: none; background: none; border: 1px solid transparent; border-radius: 8px; cursor: pointer;
-  font-size: 16px; line-height: 1; padding: 2px 6px; opacity: .75;
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 28px; height: 28px; padding: 0; cursor: pointer; color: var(--muted);
+  background: none; border: 1px solid transparent; border-radius: 7px;
 }
-.attach-btn:hover { opacity: 1; border-color: var(--border); background: var(--surface-2); }
+.attach-btn:hover { color: var(--text); border-color: var(--border); background: var(--surface-2); }
 
 /* attachment chips above the input */
 .attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
@@ -307,13 +322,13 @@ details.think .think-body { white-space: pre-wrap; opacity: .8; border-left: 2px
   border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2);
   padding: 3px 4px 3px 9px; font: 12px var(--mono);
 }
-.att .att-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 28ch; }
+.att .att-name { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 28ch; }
 .att .att-meta { color: var(--muted); white-space: nowrap; }
 .att.loading .att-meta { color: var(--warn); }
 .att.warn { border-color: var(--warn); } .att.warn .att-meta { color: var(--warn); }
 .att.error { border-color: var(--danger); color: var(--danger); }
 .att.error .att-meta { color: var(--danger); white-space: normal; }
-.att .att-x { background: none; border: none; cursor: pointer; color: var(--muted); padding: 0 4px; font-size: 13px; }
+.att .att-x { display: inline-flex; background: none; border: none; cursor: pointer; color: var(--muted); padding: 2px 3px; border-radius: 4px; }
 .att .att-x:hover { color: var(--danger); }
 .att-note { font-size: 12px; color: var(--warn); align-self: center; }
 
@@ -324,7 +339,7 @@ details.think .think-body { white-space: pre-wrap; opacity: .8; border-left: 2px
 }
 
 /* 📎 lines inside sent messages */
-.msg.user .att-line { display: inline-block; font: 12px var(--mono); background: color-mix(in srgb, var(--user) 12%, transparent); border-radius: 6px; padding: 1px 7px; margin: 2px 0; }
+.msg.user .att-line { display: inline-flex; align-items: center; gap: 5px; font: 12px var(--mono); background: color-mix(in srgb, var(--user) 12%, transparent); border-radius: 6px; padding: 1px 7px; margin: 2px 0; }
 .input-wrap:focus-within { border-color: var(--focus); }
 #input {
   display: block; width: 100%; border: none; background: none; outline: none; resize: none;
@@ -354,6 +369,7 @@ button:disabled { opacity: .5; cursor: default; }
 .suggest .d { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .pill {
+  display: inline-flex; align-items: center; gap: 6px;
   position: fixed; left: 50%; transform: translateX(-50%); bottom: 150px; z-index: 6;
   border: 1px solid var(--border); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow);
   padding: 4px 14px; cursor: pointer; font-size: 13px;
@@ -388,6 +404,7 @@ button:disabled { opacity: .5; cursor: default; }
 .msg.user > .msg-actions { position: absolute; right: 0; bottom: -22px; }
 .msg.user:has(> .user-actions) { margin-bottom: 26px; }
 .msg-actions button {
+  display: inline-flex; align-items: center; gap: 4px;
   font: 11px var(--mono); color: var(--muted); background: var(--surface); cursor: pointer;
   border: 1px solid var(--border); border-radius: 6px; padding: 1px 8px;
 }
@@ -403,10 +420,15 @@ body.is-busy .user-actions { display: none; }
   border: 1px solid var(--focus); border-radius: 8px; font-size: 12px; color: var(--focus);
   background: color-mix(in srgb, var(--focus) 8%, var(--surface));
 }
-.edit-banner span:first-child { flex: 1; }
+.edit-banner span:first-child { flex: 1; display: inline-flex; align-items: center; gap: 6px; }
 
 /* ── status bar additions ───────────────────────────────────────────────── */
-.model-btn { background: none; border: 1px solid transparent; border-radius: 6px; padding: 1px 6px; cursor: pointer; font: inherit; font-weight: 600; }
+.model-btn {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0;
+  background: none; border: 1px solid transparent; border-radius: 6px; padding: 2px 6px; cursor: pointer; font: inherit; font-weight: 600;
+}
+.model-btn #model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-btn .icon { color: var(--muted); }
 .model-btn:hover { border-color: var(--border); background: var(--surface-2); }
 .model-menu { left: 12px; right: auto; max-height: 60vh; overflow-y: auto; }
 .menu-item {
@@ -416,7 +438,7 @@ body.is-busy .user-actions { display: none; }
 .menu-item:hover:not(:disabled) { background: var(--surface-2); }
 .menu-item.current { color: var(--ok); }
 .menu-item:disabled { cursor: default; opacity: 1; }
-.menu-link { display: block; padding: 4px 0; color: var(--focus); text-decoration: none; }
+.menu-link { display: flex; align-items: center; gap: 6px; padding: 4px 0; color: var(--focus); text-decoration: none; }
 .menu-link:hover { text-decoration: underline; }
 .skills-list { max-height: 160px; overflow-y: auto; }
 .small { font-size: 12px; }
@@ -445,7 +467,9 @@ button.small { padding: 3px 10px; font-size: 12px; }
   background: none; border: none; border-radius: 6px; padding: 2px 6px;
 }
 .tree-row:hover { background: var(--surface-2); }
-.tree-icon { width: 1ch; color: var(--muted); }
+.tree-icon { display: inline-flex; color: var(--muted); }
+.tree-icon .icon { transition: transform .12s; }
+.tree-item.open > .tree-row .tree-icon .icon { transform: rotate(90deg); }
 .tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-item.dir > .tree-row .tree-name { font-weight: 600; }
 .tree-size { color: var(--muted); font-size: 11px; }

@@ -116,7 +116,7 @@ The browser and the terminal are two views of **the same session**, not separate
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ☰ 📁 ● momo  [ coding ▾ ]  exec 2/5  qwen3.5:9b ▾  ollama@localhost  ⚙ │  ← status bar
+│ [◷][▭] ● momo  [ coding ▾ ]  exec 2/5  qwen3.5:9b ▾  ollama@localhost [≡]│  ← status bar
 │ ~/projects/myapp                     CTX ▓▓▓▓▓▓░░░░ 58%   RUN: confirm   │
 ├──────────────────────────────────────────────────────────────────────────┤
 │                              ┌───────────────────────────────────────┐   │
@@ -134,7 +134,7 @@ The browser and the terminal are two views of **the same session**, not separate
 ├──────────────────────────────────────────────────────────────────────────┤
 │   /\   \  < mew~                                                         │  ← momo companion
 │ ┌──────────────────────────────────────────────────────────────────────┐ │
-│ ⏳ queued: also update the README                          ✎ ✕          │  ← queued while busy
+│ ◷ also update the README                                   ✎ ×          │  ← queued while busy
 │ │ Message momo…  (/ commands · @ files)                                │ │  ← input box
 │ └──────────────────────────────────────────────────────────────────────┘ │
 │ ⠋ thinking                                          [■ Stop] [Send ↵]    │
@@ -142,7 +142,7 @@ The browser and the terminal are two views of **the same session**, not separate
 ```
 
 - **Status bar**
-  - **☰** opens the [session drawer](#sessions) and **📁** opens the [workspace browser](#workspace-files).
+  - **Sessions** (clock icon) opens the [session drawer](#sessions) and **Workspace files** (folder icon) opens the [workspace browser](#workspace-files).
   - The **connection dot** is green while the page is connected to the harness and red while it reconnects. It reconnects on its own after a harness restart.
   - The **mode picker** switches between design, chat, plan, coding and momo, like `/design`, `/code` and so on, or Shift+Tab.
   - **Plan progress** (e.g. `exec 2/5`, `awaiting approval`) appears in plan mode. Clicking it, or the **Plan** button, opens the plan drawer.
@@ -150,7 +150,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
   - The **CTX meter** turns yellow at ≥ 75% and red at ≥ 90%, as in the TUI.
   - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on.
-  - **⚙** opens the view options (below).
+  - **View options** (sliders icon, far right) opens the view options (below).
 - **Conversation**
   - Replies **stream in** as they're generated, with a blinking cursor. Reasoning streams into an open *thinking…* block that folds away once the answer starts. When the reply is complete, it's re-rendered as markdown. Use `--no-stream` to turn streaming off.
   - Your messages are right-aligned bubbles. Replies are rendered as markdown: headings, lists, task lists, tables, code blocks, quotes and links. `[system]` lines and errors are monospace. Wide tables keep readable column widths and scroll sideways in their own box, with edge shadows showing there's more.
@@ -169,17 +169,19 @@ The browser and the terminal are two views of **the same session**, not separate
   - It grows with its content. Text starting with `/` is highlighted as a command.
   - Typing `/` opens **command autocomplete** with the usage and description of every slash command. Use ↑/↓ to pick one and Tab or Enter to insert it.
   - Typing `@` followed by part of a file name opens **path autocomplete**, a fuzzy search over the workspace. Picking a file inserts its path, e.g. `` `src/app/main.py` ``. Only the path is inserted: the model reads the file itself with its tools. To send the contents, attach the file instead.
-  - Messages sent **while the model is working** are queued instead of rejected. They appear as ⏳ chips above the input and are sent one per turn once the model is done. ✎ moves a queued message back into the input box and ✕ removes it. `/commands` still run immediately, and while the model is waiting for your answer, what you type is the answer.
+  - Messages sent **while the model is working** are queued instead of rejected. They appear as queued chips (clock icon) above the input and are sent one per turn once the model is done. The pencil moves a queued message back into the input box and × removes it. `/commands` still run immediately, and while the model is waiting for your answer, what you type is the answer.
   - The placeholder changes to `Answer momo…` when the model is waiting for your reply.
   - A spinner and a **■ Stop** button appear while the model is working.
-  - **📎** attaches files (see [Attaching files](#attaching-files)).
+  - The **paperclip** button attaches files (see [Attaching files](#attaching-files)).
 - **momo companion** walks along the top of the input box, with the same frames and mode-specific speech as in the TUI. It is hidden on narrow screens.
 
-The layout adapts to phone-width screens: the status bar collapses to mode, CTX and ⚙. It follows the system light or dark theme.
+The layout adapts to phone-width screens: the status bar collapses to mode, CTX and the view-options button. It follows the system light or dark theme.
+
+All buttons use one set of built-in line icons, drawn as inline SVG rather than emoji. They're the same size and stroke everywhere and follow the light or dark theme. The icon buttons in the top bar are, from left to right: **Sessions** (clock with arrow), **Workspace files** (folder), then on the right **Plan** (checklist, only while a plan exists) and **View options** (sliders). Hover over any icon button for its name.
 
 ### Attaching files
 
-Click **📎** next to the input box, drag files anywhere onto the page, or paste them (e.g. copied in Finder) into the input box. Each file becomes a chip above the input and is sent with your next message when you press Enter. You can send files without typing anything.
+Click the **paperclip** button next to the input box, drag files anywhere onto the page, or paste them (e.g. copied in Finder) into the input box. Each file becomes a chip above the input and is sent with your next message when you press Enter. You can send files without typing anything.
 
 - **Text-based files**, such as source code, JSON, CSV, XML, YAML, Markdown and logs, are included as text. UTF-8 is expected. UTF-16/32 files with a byte-order mark and legacy Windows-1252 text are converted too.
 - **PDFs** are converted to plain text on the machine running the harness, with a `[page N]` marker before each page. This needs the `pypdf` package (in `requirements.txt`). Scanned PDFs that contain only images have no text to extract and are rejected with a message.
@@ -191,18 +193,18 @@ The model receives the full content, wrapped in `<attachment name="…" chars="�
 
 ### Sessions
 
-**☰** opens the session drawer. It lists the 50 most recent saved sessions, each with its first message, mode, model, message count and age. The current one is highlighted.
+The **Sessions** button (clock icon, top left) opens the session drawer. It lists the 50 most recent saved sessions, each with its first message, mode, model, message count and age. The current one is highlighted.
 
 - Click a session to load it in both windows, like `/session <name>`.
-- **＋ New** saves the current session and starts an empty one, like the new `/new` command, which also works in the TUI. Model, host and mode stay the same.
+- **+ New** saves the current session and starts an empty one, like the new `/new` command, which also works in the TUI. Model, host and mode stay the same.
 - Neither is possible while the model is working.
 
 ### Workspace files
 
-**📁** opens a read-only browser of the workspace (the `--workdir`). Folders expand as you click them. Build and dependency folders such as `.git`, `.venv`, `node_modules` and `dist` are left out, and hidden files are shown only with the *hidden files* checkbox.
+The **Workspace files** button (folder icon, top left) opens a read-only browser of the workspace (the `--workdir`). Folders expand as you click them. Build and dependency folders such as `.git`, `.venv`, `node_modules` and `dist` are left out, and hidden files are shown only with the *hidden files* checkbox.
 
 Clicking a file opens a preview with line numbers and syntax highlighting. PDFs are shown as their extracted text. From the preview you can:
-- **📎 Attach** the file to your next message, exactly like uploading it
+- **Attach** the file to your next message, exactly like uploading it
 - **Insert path** into the input box
 - **Copy** the contents
 
@@ -214,11 +216,11 @@ Code blocks in replies, and files in the workspace preview, are colour-highlight
 
 ### Notifications
 
-Tick **Notify me** in the ⚙ menu to get a desktop notification when the model finishes a turn that took longer than 8 seconds, or asks you a question. Notifications only fire while the momo tab is in the background. Clicking one brings the tab back. The browser asks for permission the first time.
+Tick **Notify me** in the view options to get a desktop notification when the model finishes a turn that took longer than 8 seconds, or asks you a question. Notifications only fire while the momo tab is in the background. Clicking one brings the tab back. The browser asks for permission the first time.
 
 Even without notifications, the tab title shows **(•)** while there is unseen activity in a background tab.
 
-### View options (⚙)
+### View options
 
 | Option | TUI equivalent | Effect |
 |---|---|---|
@@ -231,7 +233,7 @@ Even without notifications, the tab title shows **(•)** while there is unseen 
 | Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
 | Notify me | — | Desktop notifications, see [Notifications](#notifications) |
-| ⤓ Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
+| Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
 
 Typing the TUI command in the browser (e.g. `/think-output off`) has the same effect as the menu.
 

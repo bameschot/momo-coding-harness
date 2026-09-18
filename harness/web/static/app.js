@@ -35,6 +35,17 @@ let unseen = false;         // new activity while the tab was hidden
 let busySince = 0;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+// An icon from the SVG sprite in index.html (same size and stroke everywhere).
+function icon(name, cls = "icon") {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", cls);
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.append(use);
+  return svg;
+}
+
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -132,7 +143,11 @@ function renderUser(text) {
   // "📎 name (N chars)" lines are attachment summaries — show them as chips.
   text.split("\n").forEach((line, i) => {
     if (i) bubble.append("\n");
-    bubble.append(line.startsWith("📎 ") ? el("span", "att-line", line) : line);
+    if (line.startsWith("📎 ")) {
+      const chip = el("span", "att-line");
+      chip.append(icon("paperclip", "icon sm"), line.slice(3));
+      bubble.append(chip);
+    } else bubble.append(line);
   });
   wrap.append(bubble);
   return wrap;
@@ -149,7 +164,7 @@ function renderChat(role, text, extra = "") {
       wrap.classList.add("plain");
       wrap.textContent = text;
     }
-    wrap.append(msgActions([["Copy", "Copy this reply as Markdown", async (btn) => {
+    wrap.append(msgActions([["copy", "Copy", "Copy this reply as Markdown", async (btn) => {
       try { await copyText(text); flash(btn, "Copied ✓"); } catch { flash(btn, "Copy failed"); }
     }]]));
     return wrap;
@@ -323,8 +338,9 @@ function markAnswered(card, answer) {
 // ── message actions ───────────────────────────────────────────────────────────
 function msgActions(items, cls = "") {
   const bar = el("div", `msg-actions ${cls}`.trim());
-  for (const [label, title, fn] of items) {
-    const b = el("button", "", label);
+  for (const [ic, label, title, fn] of items) {
+    const b = el("button");
+    b.append(icon(ic, "icon sm"), el("span", "", label));
     b.type = "button";
     b.title = title;
     b.onclick = () => fn(b);
@@ -333,11 +349,13 @@ function msgActions(items, cls = "") {
   return bar;
 }
 
+// Briefly swap a button's label (its last text span, or the whole button).
 function flash(btn, text) {
-  const orig = btn.dataset.label || btn.textContent;
-  btn.dataset.label = orig;
-  btn.textContent = text;
-  setTimeout(() => { btn.textContent = orig; }, 1400);
+  const target = btn.querySelector(":scope > span:last-child") || btn;
+  const orig = target.dataset.label || target.textContent;
+  target.dataset.label = orig;
+  target.textContent = text;
+  setTimeout(() => { target.textContent = orig; }, 1400);
 }
 
 // Retry / Edit sit on the last message you typed (not answers or /commands).
@@ -347,8 +365,8 @@ function refreshUserActions() {
   const last = users[users.length - 1];
   if (!last) return;
   last.append(msgActions([
-    ["↻ Retry", "Send this message again and replace the reply", () => post("api/retry").catch(showError)],
-    ["✎ Edit", "Edit this message and send it again", startEdit],
+    ["retry", "Retry", "Send this message again and replace the reply", () => post("api/retry").catch(showError)],
+    ["pencil", "Edit", "Edit this message and send it again", startEdit],
   ], "user-actions"));
 }
 
@@ -362,7 +380,7 @@ async function startEdit() {
   editing = { attachments: info.attachments || [] };
   input.value = info.typed;
   $("#edit-atts").textContent = editing.attachments.length
-    ? ` (keeps ${editing.attachments.map((n) => "📎 " + n).join(", ")})` : "";
+    ? ` (keeps ${editing.attachments.join(", ")})` : "";
   $("#edit-banner").hidden = false;
   autosize();
   input.focus();
@@ -759,10 +777,12 @@ function renderQueue() {
   box.replaceChildren(...queue.map((q, i) => {
     const chip = el("span", "att queued");
     const preview = (q.text.trim() || q.atts.map((a) => a.name).join(", ")).replace(/\s+/g, " ");
-    const name = el("span", "att-name", `⏳ ${preview}`);
+    const name = el("span", "att-name");
+    name.append(icon("clock", "icon sm"), preview);
     name.title = q.text;
     const meta = el("span", "att-meta", i === 0 ? "sends when momo is done" : `#${i + 1} in queue`);
-    const edit = el("button", "att-x", "✎");
+    const edit = el("button", "att-x");
+    edit.append(icon("pencil", "icon sm"));
     edit.type = "button";
     edit.title = "Edit (moves it back into the input box)";
     edit.onclick = () => {
@@ -771,7 +791,8 @@ function renderQueue() {
       for (const a of q.atts) attachments.push({ id: ++attSeq, status: "ready", name: a.name, text: a.text, chars: a.text.length });
       renderQueue(); renderChips(); autosize(); input.focus();
     };
-    const x = el("button", "att-x", "✕");
+    const x = el("button", "att-x");
+    x.append(icon("x", "icon sm"));
     x.type = "button";
     x.title = "Remove from queue";
     x.onclick = () => { queue.splice(i, 1); renderQueue(); };
@@ -818,8 +839,8 @@ function renderChips() {
   const box = $("#attachments");
   box.replaceChildren(...attachments.map((a) => {
     const chip = el("span", `att ${a.status}`);
-    const icon = a.kind === "pdf" || /\.pdf$/i.test(a.name) ? "📕" : "📄";
-    const name = el("span", "att-name", `${icon} ${a.name}`);
+    const name = el("span", "att-name");
+    name.append(icon("file", "icon sm"), a.name);
     name.title = a.name;
     let meta;
     if (a.status === "loading") meta = /\.pdf$/i.test(a.name) ? "converting PDF…" : "reading…";
@@ -833,7 +854,8 @@ function renderChips() {
         chip.title = `Large attachment: about ${Math.round((tokens / limit) * 100)}% of the context window`;
       }
     }
-    const x = el("button", "att-x", "✕");
+    const x = el("button", "att-x");
+    x.append(icon("x", "icon sm"));
     x.type = "button";
     x.title = `Remove ${a.name}`;
     x.setAttribute("aria-label", `Remove ${a.name}`);
@@ -1072,7 +1094,7 @@ for (const b of document.querySelectorAll("#plan-drawer [data-cmd]")) {
 }
 
 // ── model picker ──────────────────────────────────────────────────────────────
-$("#model").onclick = async (e) => {
+$("#model-btn").onclick = async (e) => {
   e.stopPropagation();
   const menu = $("#model-menu");
   if (!menu.hidden) return closeMenu();
@@ -1156,7 +1178,9 @@ async function loadDir(path, container) {
     const btn = el("button", "tree-row");
     btn.type = "button";
     btn.title = rel;
-    btn.append(el("span", "tree-icon", e.type === "dir" ? "▸" : "·"), el("span", "tree-name", e.name),
+    const ti = el("span", "tree-icon");
+    ti.append(icon(e.type === "dir" ? "chevron-right" : "file", "icon sm"));
+    btn.append(ti, el("span", "tree-name", e.name),
                el("span", "tree-size", e.type === "file" ? fmtSize(e.size) : ""));
     row.append(btn);
     if (e.type === "dir") {
@@ -1165,7 +1189,7 @@ async function loadDir(path, container) {
       row.append(kids);
       btn.onclick = () => {
         kids.hidden = !kids.hidden;
-        btn.firstChild.textContent = kids.hidden ? "▸" : "▾";
+        row.classList.toggle("open", !kids.hidden);
         if (!kids.hidden && !kids.childElementCount) loadDir(rel, kids);
       };
     } else {
