@@ -53,7 +53,7 @@ _COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
 _KEY_SHIFT_ENTER  = 601  # custom curses keycode bound to Shift+Enter escape sequences
 _KEY_CTRL_LEFT    = 602  # Ctrl+Left  — word jump left
 _KEY_CTRL_RIGHT   = 603  # Ctrl+Right — word jump right
-_MODE_CYCLE = ["design", "chat", "writing", "coding", "momo"]
+_MODE_CYCLE = ["design", "chat", "plan", "coding", "momo"]
 
 
 def _init_colors():
@@ -189,40 +189,6 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< feedback loop?", "< mew~",
         "< purrr~",
     ],
-    ("writing", False): [
-        "< mew~", "< write more!", "< plot twist!",
-        "< edit edit!", "< word count?",
-        "< show don't tell", "< passive voice?",
-        "< new paragraph!", "< mew mew",
-        "< semicolon!", "< em dash!",
-        "< active voice!", "< strong verb!",
-        "< cut the fluff!", "< shorter?",
-        "< chapter break?", "< purrr~",
-        "< hook them!", "< reader first!",
-        "< read aloud?", "< oxford comma!",
-        "< dialogue tags?", "< pacing!",
-        "< tension!", "< show not tell!",
-        "< foreshadow?", "< metaphor!",
-        "< trim it down!", "< concise!",
-        "< mew mew~",
-    ],
-    ("writing", True): [
-        "< mew...", "< searching...", "< spell check!",
-        "< thesaurus!", "< mew mew",
-        "< rephrasing...", "< synonyms...",
-        "< proofreading!", "< flow check...",
-        "< word choice...", "< sentence flow?",
-        "< clarity...", "< restructure?",
-        "< transition?", "< voice check...",
-        "< tone shift?", "< mew~",
-        "< reading level?", "< pacing...",
-        "< paragraph?", "< awkward phrase?",
-        "< cliche alert!", "< simpler word?",
-        "< dangling mod?", "< tense check...",
-        "< purrr...", "< conciseness?",
-        "< cadence...", "< mew mew mew",
-        "< context?",
-    ],
     ("chat",    False): [
         "< tell me more!", "< interesting!", "< got it!",
         "< ooh!", "< makes sense!", "< mew~",
@@ -246,6 +212,30 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< hmm hmm...", "< checking...", "< pattern match!",
         "< got a clue!", "< narrowing...", "< almost there",
         "< verifying...", "< cross ref...", "< purrr...",
+    ],
+    ("plan",    False): [
+        "< what's the plan?", "< mew~", "< step by step!",
+        "< checklist!", "< purrr", "< plan approved?",
+        "< one step at a time", "< ready when you are", "< looks solid!",
+        "< tick tick!", "< mew mew~", "< measure twice",
+        "< cut once!", "< y to run it!", "< edit the plan?",
+        "< any feedback?", "< read it first!", "< good goal!",
+        "< small steps!", "< tests last?", "< /plan run?",
+        "< plan saved!", "< approve pls?", "< nice & tidy!",
+        "< all boxes [x]!", "< plan complete!", "< what's next?",
+        "< bug or feature?", "< tell me more!", "< purrr~",
+    ],
+    ("plan",    True): [
+        "< investigating...", "< sniff sniff", "< tracing...",
+        "< step done?", "< checking box!", "< following plan",
+        "< hmm...", "< next step!", "< reproducing...",
+        "< mapping it...", "< verifying...", "< purrr...",
+        "< root cause?", "< found the bug!", "< reading code...",
+        "< grepping...", "< writing steps...", "< [~] in progress",
+        "< ticking [x]!", "< which step now?", "< stay on track!",
+        "< no step skip!", "< complete_step!", "< revise plan?",
+        "< running tests...", "< almost done!", "< hmm hmm...",
+        "< one more step", "< mew?", "< *checks list*",
     ],
     ("momo",   False): [
         "< mew~", "< purrr~", "< hi there!",
@@ -992,7 +982,7 @@ class TUI:
                     self._ctx_color = ctx_map.get(ev.ctx_color, _C_STATUS)
                     tools_str = "" if ev.tools_enabled else " | TOOLS: off"
                     run_str = " | RUN: confirm" if ev.run_confirm else ""
-                    self._st_mode  = ev.mode
+                    self._st_mode  = f"{ev.mode} [{ev.plan_progress}]" if ev.plan_progress else ev.mode
                     self._st_model = ev.model
                     self._st_host  = ev.host
                     self._st_provider = ev.provider or self._st_provider
@@ -1341,6 +1331,12 @@ class TUI:
                     return
                 if result.replay_session:
                     self._replay_session()
+                    return
+                if result.run_plan:
+                    self._busy = True
+                    self._redraw()
+                    t = threading.Thread(target=self.harness.execute_plan_threaded, daemon=True)
+                    t.start()
                     return
                 if result.run_compact:
                     self._add_chat("system", "Compacting context...")

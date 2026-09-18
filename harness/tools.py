@@ -165,16 +165,65 @@ SHARED_TOOLS = [
 DESIGN_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS
 ALL_TOOLS    = READ_ONLY_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
 
-# Derived subset for writer mode
 _by_name = {t["function"]["name"]: t for t in CODING_ONLY_TOOLS}
-
-WRITER_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS + [
-    _by_name["append_to_file"],
-    _by_name["edit_file"],
-]
 
 _shared_by_name = {t["function"]["name"]: t for t in SHARED_TOOLS}
 CHAT_TOOLS = READ_ONLY_TOOLS + [_shared_by_name["ask_user"]]
+
+# Plan-mode tools.  Like ask_user these are intercepted by the harness (they
+# change plan state rather than touching the filesystem), so they have no
+# executor in _EXECUTORS.
+_PLAN_STEP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title":   {"type": "string", "description": "Short imperative summary, e.g. 'Add retry to fetch_page()'"},
+        "details": {"type": "string", "description": "Exactly what to change: file, function/section, the change itself, and how to verify it"},
+        "files":   {"type": "array", "items": {"type": "string"}, "description": "Files this step touches (workdir-relative)"},
+    },
+    "required": ["title", "details"],
+}
+
+PLAN_TOOLS = [
+    _fn("create_plan",
+        "Submit the implementation plan once investigation is complete. The harness writes it "
+        "to a Markdown file, shows it to the user and asks for approval; on approval it executes "
+        "the steps one at a time with the full coding tool set. Each step must be small, ordered, "
+        "and independently verifiable, and name the file and function/section it changes. The last "
+        "step should run the project's tests (or the narrowest real check) to verify the whole change. "
+        "If the user asks for changes, revise and call create_plan again with the complete new plan.",
+        {"title": {"type": "string", "description": "Short name for the feature or fix"},
+         "goal":  {"type": "string", "description": "What the change achieves and why, including key findings from the investigation"},
+         "steps": {"type": "array", "items": _PLAN_STEP_SCHEMA, "description": "Ordered implementation steps"}},
+        ["title", "goal", "steps"]),
+
+    _fn("complete_step",
+        "Mark the CURRENT plan step as done once its change is made and verified. This ends the "
+        "step immediately: any other tool calls after it in the same turn are not run. The harness "
+        "then gives you the next step. Do not start the next step's work before calling this.",
+        {"summary": {"type": "string", "description": "One or two sentences: what changed and how it was verified"}},
+        ["summary"]),
+
+    _fn("revise_plan",
+        "Rewrite the rest of the approved plan when a discovery during execution shows it is wrong "
+        "or incomplete. 'steps' REPLACES the whole remaining plan: the current step plus EVERY later "
+        "step, including the ones that do not change — any step you leave out is dropped. Finished "
+        "steps are kept automatically. Explain the change in 'reason'.",
+        {"reason": {"type": "string", "description": "What was discovered that forces the change"},
+         "steps":  {"type": "array", "items": _PLAN_STEP_SCHEMA,
+                    "description": "The complete new list of remaining steps (current step first), in order"}},
+        ["reason", "steps"]),
+]
+_plan_by_name = {t["function"]["name"]: t for t in PLAN_TOOLS}
+
+# Investigation may run commands (reproduce a bug, check the test baseline) but
+# must not edit files until the plan is approved.
+PLAN_INVESTIGATE_TOOLS = READ_ONLY_TOOLS + [
+    _shared_by_name["ask_user"],
+    _by_name["run_command"],
+    _plan_by_name["create_plan"],
+]
+# Execution gets exactly the coding tool set, plus the step-tracking tools.
+PLAN_EXECUTE_TOOLS = ALL_TOOLS + [_plan_by_name["complete_step"], _plan_by_name["revise_plan"]]
 
 
 # ── path safety ───────────────────────────────────────────────────────────────
@@ -620,7 +669,7 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
 # clear error messages before Python's TypeError exposes internal function names.
 _REQUIRED_ARGS: dict[str, list[str]] = {}
 _KNOWN_ARGS: dict[str, set[str]] = {}
-for _tl in (READ_ONLY_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS, WRITER_TOOLS):
+for _tl in (READ_ONLY_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS):
     for _t in _tl:
         _tname = _t["function"]["name"]
         _props = _t["function"]["parameters"].get("properties", {})
@@ -729,6 +778,20 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "delete_file":    {"path": "old-file.py"},
     "run_command":    {"command": "python -m pytest"},
     "ask_user":       {"question": "Should I overwrite the existing file?"},
+    "create_plan":    {"title": "Fix off-by-one in paginate()",
+                       "goal": "Last page is dropped because paginate() uses < instead of <=.",
+                       "steps": [
+                           {"title": "Fix loop bound in paginate()",
+                            "details": "In src/pager.py paginate(), change `while page < total` to `while page <= total`.",
+                            "files": ["src/pager.py"]},
+                           {"title": "Add regression test and run the suite",
+                            "details": "Add test_last_page_included to tests/test_pager.py, then run python -m pytest.",
+                            "files": ["tests/test_pager.py"]}]},
+    "complete_step":  {"summary": "Changed the loop bound in paginate(); python -m pytest tests/test_pager.py passes."},
+    "revise_plan":    {"reason": "paginate() is also duplicated in api/pager.py",
+                       "steps": [{"title": "Fix loop bound in both paginate() copies",
+                                  "details": "Apply the <= fix in src/pager.py and api/pager.py.",
+                                  "files": ["src/pager.py", "api/pager.py"]}]},
 }
 
 

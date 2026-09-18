@@ -13,7 +13,10 @@ from . import session as session_mod
 from .diff import build_diff_body
 from .llm import make_client
 from .logger import Logger
-from .tools import DESIGN_TOOLS, WRITER_TOOLS, ALL_TOOLS, CHAT_TOOLS, dispatch, render_tool_reference
+from .plan import Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file, delete_plan_file
+from .tools import (DESIGN_TOOLS, ALL_TOOLS, CHAT_TOOLS,
+                    PLAN_INVESTIGATE_TOOLS, PLAN_EXECUTE_TOOLS,
+                    dispatch, render_tool_reference)
 
 # Tools that mutate a file on disk — the harness snapshots the target before and
 # after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
@@ -407,6 +410,7 @@ class StatusEvent:
     run_confirm: bool = False
     host: str = ""
     provider: str = ""
+    plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
 
 @dataclass
 class ErrorEvent:
@@ -463,23 +467,43 @@ def _coding_prompt(workdir: str) -> str:
         f"Working directory: {workdir}"
     )
 
-def _writing_prompt(workdir: str = "") -> str:
-    return _load_role("writer") or (
-        "You are a writing assistant. Help the user write, edit, and improve documents. "
-        "Read existing documents before editing them. "
-        "Prefer targeted replacements (edit_file) over full rewrites. "
-        "Match the register and tone of the existing text unless instructed otherwise. "
-        "Ask one focused question when intent is ambiguous. "
-        "Save documents with write_file or extend them with append_to_file — "
-        "do not paste long content in chat."
-    )
-
 def _chat_prompt() -> str:
     return _load_role("chat") or (
         "You are a knowledgeable assistant. Read code and documents when the user "
         "points at them, then answer questions and actively ask follow-up questions "
         "to deepen understanding. Never write or modify files."
     )
+
+def _planner_prompt(workdir: str) -> str:
+    raw = _load_role("planner")
+    if raw:
+        return raw.replace("{workdir}", workdir)
+    return (
+        "You are an expert software engineer in plan mode. Investigate the user's "
+        "feature request or bug with the read tools and run_command, ask the user "
+        "about genuine uncertainties with ask_user, then call create_plan with a "
+        "specific, ordered, verifiable implementation plan. Do not edit files. "
+        f"Working directory: {workdir}"
+    )
+
+# Appended to the coder prompt while an approved plan is being executed.  The
+# live plan state is rendered after it on every step, so the model always knows
+# which step it is on even after context compaction.
+_PLAN_EXECUTION_RULES = """## Executing an approved plan
+
+You are executing a plan the user approved. The harness drives it one step at a
+time: each step arrives as a user message "Plan step i/N". The step marked ▶ below
+is the current one.
+
+- Work only on the current step. Do not start later steps — the harness gives you each one in
+  turn — and do not redo finished ones.
+- Apply the Workflow above to the step: read the files it touches, make the change, verify it.
+- When the step is complete and verified, call complete_step with a short summary. That ends the
+  step; do not put other tool calls after it.
+- If you need the user's input, use ask_user. A plain-text reply without a tool call also ends the step.
+- If you discover the remaining plan is wrong or incomplete, call revise_plan with the complete
+  corrected list of remaining steps (every step you omit is dropped). Never deviate silently.
+- If the step turns out to be done already, verify that and call complete_step."""
 
 def _momo_prompt() -> str:
     return _load_role("momo") or (
@@ -492,17 +516,17 @@ def _momo_prompt() -> str:
 _ROLE_LOADERS = {
     "design":  lambda wd: _design_prompt(),
     "coding":  lambda wd: _coding_prompt(wd),
-    "writing": lambda wd: _writing_prompt(wd),
     "chat":    lambda wd: _chat_prompt(),
     "momo":    lambda wd: _momo_prompt(),
+    "plan":    lambda wd: _planner_prompt(wd),
 }
 
 _MODE_TOOLS = {
     "design":  DESIGN_TOOLS,
-    "writing": WRITER_TOOLS,
     "coding":  ALL_TOOLS,
     "chat":    CHAT_TOOLS,
     "momo":    ALL_TOOLS,
+    "plan":    PLAN_INVESTIGATE_TOOLS,
 }
 
 
@@ -564,6 +588,10 @@ class Harness:
         self.input_history: list[str] = []
         self.model_max_ctx: int | None = None  # model's real reported context window; used as num_ctx
         self.context_pct: int | None = None  # user-set % of model max; None = use default 50%
+        # Plan mode state: phase is "investigating" → "awaiting_approval" (plan kept
+        # for later) → "executing" (approved; paused if not currently running).
+        self.plan: Plan | None = None
+        self.plan_phase: str = "investigating"
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
         ]
@@ -670,15 +698,37 @@ class Harness:
 
     # ── mode switching ────────────────────────────────────────────────────────
 
+    def _plan_investigating(self) -> bool:
+        return self.mode == "plan" and self.plan_phase != "executing"
+
+    def _plan_executing(self) -> bool:
+        return self.mode == "plan" and self.plan_phase == "executing" and self.plan is not None
+
+    def _current_tools(self) -> list[dict]:
+        """Tool set for the current mode (and, in plan mode, the current phase)."""
+        if self._plan_executing():
+            return PLAN_EXECUTE_TOOLS
+        return _MODE_TOOLS.get(self.mode, ALL_TOOLS)
+
     def _build_system_prompt(self) -> str:
-        loader = _ROLE_LOADERS.get(self.mode, _ROLE_LOADERS["coding"])
-        base = loader(str(self.workdir))
+        if self._plan_executing():
+            # Execution runs with exactly the coding agent's prompt plus the plan.
+            base = (_coding_prompt(str(self.workdir)) + "\n\n---\n\n" + _PLAN_EXECUTION_RULES
+                    + "\n\n### Current plan state\n\n" + self.plan.render_for_prompt())
+        else:
+            loader = _ROLE_LOADERS.get(self.mode, _ROLE_LOADERS["coding"])
+            base = loader(str(self.workdir))
+            if self.mode == "plan" and self.plan is not None:
+                base += ("\n\n---\n\n## Current draft plan\n\nYou already submitted this plan; "
+                         "it was not approved yet. Revise it according to the user's feedback and "
+                         "call create_plan again with the complete plan.\n\n"
+                         + self.plan.render_for_prompt())
         if str(self.workdir) not in base:
             base += f"\n\nWorking directory: {self.workdir}"
         # Append the tool reference generated from the schemas for exactly this
         # mode's tool set, so the reference is always in sync with the real tools
         # (the role .md files no longer carry a hand-copied version).
-        base += "\n\n---\n\n" + render_tool_reference(_MODE_TOOLS.get(self.mode, ALL_TOOLS))
+        base += "\n\n---\n\n" + render_tool_reference(self._current_tools())
         parts = []
         for name in self.active_skills:
             p = _SKILLS_DIR / f"{name}.md"
@@ -806,11 +856,46 @@ class Harness:
     def send(self, text: str):
         """Called from the harness worker thread."""
         self._cancel.clear()
+        try:
+            if self._plan_executing():
+                # A paused plan: the user's message is extra context for the step
+                # being resumed, and execution continues where it stopped.
+                self._append_user(text)
+                self._execute_plan()
+                return
+            self.messages.append({"role": "user", "content": text})
+            tools = [] if not self.tools_enabled else self._current_tools()
+            outcome = self._run_loop(tools, 40 if self.mode == "design" else 100)
+            if outcome == "plan_approved":
+                self._execute_plan()
+        finally:
+            self._emit_status()
+            self._autosave()
+            self.event_queue.put(DoneEvent())
+
+    def _append_user(self, text: str):
+        """Append a user turn, keeping the history well-formed: bridge a tool→user
+        gap with an empty assistant turn (Qwen3's template requires it) and merge
+        into a trailing user turn rather than creating consecutive user messages."""
+        last = self.messages[-1]["role"] if self.messages else ""
+        if last == "user":
+            self.messages[-1]["content"] = f"{self.messages[-1].get('content') or ''}\n\n{text}".strip()
+            return
+        if last == "tool":
+            self.messages.append({"role": "assistant", "content": None})
         self.messages.append({"role": "user", "content": text})
 
-        tools = [] if not self.tools_enabled else _MODE_TOOLS.get(self.mode, ALL_TOOLS)
-        _MAX_ITERATIONS = 40 if self.mode == "design" else 100
+    def _run_loop(self, tools: list[dict], max_iterations: int) -> str:
+        """Run the model/tool loop on the current history until the model gives a
+        text-only reply.  Returns the outcome: "done", "empty" (no usable reply),
+        "cancelled", "error", "limit" (iteration cap), or "plan_approved" (the
+        user approved a create_plan).  The caller emits DoneEvent and autosaves."""
+        _MAX_ITERATIONS = max_iterations
         _NUDGE_AFTER = 10  # consecutive tool-only turns before injecting a respond prompt
+        investigating = self._plan_investigating()
+        executing = self._plan_executing()
+        plan_approved = False
+        self._step_summary = None  # set by complete_step; ends the loop after this batch
 
         iteration = 0
         tool_only_turns = 0
@@ -822,14 +907,10 @@ class Harness:
         while True:
             if self._cancel.is_set():
                 self.event_queue.put(ChatEvent("system", "Interrupted."))
-                self._autosave()
-                self.event_queue.put(DoneEvent())
-                return
+                return "cancelled"
             if iteration >= _MAX_ITERATIONS:
                 self.event_queue.put(ErrorEvent(f"Tool call loop exceeded {_MAX_ITERATIONS} iterations — stopping"))
-                self._autosave()
-                self.event_queue.put(DoneEvent())
-                return
+                return "limit"
             iteration += 1
             # auto-compact if needed
             self._token_estimate = self._estimate()
@@ -861,11 +942,9 @@ class Harness:
             except Exception as e:
                 if self._cancel.is_set():
                     self.event_queue.put(ChatEvent("system", "Interrupted."))
-                else:
-                    self.event_queue.put(ErrorEvent(f"{self.client.provider_name} error: {e}"))
-                self._autosave()
-                self.event_queue.put(DoneEvent())
-                return
+                    return "cancelled"
+                self.event_queue.put(ErrorEvent(f"{self.client.provider_name} error: {e}"))
+                return "error"
 
             # response is a normalized ChatResponse — the adapter has already mapped
             # its provider's wire format onto this shape.
@@ -947,6 +1026,11 @@ class Harness:
                                     if self.mode == "design" else
                                     "Your previous response was cut off. "
                                     "Do NOT output any reasoning or thinking. "
+                                    "Call create_plan now if your investigation is complete, "
+                                    "or call a tool to continue investigating, or ask_user if you need information."
+                                    if investigating else
+                                    "Your previous response was cut off. "
+                                    "Do NOT output any reasoning or thinking. "
                                     "Call a tool directly or write a brief response."
                                 )
                             elif raw_thinking:
@@ -961,6 +1045,10 @@ class Harness:
                                     "Or call ask_user if you need more information."
                                     if self.mode == "design" else
                                     "You produced reasoning but no response or tool call. "
+                                    "Based on your analysis, call create_plan now if you are ready, "
+                                    "call a tool to keep investigating, or call ask_user if you need information."
+                                    if investigating else
+                                    "You produced reasoning but no response or tool call. "
                                     "Based on your analysis, call a tool to continue or write your conclusion."
                                 )
                             else:
@@ -968,6 +1056,9 @@ class Harness:
                                     "Please respond. If you are ready to write the design, "
                                     "call write_file now with both 'path' (the file path to write) and 'content' (the full document)."
                                     if self.mode == "design" else
+                                    "Please respond. If your investigation is complete, call create_plan now; "
+                                    "otherwise call a tool to continue."
+                                    if investigating else
                                     "Please respond with your current analysis or next step."
                                 )
                             # Bridge a tool→user gap: Qwen3 expects an assistant turn
@@ -987,12 +1078,11 @@ class Harness:
                             self.messages.pop()
                         self.event_queue.put(ChatEvent("system",
                             "No response. Please rephrase or add more detail and try again."))
-                    self._autosave()
-                    self.event_queue.put(DoneEvent())
-                    return
+                        return "empty"
+                    return "done"
                 # Design mode: model announced it would write but produced no tool call.
                 # Inject one targeted nudge and continue the loop so it can comply.
-                if (self.mode in ("design", "writing")
+                if (self.mode == "design"
                         and _has_write_intent(content)
                         and not _write_nudged):
                     _write_nudged = True
@@ -1027,6 +1117,14 @@ class Harness:
             })
 
             for name, args in _calls:
+                # complete_step ends the step: calls after it in the same batch are not
+                # run, but each still gets a result so the call/result pairing holds.
+                if self._step_summary is not None:
+                    self.event_queue.put(ToolResultEvent(name, "not run — step already completed"))
+                    self.messages.append({"role": "tool", "name": name, "content":
+                        "Not run: complete_step was called earlier in this turn, which ended the step."})
+                    continue
+
                 # Rescue a file write that arrived with content but no path (some
                 # models drop the trailing 'path' after a large 'content' value):
                 # infer a filename instead of failing the required-argument check.
@@ -1058,6 +1156,18 @@ class Harness:
                     self.event_queue.put(AskUserEvent(question))
                     answer = self._user_input_queue.get()
                     result = f"User answered: {answer}"
+                elif name == "create_plan":
+                    result = self._handle_create_plan(args)
+                    if self.plan_phase == "executing":
+                        plan_approved = True
+                elif name == "revise_plan":
+                    result = self._handle_revise_plan(args)
+                elif name == "complete_step":
+                    if executing:
+                        self._step_summary = str(args.get("summary") or "").strip()
+                        result = "Step marked complete."
+                    else:
+                        result = "ERROR: complete_step is only available while executing an approved plan."
                 else:
                     # run_command confirmation: when enabled, block on a y/N prompt
                     # (reusing the ask_user input plumbing) before executing.
@@ -1100,6 +1210,15 @@ class Harness:
                 elif last_tool != "write_file":
                     last_tool = name
 
+            # The user approved the plan: stop investigating and let the caller
+            # drive execution.  Remaining calls in the batch have already run.
+            if plan_approved:
+                return "plan_approved"
+            if self._step_summary is not None:
+                if self._step_summary:
+                    self.event_queue.put(ChatEvent("assistant", self._step_summary))
+                return "done"
+
             # Inject as role "user" — Ollama's tool-use turn format expects
             # assistant → tool(s) → user; a mid-conversation system message is
             # not supported and would break the alternating turn structure.
@@ -1113,15 +1232,215 @@ class Harness:
                     "Otherwise write a text response summarising what you have found so far."
                     if self.mode == "design" else
                     "You have been calling tools for several turns without a text response. "
+                    "If your investigation is complete, call create_plan now. "
+                    "If a decision needs the user, call ask_user. "
+                    "Otherwise keep investigating, with one line of text alongside your next tool call."
+                    if investigating else
+                    "You have been calling tools for several turns without a text response. "
+                    "Write one line on your progress with your next tool call. Once the current "
+                    "plan step is complete and verified, call complete_step with a short summary."
+                    if executing else
+                    "You have been calling tools for several turns without a text response. "
                     "Stop and summarise what you have found or done so far, "
                     "or describe your next step if you are not finished."
                 )
                 self.messages.append({"role": "user", "content": nudge})
                 tool_only_turns = 0
 
+        return "done"
+
+    # ── plan mode ─────────────────────────────────────────────────────────────
+
+    def _refresh_system_prompt(self):
+        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
+
+    def _sync_plan_file(self):
+        """Mirror the in-memory plan to the plan file; report (not raise) on failure."""
+        if self.plan is not None:
+            err = write_plan_file(self.plan, self.workdir)
+            if err:
+                self.event_queue.put(ErrorEvent(err))
+
+    @staticmethod
+    def _parse_steps(raw) -> list[Step]:
+        """Build steps from a tool's 'steps' argument.  Tolerates a JSON-encoded
+        string and bare strings (title only), which small models sometimes send."""
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = [line for line in raw.splitlines() if line.strip()]
+        steps = []
+        for item in raw if isinstance(raw, list) else []:
+            if isinstance(item, dict):
+                steps.append(Step.from_dict({k: v for k, v in item.items() if k != "status"}))
+            elif isinstance(item, str) and item.strip():
+                steps.append(Step(title=item.strip()))
+        return steps
+
+    def approve_plan(self) -> str:
+        """Approve the current plan for execution, re-reading the plan file first so
+        the user's hand edits are honoured.  Returns '' on success or an error."""
+        if self.plan is None:
+            return "No plan to run. Switch to /plan and describe a feature or bug first."
+        edited = read_plan_file(self.workdir)
+        if edited is not None:
+            self.plan = edited
+        if not self.plan.steps:
+            return "The plan has no steps."
+        self.plan_phase = "executing"
+        self._sync_plan_file()
+        self._refresh_system_prompt()
+        return ""
+
+    def cancel_plan(self) -> str:
+        if self.plan is None:
+            return "No active plan."
+        title = self.plan.title
+        self.plan = None
+        self.plan_phase = "investigating"
+        delete_plan_file(self.workdir)
+        self._refresh_system_prompt()
         self._emit_status()
-        self._autosave()
-        self.event_queue.put(DoneEvent())
+        return f"Plan discarded: {title} ({PLAN_FILENAME} removed)"
+
+    def _handle_create_plan(self, args: dict) -> str:
+        steps = self._parse_steps(args.get("steps"))
+        if not steps:
+            return ("ERROR: create_plan needs a non-empty 'steps' list of "
+                    "{title, details, files} objects. Call it again with the steps.")
+        self.plan = Plan(title=str(args.get("title") or "Implementation plan").strip(),
+                         goal=str(args.get("goal") or "").strip(), steps=steps)
+        self._sync_plan_file()
+        self.event_queue.put(ChatEvent("assistant", self.plan.to_markdown()))
+        self.event_queue.put(AskUserEvent(
+            f"Execute this plan? y = run it · n = keep it for later (/plan run) · "
+            f"anything else = feedback to revise it. You can edit {PLAN_FILENAME} before answering."))
+        answer = self._user_input_queue.get().strip()
+        low = answer.lower().rstrip(".!")
+        if low in ("y", "yes", "ok", "go", "run", "approve", "approved"):
+            err = self.approve_plan()
+            if err:
+                return f"ERROR: {err}"
+            n = len(self.plan.steps)
+            return (f"User approved the plan ({n} steps). The harness will now drive "
+                    f"execution one step at a time.")
+        if low in ("", "n", "no", "later", "not now"):
+            self.plan_phase = "awaiting_approval"
+            self._refresh_system_prompt()
+            self._emit_status()
+            return (f"User chose to keep the plan for later (saved to {PLAN_FILENAME}). "
+                    "Do not call any more tools; reply with one short sentence.")
+        self.plan_phase = "investigating"
+        self._refresh_system_prompt()
+        return (f"User requested changes to the plan: {answer}\n"
+                "Investigate further if needed, then call create_plan again with the complete revised plan.")
+
+    def _handle_revise_plan(self, args: dict) -> str:
+        if not self._plan_executing():
+            return "ERROR: revise_plan is only available while executing an approved plan."
+        steps = self._parse_steps(args.get("steps"))
+        if not steps:
+            return "ERROR: revise_plan needs a non-empty 'steps' list of the remaining steps."
+        new_titles = {st.title.strip().lower() for st in steps}
+        dropped = [st.title for st in self.plan.steps
+                   if not st.finished and st.title.strip().lower() not in new_titles]
+        self.plan.replace_remaining(steps)
+        steps[0].status = "in_progress"
+        self._sync_plan_file()
+        self._refresh_system_prompt()
+        self._emit_status()
+        reason = str(args.get("reason") or "").strip()
+        start = len(self.plan.steps) - len(steps) + 1
+        listing = "\n".join(f"  {start + i}. {st.title}" for i, st in enumerate(steps))
+        dropped_txt = ("\nDropped steps:\n" + "\n".join(f"  - {t}" for t in dropped)) if dropped else ""
+        self.event_queue.put(ChatEvent("system",
+            f"Plan revised{': ' + reason if reason else ''}\nRemaining steps:\n{listing}{dropped_txt}"))
+        warn = ("\nThese steps were dropped because they are not in your list — if that was not "
+                "intended (or they are not actually done), call revise_plan again including them:"
+                + dropped_txt) if dropped else ""
+        return (f"Plan revised. Remaining steps:\n{listing}{warn}\n"
+                f"Continue with step {start} only: {steps[0].title}")
+
+    def _execute_plan(self):
+        """Drive an approved plan one step at a time.  Each step runs the same tool
+        loop as coding mode; a text-only reply completes the step.  Any other loop
+        outcome (interrupt, error, iteration cap) pauses execution so it can be
+        resumed with /plan resume.  The plan file is deleted when all steps are done."""
+        plan = self.plan
+        if plan is None:
+            self.event_queue.put(ChatEvent("system", "No plan to execute."))
+            return
+        if self.mode != "plan":
+            self.mode = "plan"
+        self.plan_phase = "executing"
+        while (idx := plan.current_index()) is not None:
+            step = plan.steps[idx]
+            step.status = "in_progress"
+            self._sync_plan_file()
+            self._refresh_system_prompt()
+            self._emit_status()
+            n = len(plan.steps)
+            self.event_queue.put(ChatEvent("system", f"▶ Plan step {idx + 1}/{n}: {step.title}"))
+            body = [f"Plan step {idx + 1}/{n}: {step.title}"]
+            if step.details:
+                body.append(step.details)
+            if step.files:
+                body.append(f"Files: {', '.join(step.files)}")
+            body.append("Implement only this step and verify it, then call complete_step with a "
+                        "short summary of what you changed and how you verified it.")
+            self._append_user("\n\n".join(body))
+
+            tools = self._current_tools() if self.tools_enabled else []
+            outcome = self._run_loop(tools, 100)
+            if outcome != "done":
+                self._sync_plan_file()
+                self.event_queue.put(ChatEvent("system",
+                    f"Plan paused at step {plan.progress()} — type /plan resume (or any "
+                    f"message) to continue, /plan cancel to discard. Progress is kept in {PLAN_FILENAME}."))
+                return
+
+            # The step that is in progress now may differ from `idx` if the model
+            # called revise_plan during the step.
+            cur = plan.current_index()
+            if cur is not None and plan.steps[cur].status == "in_progress":
+                if self._step_summary:
+                    note = self._step_summary
+                else:  # text-only reply ended the step
+                    last = self.messages[-1] if self.messages else {}
+                    note = (last.get("content") or "") if last.get("role") == "assistant" else ""
+                note = " ".join(note.split())
+                plan.steps[cur].status = "done"
+                plan.steps[cur].note = note[:200] + ("…" if len(note) > 200 else "")
+            self._sync_plan_file()
+            self._autosave()
+
+        total = len(plan.steps)
+        self.plan = None
+        self.plan_phase = "investigating"
+        delete_plan_file(self.workdir)
+        self._refresh_system_prompt()
+        self.event_queue.put(ChatEvent("system",
+            f"Plan complete: {plan.title} ({total} step{'s' if total != 1 else ''}). {PLAN_FILENAME} removed."))
+
+    def execute_plan_threaded(self):
+        """Run (or resume) plan execution on a worker thread for /plan run|resume."""
+        self._cancel.clear()
+        try:
+            self._execute_plan()
+        finally:
+            self._emit_status()
+            self._autosave()
+            self.event_queue.put(DoneEvent())
+
+    def _plan_progress(self) -> str:
+        if self.mode != "plan" or self.plan is None:
+            return ""
+        if self.plan_phase == "executing":
+            return f"exec {self.plan.progress()}"
+        if self.plan_phase == "awaiting_approval":
+            return "awaiting approval"
+        return "draft"
 
     def _emit_status(self):
         pct = self._ctx_pct()
@@ -1135,6 +1454,7 @@ class Harness:
             run_confirm=self.run_confirm,
             host=self.client.host,
             provider=self.provider,
+            plan_progress=self._plan_progress(),
         ))
 
     def list_available_skills(self) -> list[str]:
@@ -1172,13 +1492,18 @@ class Harness:
             context_pct=self.context_pct,
             host=self.client.host,
             provider=self.provider,
+            plan=self.plan.to_dict() if self.plan is not None else None,
+            plan_phase=self.plan_phase,
         )
         session_mod.save_prefs(model=self.client.model, provider=self.provider)
 
     def load_session(self, path: Path) -> str:
         data = session_mod.load(path)
         self.messages = data["messages"]
-        self.mode = data.get("mode", "design")
+        # Sessions saved in a mode that no longer exists (e.g. the removed
+        # "writing" mode) fall back to design mode.
+        mode = data.get("mode", "design")
+        self.mode = mode if mode in _MODE_TOOLS else "design"
         self.workdir = Path(data.get("workdir", str(self.workdir)))
         self.context_pct = data.get("context_pct", None)
         # Restore the provider first: if it changed, rebuild the client so the
@@ -1213,6 +1538,9 @@ class Harness:
             # compaction limit is an absolute value rather than a percentage.
             self.model_max_ctx = self.client.context_length()
         self.active_skills = data.get("active_skills", [])
+        saved_plan = data.get("plan")
+        self.plan = Plan.from_dict(saved_plan) if saved_plan else None
+        self.plan_phase = (data.get("plan_phase") or "investigating") if self.plan else "investigating"
         self.input_history.clear()
         self.input_history.extend(data.get("input_history", []))
         # Always rebuild the system prompt from the current role files and skills on

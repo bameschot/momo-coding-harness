@@ -26,6 +26,7 @@ class CommandResult:
     replay_session: bool = False            # TUI replays loaded session messages into chat buffer
     run_compact: bool = False               # TUI runs compact on worker thread
     compact_summarise: bool = True          # passed to compact_threaded()
+    run_plan: bool = False                  # TUI runs execute_plan_threaded() on a worker thread
 
 
 def handle(line: str, harness: Harness) -> CommandResult:
@@ -93,9 +94,32 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.set_mode("design")
         return CommandResult(handled=True, output="Switched to design mode")
 
-    if cmd == "/write":
-        harness.set_mode("writing")
-        return CommandResult(handled=True, output="Switched to writing mode")
+    if cmd == "/plan":
+        sub = arg.lower()
+        if not sub:
+            harness.set_mode("plan")
+            state = ""
+            if harness.plan is not None:
+                state = f" — current plan: {harness.plan.title} ({harness._plan_progress()}); /plan show to view"
+            return CommandResult(handled=True, output=(
+                "Switched to plan mode: describe a feature or bug; I'll investigate, ask "
+                "questions, and propose a plan to approve before executing it" + state))
+        if sub == "show":
+            if harness.plan is None:
+                return CommandResult(handled=True, output="No active plan.")
+            return CommandResult(handled=True, output=harness.plan.to_markdown())
+        if sub in ("run", "resume"):
+            if harness.plan is None:
+                return CommandResult(handled=True, output="No active plan. Use /plan and describe a feature or bug first.")
+            if harness.plan_phase != "executing":
+                err = harness.approve_plan()  # re-reads the plan file for hand edits
+                if err:
+                    return CommandResult(handled=True, output=f"ERROR: {err}")
+            harness.set_mode("plan")
+            return CommandResult(handled=True, run_plan=True)
+        if sub == "cancel":
+            return CommandResult(handled=True, output=harness.cancel_plan())
+        return CommandResult(handled=True, output="Usage: /plan [show|run|resume|cancel]")
 
     if cmd == "/chat":
         harness.set_mode("chat")
@@ -438,7 +462,11 @@ Available commands:
   /clear-token        Remove the current auth token
   /code               Switch to coding mode (full tools)
   /design             Switch to design mode (read-only tools)
-  /write              Switch to writing mode (document editing tools)
+  /plan               Switch to plan mode (investigate → plan → approve → execute)
+  /plan show          Show the current plan and its progress
+  /plan run           Approve and execute the plan (re-reads .momo-plan.md edits)
+  /plan resume        Continue a paused plan from its current step
+  /plan cancel        Discard the plan and delete .momo-plan.md
   /chat               Switch to chat mode (read files, ask questions)
   /momo               Switch to momo companion mode (talk to the cat)
   /clear              Clear conversation history

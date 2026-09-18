@@ -31,7 +31,7 @@ def main():
                         dest="workdir", help="Root directory for all file operations")
     parser.add_argument("--context", default=None, type=int, metavar="N",
                         help="Override context token limit (default: read from model)")
-    parser.add_argument("--mode",    default="design", choices=["design", "coding"],
+    parser.add_argument("--mode",    default="design", choices=["design", "chat", "plan", "coding", "momo"],
                         help="Starting mode (ignored when restoring a session)")
     parser.add_argument("--max-tool-result", default=0, type=int, metavar="N",
                         help="Max chars returned by a single tool call (0 = unlimited)")

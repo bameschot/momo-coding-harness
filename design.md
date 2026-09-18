@@ -63,7 +63,7 @@ Tool results are appended as `{"role": "tool", ...}` messages. Thinking content 
 ### Iteration limits
 
 - Design mode: 40 iterations maximum.
-- All other modes (writing, coding, chat, momo): 100 iterations maximum.
+- All other modes (coding, chat, plan, momo): 100 iterations maximum. Plan execution gets 100 iterations *per step*.
 
 On hitting the limit an `ErrorEvent` is emitted and the loop exits.
 
@@ -286,7 +286,7 @@ The system prompt is built from `roles/<mode>.md` plus any active skill files fr
 | Mode | Role file | Tools | Purpose |
 |------|-----------|-------|---------|
 | `design` | `roles/designer.md` | read-only + `write_file` + `ask_user` | Interview-based design partner; explores codebase, writes specs |
-| `writing` | `roles/writer.md` | design tools + `append_to_file` + `edit_file` | Document editor; targeted edits, matches existing voice |
+| `plan` | `roles/planner.md`, then `roles/coder.md` + plan state | investigating: read-only + `run_command` + `ask_user` + `create_plan`; executing: all tools + `complete_step` + `revise_plan` | Investigates, asks, writes `.momo-plan.md`; after approval executes it step by step (`Harness._execute_plan`), deleting the file when done |
 | `coding` | `roles/coder.md` | all tools | Engineer; full read/write/exec/git access |
 | `chat` | `roles/chat.md` | read-only + `ask_user` | Conversational Q&A over code and documents; never writes files |
 | `momo` | `roles/momo.md` | all tools | Cat companion; full tool access with a warm, curious persona |

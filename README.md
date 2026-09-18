@@ -32,7 +32,7 @@ Options:
 | `--model` | `qwen3.5:9b` | Model name (llama.cpp serves whatever model it was launched with) |
 | `--workspace` / `--workdir` | `.` (current directory) | Root for all file operations |
 | `--context` | auto-detected | Override context token limit (default: half the model's maximum) |
-| `--mode` | `design` | Starting mode (`design`, `writing`, `coding`, `chat`, or `momo`) |
+| `--mode` | `design` | Starting mode (`design`, `chat`, `plan`, `coding`, or `momo`) |
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--no-think` | off | Disable model thinking/reasoning mode (on by default) |
 
@@ -119,7 +119,7 @@ The token is sent as a `Authorization: Bearer <token>` header on every request.
 
 ## Modes
 
-Press `Shift+Tab` to cycle through modes: **design → chat → writing → coding → momo → design**.
+Press `Shift+Tab` to cycle through modes: **design → chat → plan → coding → momo → design**.
 
 ### Design mode (default)
 
@@ -127,17 +127,94 @@ The assistant acts as a design partner. It explores your codebase to understand 
 
 Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `write_file`, `ask_user`
 
-### Writing mode
-
-The assistant acts as a collaborative editor and writer. It reads existing documents before making changes, prefers targeted edits over full rewrites, and matches the tone and register of the existing text. Use it for drafting, editing, and rewriting documents, reports, READMEs, blog posts, and any other prose.
-
-Available tools: all design tools + `append_to_file`, `edit_file`
-
 ### Coding mode
 
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
 Available tools: all design tools + `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`
+
+### Plan mode
+
+Plan mode is for features and bugfixes you want thought through before any code changes. The assistant investigates first, asks about genuine uncertainties, and writes a concrete implementation plan. Nothing is edited until you approve that plan. It then carries the plan out step by step with the same prompt, tools, and loop as coding mode, keeping track of which step it is on.
+
+Switch to it with `/plan` (or `Shift+Tab`) and describe the feature or bug.
+
+#### 1. Investigate
+
+The assistant explores the code (`find_files`, `grep_files`, `read_file`, …) and follows the code path the change touches. For a bug it tries to reproduce the problem with `run_command` (run the failing test, the script, or a one-liner), and it finds how the project is tested. `run_command` is available so it can observe the system, not so it can change it; `/run-confirm on` makes every command ask first.
+
+When the code can't answer a question that changes the plan (two valid designs, unclear scope, a destructive step), it asks you with `ask_user`, one question at a time.
+
+#### 2. Plan
+
+The assistant calls `create_plan` with a title, a goal (the root cause, key decisions, and your answers), and an ordered list of steps. Each step names the file and function it changes, what the change is, and how to verify it. The last step runs the project's tests.
+
+The harness writes the plan to **`.momo-plan.md`** in the working directory and shows it in chat:
+
+```markdown
+# Plan: Fix paginate() dropping the last partial page
+
+## Goal
+
+paginate() stops its range before the final partial page; page_count() floors instead of rounding up.
+
+## Steps
+
+- [ ] 1. **Fix paginate() loop bound**
+  In pager.py paginate(), iterate while start < len(items) so the trailing partial page is kept.
+  Files: pager.py
+- [ ] 2. **Use ceiling division in page_count()**
+  In pager.py page_count(), return (n_items + page_size - 1) // page_size.
+  Files: pager.py
+- [ ] 3. **Add regression tests and run the suite**
+  Add partial-page cases to test_pager.py, then run python -m unittest -v.
+  Files: test_pager.py
+```
+
+#### 3. Confirm
+
+The harness then asks: *Execute this plan?*
+
+| Answer | Effect |
+|---|---|
+| `y` | Approve and start executing immediately |
+| `n` (or empty) | Keep the plan for later. The status bar shows `plan [awaiting approval]`. Start it with `/plan run` |
+| anything else | Treated as feedback. The assistant investigates further if needed and submits a revised plan |
+
+You can also **edit `.momo-plan.md` by hand** before answering (or before `/plan run`). You can reword, reorder, add, or delete steps, or mark a step `[-]` to skip it. The file is re-read when you approve, so your edits are what gets executed.
+
+#### 4. Execute
+
+The harness drives the plan one step at a time:
+
+- Before each step, the plan with its progress is rendered into the system prompt, with `▶` marking the current step. The model always knows where it is, even after context compaction.
+- Each step arrives as a `Plan step i/N` message and runs the full coding loop. The prompt is the coding agent's prompt, the tools are the full coding tool set, and each step gets its own 100-iteration budget, with the same retries and nudges.
+- The model ends a step by calling `complete_step(summary)`, or by replying with text only. Tool calls after `complete_step` in the same turn are not run, so the model can't wander into the next step.
+- If the model discovers the rest of the plan is wrong, it calls `revise_plan` with the corrected remaining steps. Finished steps are kept. Any step left out of the revision is reported in chat, and the model is told, so nothing gets dropped silently.
+- Progress is visible in the status bar (`MODE: plan [exec 3/7]`) and in `.momo-plan.md`, where the checkboxes update as steps start (`[~]`) and finish (`[x]`, with a short note).
+
+When the last step is done, the harness reports *Plan complete* and **deletes `.momo-plan.md`**.
+
+#### Pausing and resuming
+
+If a step is interrupted (`Shift+C`), hits a backend error, or runs out of iterations, execution **pauses** at that step. The plan and its progress stay in `.momo-plan.md` and in the saved session. To continue:
+
+- `/plan resume` picks up at the paused step, or
+- type any message: it is passed to the model as extra context for the resumed step (e.g. *"the test runner is `make test`"*).
+
+This also works after restarting the harness and reloading the session with `/session`. `/plan cancel` discards the plan and deletes the file.
+
+#### Plan commands
+
+| Command | Description |
+|---|---|
+| `/plan` | Switch to plan mode (shows the current plan's state if there is one) |
+| `/plan show` | Show the current plan with step statuses |
+| `/plan run` | Approve a plan kept for later and execute it (re-reads `.momo-plan.md`) |
+| `/plan resume` | Continue a paused plan from its current step |
+| `/plan cancel` | Discard the plan and delete `.momo-plan.md` |
+
+Investigation tools: read-only tools + `run_command`, `ask_user`, `create_plan`. Execution tools: same as coding mode + `complete_step`, `revise_plan`.
 
 ### Chat mode
 
@@ -153,7 +230,7 @@ The animated companion in the bar between the chat pane and status bar *is* Momo
 
 Available tools: same as coding mode (all read-only + `write_file`, `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`, `ask_user`)
 
-Switch modes with `/design`, `/write`, `/code`, `/chat`, `/momo`, or `Shift+Tab`.
+Switch modes with `/design`, `/chat`, `/plan`, `/code`, `/momo`, or `Shift+Tab`.
 
 ## Available Tools
 
@@ -167,7 +244,7 @@ Switch modes with `/design`, `/write`, `/code`, `/chat`, `/momo`, or `Shift+Tab`
 | `read_file` | Read a file, optionally a specific line range |
 | `grep_file` | Regex search in a single file — returns matching lines |
 | `grep_files` | Recursive regex search across a directory — returns matching lines |
-### Shared (design, writing, coding modes)
+### Shared (design, coding, momo modes)
 
 | Tool | Description |
 |---|---|
@@ -175,13 +252,6 @@ Switch modes with `/design`, `/write`, `/code`, `/chat`, `/momo`, or `Shift+Tab`
 | `ask_user` | Pause mid-task and ask the user a focused clarifying question. The worker thread blocks until the answer is submitted; the status bar shows `? waiting for input`. |
 
 Chat mode also has `ask_user` but not `write_file`.
-
-### Writing mode only
-
-| Tool | Description |
-|---|---|
-| `append_to_file` | Append text to a file (creates if missing) |
-| `edit_file` | Change text inside a document (see below) |
 
 ### Coding mode only
 
@@ -207,7 +277,7 @@ Skills are `.md` files in the `skills/` folder that get appended to the active r
 /unload-skill python      # remove it
 ```
 
-Active skills are saved with the session and restored on restart. Skills stack — multiple can be active at once. On a mode switch (`/code`, `/write`, etc.) the role prompt is rebuilt with all currently active skills still included.
+Active skills are saved with the session and restored on restart. Skills stack — multiple can be active at once. On a mode switch (`/code`, `/plan`, etc.) the role prompt is rebuilt with all currently active skills still included.
 
 ### Built-in skills
 
@@ -243,7 +313,7 @@ The system message is built from the active role file plus any loaded skills:
 ┌─ system ──────────────────────────────────────────────────────────────┐
 │                                                                       │
 │  <role base text>                          ← roles/<mode>.md         │
-│  (designer / coder / writer)                                          │
+│  (designer / coder / planner / chat / momo)                           │
 │  {workdir} substituted with the actual working directory              │
 │                                                                       │
 │  ---                      (only present when skills are active)       │
@@ -293,13 +363,14 @@ The set of tools included in the call depends on the current mode:
 design  → list_directory  file_info  find_files  read_file
           grep_file  grep_files  write_file  ask_user
 
-writing → all design tools + append_to_file  edit_file
-
 coding  → all design tools + edit_file  delete_file  move_file
           append_to_file  run_command
 
 chat    → list_directory  file_info  find_files  read_file
           grep_file  grep_files  ask_user
+
+plan    → investigating: read-only tools + run_command  ask_user  create_plan
+          executing:     same as coding + complete_step  revise_plan
 
 momo    → same as coding (full tool suite)
 ```
@@ -313,7 +384,8 @@ Type any command in the input bar:
 | `/help` | Show all available commands |
 | `/code` | Switch to coding mode |
 | `/design` | Switch to design mode |
-| `/write` | Switch to writing mode |
+| `/plan` | Switch to plan mode (investigate → plan → approve → execute step by step) |
+| `/plan show\|run\|resume\|cancel` | Manage the current plan — see [Plan mode](#plan-mode) |
 | `/chat` | Switch to chat mode (read files, ask questions — no file writes) |
 | `/momo` | Switch to momo companion mode (full tools; talk to the cat) |
 | `/model` | List available models on the current backend |

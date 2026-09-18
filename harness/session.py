@@ -36,7 +36,9 @@ def save(ts: str, model: str, mode: str, workdir: Path,
          input_history: list[str] | None = None,
          context_pct: int | None = None,
          host: str | None = None,
-         provider: str | None = None):
+         provider: str | None = None,
+         plan: dict | None = None,
+         plan_phase: str | None = None):
     data = {
         "created_at": ts,
         "model": model,
@@ -48,6 +50,8 @@ def save(ts: str, model: str, mode: str, workdir: Path,
         "context_pct": context_pct,
         "active_skills": active_skills or [],
         "input_history": input_history or [],
+        "plan": plan,
+        "plan_phase": plan_phase,
         "messages": messages,
     }
     session_path(ts).write_text(json.dumps(data, indent=2), encoding="utf-8")
