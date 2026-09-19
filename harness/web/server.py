@@ -108,6 +108,8 @@ def _companion_data() -> dict:
         "speech": {f"{mode}|{int(busy)}": lines
                    for (mode, busy), lines in companion._SPEECH_TEXTS.items()},
         "speech_default": companion._SPEECH_TEXTS_DEFAULT,
+        "bubble_max": companion.BUBBLE_MAX,
+        "cat_w": companion.CAT_W,
     }
 
 

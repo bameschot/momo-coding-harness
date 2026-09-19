@@ -21,7 +21,7 @@ _MOMO_SIT_L = [  # sitting facing left — normal, blink
 ]
 _MOMO_WR_BLINK = ["\\    /\\ ", " )  ( -)", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-right blink
 _MOMO_WL_BLINK = [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-left blink
-# key: (mode, is_thinking)  value: list of strings each ≤ 25 visible chars
+# key: (mode, is_thinking)  value: list of strings each ≤ BUBBLE_MAX (40) visible chars
 _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
     ("coding",  False): [
         "< mew~", "< purrr", "< found a bug!",
@@ -165,11 +165,169 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
 }
 _SPEECH_TEXTS_DEFAULT = ["< mew~", "< purrr", "< mew mew"]  # fallback for unknown modes
 
+# Longer lines (26–40 chars), mixed into the pools above so momo sometimes says a
+# whole little sentence instead of a two-word quip.
+_SPEECH_TEXTS_LONG: dict[tuple[str, bool], list[str]] = {
+    ("coding",  False): [
+        "< tests green, time for a nap?",
+        "< that diff looks tidy, purrr",
+        "< remember to commit before lunch!",
+        "< i sat on the keyboard. sorry~",
+        "< small functions are easier to chase",
+        "< a failing test is just a clue!",
+        "< did we check the edge cases?",
+        "< that variable name is too long",
+        "< one more refactor, then treats?",
+        "< ship it! (after the tests pass)",
+    ],
+    ("coding",  True): [
+        "< following that stack trace...",
+        "< reading the file, line by line",
+        "< editing carefully, no typos pls",
+        "< running the tests, fingers crossed",
+        "< hmm, where does this get called?",
+        "< grepping for the culprit...",
+        "< waiting on the compiler, purrr",
+        "< *sniffs the diff suspiciously*",
+        "< almost done with this change!",
+        "< chasing a sneaky off-by-one...",
+    ],
+    ("design",  False): [
+        "< that boundary looks nice and clean",
+        "< one module, one job. purrr~",
+        "< could this be simpler, maybe?",
+        "< draw the data flow first!",
+        "< i like where this is heading",
+        "< who owns this state, though?",
+        "< the interface is the contract!",
+        "< less coupling, more napping",
+        "< let's name things before we build",
+        "< good design is lazy design~",
+    ],
+    ("design",  True): [
+        "< weighing the trade-offs...",
+        "< mapping out the modules, hmm",
+        "< reading how it fits together",
+        "< looking for the seams in this...",
+        "< sketching the boundaries now",
+        "< which way do dependencies go?",
+        "< thinking about the edge cases",
+        "< following the data around...",
+        "< untangling the layers, purrr",
+        "< hmm, is this the simplest shape?",
+    ],
+    ("chat",    False): [
+        "< ooh, tell me more about that!",
+        "< that makes a lot of sense, purrr",
+        "< i was thinking the same thing~",
+        "< interesting! what happens next?",
+        "< you explain things so nicely",
+        "< i'm all ears (both of them)",
+        "< that's a clever way to see it",
+        "< mew! i learned something new",
+        "< go on, i'm listening closely",
+        "< good question, let me think~",
+    ],
+    ("chat",    True): [
+        "< reading up on that for you...",
+        "< looking through the code, hmm",
+        "< let me check that real quick",
+        "< following the clue around...",
+        "< digging through the files...",
+        "< ooh, found something relevant!",
+        "< cross-checking my answer, purrr",
+        "< one moment, putting it together",
+        "< hmm, this part is interesting",
+        "< almost have an answer for you!",
+    ],
+    ("plan",    False): [
+        "< a good plan is half the work!",
+        "< read the plan, then say y~",
+        "< small steps are easy to check",
+        "< does every step have a test?",
+        "< happy with the plan? purrr",
+        "< tick, tick, all boxes [x]!",
+        "< we can revise it if needed",
+        "< the goal looks clear to me!",
+        "< measure twice, cut once, mew",
+        "< what should we plan next?",
+    ],
+    ("plan",    True): [
+        "< ticking off step two, purrr",
+        "< investigating before planning...",
+        "< writing the steps down now",
+        "< staying on track, one step at a time",
+        "< verifying this step works...",
+        "< reproducing the bug first!",
+        "< following the plan closely",
+        "< checking the box when it's done",
+        "< running tests for this step...",
+        "< nearly through the checklist!",
+    ],
+    ("momo",   False): [
+        "< the sunny spot moved again, brb",
+        "< i'm proud of you, you know that?",
+        "< can we take a cuddle break soon?",
+        "< a bird! outside! look! *chirps*",
+        "< i knocked your pen off the desk",
+        "< you're doing great, keep going!",
+        "< zoomies incoming, clear the desk!",
+        "< *kneads your sleeve* purrrrr",
+        "< is it treat o'clock yet?",
+        "< i'll guard the keyboard for you",
+    ],
+    ("momo",   True): [
+        "< *sniffs the file very carefully*",
+        "< ooh, what's in this folder?",
+        "< reading... this bit is fun!",
+        "< hold on, i'm on the trail!",
+        "< *pounces on a bug* got it?",
+        "< one sec, i'm very busy cat",
+        "< checking everything twice, mew",
+        "< following my nose through here",
+        "< hmm hmm, almost figured it out",
+        "< *stares intently at the code*",
+    ],
+}
+for _key, _lines in _SPEECH_TEXTS_LONG.items():
+    _SPEECH_TEXTS[_key] = _SPEECH_TEXTS[_key] + _lines
+
+# ── bubble layout (shared by the TUI and, mirrored, the web UI) ──────────────
+# The speech bubble sits on the cat's head row, beside the frame: on the right
+# ("< text") when momo faces right, on the left ("text >") when it faces left.
+BUBBLE_MAX = 40   # visible chars in a bubble, including the "< " prefix
+CAT_W = 8         # visible width of every frame line
+
+
+def walk_max_x(cols: int) -> int:
+    """Rightmost walk position: leaves room for a full bubble on momo's right, so a
+    bubble always fits on at least one side (see bubble_dir)."""
+    return max(0, cols - 2 - CAT_W - (BUBBLE_MAX + 2))
+
+
+def _fits(cx: int, cols: int, direction: int, n: int) -> bool:
+    if direction < 0:
+        return cx >= n                          # drawn from cx + 1 - n - 1 >= 0
+    return cx + 1 + CAT_W + 1 + n < cols - 1   # must end before the last column
+
+
+def bubble_dir(cx: int, cols: int, direction: int, n: int) -> int | None:
+    """Which way momo should face to say an n-char line at walk position cx: its
+    current direction if the line fits there, else the other side, else None."""
+    for d in (direction, -direction):
+        if _fits(cx, cols, d, n):
+            return d
+    return None
+
+
+def bubble_room(cx: int, cols: int) -> int:
+    """The longest line that fits on either side of momo at walk position cx."""
+    return max(0, cx, cols - 2 - (cx + 1 + CAT_W + 1))
+
 # ── idle recap lines ──────────────────────────────────────────────────────────
 # Model-written recaps must fit the same bubble as the canned lines above:
-# ≤ 25 visible chars including the "< " prefix, single-width characters only.
-_BUBBLE_MAX = 25
-_BUBBLE_BODY = _BUBBLE_MAX - 2
+# ≤ BUBBLE_MAX visible chars including the "< " prefix, single-width characters only.
+_BUBBLE_BODY = BUBBLE_MAX - 2
 MAX_RECAP_LINES = 5   # recap lines one recap call may produce
 
 
@@ -180,9 +338,9 @@ def _clean_line(line: str) -> str:
     prev = None
     while prev != s:                                          # bullets, numbering, "< "
         prev, s = s, re.sub(r"^(?:[-*+•>]\s+|\d+[.)]\s+|<\s+)", "", s)
-    whole_action = bool(re.fullmatch(r"\*[^*]+\*", s))       # "*kneads*" stays as is
-    if not whole_action:
-        s = re.sub(r"[*_`]+", "", s)
+    # Drop markdown bold and code marks, but keep single *actions* ("*kneads*")
+    # and underscores (they are part of file names like my_file.py).
+    s = re.sub(r"\*\*|__|`", "", s)
     s = s.strip().strip("\"'").strip()
     # Printable ASCII plus the single-width ellipsis; drops emoji / wide chars.
     s = "".join(c for c in s if 32 <= ord(c) < 127 or c == "…")
@@ -224,14 +382,18 @@ class RecapPicker:
         self._queue = [line for line in self._queue + new if line in lines]
         self.lines = list(lines)
 
-    def pick(self, now: float, rng=random) -> str | None:
-        if self._queue:
-            line = self._queue.pop(0)
+    def pick(self, now: float, max_len: int = BUBBLE_MAX, rng=random) -> str | None:
+        """A recap line of at most max_len chars (what fits beside momo right now), or
+        None. A queued line that doesn't fit stays queued for a roomier spot."""
+        line = next((q for q in self._queue if len(q) <= max_len), None)
+        if line is not None:
+            self._queue.remove(line)
         else:
             if rng.random() >= _RECAP_REUSE_CHANCE:
                 return None
             pool = [line for line in self.lines[-_RECAP_REUSE_POOL:]
-                    if now - self._last_shown.get(line, float("-inf")) >= _RECAP_REPEAT_SECS]
+                    if len(line) <= max_len
+                    and now - self._last_shown.get(line, float("-inf")) >= _RECAP_REPEAT_SECS]
             if not pool:
                 return None
             line = rng.choice(pool)

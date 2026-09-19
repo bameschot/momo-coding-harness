@@ -571,7 +571,9 @@ def _format_for_summary(messages: list[dict]) -> str:
 
 _DEFAULT_CONTEXT = 32768  # fallback when the model does not report its context size
 _RECAP_NUM_CTX = 4096     # idle recap: context window of the recap call
-_RECAP_REPLY_TOKENS = 256 # ... tokens kept free for momo's reply
+_RECAP_REPLY_TOKENS = 384 # ... tokens kept free for momo's reply
+_RECAP_LINE_LEN = "20-36" # ... asked-for characters per line (bubble fits 38 after "< ")
+_RECAP_SHORT = 15         # ... a reply whose lines are all shorter gets one "longer" retry
 _RECAP_MAX_TURNS = 4      # ... never looks back further than this many user turns
 _MOMO_LINES_MAX = 30      # remembered recap lines per session
 
@@ -899,7 +901,7 @@ class Harness:
         Uses `client` (not self.client) so the caller can abort it independently.
         Returns [] on failure."""
         system = _load_role("momo-companion") or (
-            "You are Momo, a playful cat. Reply with 1-5 lines of at most 20 characters.")
+            f"You are Momo, a playful cat. Reply with 1-5 lines of {_RECAP_LINE_LEN} characters.")
         num_ctx = min(_RECAP_NUM_CTX, self.model_max_ctx or _RECAP_NUM_CTX)
         # Budget for the conversation: the window minus the system prompt, the
         # instruction wrapped around it (~64 tokens) and room for the reply.
@@ -913,16 +915,33 @@ class Harness:
         msgs = [
             {"role": "system", "content": system},
             {"role": "user", "content": f"What we did since your last recap:\n{conversation}\n\n"
-                                        f"Write up to {want} speech-bubble lines, each about "
-                                        "a different moment."},
+                                        f"Write up to {want} speech-bubble lines, "
+                                        f"{_RECAP_LINE_LEN} characters each, each about a "
+                                        "different moment."},
         ]
         try:
-            lines = fit_bubble(client.chat(msgs, [], think=False, num_ctx=num_ctx).content)
-            if not lines:
-                msgs.append({"role": "user", "content": "shorter! max 20 characters per line"})
-                lines = fit_bubble(client.chat(msgs, [], think=False, num_ctx=num_ctx).content)
+            reply = client.chat(msgs, [], think=False, num_ctx=num_ctx).content or ""
         except Exception:
             return []
+        lines = fit_bubble(reply)
+        # One retry within this attempt when the reply missed the length: nothing
+        # fit (or every line had to be cut), or every line is a tiny fragment.
+        note = None
+        if not lines or all(line.endswith("…") for line in lines):
+            note = f"too long! {_RECAP_LINE_LEN} characters per line"
+        elif all(len(line) < _RECAP_SHORT for line in lines):
+            note = (f"a bit longer please: {_RECAP_LINE_LEN} characters per line, "
+                    "full little sentences")
+        if note:
+            msgs += [{"role": "assistant", "content": reply},
+                     {"role": "user", "content": note}]
+            try:
+                retry = fit_bubble(client.chat(msgs, [], think=False, num_ctx=num_ctx).content)
+            except Exception:
+                retry = []
+            # Keep whichever gives momo more to say (ties keep the first reply).
+            if sum(map(len, retry)) > sum(map(len, lines)):
+                lines = retry
         return [f"< {line}" for line in lines]
 
     def remember_momo_lines(self, lines: list[str]):

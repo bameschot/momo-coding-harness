@@ -1287,14 +1287,16 @@ const recaps = {
     this.queue = [...this.queue, ...fresh].filter((l) => lines.includes(l));
     this.lines = [...lines];
   },
-  pick(now) {
-    let line;
-    if (this.queue.length) {
-      line = this.queue.shift();
+  // A line of at most maxLen chars (what fits beside momo right now), or null.
+  // A queued line that doesn't fit stays queued for a roomier spot.
+  pick(now, maxLen) {
+    let line = this.queue.find((l) => l.length <= maxLen);
+    if (line !== undefined) {
+      this.queue.splice(this.queue.indexOf(line), 1);
     } else {
       if (Math.random() >= this.REUSE_CHANCE) return null;
       const pool = this.lines.slice(-this.REUSE_POOL)
-        .filter((l) => now - (this.lastShown.get(l) ?? -Infinity) >= this.REPEAT_MS);
+        .filter((l) => l.length <= maxLen && now - (this.lastShown.get(l) ?? -Infinity) >= this.REPEAT_MS);
       if (!pool.length) return null;
       line = pool[Math.floor(Math.random() * pool.length)];
     }
@@ -1310,12 +1312,30 @@ function applyCompanion(ev) {
   if (document.activeElement !== secs) secs.value = ev.secs;  // don't clobber typing
   secs.disabled = !ev.enabled;
 }
+// Bubble layout — mirrors walk_max_x / bubble_dir / bubble_room in companion.py.
+// The bubble sits beside the cat on its head row: right when facing right, left otherwise.
+const bubbleFits = (x, cols, catW, dir, n) =>
+  dir < 0 ? x >= n : x + 1 + catW + 1 + n < cols - 1;
+const bubbleDir = (x, cols, catW, dir, n) =>
+  [dir, -dir].find((d) => bubbleFits(x, cols, catW, d, n)) ?? null;
+const bubbleRoom = (x, cols, catW) => Math.max(0, x, cols - 2 - (x + 1 + catW + 1));
+
+// Measured monospace advance of the companion bar, so `cols` matches what fits.
+let charW = 0;
+function measureCharW(pre) {
+  const ctx = document.createElement("canvas").getContext("2d");
+  const cs = getComputedStyle(pre);  // longhands: the `font` shorthand can be "" (Firefox)
+  ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  charW = ctx.measureText("M".repeat(10)).width / 10 || 6.6;
+}
+window.addEventListener("resize", () => { charW = 0; });
+
 function tickCompanion() {
   const c = companion, F = c.frames, pre = $("#companion");
   if (!F || !view.companion || pre.offsetParent === null) return;
-  const charW = 6.6; // ≈ 11px monospace advance
+  if (!charW) measureCharW(pre);
   const cols = Math.max(20, Math.floor(pre.clientWidth / charW));
-  const catW = 8, maxX = Math.max(0, cols - 2 - catW);
+  const catW = F.cat_w, maxX = Math.max(0, cols - 2 - catW - (F.bubble_max + 2));
   if (c.st === "walk") {
     c.step ^= 1;
     c.x = Math.max(0, Math.min(c.x + c.dir, maxX));
@@ -1323,14 +1343,21 @@ function tickCompanion() {
       c.st = "sit";
       c.sitTicks = 50 + Math.floor(Math.random() * 50);
       c.blink = 0;
-      const recap = c.idle ? recaps.pick(Date.now()) : null;
-      if (recap) {
-        c.mew = recap;
-        c.mewTicks = 30 + Math.floor(Math.random() * 16);
-      } else if (Math.random() < 0.75) {
-        const pool = F.speech[`${status.mode}|${busy && !waiting ? 1 : 0}`] || F.speech_default;
-        c.mew = pool[Math.floor(Math.random() * pool.length)];
-        c.mewTicks = 18 + Math.floor(Math.random() * 14);
+      // Only lines that fit beside momo here; it turns to face its bubble.
+      const room = bubbleRoom(c.x, cols, catW);
+      const recap = c.idle ? recaps.pick(Date.now(), room) : null;
+      let text = recap;
+      if (!text && Math.random() < 0.75) {
+        const pool = (F.speech[`${status.mode}|${busy && !waiting ? 1 : 0}`] || F.speech_default)
+          .filter((t) => t.length <= room);
+        if (pool.length) text = pool[Math.floor(Math.random() * pool.length)];
+      }
+      if (text) {
+        c.mew = text;
+        // Longer lines stay up longer; recaps a little longer still.
+        c.mewTicks = 18 + Math.floor(Math.random() * 15) + Math.floor(text.length / 2) + (recap ? 10 : 0);
+        c.sitTicks = Math.max(c.sitTicks, c.mewTicks + 10);
+        c.dir = bubbleDir(c.x, cols, catW, c.dir, text.length) ?? c.dir;
       }
     }
     if (c.blink > 0) {
@@ -1356,7 +1383,7 @@ function tickCompanion() {
       const t = c.mew.startsWith("< ") ? c.mew.slice(2) + " >" : c.mew;
       const mx = c.x + 1 - t.length - 1;
       if (mx >= 0) rows[1] = " ".repeat(mx) + t + " " + c.frame[1];
-    } else {
+    } else if (bubbleFits(c.x, cols, catW, 1, c.mew.length)) {
       rows[1] = rows[1].padEnd(c.x + 1 + catW) + " " + c.mew;
     }
   }

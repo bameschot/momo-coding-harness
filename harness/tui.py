@@ -99,14 +99,16 @@ _SPINNER_INTERVAL = 0.1  # seconds per frame
 
 # ── momo companion ────────────────────────────────────────────────────────────
 
-_CAT_W              = 8    # visible width of every frame line
 _COMPANION_H        = 4    # 4 art rows
 _COMPANION_INTERVAL = 0.12  # seconds per animation tick
 
 from .companion import (  # noqa: E402  (shared with the web UI)
     _MOMO_WR, _MOMO_WL, _MOMO_SIT, _MOMO_SIT_L, _MOMO_WR_BLINK, _MOMO_WL_BLINK,
     _SPEECH_TEXTS, _SPEECH_TEXTS_DEFAULT, RecapPicker,
+    CAT_W, bubble_dir, bubble_room, walk_max_x,
 )
+
+_CAT_W = CAT_W  # visible width of every frame line (shared with the web UI)
 
 
 # ── extended key support ─────────────────────────────────────────────────────
@@ -959,7 +961,7 @@ class TUI:
 
     def _advance_companion(self):
         cols  = self._layout["cols"]
-        max_x = max(0, cols - 2 - _CAT_W)
+        max_x = walk_max_x(cols)   # keeps room for a full speech bubble on the right
 
         if self._companion_state == "walk":
             self._companion_walk_step ^= 1
@@ -969,16 +971,25 @@ class TUI:
                 self._companion_state       = "sit"
                 self._companion_sit_ticks   = random.randint(50, 100)
                 self._companion_blink_ticks = 0
-                recap = (self._companion_recaps.pick(time.monotonic())
+                # Only lines that fit beside momo here; it turns to face its bubble.
+                room  = bubble_room(self._companion_x, cols)
+                recap = (self._companion_recaps.pick(time.monotonic(), room)
                          if self._companion_idle else None)
-                if recap:
-                    self._companion_mew_text  = recap
-                    self._companion_mew_ticks = random.randint(30, 45)
-                elif random.random() < 0.75:
+                text  = recap
+                if not text and random.random() < 0.75:
                     key  = (self.harness.mode, self._busy and not self._waiting_for_input)
-                    pool = _SPEECH_TEXTS.get(key, _SPEECH_TEXTS_DEFAULT)
-                    self._companion_mew_text  = random.choice(pool)
-                    self._companion_mew_ticks = random.randint(18, 32)
+                    pool = [t for t in _SPEECH_TEXTS.get(key, _SPEECH_TEXTS_DEFAULT) if len(t) <= room]
+                    text = random.choice(pool) if pool else None
+                if text:
+                    self._companion_mew_text  = text
+                    # Longer lines stay up longer; recaps a little longer still.
+                    self._companion_mew_ticks = (random.randint(18, 32) + len(text) // 2
+                                                 + (10 if recap else 0))
+                    self._companion_sit_ticks = max(self._companion_sit_ticks,
+                                                    self._companion_mew_ticks + 10)
+                    self._companion_dir = bubble_dir(
+                        self._companion_x, cols, self._companion_dir, len(text)
+                    ) or self._companion_dir
 
             if self._companion_blink_ticks > 0:
                 self._companion_blink_ticks -= 1
