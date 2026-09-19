@@ -1,6 +1,8 @@
 """momo companion art and speech lines, shared by the TUI and the web UI."""
 from __future__ import annotations
 
+import random
+
 _MOMO_WR = [   # walking right — two alternating leg frames
     ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " /\\/\\/\\ "],
     ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " \\/\\/\\/ "],
@@ -162,3 +164,89 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
     ],
 }
 _SPEECH_TEXTS_DEFAULT = ["< mew~", "< purrr", "< mew mew"]  # fallback for unknown modes
+
+# ── idle recap lines ──────────────────────────────────────────────────────────
+# Model-written recaps must fit the same bubble as the canned lines above:
+# ≤ 25 visible chars including the "< " prefix, single-width characters only.
+_BUBBLE_MAX = 25
+_BUBBLE_BODY = _BUBBLE_MAX - 2
+MAX_RECAP_LINES = 5   # recap lines one recap call may produce
+
+
+def _clean_line(line: str) -> str:
+    import re
+    import unicodedata
+    s = unicodedata.normalize("NFKC", line).strip()
+    prev = None
+    while prev != s:                                          # bullets, numbering, "< "
+        prev, s = s, re.sub(r"^(?:[-*+•>]\s+|\d+[.)]\s+|<\s+)", "", s)
+    whole_action = bool(re.fullmatch(r"\*[^*]+\*", s))       # "*kneads*" stays as is
+    if not whole_action:
+        s = re.sub(r"[*_`]+", "", s)
+    s = s.strip().strip("\"'").strip()
+    # Printable ASCII plus the single-width ellipsis; drops emoji / wide chars.
+    s = "".join(c for c in s if 32 <= ord(c) < 127 or c == "…")
+    return " ".join(s.split())
+
+
+def _fit(s: str) -> str:
+    if len(s) <= _BUBBLE_BODY:
+        return s
+    cut = s[:_BUBBLE_BODY - 1]            # leave room for the ellipsis
+    if s[len(cut)] != " ":                 # cut landed mid-word: drop the partial word
+        if " " not in cut:
+            return ""                      # one long word — can't fit it nicely
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:-") + "…"
+
+
+_RECAP_REPEAT_SECS = 180    # the same recap line is never repeated within this window
+_RECAP_REUSE_CHANCE = 0.25  # once new recaps are spoken: chance a bubble reuses an old one
+_RECAP_REUSE_POOL = 5       # ... picked from this many most recent lines
+
+
+class RecapPicker:
+    """Chooses momo's recap bubbles (mirrored in the web UI's app.js).
+
+    New recap lines take preference: each is spoken once, in order, before any
+    canned line. After that an older recap only comes back occasionally, and never
+    the same line within _RECAP_REPEAT_SECS — otherwise pick() returns None and the
+    caller uses a canned line."""
+
+    def __init__(self):
+        self.lines: list[str] = []
+        self._queue: list[str] = []            # new lines not spoken yet
+        self._last_shown: dict[str, float] = {}
+
+    def update(self, lines: list[str]):
+        new = [line for line in lines[-MAX_RECAP_LINES:]
+               if line not in self.lines and line not in self._queue]
+        self._queue = [line for line in self._queue + new if line in lines]
+        self.lines = list(lines)
+
+    def pick(self, now: float, rng=random) -> str | None:
+        if self._queue:
+            line = self._queue.pop(0)
+        else:
+            if rng.random() >= _RECAP_REUSE_CHANCE:
+                return None
+            pool = [line for line in self.lines[-_RECAP_REUSE_POOL:]
+                    if now - self._last_shown.get(line, float("-inf")) >= _RECAP_REPEAT_SECS]
+            if not pool:
+                return None
+            line = rng.choice(pool)
+        self._last_shown[line] = now
+        return line
+
+
+def fit_bubble(raw: str) -> list[str]:
+    """Turn a model reply into ≤ MAX_RECAP_LINES speech-bubble lines (without the "< " prefix),
+    each short enough to fit the companion bubble in the TUI and the web UI."""
+    out: list[str] = []
+    for line in (raw or "").splitlines():
+        s = _fit(_clean_line(line))
+        if s and s.lower() not in (o.lower() for o in out):
+            out.append(s)
+        if len(out) >= MAX_RECAP_LINES:
+            break
+    return out

@@ -266,6 +266,27 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output="Thinking mode: off")
         return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
 
+    if cmd == "/companion-idle-recap":
+        def _state() -> str:
+            state = "on" if harness.idle_recap else "off"
+            return f"Idle recap: {state} (after {harness.idle_recap_secs}s idle)"
+        if not arg:
+            return CommandResult(handled=True, output=_state())
+        if arg.lower() in ("on", "true", "1", "yes"):
+            harness.idle_recap = True
+        elif arg.lower() in ("off", "false", "0", "no"):
+            harness.idle_recap = False
+        else:
+            try:
+                secs = int(arg)
+            except ValueError:
+                return CommandResult(handled=True, output=f"ERROR: expected 'on', 'off' or seconds, got: {arg}")
+            if secs < 10:
+                return CommandResult(handled=True, output="ERROR: idle time must be at least 10 seconds")
+            harness.idle_recap_secs = secs
+        session_mod.save_prefs(idle_recap=harness.idle_recap, idle_recap_secs=harness.idle_recap_secs)
+        return CommandResult(handled=True, output=_state())
+
     if cmd == "/tools":
         if not arg:
             state = "on" if harness.tools_enabled else "off"
@@ -487,6 +508,9 @@ Available commands:
   /diff on|off          Show or hide diffs of file edits  (Shift+D)
   /diff-style git|compact  Choose diff presentation (git-style or compact)
   /companion on|off     Show or hide the momo companion bar  (Shift+Q)
+  /companion-idle-recap         Show whether momo recaps recent turns when you're idle
+  /companion-idle-recap on|off  momo recaps the last turns in its bubble after you've been idle
+  /companion-idle-recap <secs>  Set how long you must be idle first (default 90)
   Shift+C               Interrupt a running LLM response
   /compact            Compact context with LLM summary of dropped history
   /fast-compact       Compact context without LLM summarisation (instant)

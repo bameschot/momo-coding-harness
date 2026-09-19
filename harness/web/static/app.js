@@ -602,6 +602,7 @@ function handleEvents(evs) {
     switch (ev.type) {
       case "status": applyStatus(ev); break;
       case "busy": applyBusy(ev.busy, ev.waiting); break;
+      case "companion": applyCompanion(ev); break;
       case "done": break;
       case "delta": streamDelta(ev); break;
       case "stream_end": endStream(); break;
@@ -1106,6 +1107,12 @@ for (const r of document.querySelectorAll("input[name=diff-style]")) {
   r.onchange = () => { view.diffStyle = r.value; saveView(); rerenderAll(); };
 }
 $("#think-mode").onchange = (e) => send(`/think ${e.target.checked ? "on" : "off"}`);
+$("#idle-recap").onchange = (e) => send(`/companion-idle-recap ${e.target.checked ? "on" : "off"}`);
+$("#idle-recap-secs").onchange = (e) => {
+  const n = Math.round(Number(e.target.value));
+  if (Number.isFinite(n) && n >= 10) send(`/companion-idle-recap ${n}`);
+  else e.target.value = Math.max(10, n || 90);
+};
 
 // ── plan drawer ───────────────────────────────────────────────────────────────
 $("#plan-btn").onclick = () => { refreshState(); $("#plan-drawer").hidden = false; };
@@ -1267,7 +1274,42 @@ $("#preview-copy").onclick = async () => {
 const companion = {
   frames: null, x: 4, dir: 1, st: "walk", sitTicks: 0, step: 0,
   blink: 0, mewTicks: 0, mew: "", frame: null,
+  idle: false,
 };
+// Idle recap bubbles — mirrors companion.RecapPicker in Python: new recap lines are
+// spoken once each, before canned lines; after that an older one only comes back
+// occasionally, and never the same line within REPEAT_MS.
+const recaps = {
+  REPEAT_MS: 180_000, REUSE_CHANCE: 0.25, REUSE_POOL: 5, MAX_NEW: 5,  // MAX_NEW = MAX_RECAP_LINES
+  lines: [], queue: [], lastShown: new Map(),
+  update(lines) {
+    const fresh = lines.slice(-this.MAX_NEW).filter((l) => !this.lines.includes(l) && !this.queue.includes(l));
+    this.queue = [...this.queue, ...fresh].filter((l) => lines.includes(l));
+    this.lines = [...lines];
+  },
+  pick(now) {
+    let line;
+    if (this.queue.length) {
+      line = this.queue.shift();
+    } else {
+      if (Math.random() >= this.REUSE_CHANCE) return null;
+      const pool = this.lines.slice(-this.REUSE_POOL)
+        .filter((l) => now - (this.lastShown.get(l) ?? -Infinity) >= this.REPEAT_MS);
+      if (!pool.length) return null;
+      line = pool[Math.floor(Math.random() * pool.length)];
+    }
+    this.lastShown.set(line, now);
+    return line;
+  },
+};
+function applyCompanion(ev) {
+  companion.idle = ev.idle;
+  recaps.update(ev.lines);
+  $("#idle-recap").checked = ev.enabled;
+  const secs = $("#idle-recap-secs");
+  if (document.activeElement !== secs) secs.value = ev.secs;  // don't clobber typing
+  secs.disabled = !ev.enabled;
+}
 function tickCompanion() {
   const c = companion, F = c.frames, pre = $("#companion");
   if (!F || !view.companion || pre.offsetParent === null) return;
@@ -1281,7 +1323,11 @@ function tickCompanion() {
       c.st = "sit";
       c.sitTicks = 50 + Math.floor(Math.random() * 50);
       c.blink = 0;
-      if (Math.random() < 0.75) {
+      const recap = c.idle ? recaps.pick(Date.now()) : null;
+      if (recap) {
+        c.mew = recap;
+        c.mewTicks = 30 + Math.floor(Math.random() * 16);
+      } else if (Math.random() < 0.75) {
         const pool = F.speech[`${status.mode}|${busy && !waiting ? 1 : 0}`] || F.speech_default;
         c.mew = pool[Math.floor(Math.random() * pool.length)];
         c.mewTicks = 18 + Math.floor(Math.random() * 14);

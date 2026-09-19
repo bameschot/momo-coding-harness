@@ -167,6 +167,9 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
 .menu-title, .menu-sub { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 4px 0 2px; }
 .menu-sub { margin-top: 10px; }
 .seg { display: flex; gap: 12px; }
+.menu-num { cursor: default; }
+.menu-num input { width: 64px; padding: 2px 6px; font: inherit; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; }
+.menu-num input:disabled { opacity: .5; }
 
 /* ── transcript ─────────────────────────────────────────────────────────── */
 #transcript {

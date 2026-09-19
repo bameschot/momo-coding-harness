@@ -38,7 +38,10 @@ def save(ts: str, model: str, mode: str, workdir: Path,
          host: str | None = None,
          provider: str | None = None,
          plan: dict | None = None,
-         plan_phase: str | None = None):
+         plan_phase: str | None = None,
+         momo_lines: list[str] | None = None,
+         momo_recap_turn: int = 0,
+         turn_count: int = 0):
     data = {
         "created_at": ts,
         "model": model,
@@ -52,6 +55,9 @@ def save(ts: str, model: str, mode: str, workdir: Path,
         "input_history": input_history or [],
         "plan": plan,
         "plan_phase": plan_phase,
+        "momo_lines": momo_lines or [],
+        "momo_recap_turn": momo_recap_turn,
+        "turn_count": turn_count,
         "messages": messages,
     }
     session_path(ts).write_text(json.dumps(data, indent=2), encoding="utf-8")

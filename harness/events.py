@@ -48,6 +48,16 @@ class BusyEvent:
     waiting: bool
 
 
+@dataclasses.dataclass
+class CompanionEvent:
+    """momo's idle-recap state: whether the user is idle, the remembered recap lines,
+    and the feature's settings (so every frontend's controls stay in sync)."""
+    idle: bool
+    lines: list[str]
+    enabled: bool = False
+    secs: int = 90
+
+
 class Subscription:
     def __init__(self, bus: "EventBus"):
         self._bus = bus
@@ -68,7 +78,7 @@ class EventBus:
 
     # Events that only matter in their latest form: kept outside the backlog and
     # replayed once (latest value) to new subscribers.
-    _LATEST_ONLY = ("StatusEvent", "BusyEvent")
+    _LATEST_ONLY = ("StatusEvent", "BusyEvent", "CompanionEvent")
     # Live-only events: delivered to current subscribers but never replayed —
     # a reconnecting page sees the final messages, not the stream that built them.
     _TRANSIENT = ("DeltaEvent", "StreamEndEvent")

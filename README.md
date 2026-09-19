@@ -229,6 +229,7 @@ Even without notifications, the tab title shows **(•)** while there is unseen 
 | Markdown | `/markdown on\|off`, Shift+M | Rendered markdown or plain text for replies |
 | Edit diffs | `/diff on\|off`, Shift+D | Show or hide diffs of file edits |
 | Companion | `/companion on\|off`, Shift+Q | Show or hide momo |
+| Idle recap | `/companion-idle-recap on\|off\|<secs>` | View → Companion: a checkbox and the idle time. Shared with the TUI |
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
@@ -463,7 +464,7 @@ Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep
 
 Momo is a small black cat who lives in the harness and keeps you company. This mode is a companion first and a capable helper second: it chats, vents, and celebrates wins with genuine (slightly excessive) enthusiasm, but it also has the **full tool suite** and will read, edit, run, and write things when asked — or when its curiosity takes over and it wanders off to sniff at a suspicious filename. Replies are short, warm, lowercase, and entirely cat; reactions come *after* a tool runs, not before. Good for long grinding sessions when you want something alive in the terminal alongside you.
 
-The animated companion in the bar between the chat pane and status bar *is* Momo — in this mode you are talking to it directly. (The companion walks around and mews in every mode; toggle it with `/companion on|off` or `Shift+Q`.)
+The animated companion in the bar between the chat pane and status bar *is* Momo — in this mode you are talking to it directly. (The companion walks around and mews in every mode; toggle it with `/companion on|off` or `Shift+Q`. With `/companion-idle-recap on` (or the web UI's **View → Companion** menu), a companion that has been left alone for a while mews short recaps of what you just did instead of its canned lines. The bubble voice lives in `roles/momo-companion.md`, separate from this mode's persona.)
 
 Available tools: same as coding mode (all read-only + `write_file`, `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`, `ask_user`)
 
@@ -648,6 +649,8 @@ Type any command in the input bar:
 | `/workspace <path>` | Change the working directory. If the path does not exist, prompts for confirmation before creating it. |
 | `/think` | Show thinking mode state (on/off) |
 | `/think on\|off` | Enable or disable model thinking/reasoning mode |
+| `/companion-idle-recap on\|off` | When you've been idle, momo recaps the last turns in its speech bubble (at most once per turn, 5-minute cooldown; lines are kept in the session). Off by default; also `--companion-idle-recap` |
+| `/companion-idle-recap <secs>` | How long you must be idle before momo recaps (default 90, also `--companion-idle-recap-secs`) |
 | `/tools on\|off` | Enable or disable tool calls (off = model receives no tool schemas) |
 | `/tool-output on\|off` | Show or hide the tool calls pane |
 | `/think-output on\|off` | Show or hide model thinking/reasoning blocks (also `Shift+T`) |

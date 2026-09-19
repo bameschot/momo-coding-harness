@@ -9,19 +9,26 @@ renders the same transcript; only per-frontend view toggles are returned.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import attachments as attach_mod
 from .commands import handle as handle_command
-from .events import BusyEvent, UserEvent
+from .events import BusyEvent, CompanionEvent, UserEvent
 from .harness import Harness, ChatEvent, ToolCallEvent, ToolResultEvent, ThinkEvent
+from .llm import make_client
 
 # CommandResult fields that change how a frontend renders, not harness state.
 VIEW_FIELDS = ("tool_output", "think_output", "md_render", "diff_output", "diff_style", "companion")
 
 # Commands that mutate harness.messages — refused while a worker thread runs.
 _MUTATING = ("/clear", "/compact", "/fast-compact", "/new", "/retry")
+
+# Idle recap: how often the watcher checks, and the minimum gap between two recap
+# attempts (on top of "once per user turn" and "once per idle period").
+_IDLE_POLL = 5.0
+_RECAP_COOLDOWN = 300.0
 
 
 @dataclass
@@ -77,9 +84,18 @@ class Controller:
         self._busy = False
         self._pending_confirm: Callable[[], str | None] | None = None
         self.web_url: str | None = None  # set by main when the web server is up
+        # Idle recap state (see _idle_tick).
+        self._last_activity = time.monotonic()
+        self._idle = False
+        self._recapped_this_idle = False
+        self._last_recap_ts: float | None = None
+        self._recap_client = None   # set while a recap is generating
+        self._activity_gen = 0      # bumped on user input; a recap from an older gen is stale
         if len(harness.messages) > 1:
             self.replay_transcript(reset=False)
         self._emit_busy()
+        self._emit_companion()
+        threading.Thread(target=self._idle_loop, daemon=True, name="momo-idle").start()
 
     # ── shared state ──────────────────────────────────────────────────────────
 
@@ -98,7 +114,92 @@ class Controller:
     def _set_busy(self, busy: bool):
         with self._lock:
             self._busy = busy
+            if not busy:
+                self._last_activity = time.monotonic()  # idle time counts from the reply's end
             self._emit_busy()
+
+    def _emit_companion(self):
+        h = self.harness
+        self.bus.put(CompanionEvent(idle=self._idle, lines=list(h.momo_lines),
+                                    enabled=h.idle_recap, secs=h.idle_recap_secs))
+
+    # ── idle recap ────────────────────────────────────────────────────────────
+
+    def _note_activity(self):
+        """The user did something: leave idle, and abort an in-flight recap so the
+        user's request doesn't queue behind it on the LLM server."""
+        with self._lock:
+            self._last_activity = time.monotonic()
+            self._recapped_this_idle = False
+            self._activity_gen += 1
+            client = self._recap_client
+            was_idle, self._idle = self._idle, False
+        if client is not None:
+            client.abort()
+        if was_idle:
+            self._emit_companion()
+
+    def _idle_loop(self):
+        while True:
+            time.sleep(_IDLE_POLL)
+            try:
+                self._idle_tick()
+            except Exception:
+                pass  # never kill the watcher (and never print — it would corrupt curses)
+
+    def _recap_due(self, now: float) -> bool:
+        h = self.harness
+        last = h.messages[-1] if len(h.messages) > 1 else {}
+        return (
+            not self._recapped_this_idle
+            and self._recap_client is None
+            and h.user_turns() > h._momo_recap_turn            # at most once per turn
+            and last.get("role") == "assistant"                # ... and only a finished one
+            and bool((last.get("content") or "").strip())
+            and (self._last_recap_ts is None
+                 or now - self._last_recap_ts >= max(h.idle_recap_secs, _RECAP_COOLDOWN))
+        )
+
+    def _idle_tick(self):
+        h = self.harness
+        with self._lock:
+            if not h.idle_recap:
+                if self._idle:
+                    self._idle = False
+                    self._emit_companion()
+                return
+            now = time.monotonic()
+            if (self._busy or self._pending_confirm is not None or h._plan_executing()
+                    or now - self._last_activity < h.idle_recap_secs):
+                return
+            if not self._idle:
+                self._idle = True
+                self._emit_companion()  # momo can reuse remembered lines right away
+            if not self._recap_due(now):
+                return
+            # Record the attempt up front: a failed or aborted recap still uses up
+            # this turn, idle period and cooldown, so failures never retry in a loop.
+            self._recapped_this_idle = True
+            self._last_recap_ts = now
+            new_turns = h.user_turns() - h._momo_recap_turn   # recap only what's new
+            h._momo_recap_turn = h.user_turns()
+            gen = self._activity_gen
+            client = self._recap_client = make_client(
+                h.provider, host=h.client.host, model=h.client.model,
+                auth_token=h.client._auth_token)
+        try:
+            lines = h.momo_recap(client, new_turns)
+        finally:
+            with self._lock:
+                self._recap_client = None
+        with self._lock:
+            if gen != self._activity_gen or self._busy:
+                return  # the user came back mid-recap; don't touch the session now
+            if lines:
+                h.remember_momo_lines(lines)
+            h._autosave()  # persists the recap turn even when the attempt failed
+            if lines:
+                self._emit_companion()
 
     def _system(self, text: str):
         self.bus.put(ChatEvent("system", text))
@@ -126,6 +227,7 @@ class Controller:
         self._system(notice or (
             f"Session loaded: {h.session_path().name} ({len(h.messages)} messages)\n"
             f"Model: {h.client.model} | Mode: {h.mode} | Dir: {h.workdir}"))
+        self._emit_companion()  # the loaded session's remembered recap lines
 
     def _resend_guard(self) -> str | None:
         if self._busy:
@@ -205,6 +307,7 @@ class Controller:
         attachments = [a for a in (attachments or []) if a.get("text")]
         if not text and not attachments:
             return SubmitOutcome()
+        self._note_activity()
         with self._lock:
             if attachments and text.startswith("/"):
                 self._system("Attachments can only be sent with a message, not with a /command.")
@@ -276,6 +379,8 @@ class Controller:
             self._system(f"Unknown command: {text}")
             return SubmitOutcome()
 
+        if cmd == "/companion-idle-recap":
+            self._emit_companion()  # push the new settings to every frontend's controls
         view = {f: getattr(result, f) for f in VIEW_FIELDS if getattr(result, f) is not None}
         if view:
             return SubmitOutcome(view=view)

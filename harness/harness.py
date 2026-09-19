@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import session as session_mod
+from .companion import MAX_RECAP_LINES, fit_bubble
 from .diff import build_diff_body
 from .events import EventBus, BusyEvent, DeltaEvent, StreamEndEvent
 from .llm import make_client
@@ -569,6 +570,10 @@ def _format_for_summary(messages: list[dict]) -> str:
 # ── harness ───────────────────────────────────────────────────────────────────
 
 _DEFAULT_CONTEXT = 32768  # fallback when the model does not report its context size
+_RECAP_NUM_CTX = 4096     # idle recap: context window of the recap call
+_RECAP_REPLY_TOKENS = 256 # ... tokens kept free for momo's reply
+_RECAP_MAX_TURNS = 4      # ... never looks back further than this many user turns
+_MOMO_LINES_MAX = 30      # remembered recap lines per session
 
 
 class Harness:
@@ -590,6 +595,13 @@ class Harness:
         self.run_confirm: bool = False  # when True, prompt y/N before each run_command; toggle via /run-confirm or Shift+P
         self.active_skills: list[str] = []
         self.input_history: list[str] = []
+        # Idle recap: when on, momo recaps the last turns in its speech bubble after
+        # the user has been idle for idle_recap_secs (driven by the Controller).
+        self.idle_recap: bool = False
+        self.idle_recap_secs: int = 90
+        self.momo_lines: list[str] = []   # remembered recap lines, newest last
+        self._momo_recap_turn: int = 0    # user_turns() at the last recap attempt
+        self._turn_count: int = 0         # user turns sent; monotonic (compaction can drop messages)
         self.model_max_ctx: int | None = None  # model's real reported context window; used as num_ctx
         self.context_pct: int | None = None  # user-set % of model max; None = use default 50%
         # Plan mode state: phase is "investigating" → "awaiting_approval" (plan kept
@@ -850,6 +862,76 @@ class Harness:
         except Exception:
             return ""
 
+    def user_turns(self) -> int:
+        return self._turn_count
+
+    def _recap_context(self, turns: int, budget_tokens: int) -> str:
+        """The conversation since the last recap: the last `turns` user turns (capped at
+        _RECAP_MAX_TURNS), dropping the oldest messages until it fits budget_tokens."""
+        body = self.messages[1:]
+        turns = max(1, min(turns, _RECAP_MAX_TURNS))
+        start, seen = 0, 0
+        for i in range(len(body) - 1, -1, -1):
+            if body[i].get("role") == "user":
+                seen += 1
+                if seen == turns:
+                    start = i
+                    break
+        parts: list[str] = []
+        used = 0
+        for m in reversed(body[start:]):          # newest first, so the oldest get dropped
+            text = _format_for_summary([m])
+            if not text:
+                continue
+            cost = len(text) // 4 + 1              # same estimate as _estimate_tokens
+            if used + cost > budget_tokens:
+                if not parts:                      # always keep the end of the newest message
+                    parts.append(text[-budget_tokens * 4:])
+                break
+            parts.append(text)
+            used += cost
+        return "\n".join(reversed(parts))
+
+    def momo_recap(self, client, turns: int = 1) -> list[str]:
+        """Recap the `turns` user turns since the last recap as several short lines in
+        momo's voice (up to MAX_RECAP_LINES), each sized to fit the companion speech
+        bubble ("< "-prefixed). The context is trimmed to fit the recap call's window.
+        Uses `client` (not self.client) so the caller can abort it independently.
+        Returns [] on failure."""
+        system = _load_role("momo-companion") or (
+            "You are Momo, a playful cat. Reply with 1-5 lines of at most 20 characters.")
+        num_ctx = min(_RECAP_NUM_CTX, self.model_max_ctx or _RECAP_NUM_CTX)
+        # Budget for the conversation: the window minus the system prompt, the
+        # instruction wrapped around it (~64 tokens) and room for the reply.
+        budget = num_ctx - len(system) // 4 - 64 - _RECAP_REPLY_TOKENS
+        if budget <= 0:
+            return []
+        conversation = self._recap_context(turns, budget)
+        if not conversation.strip():
+            return []
+        want = min(MAX_RECAP_LINES, 2 + turns)   # more happened → more to recap
+        msgs = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"What we did since your last recap:\n{conversation}\n\n"
+                                        f"Write up to {want} speech-bubble lines, each about "
+                                        "a different moment."},
+        ]
+        try:
+            lines = fit_bubble(client.chat(msgs, [], think=False, num_ctx=num_ctx).content)
+            if not lines:
+                msgs.append({"role": "user", "content": "shorter! max 20 characters per line"})
+                lines = fit_bubble(client.chat(msgs, [], think=False, num_ctx=num_ctx).content)
+        except Exception:
+            return []
+        return [f"< {line}" for line in lines]
+
+    def remember_momo_lines(self, lines: list[str]):
+        for line in lines:
+            if line in self.momo_lines:
+                self.momo_lines.remove(line)
+            self.momo_lines.append(line)
+        del self.momo_lines[:-_MOMO_LINES_MAX]
+
     def compact_threaded(self, summarise: bool = True):
         """Run compact() on a worker thread, emitting events back to the TUI."""
         try:
@@ -872,6 +954,7 @@ class Harness:
     def send(self, text: str):
         """Called from the harness worker thread."""
         self._cancel.clear()
+        self._turn_count += 1
         try:
             if self._plan_executing():
                 # A paused plan: the user's message is extra context for the step
@@ -1573,6 +1656,9 @@ class Harness:
             provider=self.provider,
             plan=self.plan.to_dict() if self.plan is not None else None,
             plan_phase=self.plan_phase,
+            momo_lines=self.momo_lines,
+            momo_recap_turn=self._momo_recap_turn,
+            turn_count=self._turn_count,
         )
         session_mod.save_prefs(model=self.client.model, provider=self.provider)
 
@@ -1634,6 +1720,10 @@ class Harness:
         self.plan_phase = (data.get("plan_phase") or "investigating") if self.plan else "investigating"
         self.input_history.clear()
         self.input_history.extend(data.get("input_history", []))
+        self.momo_lines = list(data.get("momo_lines", []))
+        self._momo_recap_turn = data.get("momo_recap_turn", 0)
+        self._turn_count = data.get("turn_count",
+                                    sum(1 for m in self.messages if m.get("role") == "user"))
         # Always rebuild the system prompt from the current role files and skills on
         # disk — saved sessions carry a snapshot; role/skill edits must take effect.
         if self.messages and self.messages[0].get("role") == "system":
@@ -1654,6 +1744,9 @@ class Harness:
         self.logger = Logger(self._ts)
         self.plan = None
         self.plan_phase = "investigating"
+        self.momo_lines = []
+        self._momo_recap_turn = 0
+        self._turn_count = 0
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
         self._token_estimate = self._estimate()
         self._emit_status()

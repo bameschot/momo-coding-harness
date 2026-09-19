@@ -46,6 +46,11 @@ def main():
                         help="Disable model thinking/reasoning mode (default: on)")
     parser.add_argument("--no-stream", action="store_true", default=False,
                         help="Wait for complete replies instead of streaming them as they are generated")
+    parser.add_argument("--companion-idle-recap", action=argparse.BooleanOptionalAction, default=None,
+                        help="momo recaps the last turns in its speech bubble when you're idle "
+                             "(default: last /companion-idle-recap setting, else off)")
+    parser.add_argument("--companion-idle-recap-secs", default=None, type=int, metavar="N",
+                        help="Seconds of inactivity before momo recaps (default 90)")
     parser.add_argument("--web", action=argparse.BooleanOptionalAction, default=True,
                         help="Serve the browser chat UI alongside the TUI")
     parser.add_argument("--web-host", default="127.0.0.1", metavar="HOST",
@@ -77,6 +82,9 @@ def main():
         harness.think = False
     if args.no_stream:
         harness.stream = False
+    harness.idle_recap = bool(args.companion_idle_recap if args.companion_idle_recap is not None
+                              else prefs.get("idle_recap", False))
+    harness.idle_recap_secs = max(10, args.companion_idle_recap_secs or prefs.get("idle_recap_secs") or 90)
 
     # Restore last session unless --fresh
     sessions = session_mod.list_sessions()

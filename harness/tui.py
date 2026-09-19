@@ -13,7 +13,7 @@ from typing import Any
 
 from . import md_render
 from .controller import Controller
-from .events import BusyEvent, DeltaEvent, ResetEvent, StreamEndEvent, UserEvent
+from .events import BusyEvent, CompanionEvent, DeltaEvent, ResetEvent, StreamEndEvent, UserEvent
 from .harness import (
     Harness, ChatEvent, ToolCallEvent, ToolResultEvent,
     StatusEvent, ErrorEvent, DoneEvent, AskUserEvent, ThinkEvent, DiffEvent,
@@ -105,7 +105,7 @@ _COMPANION_INTERVAL = 0.12  # seconds per animation tick
 
 from .companion import (  # noqa: E402  (shared with the web UI)
     _MOMO_WR, _MOMO_WL, _MOMO_SIT, _MOMO_SIT_L, _MOMO_WR_BLINK, _MOMO_WL_BLINK,
-    _SPEECH_TEXTS, _SPEECH_TEXTS_DEFAULT,
+    _SPEECH_TEXTS, _SPEECH_TEXTS_DEFAULT, RecapPicker,
 )
 
 
@@ -311,6 +311,10 @@ class TUI:
         self._companion_mew_ticks:     int        = 0
         self._companion_mew_text:      str        = ""
         self._companion_ts:            float      = 0.0
+        # Idle recap: while the user is idle momo speaks model-written recap lines
+        # (newest first, then random recent ones) instead of the canned pool.
+        self._companion_idle:          bool       = False
+        self._companion_recaps                    = RecapPicker()
         # Cache for _draw_companion: skip the full erase+redraw when nothing
         # visible has changed since the last paint.
         self._companion_drawn_x:        int        = -1
@@ -854,6 +858,9 @@ class TUI:
                     changed = True
                 elif isinstance(ev, BusyEvent):
                     changed = True
+                elif isinstance(ev, CompanionEvent):
+                    self._companion_idle = ev.idle
+                    self._companion_recaps.update(ev.lines)
                 elif isinstance(ev, ToolCallEvent):
                     self._add_tool_call(ev.name, ev.args)
                     changed = True
@@ -962,7 +969,12 @@ class TUI:
                 self._companion_state       = "sit"
                 self._companion_sit_ticks   = random.randint(50, 100)
                 self._companion_blink_ticks = 0
-                if random.random() < 0.75:
+                recap = (self._companion_recaps.pick(time.monotonic())
+                         if self._companion_idle else None)
+                if recap:
+                    self._companion_mew_text  = recap
+                    self._companion_mew_ticks = random.randint(30, 45)
+                elif random.random() < 0.75:
                     key  = (self.harness.mode, self._busy and not self._waiting_for_input)
                     pool = _SPEECH_TEXTS.get(key, _SPEECH_TEXTS_DEFAULT)
                     self._companion_mew_text  = random.choice(pool)
