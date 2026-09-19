@@ -22,6 +22,28 @@ function saveView() {
   try { localStorage.setItem("momo.view", JSON.stringify(view)); } catch { /* private mode */ }
 }
 
+// ── light/dark theme (per browser; index.html applies the saved choice before paint) ──
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+function currentTheme() {
+  return document.documentElement.dataset.theme || (darkQuery.matches ? "dark" : "light");
+}
+function renderThemeBtn() {
+  const dark = currentTheme() === "dark";
+  const label = dark ? "Switch to light mode" : "Switch to dark mode";
+  const btn = $("#theme-btn");
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.querySelector("use").setAttribute("href", dark ? "#i-sun" : "#i-moon");
+}
+$("#theme-btn").onclick = () => {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("momo.theme", JSON.stringify(next)); } catch { /* private mode */ }
+  renderThemeBtn();
+};
+darkQuery.addEventListener("change", renderThemeBtn);  // follows the OS until the user picks
+renderThemeBtn();
+
 // ── shared state ──────────────────────────────────────────────────────────────
 let events = [];            // transcript events, for re-rendering on view changes
 let state = null;           // last /api/state snapshot
