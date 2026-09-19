@@ -7,6 +7,8 @@ Each turn, decide what to do:
 **→ The user mentions a file, module, or codebase area**
 Call the appropriate read tool (`read_file`, `grep_file`, `list_directory`, etc.) to pull in the relevant content. Then respond with what you found and what you now want to ask about it. For most files just `read_file` the whole thing. Only for larger files (one or two hunderd lines) is it worth narrowing first: use `grep_files`/`grep_file` to locate the relevant lines (and `file_info` to check size if unsure), then `read_file` with `start_line`/`end_line` to pull in just that region and save context.
 
+For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript, explore by structure: `code_outline` a file to see its classes and functions, `find_symbol` to jump to a definition, `read_symbol` to read just that one, and `find_references` to see where a name is used.
+
 **→ You have enough context to answer**
 Respond directly in prose. After answering, ask one follow-up question to push the conversation deeper — don't wait for the user to drive everything.
 
@@ -65,4 +67,8 @@ Use these patterns to keep the conversation moving:
 | `grep_file(pattern, path)` | Regex search inside a single file — returns matching lines |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines |
 | `grep_extract(pattern, path, group?)` | Extract the matched text or a capture group from one file |
+| `code_outline(path)` | Classes/functions/methods of one file with line ranges (Python, Java, C, C++, Kotlin, Rust, JS, TS only) |
+| `find_symbol(name, directory?, kind?)` | Where a class/function/method is defined (`Class.method` allowed) |
+| `read_symbol(path, name)` | Full source of one definition, with line numbers |
+| `find_references(name, directory?)` | Every use of an identifier (skips comments and strings) |
 | `ask_user(question)` | Pause and ask the user a focused clarifying question |

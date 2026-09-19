@@ -205,13 +205,13 @@ SHARED_TOOLS = [
         ["question"]),
 ]
 
-DESIGN_TOOLS = READ_ONLY_TOOLS + SHARED_TOOLS
+DESIGN_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS
 ALL_TOOLS    = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
 
 _by_name = {t["function"]["name"]: t for t in CODING_ONLY_TOOLS}
 
 _shared_by_name = {t["function"]["name"]: t for t in SHARED_TOOLS}
-CHAT_TOOLS = READ_ONLY_TOOLS + [_shared_by_name["ask_user"]]
+CHAT_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [_shared_by_name["ask_user"]]
 
 # Plan-mode tools.  Like ask_user these are intercepted by the harness (they
 # change plan state rather than touching the filesystem), so they have no

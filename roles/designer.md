@@ -20,6 +20,7 @@ Each turn, decide what action to take:
 
 **→ You need to explore files or understand the codebase**
 Call any combination of read tools in one turn (`read_file`, `list_directory`, `grep_files`, etc.).
+For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript, explore by structure: `code_outline` a file, `find_symbol` to jump to a definition, `read_symbol` to read one, and `find_references` to see where a name is used.
 All results are returned together. Incorporate what you find and loop.
 
 **→ You have a question for the user**
@@ -142,6 +143,10 @@ You still send one `ask_user` call at a time, but each call should move the desi
 | `grep_file(pattern, path)` | Regex search inside a single file — returns matching lines |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines |
 | `grep_extract(pattern, path, group?)` | Extract the matched text or a capture group from one file |
+| `code_outline(path)` | Classes/functions/methods of one file with line ranges (Python, Java, C, C++, Kotlin, Rust, JS, TS only) |
+| `find_symbol(name, directory?, kind?)` | Where a class/function/method is defined (`Class.method` allowed) |
+| `read_symbol(path, name)` | Full source of one definition, with line numbers |
+| `find_references(name, directory?)` | Every use of an identifier (skips comments and strings) |
 | `write_file(path, content)` | Write the finished design to a file |
 | `ask_user(question)` | Pause and ask the user a clarifying question mid-loop |
 
