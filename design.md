@@ -291,6 +291,11 @@ The system prompt is built from `roles/<mode>.md` plus any active skill files fr
 | `chat` | `roles/chat.md` | read-only + code nav + `ask_user` | Conversational Q&A over code and documents; never writes files |
 | `momo` | `roles/momo.md` | all tools | Cat companion; full tool access with a warm, curious persona |
 
+`read_file`'s trailer is deliberately load-bearing: on a file `code_nav` can parse it names the
+definition a ranged read landed in, and on a whole-file read it points at `code_outline`. Measured
+against the local 9B, that one hint moved `read_file` from 55% of all tool calls to 20% and the
+navigation tools from 19% to 63%; see `evals/`.
+
 "Code nav" is the tree-sitter tool set in `harness/code_nav.py` (`code_outline`, `find_symbol`,
 `read_symbol`, `find_references`, `file_dependencies`), gated on `code_nav.AVAILABLE` so a missing
 tree-sitter install simply removes it from every mode. It keeps two LRU caches: a small one holding

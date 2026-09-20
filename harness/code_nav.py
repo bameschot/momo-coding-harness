@@ -629,6 +629,21 @@ def _enclosing(symbols: list[Symbol], line: int, skip_name: str | None = None) -
     return best
 
 
+# Public because read_file's footer, find_symbol's line form and read_symbol's
+# line form all need the same "which definition is line N in?" lookup.
+def enclosing(idx: "_Index", line: int) -> Symbol | None:
+    return _enclosing(idx.symbols, line)
+
+
+_LINE_QUERY = re.compile(r"[Ll]?(\d+)")
+
+
+def line_query(name: str) -> int | None:
+    """The line number in a name like '1300' or 'L1300', else None."""
+    m = _LINE_QUERY.fullmatch(name.strip())
+    return int(m.group(1)) if m else None
+
+
 _ERROR_NOTE ="(note: the file has syntax errors or unsupported syntax; results may be incomplete)"
 
 
@@ -779,6 +794,28 @@ def find_symbol(name: str, directory: str = ".", kind: str | None = None, *, wor
         return root
     if not root.exists():
         return f"ERROR: not found: {directory}"
+    # "which definition is line N in?" — one header line, where read_symbol would
+    # return the whole definition.  This is the cheap answer to a stack trace or a
+    # grep hit, so it belongs on the *find* tool.
+    line = line_query(name)
+    if line is not None:
+        if root.is_dir():
+            return (f"ERROR: looking up line {line} needs a single file, not a directory — "
+                    f"pass the file as 'directory', e.g. find_symbol(\"{name}\", \"path/to/file.py\")")
+        try:
+            idx = index(root)
+        except OSError as e:
+            return f"ERROR: {e}"
+        if idx is None:
+            return _unsupported(directory)
+        if not 1 <= line <= max(idx.nlines, 1):
+            return f"ERROR: line {line} is outside {directory} (1-{idx.nlines})"
+        owner = enclosing(idx, line)
+        if owner is None:
+            return (f"(line {line} of {_rel(root, workdir)} is not inside any definition — "
+                    "it is at module level)")
+        return (f"{_rel(root, workdir)}:L{owner.start}-{owner.end}  {owner.kind} {owner.qualname}"
+                f"  | {owner.signature}")
     stats: dict = {}
     hits = []
     kinds: dict[str, int] = {}
@@ -825,8 +862,8 @@ def read_symbol(path: str, name: str, *, workdir: Path) -> str:
     # A line number instead of a name: read the definition containing that line.
     # Closes the loop after a grep_files hit, a find_references hit or a
     # traceback, all of which hand the model `file:line`.
-    if re.fullmatch(r"[Ll]?\d+", name.strip()):
-        line = int(name.strip().lstrip("Ll"))
+    line = line_query(name)
+    if line is not None:
         if not 1 <= line <= max(len(parsed.lines), 1):
             return f"ERROR: line {line} is outside {path} (1-{len(parsed.lines)})"
         owner = _enclosing(parsed.symbols, line)

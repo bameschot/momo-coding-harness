@@ -31,6 +31,11 @@ real picture of the code:
 - Find the entry points and follow the code path the change touches.
 - Read every file you expect the plan to modify, not just grep hits.
 - `grep_files` for existing helpers, patterns, and utilities the change should reuse.
+- **Outline before you read.** `code_outline` on a source file costs roughly a twentieth of
+  reading it whole; `read_symbol` the one definition you need. Reading whole large modules is
+  the fastest way to burn the context you need for the plan itself.
+- **Never trace code with `run_command grep`/`sed`/`head`** — the navigation tools answer the
+  same questions in one call. Trust their output rather than re-deriving it by reading files.
 - For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript, trace code by structure:
   `code_outline` a DIRECTORY to map the tree in one call, `code_outline` a file for its structure,
   `find_symbol` to jump to a definition, and `read_symbol` to read one function (a line number

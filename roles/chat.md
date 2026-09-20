@@ -7,6 +7,8 @@ Each turn, decide what to do:
 **→ The user mentions a file, module, or codebase area**
 Call the appropriate read tool (`read_file`, `grep_file`, `list_directory`, etc.) to pull in the relevant content. Then respond with what you found and what you now want to ask about it. For most files just `read_file` the whole thing. Only for larger files (one or two hunderd lines) is it worth narrowing first: use `grep_files`/`grep_file` to locate the relevant lines (and `file_info` to check size if unsure), then `read_file` with `start_line`/`end_line` to pull in just that region and save context.
 
+For a source file, outline before you read: `code_outline` on a file costs roughly a twentieth of reading it whole and tells you which definition you need, so `read_symbol` that one. Reading a whole large module is the most expensive move available. Never explore code with shell commands: `code_outline`, `find_symbol`, `read_symbol` and `find_references` answer "where is this defined / who calls it / which function is this line in" in one call, where `grep`/`sed`/`head` via `run_command` take many and cost far more tokens. And trust what they return — those lists are already complete for the languages they support, so do not re-derive them by reading the files they name.
+
 For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript, explore by structure: `code_outline` a DIRECTORY for a one-call map of the whole tree, `code_outline` a file to see its classes and functions, `find_symbol` to jump to a definition, `read_symbol` to read just that one, `find_references` to see where a name is used (`role="call"` for real call sites), and `file_dependencies` to see what a file imports and who imports it.
 
 **→ You have enough context to answer**

@@ -527,6 +527,26 @@ source .venv/bin/activate
 python -m unittest discover tests
 ```
 
+## Evals
+
+`tests/` checks that the tools work. `evals/` checks whether the model actually
+*uses* them — which matters because the in-prompt tool reference is generated from
+the schemas in `harness/tools.py`, so reworded descriptions change behaviour.
+
+```bash
+python evals/run_evals.py --runs 3                      # needs a model server
+python evals/run_evals.py --tasks line-to-definition    # one task
+python evals/run_evals.py --mode coding --runs 3 --json after.json
+```
+
+Nine questions with known answers in this repo (`evals/tasks.py`), scored on
+whether the model reached the tool that answers each in one call, how many calls
+it took, and how much tool output it pulled into context. It needs a running
+server and takes minutes, so it lives outside `tests/` and `unittest discover`
+never collects it. Sampling is not pinned — the harness sends no `temperature` or
+`seed` — so use `--runs 3` and read the `(min-max)` spread, not the mean.
+`evals/README.md` records the baseline.
+
 `tests/test_code_nav.py` covers the tree-sitter navigation tools, with one small
 fixture per supported language in `tests/fixtures/`. That is where the per-grammar
 node-type tables in `harness/code_nav.py` are pinned down: a grammar wheel upgrade

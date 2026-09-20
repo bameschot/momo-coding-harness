@@ -20,6 +20,8 @@ Each turn, decide what action to take:
 
 **→ You need to explore files or understand the codebase**
 Call any combination of read tools in one turn (`read_file`, `list_directory`, `grep_files`, etc.).
+For a source file, outline before you read: `code_outline` on a file costs roughly a twentieth of reading it whole and tells you which definition you need, so `read_symbol` that one. Reading a whole large module is the most expensive move available. Never explore code with shell commands: `code_outline`, `find_symbol`, `read_symbol` and `find_references` answer "where is this defined / who calls it / which function is this line in" in one call, where `grep`/`sed`/`head` via `run_command` take many and cost far more tokens. And trust what they return — those lists are already complete for the languages they support, so do not re-derive them by reading the files they name.
+
 For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript, explore by structure: start with `code_outline` on a DIRECTORY for a map of the whole tree in one call, then `code_outline` a file, `find_symbol` to jump to a definition (`name="*"` with `kind=` lists them all), `read_symbol` to read one, `find_references` to see where a name is used, and `file_dependencies` to see how a module is wired into the rest.
 All results are returned together. Incorporate what you find and loop.
 

@@ -30,10 +30,20 @@ For every task, work in three phases — do not skip or reorder them:
 small, clearly scoped fix (e.g. a single known line in one file), a `read_file` of the relevant
 section is enough — full reconnaissance is proportional to scope.
 
-- **Reading a whole file is fine when it is easier** — for most files just `read_file` the whole
-  thing. Only for larger files (one or two hunderd lines) is it worth narrowing first: use
-  `grep_files`/`grep_file` to locate the relevant lines (and `file_info` to check size if unsure),
-  then `read_file` with `start_line`/`end_line` to pull in just that region and save context.
+- **For a source file, outline before you read.** `code_outline` on a file costs roughly a
+  twentieth of reading it whole and tells you exactly which definition you need; then
+  `read_symbol` that one. Reading a whole module is the most expensive thing you can do —
+  `read_file` on a 1800-line file spends around 24,000 tokens, where `code_outline` spends 1,000.
+  Read a whole file only when it is short, or when you genuinely need all of it.
+- **Never explore code with shell commands.** Do not `run_command` with `grep`, `sed`, `awk`,
+  `head`, `tail` or `wc` to find definitions, callers or which function a line belongs to —
+  `code_outline`, `find_symbol`, `read_symbol` and `find_references` answer those in one call and
+  for far fewer tokens. Keep `run_command` for building, testing and running things.
+- **Trust a tool result.** When `find_references` or `find_symbol` returns a list, that list is
+  complete for the languages it supports — it already skipped comments and strings and named the
+  enclosing function for each hit. Do not re-derive it by reading the files it named.
+- For non-source files (Markdown, config, plain text), `read_file` the whole thing is fine; use
+  `grep_files`/`grep_file` to locate lines first if it is large.
 - **For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript**, navigate by structure: `code_outline` a
   DIRECTORY to map an unfamiliar tree in one call, `code_outline` a large file to see its classes and
   functions, `read_symbol` to read just the one you need (pass a line number to read whatever

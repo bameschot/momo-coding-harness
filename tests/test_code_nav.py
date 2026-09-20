@@ -7,13 +7,32 @@ assertions.
 
 Run with:  python -m unittest discover tests
 """
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
 from harness import code_nav
 
 FIXTURES = Path(__file__).parent / "fixtures"
-BROKEN = FIXTURES / "broken"
+
+# A deliberately unparseable file, plus a scratch area for tests that write.
+# Both live in a temp directory rather than in tests/: a broken file checked into
+# the repo made every project-wide code_nav scan report "1 file with syntax
+# errors", and scratch files written under tests/ survive a crashed test run.
+SCRATCH: Path
+BROKEN: Path
+
+
+def setUpModule():
+    global SCRATCH, BROKEN
+    SCRATCH = Path(tempfile.mkdtemp(prefix="code_nav_test_"))
+    BROKEN = SCRATCH
+    (SCRATCH / "broken.py").write_text("def broken(\n    this is not valid python ((\n")
+
+
+def tearDownModule():
+    shutil.rmtree(SCRATCH, ignore_errors=True)
 
 # One fixture per supported grammar.  Each declares a Parser type with a parse
 # method, a free `run` function, and at least one import — so the same
@@ -283,7 +302,7 @@ class FileDependencies(unittest.TestCase):
 
     def test_nested_imports_are_found(self):
         """An import deferred inside a function is still a dependency."""
-        src = FIXTURES / "broken"  # reuse the isolated dir for a scratch file
+        src = SCRATCH
         f = src / "lazy.py"
         f.write_text("def go():\n    from collections import deque\n    return deque()\n")
         try:
@@ -364,7 +383,7 @@ class Caching(unittest.TestCase):
             code_nav._index_cache.clear()
 
     def test_reparse_after_mtime_change(self):
-        f = BROKEN / "churn.py"
+        f = SCRATCH / "churn.py"
         f.write_text("def one():\n    pass\n")
         try:
             self.assertIn("one", code_nav.find_symbol("one", "churn.py", workdir=BROKEN))

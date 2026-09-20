@@ -99,26 +99,30 @@ CODE_NAV_TOOLS = [
         []),
 
     _fn("find_symbol",
-        f"Find where a class, function or method is DEFINED across the project ({_CODE_NAV_LANGS} "
-        "files). Unlike grep_files it only returns real definitions, never comments, strings or "
-        "call sites. Returns file:L<start>-<end>, kind, qualified name and signature line. "
-        "The name may be a wildcard pattern ('*' and '?'), so combined with kind you can LIST "
-        "definitions rather than look one up: name='*' with kind='class' gives every class. "
-        "Results are capped at 100.",
-        {"name":      {"type": "string", "description": "Name to find, e.g. 'send', a qualified 'Harness.send', or a pattern like '*_handler' or '*' for all"},
-         "directory": {"type": "string", "description": "Directory (or single file) to search (default: .)"},
+        f"Find where a class, function or method is DEFINED, or WHICH definition a line belongs to "
+        f"({_CODE_NAV_LANGS} files). Pass a LINE NUMBER as the name (e.g. '1300' or 'L1300') plus "
+        "that one file, and you get the definition containing that line in a single line of output "
+        "— the cheap answer after a stack trace, a grep_files hit or a find_references hit, all of "
+        "which give you 'file:line'. Pass a name and it finds the definition: unlike grep_files it "
+        "only returns real definitions, never comments, strings or call sites. Returns "
+        "file:L<start>-<end>, kind, qualified name and signature line. The name may be a wildcard "
+        "pattern ('*' and '?'), so combined with kind you can LIST definitions rather than look one "
+        "up: name='*' with kind='class' gives every class. Results are capped at 100.",
+        {"name":      {"type": "string", "description": "A line number like '1300' to get the definition containing it; or a name to find, e.g. 'send', a qualified 'Harness.send', or a pattern like '*_handler' or '*' for all"},
+         "directory": {"type": "string", "description": "Where to look: a directory, or a single file. When name is a line number this MUST be the one file that line is in, e.g. 'harness/harness.py' — not the directory containing it. Default: ."},
          "kind":      {"type": "string", "description": "Only this kind: class, interface, enum, struct, trait, impl, object, function, method, ... (default: any)"}},
         ["name"]),
 
     _fn("read_symbol",
         "Read the complete source of ONE class, function or method from a file, with line numbers "
-        "in the same format as read_file (so you can copy text for edit_file). Use a qualified name "
-        "like 'Class.method' when the bare name is ambiguous; if it still matches several "
-        "definitions you get their line ranges instead. You can also pass a LINE NUMBER instead of "
-        "a name to read whichever definition contains that line — use this after a grep_files hit, "
-        "a find_references hit or a stack trace, which all give you 'file:line'.",
+        "in the same format as read_file (so you can copy text for edit_file). `name` may be either "
+        "the definition's name or a LINE NUMBER ('1300' / 'L1300'), which reads whichever definition "
+        "contains that line — use the line form after a grep_files hit or a stack trace. Use a "
+        "qualified name like 'Class.method' when a bare name is ambiguous; if it still matches "
+        "several definitions you get their line ranges instead. To learn only WHICH definition a "
+        "line is in, without its body, use find_symbol with the line number instead.",
         {"path": {"type": "string", "description": "Source file containing the definition"},
-         "name": {"type": "string", "description": "Name of the definition, e.g. 'parse' or 'Parser.parse'; or a line number like '251' to read the definition containing that line"}},
+         "name": {"type": "string", "description": "A line number like '1300' to read the definition containing it, or a name like 'parse' or 'Parser.parse'"}},
         ["path", "name"]),
 
     _fn("find_references",
@@ -348,6 +352,41 @@ def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
     return "\n".join(matches)
 
 
+def _read_footer(p: Path, path: str, n: int, start_line: int, end_line: int | None) -> str:
+    """The trailer after read_file output — the most-executed hint in the tool set.
+
+    On a file code_nav can parse it points at the structural tools, because
+    reading a large module whole costs roughly twenty times what code_outline
+    does, and a ranged read almost always wants to know which definition the
+    range landed in.  Anything code_nav cannot parse keeps the original
+    line-range hint.
+    """
+    idx = None
+    if code_nav.AVAILABLE:
+        try:
+            idx = code_nav.index(p)
+        except OSError:
+            idx = None
+    whole = end_line is None and start_line <= 1
+    if idx is None or not idx.symbols:
+        if whole and n > _READ_FOOTER_LINES:
+            return f"\n[{n} lines total — use start_line/end_line to read specific sections]"
+        return ""
+    if whole:
+        if n <= _READ_FOOTER_LINES:
+            return ""
+        return (f"\n[{n} lines total, {len(idx.symbols)} definitions — code_outline shows this "
+                f"{idx.lang} file's structure for a fraction of the tokens, and read_symbol reads "
+                f"one definition; or use start_line/end_line]")
+    owner = code_nav.enclosing(idx, start_line)
+    shown_end = min(end_line or n, n)
+    if owner is None:
+        return f"\n[showing lines {start_line}-{shown_end} of {n}]"
+    return (f"\n[showing lines {start_line}-{shown_end} of {n} — line {start_line} is inside "
+            f"{owner.kind} {owner.qualname} (L{owner.start}-{owner.end}); "
+            f'read_symbol("{path}", "{owner.qualname}") reads that definition whole]')
+
+
 def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, workdir: Path) -> str:
     p = _safe_path(path, workdir)
     if isinstance(p, str):
@@ -365,9 +404,7 @@ def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, w
     numbered = "".join(f"{s + i + 1:4}: {l}" for i, l in enumerate(chunk))
     if not numbered:
         return "(empty)"
-    if end_line is None and n > _READ_FOOTER_LINES:
-        numbered += f"\n[{n} lines total — use start_line/end_line to read specific sections]"
-    return numbered
+    return numbered + _read_footer(p, path, n, start_line, end_line)
 
 
 def _grep_file(pattern: str, path: str, *, workdir: Path) -> str:
@@ -847,7 +884,7 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "grep_files":     {"pattern": "TODO"},
     "grep_extract":   {"pattern": "def (\\w+)", "path": "main.py", "group": 1},
     "code_outline":   {"path": "src", "depth": 1},
-    "find_symbol":    {"name": "Parser.parse"},
+    "find_symbol":    {"name": "L1300", "directory": "src/parser.py"},
     "read_symbol":    {"path": "src/parser.py", "name": "Parser.parse"},
     "find_references": {"name": "parse_config", "role": "call"},
     "file_dependencies": {"path": "src/parser.py"},
