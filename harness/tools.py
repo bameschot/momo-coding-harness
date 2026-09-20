@@ -88,18 +88,24 @@ READ_ONLY_TOOLS = [
 _CODE_NAV_LANGS = "Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript"
 CODE_NAV_TOOLS = [
     _fn("code_outline",
-        f"Show the structure of one source file ({_CODE_NAV_LANGS}): every class, function and "
-        "method with its line range and signature line, indented by nesting. Use it to "
-        "understand a file without reading all of it, then read_symbol or read_file the part you need.",
-        {"path": {"type": "string", "description": "Source file to outline"}},
-        ["path"]),
+        f"Show the structure of source code ({_CODE_NAV_LANGS}). Given a FILE: every class, "
+        "function and method with its line range and signature line, indented by nesting — use it "
+        "to understand a file without reading all of it, then read_symbol or read_file the part "
+        "you need. Given a DIRECTORY: a one-line-per-file map of the top-level definitions of "
+        "every source file under it. Start here to get your bearings in an unfamiliar project — "
+        "one call on a directory replaces outlining each file separately.",
+        {"path":  {"type": "string", "description": "Source file to outline, or a directory to map (default: .)"},
+         "depth": {"type": "integer", "description": "Nesting levels to show: 1 = top-level definitions only, 2 = their methods too (default: 1 for a directory, all levels for a file)"}},
+        []),
 
     _fn("find_symbol",
         f"Find where a class, function or method is DEFINED across the project ({_CODE_NAV_LANGS} "
         "files). Unlike grep_files it only returns real definitions, never comments, strings or "
         "call sites. Returns file:L<start>-<end>, kind, qualified name and signature line. "
+        "The name may be a wildcard pattern ('*' and '?'), so combined with kind you can LIST "
+        "definitions rather than look one up: name='*' with kind='class' gives every class. "
         "Results are capped at 100.",
-        {"name":      {"type": "string", "description": "Name to find, e.g. 'send' or a qualified 'Harness.send'"},
+        {"name":      {"type": "string", "description": "Name to find, e.g. 'send', a qualified 'Harness.send', or a pattern like '*_handler' or '*' for all"},
          "directory": {"type": "string", "description": "Directory (or single file) to search (default: .)"},
          "kind":      {"type": "string", "description": "Only this kind: class, interface, enum, struct, trait, impl, object, function, method, ... (default: any)"}},
         ["name"]),
@@ -108,20 +114,38 @@ CODE_NAV_TOOLS = [
         "Read the complete source of ONE class, function or method from a file, with line numbers "
         "in the same format as read_file (so you can copy text for edit_file). Use a qualified name "
         "like 'Class.method' when the bare name is ambiguous; if it still matches several "
-        "definitions you get their line ranges instead.",
+        "definitions you get their line ranges instead. You can also pass a LINE NUMBER instead of "
+        "a name to read whichever definition contains that line — use this after a grep_files hit, "
+        "a find_references hit or a stack trace, which all give you 'file:line'.",
         {"path": {"type": "string", "description": "Source file containing the definition"},
-         "name": {"type": "string", "description": "Name of the definition, e.g. 'parse' or 'Parser.parse'"}},
+         "name": {"type": "string", "description": "Name of the definition, e.g. 'parse' or 'Parser.parse'; or a line number like '251' to read the definition containing that line"}},
         ["path", "name"]),
 
     _fn("find_references",
-        f"Find every place an identifier is used across the project ({_CODE_NAV_LANGS} files): "
-        "calls, reads, type uses and the definition itself (tagged '(def)'). Each hit names the "
-        "function or class it sits in, e.g. '[in Parser.parse]'. Matches whole "
-        "identifiers only and skips comments and strings, so it is more exact than grep_files. "
-        "Use before renaming or changing a function's signature. Results are capped at 200.",
+        f"Find every place an identifier is used across the project ({_CODE_NAV_LANGS} files). "
+        "Each hit names the function or class it sits in, e.g. '[in Parser.parse]', and tags what "
+        "the use IS: '(call)' a call site, '(def)' the definition, '(import)' an import, "
+        "'(type)' a type reference, '(other)' a plain read or assignment. A call on an object also "
+        "shows the receiver, e.g. '(call, recv ast)' for 'ast.parse(...)' — that is how you spot "
+        "unrelated same-named methods. Matches whole identifiers only and skips comments and "
+        "strings, so it is more exact than grep_files. Use before renaming or changing a "
+        "function's signature, and pass role='call' to see only real call sites. "
+        "Results are capped at 200.",
         {"name":      {"type": "string", "description": "Identifier to find, e.g. 'parse_config'"},
-         "directory": {"type": "string", "description": "Directory (or single file) to search (default: .)"}},
+         "directory": {"type": "string", "description": "Directory (or single file) to search (default: .)"},
+         "role":      {"type": "string", "description": "Only uses of this kind: call, def, import, type, other (default: all kinds)"}},
         ["name"]),
+
+    _fn("file_dependencies",
+        f"Show what one source file DEPENDS ON and what depends on IT ({_CODE_NAV_LANGS} files): "
+        "the imports/includes it declares, and the files elsewhere in the project that import it. "
+        "Use it to judge the blast radius of a change before making it, or to find a module's "
+        "callers when you do not yet know a name to search for. Importers are matched on the text "
+        "of each import, not resolved, so a same-named module elsewhere can show up and dynamic "
+        "imports can be missed.",
+        {"path":      {"type": "string", "description": "Source file to inspect"},
+         "direction": {"type": "string", "description": "'both' (default), 'imports' for only what it imports, or 'importers' for only what imports it"}},
+        ["path"]),
 ] if code_nav.AVAILABLE else []
 
 CODING_ONLY_TOOLS = [
@@ -743,6 +767,7 @@ if code_nav.AVAILABLE:
         "find_symbol":        code_nav.find_symbol,
         "read_symbol":        code_nav.read_symbol,
         "find_references":    code_nav.find_references,
+        "file_dependencies":  code_nav.file_dependencies,
     })
 
 
@@ -821,10 +846,11 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "grep_file":      {"pattern": "def ", "path": "main.py"},
     "grep_files":     {"pattern": "TODO"},
     "grep_extract":   {"pattern": "def (\\w+)", "path": "main.py", "group": 1},
-    "code_outline":   {"path": "src/parser.py"},
+    "code_outline":   {"path": "src", "depth": 1},
     "find_symbol":    {"name": "Parser.parse"},
     "read_symbol":    {"path": "src/parser.py", "name": "Parser.parse"},
-    "find_references": {"name": "parse_config"},
+    "find_references": {"name": "parse_config", "role": "call"},
+    "file_dependencies": {"path": "src/parser.py"},
     "write_file":     {"path": "hello.py", "content": "print('hello!')"},
     "edit_file":      {"path": "main.py", "old_string": "existing line", "new_string": "replacement line"},
     "append_to_file": {"path": "notes.md", "content": "\n## New section\n"},

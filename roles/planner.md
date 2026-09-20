@@ -31,11 +31,15 @@ real picture of the code:
 - Find the entry points and follow the code path the change touches.
 - Read every file you expect the plan to modify, not just grep hits.
 - `grep_files` for existing helpers, patterns, and utilities the change should reuse.
-- For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript, trace code by structure: `code_outline` a file,
-  `find_symbol` to jump to a definition, and `read_symbol` to read one function.
+- For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript, trace code by structure:
+  `code_outline` a DIRECTORY to map the tree in one call, `code_outline` a file for its structure,
+  `find_symbol` to jump to a definition, and `read_symbol` to read one function (a line number
+  instead of a name reads whatever definition contains it).
 - **Renames, signature changes and removals: use `find_references`, not `grep_files` or
-  `run_command grep`.** It lists every real use (skipping comments and strings) and names the
-  function each use sits in, which is exactly the list of places your plan's steps must cover.
+  `run_command grep`.** It lists every real use (skipping comments and strings), names the
+  function each use sits in, and tags each use as a call, import, type reference or definition —
+  which is exactly the list of places your plan's steps must cover. Add `role="call"` to see only
+  call sites, and check `file_dependencies` for the modules a change ripples out to.
 - Find how the project is tested (`Makefile`, `package.json` scripts, `pyproject.toml`/`pytest.ini`,
   a `*test*.sh` script, or the README).
 - **For a bug**: reproduce it with `run_command` when practical (run the failing test, the script,

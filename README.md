@@ -482,17 +482,21 @@ Switch modes with `/design`, `/chat`, `/plan`, `/code`, `/momo`, or `Shift+Tab`.
 | `read_file` | Read a file, optionally a specific line range |
 | `grep_file` | Regex search in a single file — returns matching lines |
 | `grep_files` | Recursive regex search across a directory — returns matching lines |
+| `grep_extract` | Extract only the matched text (or a capture group) from a single file |
 
-### Code navigation (coding, plan, momo modes)
+### Code navigation (all modes)
 
 Syntax-aware tools built on [tree-sitter](https://tree-sitter.github.io/) for Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript (including JSX/TSX). The grammars are installed from `requirements.txt` and work offline. If tree-sitter is not installed, these tools are simply not offered.
 
 | Tool | Description |
 |---|---|
-| `code_outline` | Classes, functions and methods of one file, with line ranges and signatures |
-| `find_symbol` | Where a name (or `Class.method`) is defined across the project, never comments or call sites |
-| `read_symbol` | The full source of one definition, numbered like `read_file` |
-| `find_references` | Every use of an identifier, skipping comments and strings and tagging the definition `(def)` |
+| `code_outline` | Structure of one file — classes, functions and methods with line ranges and signatures. Given a **directory** instead, a one-line-per-file map of every source file under it, which is the cheapest way to get your bearings in an unfamiliar tree. `depth` controls how much nesting is shown. |
+| `find_symbol` | Where a name (or `Class.method`) is defined across the project, never comments or call sites. The name may be a wildcard pattern, so `name="*"` with `kind="class"` **lists** every class rather than looking one up. |
+| `read_symbol` | The full source of one definition, numbered like `read_file`. Pass a **line number** instead of a name to read whichever definition contains it — the natural follow-up to a `grep_files` hit or a stack trace. |
+| `find_references` | Every use of an identifier, skipping comments and strings. Each hit names the enclosing definition and tags what the use *is*: `(call)`, `(def)`, `(import)`, `(type)` or `(other)`, plus the receiver for a method call (`(call, recv JSON)`). `role=` filters to one kind, and a qualified name like `JSON.parse` keeps only that receiver. |
+| `file_dependencies` | What one file imports (including imports nested inside functions) and which files import it. Use it to judge the blast radius of a change. Importers are matched on the text of each import rather than resolved, so a same-named module elsewhere can appear and dynamic imports can be missed. |
+
+`find_symbol` and `find_references` say so when a file in the scanned tree could not be parsed or was skipped for size, so an empty result is never mistaken for proof of absence.
 ### Shared (design, coding, momo modes)
 
 | Tool | Description |
@@ -515,6 +519,20 @@ Chat mode also has `ask_user` but not `write_file`.
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
 
 `grep_files` returns at most 200 matches; `find_files` returns at most 100 files. Results over the cap include a trailer explaining how many were omitted.
+
+## Tests
+
+```bash
+source .venv/bin/activate
+python -m unittest discover tests
+```
+
+`tests/test_code_nav.py` covers the tree-sitter navigation tools, with one small
+fixture per supported language in `tests/fixtures/`. That is where the per-grammar
+node-type tables in `harness/code_nav.py` are pinned down: a grammar wheel upgrade
+that renames a node would otherwise silently empty a tool's output instead of
+failing. `tests/fixtures/broken/` holds a deliberately unparseable file used to
+check that the tools admit when a file could not be read.
 
 ## Skills
 
@@ -609,15 +627,18 @@ For Qwen-family models, `<`, `>`, and `&` in tool result content are XML-escaped
 The set of tools included in the call depends on the current mode:
 
 ```
-design  → list_directory  file_info  find_files  read_file
-          grep_file  grep_files  write_file  ask_user
+read-only → list_directory  file_info  find_files  read_file
+            grep_file  grep_files  grep_extract
+
+code nav  → code_outline  find_symbol  read_symbol  find_references
+            file_dependencies          (omitted if tree-sitter is not installed)
+
+design  → read-only + code nav + write_file  ask_user
 
 coding  → all design tools + edit_file  delete_file  move_file
           append_to_file  run_command
-          code_outline  find_symbol  read_symbol  find_references
 
-chat    → list_directory  file_info  find_files  read_file
-          grep_file  grep_files  ask_user
+chat    → read-only + code nav + ask_user
 
 plan    → investigating: read-only tools + code navigation + run_command  ask_user  create_plan
           executing:     same as coding + complete_step  revise_plan

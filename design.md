@@ -285,10 +285,17 @@ The system prompt is built from `roles/<mode>.md` plus any active skill files fr
 
 | Mode | Role file | Tools | Purpose |
 |------|-----------|-------|---------|
-| `design` | `roles/designer.md` | read-only + `write_file` + `ask_user` | Interview-based design partner; explores codebase, writes specs |
-| `plan` | `roles/planner.md`, then `roles/coder.md` + plan state | investigating: read-only + `run_command` + `ask_user` + `create_plan`; executing: all tools + `complete_step` + `revise_plan` | Investigates, asks, writes `.momo-plan.md`; after approval executes it step by step (`Harness._execute_plan`), deleting the file when done |
+| `design` | `roles/designer.md` | read-only + code nav + `write_file` + `ask_user` | Interview-based design partner; explores codebase, writes specs |
+| `plan` | `roles/planner.md`, then `roles/coder.md` + plan state | investigating: read-only + code nav + `run_command` + `ask_user` + `create_plan`; executing: all tools + `complete_step` + `revise_plan` | Investigates, asks, writes `.momo-plan.md`; after approval executes it step by step (`Harness._execute_plan`), deleting the file when done |
 | `coding` | `roles/coder.md` | all tools | Engineer; full read/write/exec/git access |
-| `chat` | `roles/chat.md` | read-only + `ask_user` | Conversational Q&A over code and documents; never writes files |
+| `chat` | `roles/chat.md` | read-only + code nav + `ask_user` | Conversational Q&A over code and documents; never writes files |
 | `momo` | `roles/momo.md` | all tools | Cat companion; full tool access with a warm, curious persona |
+
+"Code nav" is the tree-sitter tool set in `harness/code_nav.py` (`code_outline`, `find_symbol`,
+`read_symbol`, `find_references`, `file_dependencies`), gated on `code_nav.AVAILABLE` so a missing
+tree-sitter install simply removes it from every mode. It keeps two LRU caches: a small one holding
+parse trees (~0.65 MB per file, so it stays small) for the tools that walk nodes, and a large one
+holding only symbols and imports, which is what the project-wide scans read — that split is what
+makes a repeated `find_symbol` over a large repo cheap.
 
 `{workdir}` in role files is substituted with the actual working directory path at load time (currently only `coder.md` uses this token).

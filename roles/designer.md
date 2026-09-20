@@ -20,7 +20,7 @@ Each turn, decide what action to take:
 
 **→ You need to explore files or understand the codebase**
 Call any combination of read tools in one turn (`read_file`, `list_directory`, `grep_files`, etc.).
-For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript, explore by structure: `code_outline` a file, `find_symbol` to jump to a definition, `read_symbol` to read one, and `find_references` to see where a name is used.
+For Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript, explore by structure: start with `code_outline` on a DIRECTORY for a map of the whole tree in one call, then `code_outline` a file, `find_symbol` to jump to a definition (`name="*"` with `kind=` lists them all), `read_symbol` to read one, `find_references` to see where a name is used, and `file_dependencies` to see how a module is wired into the rest.
 All results are returned together. Incorporate what you find and loop.
 
 **→ You have a question for the user**
@@ -143,10 +143,11 @@ You still send one `ask_user` call at a time, but each call should move the desi
 | `grep_file(pattern, path)` | Regex search inside a single file — returns matching lines |
 | `grep_files(pattern, directory?)` | Regex search across all files — returns matching lines |
 | `grep_extract(pattern, path, group?)` | Extract the matched text or a capture group from one file |
-| `code_outline(path)` | Classes/functions/methods of one file with line ranges (Python, Java, C, C++, Kotlin, Rust, JS, TS only) |
-| `find_symbol(name, directory?, kind?)` | Where a class/function/method is defined (`Class.method` allowed) |
-| `read_symbol(path, name)` | Full source of one definition, with line numbers |
-| `find_references(name, directory?)` | Every use of an identifier (skips comments and strings) |
+| `code_outline(path?, depth?)` | Structure of one file, or a one-line-per-file map of a whole directory (Python, Java, C, C++, Kotlin, Rust, JS, TS only) |
+| `find_symbol(name, directory?, kind?)` | Where a class/function/method is defined (`Class.method` and `*` patterns allowed) |
+| `read_symbol(path, name)` | Full source of one definition, with line numbers (`name` may be a line number) |
+| `find_references(name, directory?, role?)` | Every use of an identifier, tagged call/def/import/type (skips comments and strings) |
+| `file_dependencies(path, direction?)` | What a file imports, and which files import it |
 | `write_file(path, content)` | Write the finished design to a file |
 | `ask_user(question)` | Pause and ask the user a clarifying question mid-loop |
 

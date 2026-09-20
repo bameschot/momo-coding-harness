@@ -1,5 +1,6 @@
 ollama>=0.5,<1
-# Code navigation (code_outline / find_symbol / read_symbol / find_references).
+# Code navigation (code_outline / find_symbol / read_symbol / find_references /
+# file_dependencies).
 # Per-language grammar wheels are bundled and work offline; the harness still
 # runs without them, the code-navigation tools are just not offered.
 tree-sitter>=0.25,<0.27
