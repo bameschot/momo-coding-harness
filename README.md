@@ -216,9 +216,16 @@ Code blocks in replies, and files in the workspace preview, are colour-highlight
 
 ### Notifications
 
-Tick **Notify me** in the view options to get a desktop notification when the model finishes a turn that took longer than 8 seconds, or asks you a question. Notifications only fire while the momo tab is in the background. Clicking one brings the tab back. The browser asks for permission the first time.
+The view options have two independent switches under **Notifications**: **Desktop notification** and **Play a sound**. Either one fires when momo needs you:
 
-Even without notifications, the tab title shows **(•)** while there is unseen activity in a background tab.
+- **momo needs an answer** — a question from the `ask_user` tool, a `run_command` permission prompt (`/run-confirm on`), a plan waiting for approval, or a `[y/N]` confirmation from a command. The sound rises.
+- **the turn is over** — for turns longer than 2 seconds, so command echoes stay quiet. The sound falls, and the notification body is the first line of the reply.
+
+Both only fire while the momo window is **away** — minimised, on another tab, *or* simply not the focused window. That last case is the point: a browser sitting open beside your editor counts as away, so you are told without having to watch it. Clicking a notification brings the window back.
+
+Even with both switches off, the window title shows **(•)** while there is unseen activity, and clears when you come back.
+
+The browser asks permission the first time you tick **Desktop notification**. Desktop notifications need a secure origin, which `http://127.0.0.1` and `http://localhost` are — but a LAN address served over plain HTTP (`--web-host 0.0.0.0`) is not, and the browser withholds the API entirely there. An SSH tunnel keeps the origin `localhost` and so keeps notifications working. The sound has no such restriction and works over any origin.
 
 ### View options
 
@@ -233,7 +240,8 @@ Even without notifications, the tab title shows **(•)** while there is unseen 
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
-| Notify me | — | Desktop notifications, see [Notifications](#notifications) |
+| Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
+| Play a sound | — | An audible cue while the window is away, see [Notifications](#notifications) |
 | Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
 
 Typing the TUI command in the browser (e.g. `/think-output off`) has the same effect as the menu.

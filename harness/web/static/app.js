@@ -53,8 +53,9 @@ let history = [], histIdx = -1, histStash = "";
 let queue = [];             // messages typed while busy: {text, atts}
 let editing = null;         // {attachments: [names]} while editing the last message
 let connectedAt = 0;        // ignore backlog replay for notifications
-let unseen = false;         // new activity while the tab was hidden
+let unseen = false;         // new activity while the window was away
 let busySince = 0;
+let focused = document.hasFocus();  // a visible but unfocused window still counts as away
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 // An icon from the SVG sprite in index.html (same size and stroke everywhere).
@@ -193,9 +194,14 @@ function renderChat(role, text, extra = "") {
   }
   wrap.textContent = text;
   // `[y/N]` confirmation prompts from /commands get quick-answer buttons.
-  if (role === "system" && / \[y\/N\]$/.test(text)) return askCard(text, true, "Confirm");
+  if (isConfirmPrompt(role, text)) return askCard(text, true, "Confirm");
   return wrap;
 }
+
+// A /command confirmation (Controller._pending_confirm) arrives as a plain system
+// message, not as an ask_user event — both the renderer and the notifier need to
+// recognise it, so the test lives in one place.
+const isConfirmPrompt = (role, text) => role === "system" && / \[y\/N\]$/.test(text);
 
 function renderThink(text) {
   if (!view.think) return null;
@@ -498,35 +504,102 @@ function updateTitle() {
   document.title = `${unseen ? "(•) " : ""}momo · ${status.mode || ""}${busy ? " …" : ""}`;
 }
 
-// ── notifications (only while the tab is hidden) ──────────────────────────────
-let notifyOn = loadJSON("momo.notify", false) && "Notification" in window && Notification.permission === "granted";
+// ── notifications (only while the window is away) ─────────────────────────────
+// "Away" is hidden *or* unfocused: `document.hidden` alone misses the common
+// layout of the browser sitting open next to the editor — visible, but not the
+// window you are looking at.
+const away = () => document.hidden || !focused;
 const live = () => Date.now() - connectedAt > 2000;  // skip the backlog replay after (re)connect
+const NOTIFY_MIN_TURN_MS = 2000;  // below this a turn is an echo, not news
 
-function notify(title, body) {
-  if (!document.hidden || !live()) return;
+// `momo.notify` held a bare boolean before the sound option existed.
+function loadNotifyPrefs() {
+  const raw = loadJSON("momo.notify", null);
+  if (raw === true) return { desktop: true, sound: false };
+  if (raw && typeof raw === "object") return { desktop: !!raw.desktop, sound: !!raw.sound };
+  return { desktop: false, sound: false };
+}
+const notifyPrefs = loadNotifyPrefs();
+let desktopOn = notifyPrefs.desktop && "Notification" in window && Notification.permission === "granted";
+
+function saveNotifyPrefs() {
+  try { localStorage.setItem("momo.notify", JSON.stringify(notifyPrefs)); } catch { /* private mode */ }
+}
+
+// Two short blips, synthesised so the front end stays asset-free: "ask" rises
+// (a question), "finish" falls (a resolution), so they tell apart by ear alone.
+let audioCtx = null;
+function audio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === "suspended") audioCtx.resume();  // autoplay policy
+  return audioCtx;
+}
+function chime(kind) {
+  try {
+    const ctx = audio();
+    for (const [i, freq] of (kind === "ask" ? [622, 831] : [831, 622]).entries()) {
+      const at = ctx.currentTime + i * 0.14;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      // Ramped rather than switched, because a bare start/stop clicks.
+      gain.gain.setValueAtTime(0, at);
+      gain.gain.linearRampToValueAtTime(0.12, at + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.13);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(at);
+      osc.stop(at + 0.14);
+    }
+  } catch { /* no audio device, or still locked for want of a gesture */ }
+}
+
+// kind: "ask" (momo needs an answer) | "finish" (the turn is over)
+function signal(kind, title, body) {
+  if (!away() || !live()) return;
   unseen = true;
   updateTitle();
-  if (!notifyOn) return;
+  if (notifyPrefs.sound) chime(kind);
+  if (!desktopOn) return;
   try {
     const n = new Notification(title, { body: body.slice(0, 180), tag: "momo", renotify: true });
     n.onclick = () => { window.focus(); n.close(); };
   } catch { /* some browsers only allow notifications from a service worker */ }
 }
 
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && unseen) { unseen = false; updateTitle(); }
-});
+// Coming back clears the marker. Both events are wired: minimising fires blur,
+// switching tabs fires visibilitychange, and which arrives varies by platform.
+function onPresence() {
+  if (!away() && unseen) { unseen = false; updateTitle(); }
+}
+document.addEventListener("visibilitychange", onPresence);
+addEventListener("focus", () => { focused = true; onPresence(); });
+addEventListener("blur", () => { focused = false; });
 
-$("#notify").checked = notifyOn;
-$("#notify").onchange = async (e) => {
+$("#notify-desktop").checked = desktopOn;
+$("#notify-desktop").onchange = async (e) => {
   if (e.target.checked) {
+    // Plain HTTP on a LAN address is not a secure context, so the API is simply
+    // absent there — say so instead of blaming the browser's settings.
+    if (!isSecureContext) {
+      e.target.checked = false;
+      return attNote("Notifications need a secure origin — open http://localhost or tunnel over SSH.");
+    }
     if (!("Notification" in window)) { e.target.checked = false; return attNote("This browser has no notifications."); }
     const perm = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
-    notifyOn = perm === "granted";
-    e.target.checked = notifyOn;
-    if (!notifyOn) attNote("Notifications are blocked for this page in the browser settings.");
-  } else notifyOn = false;
-  try { localStorage.setItem("momo.notify", JSON.stringify(notifyOn)); } catch { /* ignore */ }
+    desktopOn = perm === "granted";
+    e.target.checked = desktopOn;
+    if (!desktopOn) attNote("Notifications are blocked for this page in the browser settings.");
+  } else desktopOn = false;
+  notifyPrefs.desktop = desktopOn;
+  saveNotifyPrefs();
+};
+
+$("#notify-sound").checked = notifyPrefs.sound;
+$("#notify-sound").onchange = (e) => {
+  notifyPrefs.sound = e.target.checked;
+  saveNotifyPrefs();
+  if (notifyPrefs.sound) chime("finish");  // this click is the gesture that unlocks audio
 };
 
 function lastAssistantText() {
@@ -542,8 +615,8 @@ function applyBusy(b, w) {
   busy = b; waiting = w;
   document.body.classList.toggle("is-busy", busy);
   if (wasBusy && !busy) {
-    if (Date.now() - busySince > 8000) {
-      notify("momo finished", lastAssistantText().split("\n").find((l) => l.trim()) || "The turn is complete.");
+    if (Date.now() - busySince > NOTIFY_MIN_TURN_MS) {
+      signal("finish", "momo finished", lastAssistantText().split("\n").find((l) => l.trim()) || "The turn is complete.");
     }
     // Send the next queued message once the turn is over.
     if (queue.length) setTimeout(sendNextQueued, 150);
@@ -616,8 +689,10 @@ function handleEvents(evs) {
       default: {
         events.push(ev);
         if (ev.type === "user") pushHistory(ev.text);
-        if (ev.type === "ask_user") notify("momo has a question", ev.question);
-        else if (document.hidden && live() && !unseen) { unseen = true; updateTitle(); }
+        if (ev.type === "ask_user") signal("ask", "momo has a question", ev.question);
+        else if (ev.type === "chat" && isConfirmPrompt(ev.role, ev.text)) {
+          signal("ask", "momo needs a confirmation", ev.text);
+        } else if (away() && live() && !unseen) { unseen = true; updateTitle(); }
         const n = renderEvent(ev);
         if (n) nodes.push(n);
       }
@@ -1085,6 +1160,8 @@ function syncViewMenu() {
   for (const r of document.querySelectorAll("input[name=diff-style]")) r.checked = r.value === view.diffStyle;
   $("#composer").classList.toggle("no-companion", !view.companion);
   $("#companion").hidden = !view.companion;
+  $("#notify-desktop").checked = desktopOn;
+  $("#notify-sound").checked = notifyPrefs.sound;
 }
 function closeMenu() {
   $("#view-menu").hidden = true;
