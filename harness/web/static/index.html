@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>momo</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext x='0' y='13' font-size='13'%3E%F0%9F%90%88%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="app.css">
 <script>
   // Apply the saved light/dark choice before first paint (no flash); app.js wires the toggle.
@@ -84,8 +84,8 @@
     <div class="menu-sub">Skills</div>
     <div id="skills-list" class="skills-list"><span class="muted">No skills found.</span></div>
     <div class="menu-sub">Notifications</div>
-    <label><input type="checkbox" id="notify-desktop"> Desktop notification</label>
     <label><input type="checkbox" id="notify-sound"> Play a sound</label>
+    <label><input type="checkbox" id="notify-desktop"> Desktop notification <span class="muted">(when away)</span></label>
     <div class="menu-sub">Other</div>
     <a id="export-link" class="menu-link" href="api/export" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download conversation (.md)</a>
   </div>

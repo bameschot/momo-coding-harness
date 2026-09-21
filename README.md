@@ -216,14 +216,17 @@ Code blocks in replies, and files in the workspace preview, are colour-highlight
 
 ### Notifications
 
-The view options have two independent switches under **Notifications**: **Desktop notification** and **Play a sound**. Either one fires when momo needs you:
+The view options have two independent switches under **Notifications**: **Play a sound** and **Desktop notification**. Both fire on the same two moments:
 
 - **momo needs an answer** — a question from the `ask_user` tool, a `run_command` permission prompt (`/run-confirm on`), a plan waiting for approval, or a `[y/N]` confirmation from a command. The sound rises.
 - **the turn is over** — for turns longer than 2 seconds, so command echoes stay quiet. The sound falls, and the notification body is the first line of the reply.
 
-Both only fire while the momo window is **away** — minimised, on another tab, *or* simply not the focused window. That last case is the point: a browser sitting open beside your editor counts as away, so you are told without having to watch it. Clicking a notification brings the window back.
+They differ in *when* they apply, which is the part worth knowing:
 
-Even with both switches off, the window title shows **(•)** while there is unseen activity, and clears when you come back.
+- **Play a sound** always plays, whether or not the momo window has focus. A focused window doesn't mean you're looking at it, and being told without having to look is the point of a cue you can hear.
+- **Desktop notification** only fires while the window is **away** — minimised, on another tab, or simply not the focused window. That last case matters: a browser sitting open beside your editor counts as away. Notifying about the window you're already staring at would just be noise. Clicking a notification brings the window back.
+
+Even with both switches off, the window title shows **(•)** while there is unseen activity in an away window, and clears when you come back.
 
 The browser asks permission the first time you tick **Desktop notification**. Desktop notifications need a secure origin, which `http://127.0.0.1` and `http://localhost` are — but a LAN address served over plain HTTP (`--web-host 0.0.0.0`) is not, and the browser withholds the API entirely there. An SSH tunnel keeps the origin `localhost` and so keeps notifications working. The sound has no such restriction and works over any origin.
 
@@ -240,8 +243,8 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
+| Play a sound | — | An audible cue, focused or not, see [Notifications](#notifications) |
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
-| Play a sound | — | An audible cue while the window is away, see [Notifications](#notifications) |
 | Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
 
 Typing the TUI command in the browser (e.g. `/think-output off`) has the same effect as the menu.

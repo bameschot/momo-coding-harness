@@ -531,40 +531,69 @@ function saveNotifyPrefs() {
 let audioCtx = null;
 function audio() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === "suspended") audioCtx.resume();  // autoplay policy
   return audioCtx;
 }
+
 function chime(kind) {
-  try {
-    const ctx = audio();
-    for (const [i, freq] of (kind === "ask" ? [622, 831] : [831, 622]).entries()) {
-      const at = ctx.currentTime + i * 0.14;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = freq;
-      // Ramped rather than switched, because a bare start/stop clicks.
-      gain.gain.setValueAtTime(0, at);
-      gain.gain.linearRampToValueAtTime(0.12, at + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.13);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(at);
-      osc.stop(at + 0.14);
-    }
-  } catch { /* no audio device, or still locked for want of a gesture */ }
+  let ctx;
+  try { ctx = audio(); } catch { return; }  // no WebAudio in this browser
+  const play = () => {
+    try {
+      for (const [i, freq] of (kind === "ask" ? [622, 831] : [831, 622]).entries()) {
+        const at = ctx.currentTime + i * 0.14;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        // Ramped rather than switched, because a bare start/stop clicks.
+        gain.gain.setValueAtTime(0, at);
+        gain.gain.linearRampToValueAtTime(0.12, at + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.13);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(at);
+        osc.stop(at + 0.14);
+      }
+    } catch { /* the device went away */ }
+  };
+  // Scheduling into a suspended context loses the sound outright, so resume
+  // first and schedule in the callback.
+  if (ctx.state === "suspended") ctx.resume().then(play, () => {});
+  else play();
 }
 
+// A sound setting restored from an earlier visit has had no user gesture yet, and
+// the browser blocks audio until there is one — the first click or keypress is it.
+function unlockAudio() {
+  if (notifyPrefs.sound) { try { audio().resume(); } catch { /* ignore */ } }
+}
+addEventListener("pointerdown", unlockAudio, { once: true });
+addEventListener("keydown", unlockAudio, { once: true });
+
+let notifyThrew = false;  // the service-worker-only complaint is made once
+
 // kind: "ask" (momo needs an answer) | "finish" (the turn is over)
+// The sound is deliberately NOT gated on focus: a focused window does not mean
+// you are watching it, and being told without having to look is the whole point
+// of a cue you can hear. The desktop notification is gated, because notifying
+// about the window you are staring at is just noise.
 function signal(kind, title, body) {
-  if (!away() || !live()) return;
+  if (!live()) return;
+  if (notifyPrefs.sound) chime(kind);
+  if (!away()) return;
   unseen = true;
   updateTitle();
-  if (notifyPrefs.sound) chime(kind);
   if (!desktopOn) return;
   try {
     const n = new Notification(title, { body: body.slice(0, 180), tag: "momo", renotify: true });
     n.onclick = () => { window.focus(); n.close(); };
-  } catch { /* some browsers only allow notifications from a service worker */ }
+  } catch {
+    // A few browsers only allow notifications from a service worker. Say so once:
+    // failing silently here is indistinguishable from the feature being broken.
+    if (!notifyThrew) {
+      notifyThrew = true;
+      attNote("This browser needs a service worker for notifications — the sound still works.");
+    }
+  }
 }
 
 // Coming back clears the marker. Both events are wired: minimising fires blur,
@@ -637,6 +666,13 @@ setInterval(() => {
 }, 100);
 
 // ── event stream ──────────────────────────────────────────────────────────────
+// Batched event delivery coalesces a burst into one render. It must NOT go through
+// requestAnimationFrame alone: browsers pause rAF entirely in a hidden tab or a
+// minimised window, so every event — including the turn-finished one a notification
+// is meant to announce — would sit in the batch until you came back and looked,
+// which is exactly when you no longer need telling. Fall back to a timer there.
+const schedule = (fn) => (document.hidden ? setTimeout(fn, 0) : requestAnimationFrame(fn));
+
 let es;
 function connect() {
   es = new EventSource("api/events");
@@ -659,7 +695,7 @@ function connect() {
     batch.push(JSON.parse(m.data));
     if (!scheduled) {
       scheduled = true;
-      requestAnimationFrame(() => {
+      schedule(() => {
         scheduled = false;
         const evs = batch;
         batch = [];

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="momo">
+  <title>momo</title>
+  <style>
+    /* momo is a black cat, but a black cat is invisible on a dark tab strip, so the
+       silhouette inverts with the browser theme and the eye inverts with it. */
+    .ink  { fill: #15150f; }
+    .tail { fill: none; stroke: #15150f; stroke-width: 2.2; stroke-linecap: round; }
+    .eye  { fill: #fbfaf5; }
+    @media (prefers-color-scheme: dark) {
+      .ink  { fill: #f2efe4; }
+      .tail { stroke: #f2efe4; }
+      .eye  { fill: #15150f; }
+    }
+  </style>
+
+  <!-- the "\" and "(" of rows 1-2: the tail sweeping up on momo's right -->
+  <path class="tail" d="M20.4 26.8C24.6 27.0 26.4 23.6 25.2 18.8"/>
+
+  <!-- rows 3-4, "(  \  )" over "|(__)/": the sitting body, chest left, haunch right -->
+  <path class="ink" d="M9.4 16.2C7.6 19.4 6.9 23.0 7.4 26.6C7.5 27.5 8.2 28.1 9.1 28.1L20.1 28.1C21.0 28.1 21.7 27.4 21.7 26.5C21.7 22.2 20.4 18.0 17.6 14.6Z"/>
+
+  <!-- row 2, "(' )": the head, facing left -->
+  <circle class="ink" cx="12.4" cy="12.4" r="5.8"/>
+
+  <!-- row 1, "/\": the ears -->
+  <path class="ink" d="M7.4 9.6 6.4 4.2l5.8 3.0z"/>
+  <path class="ink" d="M17.4 9.6 18.4 4.2l-5.8 3.0z"/>
+
+  <!-- the "'" of "(' )": momo's one visible eye -->
+  <circle class="eye" cx="10.0" cy="11.9" r="0.95"/>
+</svg>
