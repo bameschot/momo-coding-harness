@@ -196,7 +196,9 @@ CODING_ONLY_TOOLS = [
 
     _fn("run_command",
         "Run a shell command from the working directory. Returns stdout and stderr. "
-        "Use for running scripts, tests, build tools, etc. The command runs with the "
+        "Use for running scripts, tests, build tools, etc. To read a web page or call an "
+        "API use fetch_url, not curl or wget; to download a file to disk (a jar, "
+        "archive, image) curl -o or wget is fine. The command runs with the "
         "working directory as its current directory. It is NON-INTERACTIVE: no stdin is "
         "connected, so a command that waits for input (e.g. 'git commit' with no -m, "
         "'npm init', a prompt for a password) will hang until it times out — always pass "
@@ -760,8 +762,40 @@ def _delete_file(path: str, *, workdir: Path) -> str:
 
 _MAX_COMMAND_TIMEOUT = 900  # 15 minutes — upper bound for a single run_command
 
+# Web clients a model reaches for when fetch_url is missing (i.e. /net is off).
+# Matched in command position only — at the start, or after ; & | ( $( ` or a
+# newline, optionally behind sudo/env/time/exec/command/nohup — so `grep -rn curl .`
+# and `echo "curl"` still run.  This steers the model; it is NOT a sandbox:
+# `python -c` with urllib, mvn, or `bash -c "curl ..."` still reach the network.
+_WEB_CLIENT_RE = re.compile(
+    r"(?:^|[;&|(`\n]|\$\()\s*"
+    r"(?:(?:sudo|time|exec|command|nohup)\s+|env\s+(?:\S+=\S*\s+)*)*"
+    r"(?:\S*/)?(curl|wget)(?=\s|$|[;&|)`])"
+)
 
-def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: Path) -> str:
+
+def _web_client_in(command: str) -> str | None:
+    m = _WEB_CLIENT_RE.search(command)
+    return m.group(1) if m else None
+
+
+def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: Path,
+                 net_access: str = "off") -> str:
+    # Steer page reads and API calls to fetch_url; downloads to disk still need
+    # curl/wget.  With /net off, running curl would quietly bypass the user's
+    # setting (observed: a 9B model with no fetch_url fell back to 50 curl calls
+    # over two sessions), so refuse and say what to do instead.
+    note = ""
+    if client := _web_client_in(command):
+        if net_access == "off":
+            return (f"ERROR: this command was not run: it uses {client} to reach the "
+                    "internet, and internet access is off. Do not retry with another "
+                    "command or script. Tell the user: \"Internet access is off. Run "
+                    "/net on and ask again.\" Turning it on gives you the fetch_url tool "
+                    "and lets curl and wget run.")
+        note = (f"(note: to read a page or call an API, use the fetch_url tool instead "
+                f"of {client} — it returns cleaner text. {client} is fine for "
+                "downloading files to disk.)\n")
     # Clamp to the 15-minute ceiling; fall back to the ceiling for missing/invalid
     # values so a hung command can never block the worker thread indefinitely.
     try:
@@ -782,7 +816,7 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
             parts.append(f"[stderr]\n{r.stderr.strip()}")
         if r.returncode != 0:
             parts.append(f"[exit code: {r.returncode}]")
-        return "\n".join(parts) or "(no output)"
+        return note + ("\n".join(parts) or "(no output)")
     except subprocess.TimeoutExpired:
         return f"ERROR: command timed out after {timeout}s"
     except OSError as e:
@@ -835,6 +869,8 @@ if code_nav.AVAILABLE:
 # net_access is deliberately not in the fetch_url schema: the model must not be
 # able to ask for "local" and unblock the private network for itself.
 _NEEDS_NET_ACCESS = {"fetch_url"}
+# run_command only needs to know whether /net is off, to steer curl/wget.
+_NEEDS_NET_STATE = {"run_command"}
 
 
 def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
@@ -876,8 +912,12 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
             f"Valid arguments: {', '.join(sorted(known))}.{hint}"
         )
 
-    extra = ({"net_access": net_access, "net_max_bytes": net_max_bytes}
-             if name in _NEEDS_NET_ACCESS else {})
+    if name in _NEEDS_NET_ACCESS:
+        extra = {"net_access": net_access, "net_max_bytes": net_max_bytes}
+    elif name in _NEEDS_NET_STATE:
+        extra = {"net_access": net_access}
+    else:
+        extra = {}
     try:
         return fn(**args, workdir=workdir, **extra)
     except TypeError as e:

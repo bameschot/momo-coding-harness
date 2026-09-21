@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -138,11 +139,16 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return CommandResult(handled=True, retry=True)
 
     if cmd == "/clear":
+        # An active plan goes too: it refers to a conversation that no longer exists.
+        # (Safe here — the Controller rejects /clear while a plan step is running.)
+        plan_note = ""
+        if harness.plan is not None:
+            plan_note = "; " + harness.cancel_plan()  # also refreshes messages[0]
         system_msg = harness.messages[0]
         harness.messages = [system_msg]
         harness._token_estimate = harness._estimate()
         harness._emit_status()
-        return CommandResult(handled=True, output="Conversation cleared")
+        return CommandResult(handled=True, output="Conversation cleared" + plan_note)
 
     if cmd in ("/workspace", "/workdir"):  # /workdir kept as a backward-compatible alias
         if not arg:
@@ -572,7 +578,7 @@ Available commands:
   /plan cancel        Discard the plan and delete .momo-plan.md
   /chat               Switch to chat mode (read files, ask questions)
   /momo               Switch to momo companion mode (talk to the cat)
-  /clear              Clear conversation history
+  /clear              Clear conversation history and discard any active plan
   /new                Save this session and start a new, empty one
   /retry              Re-send your last message (drops the reply it got)
   /workspace          Show current working directory (alias: /workdir)
@@ -625,3 +631,15 @@ File inspection (no model round-trip):
   /read <path> [start] [end]       Read a file (optional line range)
   /grep <pattern> [path_or_dir]    Regex search in a file or directory
 """.strip()
+
+
+def help_commands() -> list[dict]:
+    """Parse the /help text into [{cmd, usage, desc}] for autocomplete."""
+    out = []
+    for line in _HELP.splitlines():
+        m = re.match(r"\s{2}(/.+?)\s{2,}(\S.*)$", line)
+        if m:
+            usage = m.group(1).strip()
+            out.append({"cmd": usage.split()[0], "usage": usage, "desc": m.group(2).strip()})
+    return out
+

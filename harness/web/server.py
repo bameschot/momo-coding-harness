@@ -31,11 +31,9 @@ import hmac
 import ipaddress
 import json
 import queue
-import re
 import socket
 import os
 import threading
-import time
 from dataclasses import asdict
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -45,9 +43,10 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import attachments as attach_mod
 from .. import companion
+from ..file_search import fuzzy_search, workspace_files
 from .. import session as session_mod
 from ..tools import _SKIP_DIRS, _safe_path
-from ..commands import _HELP, _render_markdown
+from ..commands import help_commands, _render_markdown
 from ..controller import Controller
 from ..events import event_to_json
 from ..harness import ErrorEvent
@@ -66,8 +65,6 @@ _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
 _KEEPALIVE_S = 15.0
 _COOKIE = "momo_token"
 _MAX_PREVIEW_BYTES = 5_000_000
-_SEARCH_MAX_FILES = 20_000
-_SEARCH_TTL_S = 10.0
 
 
 def is_loopback(host: str) -> bool:
@@ -77,17 +74,6 @@ def is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host.strip("[]")).is_loopback
     except ValueError:
         return False
-
-
-def _help_commands() -> list[dict]:
-    """Parse the /help text into [{cmd, usage, desc}] for autocomplete."""
-    out = []
-    for line in _HELP.splitlines():
-        m = re.match(r"\s{2}(/.+?)\s{2,}(\S.*)$", line)
-        if m:
-            usage = m.group(1).strip()
-            out.append({"cmd": usage.split()[0], "usage": usage, "desc": m.group(2).strip()})
-    return out
 
 
 def _pdf_support() -> bool:
@@ -169,50 +155,6 @@ def _list_workspace(root: Path, rel: str, hidden: bool) -> list[dict] | str:
     return out
 
 
-_search_cache: dict = {"root": None, "ts": 0.0, "files": []}
-
-
-def _workspace_files(root: Path) -> list[str]:
-    now = time.monotonic()
-    if _search_cache["root"] == root and now - _search_cache["ts"] < _SEARCH_TTL_S:
-        return _search_cache["files"]
-    files: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS and not d.startswith("."))
-        rel_dir = os.path.relpath(dirpath, root)
-        for f in sorted(filenames):
-            if f.startswith("."):
-                continue
-            files.append(f if rel_dir == "." else f"{rel_dir}/{f}")
-            if len(files) >= _SEARCH_MAX_FILES:
-                break
-        if len(files) >= _SEARCH_MAX_FILES:
-            break
-    _search_cache.update(root=root, ts=now, files=files)
-    return files
-
-
-def _fuzzy_search(files: list[str], q: str, limit: int = 30) -> list[str]:
-    """Case-insensitive subsequence match; basename hits first, then shorter paths."""
-    q = q.lower()
-    if not q:
-        return files[:limit]
-    scored = []
-    for f in files:
-        fl = f.lower()
-        i = 0
-        for ch in fl:
-            if i < len(q) and ch == q[i]:
-                i += 1
-        if i < len(q):
-            continue
-        base = fl.rsplit("/", 1)[-1]
-        rank = 0 if base.startswith(q) else 1 if q in base else 2 if q in fl else 3
-        scored.append((rank, len(f), f))
-    scored.sort()
-    return [f for _, _, f in scored[:limit]]
-
-
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
@@ -262,7 +204,7 @@ class WebServer:
             "context_limit": h.context_limit,
             "pdf_support": _pdf_support(),
             "modes": _MODES,
-            "commands": _help_commands(),
+            "commands": help_commands(),
             "skills": {"available": h.list_available_skills(), "active": list(h.active_skills)},
             "plan": h.plan.to_markdown() if h.plan is not None else None,
             "plan_phase": h.plan_phase if h.plan is not None else None,
@@ -391,7 +333,7 @@ class WebServer:
                 elif path == "/api/file":
                     self._file(h.workdir, arg("path"))
                 elif path == "/api/files/search":
-                    self._json({"results": _fuzzy_search(_workspace_files(h.workdir), arg("q"))})
+                    self._json({"results": fuzzy_search(workspace_files(h.workdir), arg("q"))})
                 else:
                     self._send(HTTPStatus.NOT_FOUND, b"Not found\n")
 

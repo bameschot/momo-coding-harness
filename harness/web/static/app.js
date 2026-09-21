@@ -549,9 +549,19 @@ function saveNotifyPrefs() {
   try { localStorage.setItem("momo.notify", JSON.stringify(notifyPrefs)); } catch { /* private mode */ }
 }
 
-// Two short blips, synthesised so the front end stays asset-free: "ask" rises
-// (a question), "finish" falls (a resolution), so they tell apart by ear alone.
+// A kitten's mew, synthesised so the front end stays asset-free. A kitten is
+// high (~1 kHz), soft and nearly pure, so the source is a sine with a few soft
+// overtones; a lowpass opening and closing on it is the mouth ("m-ew"), and a
+// quick vibrato makes it wobble like a small voice. "ask" ends on an upturn (a
+// question), "finish" falls away (a resolution), so they tell apart by ear alone.
+const MEW = {
+  //         pitch (Hz) at 0, 30%, 65%, 100% of the mew
+  ask:    [900, 1200, 980, 1550],
+  finish: [950, 1300, 1150, 800],
+};
+const MEW_LEN = 0.4;  // short: a long mew turns into a wail
 let audioCtx = null;
+let mewWave = null;
 function audio() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   return audioCtx;
@@ -562,20 +572,62 @@ function chime(kind) {
   try { ctx = audio(); } catch { return; }  // no WebAudio in this browser
   const play = () => {
     try {
-      for (const [i, freq] of (kind === "ask" ? [622, 831] : [831, 622]).entries()) {
-        const at = ctx.currentTime + i * 0.14;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = "sine";
-        osc.frequency.value = freq;
-        // Ramped rather than switched, because a bare start/stop clicks.
-        gain.gain.setValueAtTime(0, at);
-        gain.gain.linearRampToValueAtTime(0.12, at + 0.01);
-        gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.13);
-        osc.connect(gain).connect(ctx.destination);
-        osc.start(at);
-        osc.stop(at + 0.14);
-      }
+      const at = ctx.currentTime, end = at + MEW_LEN;
+      const [p0, p1, p2, p3] = MEW[kind] || MEW.finish;
+
+      // Source: fundamental plus modest 2nd–4th harmonics — enough for the "ee"
+      // formant to have something to lift. A full sawtooth reads as a horn, a
+      // bare sine as a whistle.
+      if (!mewWave) mewWave = ctx.createPeriodicWave(
+        new Float32Array([0, 0, 0, 0, 0]), new Float32Array([0, 1, 0.35, 0.2, 0.08]));
+      const osc = ctx.createOscillator();
+      osc.setPeriodicWave(mewWave);
+      osc.frequency.setValueAtTime(p0, at);
+      osc.frequency.exponentialRampToValueAtTime(p1, at + MEW_LEN * 0.3);
+      osc.frequency.exponentialRampToValueAtTime(p2, at + MEW_LEN * 0.65);
+      osc.frequency.exponentialRampToValueAtTime(p3, end);
+      // Vibrato in cents, so it scales with the pitch.
+      const lfo = ctx.createOscillator();
+      const lfoDepth = ctx.createGain();
+      lfo.frequency.value = 6;
+      lfoDepth.gain.value = 12;
+      lfo.connect(lfoDepth).connect(osc.detune);
+
+      // The mouth: closed ("m") muffles the overtones, open lets them through.
+      const mouth = ctx.createBiquadFilter();
+      mouth.type = "lowpass";
+      mouth.Q.value = 0.7;  // no resonant peak: a peak is what made it shrill
+      mouth.frequency.setValueAtTime(700, at);
+      mouth.frequency.exponentialRampToValueAtTime(3800, at + MEW_LEN * 0.2);
+      mouth.frequency.exponentialRampToValueAtTime(1600, end);
+      // The vowel: a lift high up is "ee"; sliding it down turns it into "ew".
+      // Without it the open mouth alone says "aw".
+      const vowel = ctx.createBiquadFilter();
+      vowel.type = "peaking";
+      vowel.Q.value = 2;
+      vowel.gain.value = 10;
+      vowel.frequency.setValueAtTime(3600, at);
+      vowel.frequency.setValueAtTime(3600, at + MEW_LEN * 0.2);
+      vowel.frequency.exponentialRampToValueAtTime(1200, end);
+
+      // Warmth: a gentle lift under the fundamental gives the voice some body.
+      const warm = ctx.createBiquadFilter();
+      warm.type = "lowshelf";
+      warm.frequency.value = 1500;
+      warm.gain.value = 6;
+
+      // Soft onset for the "m", swell, then fade; ramped rather than switched,
+      // because a bare start/stop clicks.
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, at);
+      gain.gain.linearRampToValueAtTime(0.025, at + 0.04);
+      gain.gain.linearRampToValueAtTime(0.04, at + MEW_LEN * 0.25);
+      gain.gain.setValueAtTime(0.04, at + MEW_LEN * 0.45);
+      gain.gain.exponentialRampToValueAtTime(0.0001, end);
+
+      osc.connect(warm).connect(vowel).connect(mouth).connect(gain).connect(ctx.destination);
+      osc.start(at); lfo.start(at);
+      osc.stop(end + 0.01); lfo.stop(end + 0.01);
     } catch { /* the device went away */ }
   };
   // Scheduling into a suspended context loses the sound outright, so resume
@@ -651,7 +703,7 @@ $("#notify-sound").checked = notifyPrefs.sound;
 $("#notify-sound").onchange = (e) => {
   notifyPrefs.sound = e.target.checked;
   saveNotifyPrefs();
-  if (notifyPrefs.sound) chime("finish");  // this click is the gesture that unlocks audio
+  if (notifyPrefs.sound) chime("ask");  // this click is the gesture that unlocks audio
 };
 
 function lastAssistantText() {

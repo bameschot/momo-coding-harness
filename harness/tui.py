@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import random
+import re
 import sys
 import time
 import textwrap
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from . import md_render
+from .commands import help_commands
+from .file_search import fuzzy_search, workspace_files
 from .controller import Controller
 from .events import BusyEvent, CompanionEvent, DeltaEvent, ResetEvent, StreamEndEvent, UserEvent
 from .harness import (
@@ -54,6 +57,10 @@ _KEY_SHIFT_ENTER  = 601  # custom curses keycode bound to Shift+Enter escape seq
 _KEY_CTRL_LEFT    = 602  # Ctrl+Left  — word jump left
 _KEY_CTRL_RIGHT   = 603  # Ctrl+Right — word jump right
 _MODE_CYCLE = ["design", "chat", "plan", "coding", "momo"]
+# Suggestions, as in the web UI: "@query" right before the caret opens workspace
+# path suggestions; a leading "/" opens slash-command suggestions.
+_AT_RX = re.compile(r"(?:^|\s)@([\w./~+-]*)$")
+_SUGGEST_MAX_ROWS = 8
 
 
 def _init_colors():
@@ -290,6 +297,12 @@ class TUI:
         self._history_idx: int = -1     # -1 = not browsing
         self._history_stash: str = ""   # saves live input while browsing
         self._focus: str = "input"      # "input" | "chat"
+        # @-path / slash-command suggestions, drawn over the bottom of the chat pane.
+        # Each item is {"path": p} or a help_commands() entry {cmd, usage, desc}.
+        self._sugg: list[dict] = []
+        self._sugg_idx: int = -1        # -1 = nothing highlighted (Enter still submits)
+        self._sugg_query: tuple | None = None  # query the list was computed for
+        self._commands = help_commands()
         # Status bar components — assembled (with DIR shortening) in _draw_status.
         self._st_mode  = harness.mode
         self._st_model = harness.client.model
@@ -429,6 +442,8 @@ class TUI:
         L = self._layout
         chat_edge = _C_FOCUS if self._focus == "chat" else _C_BORDER
         self._chat_buf.render(self._chat_win, L["chat_h"], L["cols"], edge_color=chat_edge)
+        self._update_suggest()
+        self._draw_suggest()
         self._draw_companion()
         self._draw_status()
         self._draw_input()
@@ -658,8 +673,95 @@ class TUI:
         if self._too_small:
             self._draw_too_small()
             return
+        was_open = bool(self._sugg)
+        self._update_suggest()
+        if was_open or self._sugg:  # the popup lives in the chat pane
+            self._redraw()
+            return
         self._draw_input()
         curses.doupdate()
+
+    # ── @-path and /command suggestions ──────────────────────────────────────
+
+    def _update_suggest(self):
+        """Recompute suggestions when the "@query" or "/command" being typed changes."""
+        query = None
+        if self._focus == "input":
+            v = self._input
+            m = _AT_RX.search(v[:self._cursor])
+            if m:
+                query = ("@", m.group(1))
+            elif v.startswith("/") and "\n" not in v and not re.search(r"\s\S*\s", v):
+                query = ("/", v)  # until a second word is finished, like the web UI
+        if query == self._sugg_query:
+            return  # unchanged (also keeps an Esc-dismissed list closed)
+        self._sugg_query = query
+        self._sugg_idx = -1
+        if query is None:
+            self._sugg = []
+        elif query[0] == "@":
+            self._sugg = [{"path": p} for p in
+                          fuzzy_search(workspace_files(self.harness.workdir), query[1])]
+        else:
+            v = query[1]
+            word = v.split()[0].lower()
+            self._sugg = [c for c in self._commands
+                          if c["cmd"].startswith(word) or c["usage"].startswith(v)]
+            if len(self._sugg) == 1 and self._sugg[0]["usage"] == v.strip():
+                self._sugg = []  # already fully typed
+
+    def _close_suggest(self):
+        self._sugg = []
+        self._sugg_idx = -1
+
+    def _pick_suggest(self, i: int):
+        item = self._sugg[i]
+        if "path" in item:
+            # Replace the pending "@query" with `path`, like the web UI.
+            path = item["path"]
+            before = re.sub(r"@[\w./~+-]*$", lambda _m: f"`{path}`", self._input[:self._cursor])
+            after = self._input[self._cursor:]
+            glue = "" if after.startswith(" ") else " "
+            self._input = before + glue + after
+            self._cursor = len(before) + len(glue)
+        else:
+            # Commands that take an argument get a trailing space to type it.
+            usage = item["usage"]
+            takes_arg = " " in usage and " | " not in usage
+            self._input = item["cmd"] + (" " if takes_arg else "")
+            self._cursor = len(self._input)
+        self._close_suggest()
+
+    def _draw_suggest(self):
+        if not self._sugg or self._chat_win is None:
+            return
+        win = self._chat_win
+        cols = self._layout["cols"]
+        content_h = self._layout["chat_h"] - 1  # bottom row is the h-scrollbar
+        n = min(len(self._sugg), _SUGGEST_MAX_ROWS, content_h)
+        if n <= 0:
+            return
+        # Scroll the visible slice so the highlighted row stays in view.
+        first = min(max(0, self._sugg_idx - n + 1), len(self._sugg) - n)
+        is_path = "path" in self._sugg[0]
+        if is_path:
+            width = min(cols - 2, max(len(c["path"]) for c in self._sugg) + 4)
+        else:
+            usage_w = max(len(c["usage"]) for c in self._sugg)
+            width = min(cols - 2, usage_w + max(len(c["desc"]) for c in self._sugg) + 4)
+        for row, i in enumerate(range(first, first + n)):
+            item = self._sugg[i]
+            if is_path:
+                label = "@ " + _shorten_path_left(item["path"], width - 3)
+            else:
+                label = f"{item['usage'].ljust(usage_w)}  {item['desc']}"
+            attr = (curses.A_REVERSE | curses.color_pair(_C_FOCUS) if i == self._sugg_idx
+                    else curses.color_pair(_C_CMD))
+            try:
+                win.addnstr(content_h - n + row, 0, (" " + label).ljust(width), width, attr)
+            except curses.error:
+                pass
+        win.noutrefresh()
 
     # ── adding lines to chat buffer ───────────────────────────────────────────
 
@@ -1129,6 +1231,7 @@ class TUI:
         text = self._input
         self._input = ""
         self._cursor = 0
+        self._close_suggest()
         self._history_idx = -1
         self._history_stash = ""
         outcome = self.controller.submit(text, source="tui")
@@ -1223,6 +1326,22 @@ class TUI:
                         curses.doupdate()
                 time.sleep(0.02)  # idle — avoids CPU spin without adding key lag
                 continue
+
+            # Open suggestion list: ↑/↓ move, Tab picks (first by default), Enter
+            # picks only a highlighted row, Esc (below) dismisses.
+            if self._sugg and self._focus == "input":
+                n = len(self._sugg)
+                if ch in (curses.KEY_UP, curses.KEY_DOWN):
+                    if ch == curses.KEY_DOWN:
+                        self._sugg_idx = (self._sugg_idx + 1) % n
+                    else:
+                        self._sugg_idx = self._sugg_idx - 1 if self._sugg_idx > 0 else n - 1
+                    self._redraw()
+                    continue
+                if ch == 9 or (ch in (13, curses.KEY_ENTER) and self._sugg_idx >= 0):
+                    self._pick_suggest(max(0, self._sugg_idx))
+                    self._redraw()
+                    continue
 
             # Shift+Tab cycles through all four modes
             if ch == curses.KEY_BTAB:
@@ -1390,6 +1509,10 @@ class TUI:
                     self._redraw_input_only()
                 elif peek != curses.ERR:
                     _pushed_ch = peek
+                elif self._sugg:
+                    # Plain Esc — dismiss the suggestion list until the query changes.
+                    self._close_suggest()
+                    self._redraw()
                 continue
 
             # input editing always works regardless of focus

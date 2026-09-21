@@ -218,8 +218,8 @@ Code blocks in replies, and files in the workspace preview, are colour-highlight
 
 The view options have two independent switches under **Notifications**: **Play a sound** and **Desktop notification**. Both fire on the same two moments:
 
-- **momo needs an answer** — a question from the `ask_user` tool, a `run_command` permission prompt (`/run-confirm on`), a plan waiting for approval, or a `[y/N]` confirmation from a command. The sound rises.
-- **the turn is over** — for turns longer than 2 seconds, so command echoes stay quiet. The sound falls, and the notification body is the first line of the reply.
+- **momo needs an answer** — a question from the `ask_user` tool, a `run_command` permission prompt (`/run-confirm on`), a plan waiting for approval, or a `[y/N]` confirmation from a command. The sound is a kitten mew that rises at the end, like a question.
+- **the turn is over** — for turns longer than 2 seconds, so command echoes stay quiet. The mew falls, and the notification body is the first line of the reply.
 
 They differ in *when* they apply, which is the part worth knowing:
 
@@ -243,7 +243,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
-| Play a sound | — | An audible cue, focused or not, see [Notifications](#notifications) |
+| Play a sound | — | An audible cue (a synthesised kitten mew), focused or not, see [Notifications](#notifications) |
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
 | Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
 
@@ -358,6 +358,8 @@ curl -sN localhost:8765/api/events          # watch the live event stream
   - **Ctrl+E / End** — move cursor to end of the current line.
   - **Ctrl+K** — delete from cursor to end of the current line (kills the newline itself when the cursor is right before one).
   - **Ctrl+U** — delete from start of the current line to the cursor.
+  - **@ path autocomplete**: typing `@` followed by part of a file name opens a fuzzy workspace search above the input, the same search the web UI uses. `↑`/`↓` select, `Tab` inserts the first (or highlighted) path, `Enter` inserts a highlighted path (with nothing highlighted it still submits), and `Esc` closes the list. The pick replaces `@query` with `` `path/to/file` ``. While the list is open, `Tab` inserts instead of switching focus.
+  - **/ command autocomplete**: typing `/` at the start of the input lists the matching slash commands with their usage and description. It uses the same keys as `@`. A picked command that takes an argument gets a trailing space so you can type the argument.
   - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
 - **Chat pane scrolling** — `↑`/`↓`, `PgUp`/`PgDn`. When a table or other wide content is present, `←`/`→` scrolls horizontally (chat focus required).
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green.
@@ -659,6 +661,7 @@ Active skills are saved with the session and restored on restart. Skills stack �
 | `html-javascript` | Semantic HTML, accessibility, modern JS patterns and pitfalls |
 | `java` | Java patterns |
 | `kotlin` | Kotlin patterns |
+| `maven-dependency-updates` | Find newer Maven Central versions, map the CVEs each upgrade fixes (needs `/net on`), apply upgrades |
 | `python` | Python patterns |
 | `rust` | Ownership, borrowing, error handling, idiomatic Rust |
 | `sql` | Query patterns, indexing, safe updates, migrations |
@@ -794,7 +797,7 @@ Type any command in the input bar:
 | `/tool-result <n>` | Set the cap (e.g. `/tool-result 8000`); `0` = unlimited |
 | `/compact` | Compact context — removes old messages and summarises them with the LLM |
 | `/fast-compact` | Compact context without LLM summarisation (instant) |
-| `/clear` | Clear conversation history |
+| `/clear` | Clear conversation history and discard any active plan (removes `.momo-plan.md`, like `/plan cancel`) |
 | `/new` | Save this session and start a new, empty one (same model, host and mode) |
 | `/retry` | Re-send your last message, replacing the reply it got |
 | `/cost` | Show token usage for this session, aggregated by mode and model (in/out/total tokens per combination) |

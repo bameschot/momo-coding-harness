@@ -161,6 +161,11 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
   position: absolute; right: 12px; top: calc(100% - 4px); min-width: 250px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: var(--shadow); padding: 8px 12px 10px; font-size: 13px;
+  /* The options outgrow short windows; scroll inside the menu rather than run
+     off the bottom, where the last sections (notifications) were unreachable.
+     The offset clears the two-row status bar plus a small gap. */
+  max-height: calc(100vh - 110px); max-height: calc(100dvh - 110px);
+  overflow-y: auto; overscroll-behavior: contain;
 }
 .menu label { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
 .menu kbd { margin-left: auto; }
