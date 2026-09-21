@@ -292,6 +292,15 @@ class Controller:
     def set_mode(self, mode: str):
         self.harness.set_mode(mode)
 
+    def cycle_net(self):
+        """off -> on -> off.  '/net local' is deliberately not in the cycle: it is
+        the setting that exposes this harness's own API, so it stays explicit."""
+        h = self.harness
+        h.net_access = "off" if h.net_access != "off" else "on"
+        self._system(f"Internet access: {h.net_access}")
+        h.rebuild_system_prompt()
+        h._emit_status()
+
     def toggle_run_confirm(self):
         self.harness.run_confirm = not self.harness.run_confirm
         self._system(f"run_command confirmation: {'on' if self.harness.run_confirm else 'off'}")

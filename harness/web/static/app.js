@@ -496,8 +496,31 @@ function applyStatus(s) {
   const run = $("#run-badge");
   run.textContent = s.run_confirm ? "RUN: confirm" : "RUN: auto";
   run.classList.toggle("on", s.run_confirm);
+  const netOn = s.net_access !== "off";
+  const net = $("#net-badge");
+  net.hidden = !netOn;
+  net.textContent = `NET: ${s.net_access}${s.net_confirm ? "" : " (writes: auto)"}`;
+  $("#net-on").checked = netOn;
+  $("#net-local").checked = s.net_access === "local";
+  $("#net-local").disabled = !netOn;
+  $("#net-confirm").checked = s.net_confirm;
+  $("#net-confirm").disabled = !netOn;
+  const mb = $("#net-max-bytes");
+  if (document.activeElement !== mb) mb.value = formatSize(s.net_max_bytes);
+  mb.disabled = !netOn;
   updateTitle();
   if (planChanged) refreshState();
+}
+
+// Mirrors net.format_size in Python so the field shows what /net-max-bytes accepts.
+function formatSize(n) {
+  for (const [unit, size] of [["MB", 1048576], ["KB", 1024]]) {
+    if (n >= size) {
+      const v = n / size;
+      return (v >= 10 || v === Math.floor(v)) ? `${Math.round(v)}${unit}` : `${v.toFixed(1)}${unit}`;
+    }
+  }
+  return `${n}`;
 }
 
 function updateTitle() {
@@ -1170,6 +1193,14 @@ function cycleMode() {
 $("#mode").onchange = (e) => post("api/mode", { mode: e.target.value }).catch(() => {});
 $("#run-badge").onclick = () => send(`/run-confirm ${status.run_confirm ? "off" : "on"}`);
 $("#tools-badge").onclick = () => send("/tools on");
+$("#net-badge").onclick = () => send("/net off");
+$("#net-on").onchange = (e) => send(`/net ${e.target.checked ? "on" : "off"}`);
+$("#net-local").onchange = (e) => send(`/net ${e.target.checked ? "local" : "on"}`);
+$("#net-confirm").onchange = (e) => send(`/net-confirm ${e.target.checked ? "on" : "off"}`);
+$("#net-max-bytes").onchange = (e) => {
+  const v = e.target.value.trim();
+  if (v) send(`/net-max-bytes ${v}`);
+};
 
 // Shift+letter shortcuts when focus is outside the text box (TUI: chat focus).
 document.addEventListener("keydown", (e) => {

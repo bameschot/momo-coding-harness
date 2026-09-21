@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import net as net_mod
 from . import session as session_mod
 from .controller import Controller
 from .harness import Harness, ChatEvent
@@ -44,6 +45,16 @@ def main():
                         help="Start a new session instead of restoring the last one")
     parser.add_argument("--no-think", action="store_true", default=False,
                         help="Disable model thinking/reasoning mode (default: on)")
+    parser.add_argument("--net", choices=("off", "on", "local"), default="off",
+                        help="Let the model fetch URLs with fetch_url: 'on' reaches the "
+                             "public internet, 'local' also allows localhost and the LAN "
+                             "(default: off; toggle at runtime with /net)")
+    parser.add_argument("--net-confirm", choices=("on", "off"), default="on",
+                        help="Ask y/N before each fetch_url POST/PUT/PATCH/DELETE "
+                             "(default: on). Writes to private addresses always ask.")
+    parser.add_argument("--net-max-bytes", default=None, metavar="SIZE",
+                        help="Ceiling on a single fetch_url response, in bytes or with a "
+                             "unit: 200000, 500kb, 2mb (default: 100kb)")
     parser.add_argument("--no-stream", action="store_true", default=False,
                         help="Wait for complete replies instead of streaming them as they are generated")
     parser.add_argument("--companion-idle-recap", action=argparse.BooleanOptionalAction, default=None,
@@ -82,6 +93,13 @@ def main():
         harness.think = False
     if args.no_stream:
         harness.stream = False
+    harness.net_access = args.net
+    harness.net_confirm = args.net_confirm == "on"
+    if args.net_max_bytes:
+        if (size := net_mod.parse_size(args.net_max_bytes)):
+            harness.net_max_bytes = min(size, net_mod.HARD_MAX_BYTES)
+        else:
+            parser.error(f"--net-max-bytes: not a size: {args.net_max_bytes}")
     harness.idle_recap = bool(args.companion_idle_recap if args.companion_idle_recap is not None
                               else prefs.get("idle_recap", False))
     harness.idle_recap_secs = max(10, args.companion_idle_recap_secs or prefs.get("idle_recap_secs") or 90)

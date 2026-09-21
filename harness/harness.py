@@ -17,9 +17,10 @@ from .events import EventBus, BusyEvent, DeltaEvent, StreamEndEvent
 from .llm import make_client
 from .logger import Logger
 from .plan import Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file, delete_plan_file
-from .tools import (DESIGN_TOOLS, ALL_TOOLS, CHAT_TOOLS,
+from .tools import (DESIGN_TOOLS, ALL_TOOLS, CHAT_TOOLS, NET_TOOLS,
                     PLAN_INVESTIGATE_TOOLS, PLAN_EXECUTE_TOOLS,
                     dispatch, render_tool_reference)
+from . import net as net_mod
 
 # Tools that mutate a file on disk — the harness snapshots the target before and
 # after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
@@ -333,6 +334,39 @@ def _sanitize_tool_args(name: str, args: dict) -> dict:
     return args
 
 
+def _mask_tool_args(name: str, args: dict) -> dict:
+    """Blank out secret request-header values in a fetch_url call.
+
+    Applied to what is displayed, logged and saved — never to the in-memory
+    history, so the model can still repeat its own call.  Tool arguments are
+    otherwise stored verbatim in the session JSON and the NDJSON log, which is
+    how an Authorization header would end up on disk in cleartext.
+    """
+    if name != "fetch_url" or not isinstance(args.get("headers"), dict):
+        return args
+    headers = {k: ("***" if str(k).lower() in net_mod.SECRET_HEADERS else v)
+               for k, v in args["headers"].items()}
+    return {**args, "headers": headers}
+
+
+def _mask_messages(messages: list[dict]) -> list[dict]:
+    """A copy of `messages` with secret header values masked, for session files."""
+    out = []
+    for m in messages:
+        calls = m.get("tool_calls")
+        if not calls:
+            out.append(m)
+            continue
+        out.append({**m, "tool_calls": [
+            {**c, "function": {**c["function"],
+                               "arguments": _mask_tool_args(c["function"]["name"],
+                                                            c["function"].get("arguments") or {})}}
+            if c.get("function") else c
+            for c in calls
+        ]})
+    return out
+
+
 def _derive_write_path(content: str, mode: str) -> str:
     """Infer a filename for a write_file/append_to_file call that arrived with
     'content' but no 'path'.  Some models (notably gemma) emit the large content
@@ -411,6 +445,9 @@ class StatusEvent:
     ctx_color: str  # "normal" | "yellow" | "red"
     tools_enabled: bool = True
     run_confirm: bool = False
+    net_access: str = "off"     # "off" | "on" | "local"
+    net_confirm: bool = True    # ask y/N before a write request
+    net_max_bytes: int = 102400  # ceiling on one fetch_url response
     host: str = ""
     provider: str = ""
     plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
@@ -595,6 +632,14 @@ class Harness:
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
         self.run_confirm: bool = False  # when True, prompt y/N before each run_command; toggle via /run-confirm or Shift+P
+        # Internet access for fetch_url: "off" | "on" (public hosts only) |
+        # "local" (also loopback/LAN).  Off by default and never persisted --
+        # this is the only tool that sends data off the machine.  /net
+        self.net_access: str = "off"
+        # When True, POST/PUT/PATCH/DELETE ask y/N first.  /net-confirm
+        self.net_confirm: bool = True
+        # Ceiling on a single fetch_url response.  /net-max-bytes
+        self.net_max_bytes: int = net_mod.DEFAULT_MAX_BYTES
         self.active_skills: list[str] = []
         self.input_history: list[str] = []
         # Idle recap: when on, momo recaps the last turns in its speech bubble after
@@ -648,6 +693,31 @@ class Harness:
             return self._user_input_queue.get()
         finally:
             self.awaiting_input = False
+
+    def _net_confirm_prompt(self, args: dict) -> str | None:
+        """The y/N question to ask before a fetch_url write, or None to just run it.
+
+        GET and HEAD never ask.  Writes ask whenever net_confirm is on — and also
+        when the target is not a public address, *even with net_confirm off*.
+        That carve-out matters: the harness's own web API is on 127.0.0.1 and its
+        same-origin check passes any request with no Origin header (which a
+        non-browser client never sends), so "/net local" plus unattended writes
+        would otherwise let a fetched page drive this harness through
+        POST /api/submit.
+        """
+        method = str(args.get("method") or "GET").upper()
+        if method in ("GET", "HEAD"):
+            return None
+        url = str(args.get("url") or "")
+        private = net_mod.is_private_target(url)
+        if not self.net_confirm and not private:
+            return None
+        why = ("\nThis is a local/private address, so it is confirmed even though "
+               "write confirmation is off." if private and not self.net_confirm else "")
+        body = str(args.get("body") or "")
+        shown = body if len(body) <= 500 else body[:500] + f"… (+{len(body) - 500} chars)"
+        return (f"Send this request? Reply 'y' to allow, anything else to decline.{why}\n"
+                f"  {method} {url}" + (f"\n  body: {shown}" if shown else ""))
 
     # ── file-edit diffs ─────────────────────────────────────────────────────────
 
@@ -735,10 +805,18 @@ class Harness:
         return self.mode == "plan" and self.plan_phase == "executing" and self.plan is not None
 
     def _current_tools(self) -> list[dict]:
-        """Tool set for the current mode (and, in plan mode, the current phase)."""
+        """Tool set for the current mode (and, in plan mode, the current phase).
+
+        fetch_url is appended only while internet access is on, so a model that
+        cannot use it never sees it in the schema or in the generated reference.
+        """
         if self._plan_executing():
-            return PLAN_EXECUTE_TOOLS
-        return _MODE_TOOLS.get(self.mode, ALL_TOOLS)
+            tools = PLAN_EXECUTE_TOOLS
+        else:
+            tools = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
+        if self.net_access != "off":
+            tools = tools + NET_TOOLS
+        return tools
 
     def _build_system_prompt(self) -> str:
         if self._plan_executing():
@@ -770,8 +848,18 @@ class Harness:
 
     def set_mode(self, mode: str):
         self.mode = mode
-        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
+        self.rebuild_system_prompt()
         self._emit_status()
+
+    def rebuild_system_prompt(self):
+        """Re-render the system prompt in place.
+
+        The prompt embeds a tool reference generated from the current tool set,
+        so anything that changes which tools are offered mid-session has to call
+        this or the reference goes stale — which matters for the small models
+        that emit text-format tool calls by copying that reference.
+        """
+        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
 
     # ── context management ────────────────────────────────────────────────────
 
@@ -1260,8 +1348,9 @@ class Harness:
                     self.event_queue.put(ChatEvent("system",
                         f"write_file was missing 'path' — inferred '{inferred}' from the content."))
 
-                self.event_queue.put(ToolCallEvent(name, args))
-                self.logger.log_tool_call(self.mode, self.client.model, name, args)
+                shown = _mask_tool_args(name, args)
+                self.event_queue.put(ToolCallEvent(name, shown))
+                self.logger.log_tool_call(self.mode, self.client.model, name, shown)
 
                 # Snapshot the target file before a mutating tool runs so the
                 # post-edit diff can be built against its previous contents.
@@ -1299,11 +1388,20 @@ class Harness:
                             f"Run this command? Reply 'y' to allow, anything else to decline.\n  $ {cmd}"
                         ).strip().lower()
                         if answer in ("y", "yes"):
-                            result = dispatch(name, args, self.workdir)
+                            result = dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes)
                         else:
                             result = "ERROR: command declined by user"
+                    elif name == "fetch_url" and (q := self._net_confirm_prompt(args)):
+                        answer = self._ask_user(q).strip().lower()
+                        if answer in ("y", "yes"):
+                            result = dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes)
+                        else:
+                            result = ("ERROR: the user declined this request, so it was "
+                                      "never sent. The server was not contacted and nothing "
+                                      "is wrong with it. Do not retry — ask the user what "
+                                      "they would like to do instead.")
                     else:
-                        result = dispatch(name, args, self.workdir)
+                        result = dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes)
                     if self.max_tool_result > 0 and len(result) > self.max_tool_result:
                         total = len(result)
                         cutoff = result.rfind("\n", 0, self.max_tool_result)
@@ -1633,6 +1731,9 @@ class Harness:
             ctx_color=self._ctx_color(pct),
             tools_enabled=self.tools_enabled,
             run_confirm=self.run_confirm,
+            net_access=self.net_access,
+            net_confirm=self.net_confirm,
+            net_max_bytes=self.net_max_bytes,
             host=self.client.host,
             provider=self.provider,
             plan_progress=self._plan_progress(),
@@ -1667,7 +1768,7 @@ class Harness:
     def _autosave(self):
         session_mod.save(
             self._ts, self.client.model, self.mode,
-            self.workdir, self.messages, self.context_limit,
+            self.workdir, _mask_messages(self.messages), self.context_limit,
             self.active_skills,
             self.input_history,
             context_pct=self.context_pct,

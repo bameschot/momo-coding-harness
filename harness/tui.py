@@ -874,13 +874,18 @@ class TUI:
                     self._ctx_color = ctx_map.get(ev.ctx_color, _C_STATUS)
                     tools_str = "" if ev.tools_enabled else " | TOOLS: off"
                     run_str = " | RUN: confirm" if ev.run_confirm else ""
+                    net_str = ""
+                    if ev.net_access != "off":
+                        net_str = f" | NET: {ev.net_access}"
+                        if not ev.net_confirm:
+                            net_str += " (writes: auto)"
                     self._st_mode  = f"{ev.mode} [{ev.plan_progress}]" if ev.plan_progress else ev.mode
                     self._st_model = ev.model
                     self._st_host  = ev.host
                     self._st_provider = ev.provider or self._st_provider
                     self._st_ctx   = ev.ctx_pct
                     self._st_dir   = ev.workdir
-                    self._st_extra = f"{tools_str}{run_str}"
+                    self._st_extra = f"{tools_str}{run_str}{net_str}"
                     changed = True
                 elif isinstance(ev, ThinkEvent):
                     self._add_think(ev.text)

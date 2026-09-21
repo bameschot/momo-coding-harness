@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import net as net_mod
 from . import session as session_mod
 from .harness import Harness, ChatEvent
 from .tools import dispatch
@@ -315,6 +316,80 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output="run_command confirmation: off (commands run automatically)")
         return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
 
+    if cmd == "/net":
+        def _net_state() -> str:
+            label = {"off": "off", "on": "on (public internet only)",
+                     "local": "on, including localhost and the LAN"}[harness.net_access]
+            writes = "ask y/N" if harness.net_confirm else "run without asking"
+            return f"Internet access: {label}\nWrite requests (POST/PUT/PATCH/DELETE): {writes}"
+        if not arg:
+            return CommandResult(handled=True, output=_net_state())
+        a = arg.lower()
+        if a in ("on", "true", "1", "yes", "public"):
+            harness.net_access = "on"
+        elif a in ("off", "false", "0", "no"):
+            harness.net_access = "off"
+        elif a == "local":
+            harness.net_access = "local"
+        else:
+            return CommandResult(handled=True,
+                                 output=f"ERROR: expected 'on', 'off' or 'local', got: {arg}")
+        # fetch_url enters/leaves the tool set, so the generated tool reference
+        # in the system prompt has to be re-rendered.
+        harness.rebuild_system_prompt()
+        harness._emit_status()
+        extra = ""
+        if harness.net_access != "off":
+            extra = ("\nFetched pages are untrusted input — consider '/run-confirm on' "
+                     "so shell commands need approval too.")
+        if harness.net_access == "local":
+            extra += ("\nlocalhost and the LAN are now reachable, including this harness's "
+                      "own web UI. Writes to private addresses always ask first.")
+        return CommandResult(handled=True, output=_net_state() + extra)
+
+    if cmd == "/net-confirm":
+        if not arg:
+            state = "on" if harness.net_confirm else "off"
+            return CommandResult(handled=True, output=f"fetch_url write confirmation: {state}")
+        if arg.lower() in ("on", "true", "1", "yes"):
+            harness.net_confirm = True
+            harness._emit_status()
+            return CommandResult(handled=True,
+                                 output="fetch_url write confirmation: on (you will be asked "
+                                        "y/N before each POST/PUT/PATCH/DELETE)")
+        if arg.lower() in ("off", "false", "0", "no"):
+            harness.net_confirm = False
+            harness._emit_status()
+            return CommandResult(handled=True,
+                                 output="fetch_url write confirmation: off (write requests run "
+                                        "automatically; requests to local and private addresses "
+                                        "are still confirmed)")
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+
+    if cmd == "/net-max-bytes":
+        cur = net_mod.format_size(harness.net_max_bytes)
+        if not arg:
+            return CommandResult(handled=True, output=(
+                f"fetch_url response cap: {cur} ({harness.net_max_bytes} bytes)\n"
+                f"Set it with a size, e.g. /net-max-bytes 500kb or /net-max-bytes 2mb."))
+        size = net_mod.parse_size(arg)
+        if size is None:
+            return CommandResult(handled=True, output=(
+                f"ERROR: not a size: {arg}. Use bytes or a unit, e.g. 200000, 500kb, 2mb."))
+        if size > net_mod.HARD_MAX_BYTES:
+            return CommandResult(handled=True, output=(
+                f"ERROR: {net_mod.format_size(size)} is above the "
+                f"{net_mod.format_size(net_mod.HARD_MAX_BYTES)} hard limit."))
+        harness.net_max_bytes = size
+        harness._emit_status()
+        warn = ""
+        if size > 1024 * 1024 and not harness.max_tool_result:
+            # /tool-result is the context guard; without it a big fetch lands whole.
+            warn = ("\nThat is large: with /tool-result unlimited, one fetch of this size "
+                    "goes into the context in full. Consider /tool-result 20000.")
+        return CommandResult(handled=True, output=(
+            f"fetch_url response cap: {net_mod.format_size(size)} ({size} bytes)" + warn))
+
     if cmd == "/cost":
         return CommandResult(handled=True, output=harness.logger.cost_summary())
 
@@ -523,6 +598,15 @@ Available commands:
   /think on|off       Enable or disable model thinking/reasoning mode
   /run-confirm        Show run_command confirmation state (on/off)
   /run-confirm on|off Ask y/N before each run_command  (Shift+P toggles)
+  /tools              Show whether tool calls are enabled (on/off)
+  /tools on|off       Enable or disable tool calls entirely
+  /net                Show internet access state (off/on/local)
+  /net on|off         Allow or block fetch_url reaching the public internet
+  /net local          Also allow localhost and the LAN (off by default)
+  /net-confirm        Show whether fetch_url writes ask for confirmation
+  /net-confirm on|off Ask y/N before each POST/PUT/PATCH/DELETE (default on)
+  /net-max-bytes      Show the fetch_url response size cap
+  /net-max-bytes <n>  Set it, in bytes or with a unit: 200000, 500kb, 2mb
   /list-skills        List available skills and show which are active
   /load-skill <name>  Append a skill's instructions to the system prompt
   /unload-skill <name> Remove a skill from the system prompt
