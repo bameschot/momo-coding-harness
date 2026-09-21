@@ -498,8 +498,9 @@ function applyStatus(s) {
   run.classList.toggle("on", s.run_confirm);
   const netOn = s.net_access !== "off";
   const net = $("#net-badge");
-  net.hidden = !netOn;
-  net.textContent = `NET: ${s.net_access}${s.net_confirm ? "" : " (writes: auto)"}`;
+  net.classList.toggle("warn", netOn);
+  net.textContent = netOn ? `NET: ${s.net_access}${s.net_confirm ? "" : " (writes: auto)"}` : "NET: off";
+  net.title = netOn ? "Internet access is on — click to turn it off" : "Internet access is off — click to turn it on";
   $("#net-on").checked = netOn;
   $("#net-local").checked = s.net_access === "local";
   $("#net-local").disabled = !netOn;
@@ -1245,7 +1246,7 @@ function cycleMode() {
 $("#mode").onchange = (e) => post("api/mode", { mode: e.target.value }).catch(() => {});
 $("#run-badge").onclick = () => send(`/run-confirm ${status.run_confirm ? "off" : "on"}`);
 $("#tools-badge").onclick = () => send("/tools on");
-$("#net-badge").onclick = () => send("/net off");
+$("#net-badge").onclick = () => send(`/net ${status.net_access !== "off" ? "off" : "on"}`);
 $("#net-on").onchange = (e) => send(`/net ${e.target.checked ? "on" : "off"}`);
 $("#net-local").onchange = (e) => send(`/net ${e.target.checked ? "local" : "on"}`);
 $("#net-confirm").onchange = (e) => send(`/net-confirm ${e.target.checked ? "on" : "off"}`);
