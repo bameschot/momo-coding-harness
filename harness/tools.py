@@ -886,6 +886,11 @@ _NEEDS_NET_STATE = {"run_command"}
 
 
 _PLACEHOLDER_RE = re.compile(r"^\s*\[written to [^\]]*\]\s*$")
+# Notes the harness splices into tool results (compaction trim, size cutoff).
+# Content carrying one was rebuilt from a shortened result: writing it would
+# silently replace the missing middle of the file with the note.
+_CUT_MARKER_RE = re.compile(r"\[… [\d,]+ chars removed by context compaction …\]"
+                            r"|\.\.\. \(truncated after \d+ chars of \d+ — ")
 
 
 def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
@@ -911,6 +916,13 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
         return (f"ERROR: content is a history placeholder, not file content — nothing was "
                 f"written. {args.get('path', 'The file')} still holds its previous contents. "
                 f"Pass the complete file text in 'content'.")
+    if (name in ("write_file", "append_to_file") and isinstance(args.get("content"), str)
+            and (m := _CUT_MARKER_RE.search(args["content"]))):
+        return (f"ERROR: content contains a harness note ({m.group(0).strip()[:60]}…), "
+                f"so it was copied from a shortened tool result and is missing text — "
+                f"nothing was written. {args.get('path', 'The file')} still holds its previous "
+                f"contents. Re-read the part you need with read_file (start_line/end_line), "
+                f"or use edit_file to change only the lines that differ.")
 
     required = _REQUIRED_ARGS.get(name, [])
     missing = [r for r in required if r not in args]

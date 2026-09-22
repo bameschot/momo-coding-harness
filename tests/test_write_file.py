@@ -83,6 +83,25 @@ class Dispatch(unittest.TestCase):
                 self.assertTrue(r.startswith("ERROR:"), r)
                 self.assertEqual((self.wd / "a.py").read_text(), "real\n")
 
+    def test_shortened_result_markers_never_written(self):
+        # Copies of the notes Harness._compact and the tool-result size cutoff
+        # splice in (harness.py) — keep in step if their wording changes.
+        markers = ("[… 12,345 chars removed by context compaction …]",
+                   "... (truncated after 4000 chars of 9000 — use read_file with "
+                   "start_line/end_line for specific sections)")
+        for tool in ("write_file", "append_to_file"):
+            for marker in markers:
+                content = f"import os\n{marker}\nprint('end')\n"
+                r = dispatch(tool, {"path": "a.py", "content": content}, self.wd)
+                self.assertTrue(r.startswith("ERROR:"), r)
+                self.assertEqual((self.wd / "a.py").read_text(), "real\n")
+
+    def test_marker_source_code_is_fine(self):
+        # The harness's own f-string templates (no digits) must stay writable.
+        src = 'x = f"[… {cut:,} chars removed by context compaction …]"\n'
+        r = dispatch("write_file", {"path": "m.py", "content": src}, self.wd)
+        self.assertTrue(r.startswith("Written:"), r)
+
     def test_placeholder_inside_real_content_is_fine(self):
         r = dispatch("write_file", {"path": "b.md", "content": "see [written to x] below\n"}, self.wd)
         self.assertTrue(r.startswith("Written:"), r)
