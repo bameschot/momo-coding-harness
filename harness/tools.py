@@ -607,7 +607,7 @@ def _append_to_file(path: str, content: str, *, workdir: Path) -> str:
             f.write(content)
     except OSError as e:
         return f"ERROR: {e}"
-    return "OK"
+    return f"OK — appended {_size_note(content)} to {path}"
 
 
 # Leading "  12: " line-number prefix as emitted by read_file — models often copy
@@ -732,18 +732,30 @@ def _edit_file(path: str, old_string: str, new_string: str,
     return "OK — 1 change applied"
 
 
+def _size_note(content: str) -> str:
+    lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+    return f"{lines} line{'s' if lines != 1 else ''}, {len(content.encode('utf-8'))} bytes"
+
+
 def _write_file(path: str, content: str, *, workdir: Path) -> str:
     p = _safe_path(path, workdir)
     if isinstance(p, str):
         return p
+    # A small model that doubts its write landed rewrites the same file again and
+    # again; say so plainly rather than silently writing identical bytes.
+    try:
+        if p.is_file() and p.read_text(encoding="utf-8") == content:
+            return f"No change: {path} already contains exactly this content."
+    except (OSError, UnicodeDecodeError):
+        pass
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
     except OSError as e:
         return f"ERROR: {e}"
-    # "Written: <path>" — the harness inspects last_tool by name (not return value)
-    # but the model uses this confirmation to know the write succeeded.
-    return f"Written: {path}"
+    # The harness inspects last_tool by name (not return value), but the model
+    # uses this confirmation — with concrete size — to know the write landed.
+    return f"Written: {path} ({_size_note(content)})"
 
 
 def _delete_file(path: str, *, workdir: Path) -> str:
@@ -873,6 +885,9 @@ _NEEDS_NET_ACCESS = {"fetch_url"}
 _NEEDS_NET_STATE = {"run_command"}
 
 
+_PLACEHOLDER_RE = re.compile(r"^\s*\[written to [^\]]*\]\s*$")
+
+
 def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              net_max_bytes: int = net.DEFAULT_MAX_BYTES) -> str:
     fn = _EXECUTORS.get(name)
@@ -887,6 +902,15 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
         routed = {k: args[k] for k in ("path", "old_string", "new_string", "replace_all")
                   if k in args}
         return "(note: routed write_file to edit_file) " + dispatch("edit_file", routed, workdir)
+
+    # Sessions saved before the harness stopped eliding write content hold
+    # "[written to <path>]" in place of past file bodies, and a model reading that
+    # history copies it.  Never let the placeholder reach the disk.
+    if (name in ("write_file", "append_to_file") and isinstance(args.get("content"), str)
+            and _PLACEHOLDER_RE.match(args["content"])):
+        return (f"ERROR: content is a history placeholder, not file content — nothing was "
+                f"written. {args.get('path', 'The file')} still holds its previous contents. "
+                f"Pass the complete file text in 'content'.")
 
     required = _REQUIRED_ARGS.get(name, [])
     missing = [r for r in required if r not in args]

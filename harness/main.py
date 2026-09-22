@@ -108,6 +108,15 @@ def main():
     sessions = session_mod.list_sessions()
     if not args.fresh and sessions:
         harness.load_session(sessions[0])
+        # Backend flags given on the command line beat the backend the restored
+        # session was saved with — otherwise `--provider ollama` is silently undone.
+        if args.provider or args.host or args.model:
+            new_provider = args.provider or harness.provider
+            switched = new_provider != harness.provider
+            harness.switch_backend(
+                new_provider,
+                host=args.host or (_DEFAULT_HOSTS[new_provider] if switched else harness.client.host),
+                model=args.model or (model if switched else harness.client.model))
     else:
         harness.set_mode(args.mode)
 

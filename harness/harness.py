@@ -317,23 +317,6 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
     return results
 
 
-# Tools whose "content" argument can be large and contain characters (<, >, &)
-# that break Ollama's Qwen3 XML template when re-sent in message history.
-# We replace the content with a short placeholder after storage — the file is
-# on disk and the model can read_file it back if needed.
-_CONTENT_ARG_TOOLS = {"write_file", "append_to_file"}
-
-
-def _sanitize_tool_args(name: str, args: dict) -> dict:
-    """Replace the 'content' value for file-writing tools with a placeholder.
-    Prevents large file bodies (Python scripts, etc.) with XML-special characters
-    from being embedded verbatim in Ollama's XML chat template on subsequent turns."""
-    if name in _CONTENT_ARG_TOOLS and "content" in args:
-        return {k: (f"[written to {args.get('path', 'file')}]" if k == "content" else v)
-                for k, v in args.items()}
-    return args
-
-
 def _mask_tool_args(name: str, args: dict) -> dict:
     """Blank out secret request-header values in a fetch_url call.
 
@@ -379,10 +362,6 @@ def _derive_write_path(content: str, mode: str) -> str:
         if slug:
             return f"{slug[:60]}.md"
     return "design.md" if mode == "design" else "untitled.md"
-
-
-def _is_qwen(model: str) -> bool:
-    return "qwen" in model.lower()
 
 
 _WRITE_INTENT = (
@@ -572,14 +551,60 @@ _MODE_TOOLS = {
 
 # ── token estimation ──────────────────────────────────────────────────────────
 
-def _estimate_tokens(messages: list[dict]) -> int:
-    total = 0
-    for m in messages:
-        content = m.get("content") or ""
-        if isinstance(content, list):
-            content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-        total += len(content) // 4
-    return total
+def _content_text(m: dict) -> str:
+    content = m.get("content") or ""
+    if isinstance(content, list):
+        content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return content
+
+
+def _text_tokens(text: str) -> int:
+    return len(text) // 4
+
+
+def _calls_tokens(m: dict) -> int:
+    calls = m.get("tool_calls") or []
+    if not calls:
+        return 0
+    return _text_tokens(json.dumps([tc.get("function", tc) for tc in calls], default=str))
+
+
+def _msg_tokens(m: dict) -> int:
+    """Estimated tokens one message costs in a request (thinking is never sent)."""
+    if m.get("role") == "thinking":
+        return 0
+    return _text_tokens(_content_text(m)) + _calls_tokens(m)
+
+
+# Compaction folds the dropped history into this block at the top of the oldest
+# remaining user message; a later compaction replaces it rather than stacking.
+_SUMMARY_OPEN = "[Earlier context summary:\n"
+_SUMMARY_CLOSE = "\n]\n\n"
+_SUMMARY_REPLY_TOKENS = 1024   # room kept free for the summary in the summariser call
+_TRIM_FLOOR_TOKENS = 256       # a trimmed tool result keeps at least this much
+
+
+# Context breakdown categories, in display order: (key, label, sent to the model).
+_CTX_CATEGORIES = (
+    ("system", "System prompt", True),
+    ("tools", "Tools", True),
+    ("user", "User", True),
+    ("assistant", "Assistant", True),
+    ("tool_calls", "Tool calls", True),
+    ("tool_results", "Tool results", True),
+    ("generating", "Generating", True),
+    ("thinking", "Thinking", False),
+)
+
+
+def _split_summary(text: str) -> tuple[str, str]:
+    """Split a compaction summary block off the front of a user message:
+    returns (summary, rest); summary is '' when there is none."""
+    if text.startswith(_SUMMARY_OPEN):
+        end = text.find(_SUMMARY_CLOSE, len(_SUMMARY_OPEN))
+        if end != -1:
+            return text[len(_SUMMARY_OPEN):end], text[end + len(_SUMMARY_CLOSE):]
+    return "", text
 
 
 def _format_for_summary(messages: list[dict]) -> str:
@@ -655,10 +680,15 @@ class Harness:
         # for later) → "executing" (approved; paused if not currently running).
         self.plan: Plan | None = None
         self.plan_phase: str = "investigating"
+        self._tool_ref = ""
+        self._schema_cache: tuple = (None, 0)
+        self._turn_user: dict | None = None  # the user message the running turn answers
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
         ]
         self._token_estimate = 0
+        self._stream_chars = 0      # chars of the reply currently streaming in
+        self._measured_tokens: int | None = None  # last prompt+eval the server reported
         self._cancel = threading.Event()
         # For a fixed-model backend, adopt the server's actually-loaded model before
         # reading its context window, so the label and ctx message reflect reality
@@ -790,6 +820,23 @@ class Harness:
         if loaded and loaded[0] != self.client.model:
             self.client.set_model(loaded[0])
 
+    def switch_backend(self, provider: str, host: str, model: str):
+        """Point the harness at a backend, rebuilding the client when the provider
+        changes, then re-read the served model and its context window."""
+        if provider != self.provider:
+            self.client = make_client(provider, host=host, model=model,
+                                      auth_token=self.client._auth_token)
+            self.provider = provider
+        else:
+            self.client.set_host(host)
+            self.client.set_model(model)
+        self._reconcile_fixed_model()
+        if self.context_pct is not None:
+            self._sync_context_limit(emit=False)
+        else:
+            self.model_max_ctx = self.client.context_length()
+        self._emit_status()
+
     def set_model(self, model: str):
         """Switch model and re-sync context limit from the new model's capabilities."""
         self.client.set_model(model)
@@ -836,7 +883,9 @@ class Harness:
         # Append the tool reference generated from the schemas for exactly this
         # mode's tool set, so the reference is always in sync with the real tools
         # (the role .md files no longer carry a hand-copied version).
-        base += "\n\n---\n\n" + render_tool_reference(self._current_tools())
+        # Kept so the context breakdown can attribute it to tools without re-rendering.
+        self._tool_ref = render_tool_reference(self._current_tools())
+        base += "\n\n---\n\n" + self._tool_ref
         parts = []
         for name in self.active_skills:
             p = _SKILLS_DIR / f"{name}.md"
@@ -863,8 +912,72 @@ class Harness:
 
     # ── context management ────────────────────────────────────────────────────
 
+    @property
+    def _stream_tokens(self) -> int:
+        return self._stream_chars // 4
+
     def _ctx_pct(self) -> int:
-        return min(100, int(self._token_estimate / self.context_limit * 100))
+        used = self._token_estimate + self._stream_tokens
+        return min(100, int(used / self.context_limit * 100))
+
+    def _context_categories(self) -> dict[str, int]:
+        """Estimated tokens per context category (chars/4, see _text_tokens).
+        Thinking is kept in the transcript but filtered before every API call, so
+        it is reported but never counted as sent."""
+        cats = {key: 0 for key, _, _ in _CTX_CATEGORIES}
+        # Kept apart as well as counted under "tools", so _estimate can leave it out.
+        cats["schemas"] = self._schema_tokens()
+        cats["tools"] += cats["schemas"]
+        for m in list(self.messages):
+            role = m.get("role")
+            text = _content_text(m)
+            if role == "system":
+                # The generated tool reference is part of the system prompt text,
+                # but it is spent on tools, so it is attributed to them.
+                ref = self._tool_ref
+                if ref and ref in text:
+                    cats["tools"] += _text_tokens(ref)
+                    text = text.replace(ref, "", 1)
+                cats["system"] += _text_tokens(text)
+            elif role == "user":
+                cats["user"] += _text_tokens(text)
+            elif role == "assistant":
+                cats["assistant"] += _text_tokens(text)
+                cats["tool_calls"] += _calls_tokens(m)
+            elif role == "tool":
+                cats["tool_results"] += _text_tokens(text)
+            elif role == "thinking":
+                cats["thinking"] += _text_tokens(text)
+        cats["generating"] = self._stream_tokens
+        return cats
+
+    def _schema_tokens(self) -> int:
+        """Estimated tokens of the tool schemas sent with each request, cached per
+        tool set (serialising them is the expensive part of an estimate)."""
+        tools = self._current_tools() if self.tools_enabled else []
+        key = tuple(t["function"]["name"] for t in tools)
+        if self._schema_cache[0] != key:
+            n = _text_tokens(json.dumps(tools, separators=(",", ":"))) if tools else 0
+            self._schema_cache = (key, n)
+        return self._schema_cache[1]
+
+    def context_breakdown(self) -> dict:
+        """Where the context is spent, per category — backs /context and the web
+        UI's context popover.  ``used`` is the status-bar figure (the server's
+        measured count after a reply, the estimate before one) plus whatever is
+        streaming in; the categories are always estimates."""
+        cats = self._context_categories()
+        return {
+            "limit": self.context_limit,
+            "model_max": self.model_max_ctx,
+            "used": self._token_estimate + self._stream_tokens,
+            "estimated": sum(cats[k] for k, _, sent in _CTX_CATEGORIES if sent),
+            "measured": self._measured_tokens,
+            "pct": self._ctx_pct(),
+            "streaming": self._stream_tokens > 0,
+            "categories": [{"key": k, "label": label, "tokens": cats[k], "sent": sent}
+                           for k, label, sent in _CTX_CATEGORIES],
+        }
 
     def _ctx_color(self, pct: int) -> str:
         if pct >= 90:
@@ -874,83 +987,157 @@ class Harness:
         return "normal"
 
     def compact(self, summarise: bool = True) -> str:
-        before = self._token_estimate
-        removed = 0
-        target = self.context_limit // 3
-        removed_msgs: list[dict] = []
+        return self._compact(summarise)[1]
 
-        # Pass 1: remove tool-call groups (assistant + all its tool/thinking results)
-        i = 1  # keep system prompt at 0
-        while i < len(self.messages) and self._estimate() > target:
-            msg = self.messages[i]
-            if msg["role"] == "assistant":
+    def _compact(self, summarise: bool = True) -> tuple[bool, str]:
+        """Shrink the history to a third of its budget (the limit minus the fixed
+        system prompt).  Returns (changed, notice).
+
+        Pass 1 drops old tool-call groups (assistant + its tool/thinking messages),
+        pass 2 drops whole old turns, pass 3 trims the largest tool results that
+        are left.  The running turn's question and its latest tool group are never
+        dropped — deleting the result the model just asked for makes it ask again.
+        Nothing is changed until the summary is in, so a cancel leaves it intact.
+        """
+        msgs = self.messages
+        before = self._token_estimate or self._estimate(schemas=True)
+        costs = [_msg_tokens(m) for m in msgs]
+        fixed = costs[0] if msgs else 0
+        if fixed >= self.context_limit:
+            return False, (f"Context not compacted: the system prompt and tool reference alone are "
+                           f"~{fixed:,} tokens, over the {self.context_limit:,}-token limit. "
+                           "Raise it with /context <n> or /context <n>%.")
+        target = fixed + (self.context_limit - fixed) // 3
+        total = sum(costs)
+
+        users = [i for i, m in enumerate(msgs) if m.get("role") == "user"]
+        anchor = next((i for i, m in enumerate(msgs) if m is self._turn_user), None)
+        if anchor is None:
+            anchor = users[-1] if users else len(msgs)
+        # The latest tool group of the running turn stays (it may be in flight).
+        last_calls = next((i for i in range(len(msgs) - 1, anchor, -1)
+                           if msgs[i].get("role") == "assistant" and msgs[i].get("tool_calls")), None)
+        tail = last_calls if last_calls is not None else len(msgs)
+
+        drop: set[int] = set()
+
+        def take(idx):
+            nonlocal total
+            drop.add(idx)
+            total -= costs[idx]
+
+        # Pass 1: tool-call groups, oldest first.
+        i = 1
+        while i < tail and total > target:
+            role = msgs[i].get("role")
+            if role == "assistant":
                 j = i + 1
-                while j < len(self.messages) and self.messages[j]["role"] in ("tool", "thinking"):
+                while j < tail and msgs[j].get("role") in ("tool", "thinking"):
                     j += 1
                 if j > i + 1:
-                    group = self.messages[i:j]
-                    removed_msgs.extend(group)
-                    del self.messages[i:j]
-                    removed += len(group)
+                    for k in range(i, j):
+                        take(k)
+                    i = j
                     continue
-            elif msg["role"] in ("tool", "thinking"):
-                # orphaned tool/thinking with no preceding assistant
-                removed_msgs.append(self.messages[i])
-                del self.messages[i]
-                removed += 1
-                continue
+            elif role in ("tool", "thinking"):
+                take(i)   # orphaned tool/thinking with no preceding assistant
             i += 1
 
-        # Pass 2: remove oldest user+assistant pairs
-        i = 1
-        while i < len(self.messages) and self._estimate() > target:
-            msg = self.messages[i]
-            if msg["role"] == "user":
-                removed_msgs.append(self.messages[i])
-                del self.messages[i]
-                removed += 1
-                if i < len(self.messages) and self.messages[i]["role"] == "assistant":
-                    removed_msgs.append(self.messages[i])
-                    del self.messages[i]
-                    removed += 1
-            else:
-                i += 1
+        # Pass 2: whole turns before the running one, oldest first, so what is
+        # left still starts with a user message and keeps its tool pairing.
+        starts = [u for u in users if u < anchor]
+        if not starts or starts[0] > 1:
+            starts.insert(0, 1)
+        for n, s0 in enumerate(starts):
+            if total <= target:
+                break
+            s1 = starts[n + 1] if n + 1 < len(starts) else anchor
+            for k in range(s0, s1):
+                if k not in drop:
+                    take(k)
 
-        # Summarise removed messages and inject into oldest remaining user turn
-        summary = self._summarize_removed(removed_msgs) if (removed_msgs and summarise) else ""
-        if summary:
-            for msg in self.messages[1:]:
-                if msg["role"] == "user":
-                    msg["content"] = f"[Earlier context summary:\n{summary}\n]\n\n{msg['content']}"
+        # Pass 3: still over the limit — trim the largest remaining tool results.
+        trims: dict[int, str] = {}
+        if total > self.context_limit:
+            for k in sorted((k for k in range(1, len(msgs))
+                             if k not in drop and msgs[k].get("role") == "tool"),
+                            key=lambda k: -costs[k]):
+                excess = total - self.context_limit
+                if excess <= 0:
                     break
+                keep = max(costs[k] - excess - 16, _TRIM_FLOOR_TOKENS)  # 16: the marker
+                if keep >= costs[k]:
+                    continue
+                text = _content_text(msgs[k])
+                head, tail_chars = keep * 4 * 2 // 3, keep * 4 // 3
+                cut = len(text) - head - tail_chars
+                trims[k] = (f"{text[:head]}\n[… {cut:,} chars removed by context compaction …]\n"
+                            f"{text[len(text) - tail_chars:]}")
+                total -= costs[k] - _text_tokens(trims[k])
 
-        after = self._estimate()
+        if not drop and not trims:
+            return False, (f"Context not compacted: nothing left to remove "
+                           f"(~{total:,} of {self.context_limit:,} tokens).")
+
+        # Summarise what goes, folding in a summary already at the top of the
+        # oldest surviving user message so the new one replaces it.
+        keep_idx = [k for k in range(len(msgs)) if k not in drop]
+        first_user = next((k for k in keep_idx if msgs[k].get("role") == "user"), None)
+        prev_summary, first_body = "", None
+        if first_user is not None:
+            prev_summary, first_body = _split_summary(_content_text(msgs[first_user]))
+        removed_msgs = [msgs[k] for k in sorted(drop)]
+        summary = ""
+        if summarise and removed_msgs:
+            summary = self._summarize_removed(removed_msgs, prev_summary)
+            if self._cancel.is_set():
+                return False, "Compaction cancelled — history unchanged."
+
+        # Commit.
+        # (In place: _turn_user tracks the running turn's message by identity.)
+        for k, text in trims.items():
+            msgs[k]["content"] = text
+        if summary and first_user is not None:
+            msgs[first_user]["content"] = f"{_SUMMARY_OPEN}{summary}{_SUMMARY_CLOSE}{first_body}"
+        self.messages = [msgs[k] for k in keep_idx]
+
+        after = self._estimate(schemas=True)
         self._token_estimate = after
+        self._measured_tokens = None
         action = "summarised" if summary else "removed"
-        notice = (f"Context compacted: {action} {removed} messages "
-                  f"(was ~{before} tokens, now ~{after} tokens)")
-        self.logger.log_compact(self.mode, self.client.model, removed, before, after)
-        return notice
+        notice = f"Context compacted: {action} {len(drop)} messages"
+        if trims:
+            notice += f", trimmed {len(trims)} tool result{'s' if len(trims) > 1 else ''}"
+        notice += f" (was ~{before:,} tokens, now ~{after:,} tokens)"
+        self.logger.log_compact(self.mode, self.client.model, len(drop), before, after)
+        return True, notice
 
-    def _summarize_removed(self, msgs: list[dict]) -> str:
-        """One-shot LLM call to summarise removed messages. Returns '' on failure."""
+    def _summarize_removed(self, msgs: list[dict], previous: str = "") -> str:
+        """One-shot LLM call to summarise removed messages (superseding `previous`,
+        an earlier summary). Returns '' on failure."""
         conversation = _format_for_summary(msgs)
         if not conversation.strip():
-            return ""
-        prompt = [{
-            "role": "user",
-            "content": (
-                "Summarize the following conversation fragment concisely. "
-                "Preserve: key decisions, file names, code entities, outcomes, and "
-                "any facts needed to continue the work. Omit pleasantries and filler.\n\n"
-                + conversation
-            )
-        }]
+            return previous
+        num_ctx = self.model_max_ctx or self.context_limit
+        instruction = ("Summarize the following conversation fragment concisely. "
+                       "Preserve: key decisions, file names, code entities, outcomes, and "
+                       "any facts needed to continue the work. Omit pleasantries and filler.\n\n")
+        if previous:
+            instruction += f"It continues from this earlier summary; fold it in:\n{previous}\n\n"
+        # Fit the call's window: keep the newest part of the fragment.
+        budget = (num_ctx - _SUMMARY_REPLY_TOKENS - _text_tokens(instruction)) * 4
+        if budget <= 0:
+            return previous
+        if len(conversation) > budget:
+            conversation = conversation[-budget:]
+            conversation = conversation[conversation.find("\n") + 1:]
+        prompt = [{"role": "user", "content": instruction + conversation}]
         try:
-            response = self.client.chat(prompt, [])
-            return response.content or ""
+            response = self.client.chat(prompt, [], think=False, num_ctx=num_ctx)
         except Exception:
             return ""
+        content, _ = _extract_and_strip_thinking(response.content or "")
+        return content
 
     def user_turns(self) -> int:
         return self._turn_count
@@ -973,7 +1160,7 @@ class Harness:
             text = _format_for_summary([m])
             if not text:
                 continue
-            cost = len(text) // 4 + 1              # same estimate as _estimate_tokens
+            cost = len(text) // 4 + 1              # same estimate as _text_tokens
             if used + cost > budget_tokens:
                 if not parts:                      # always keep the end of the newest message
                     parts.append(text[-budget_tokens * 4:])
@@ -1041,6 +1228,7 @@ class Harness:
 
     def compact_threaded(self, summarise: bool = True):
         """Run compact() on a worker thread, emitting events back to the TUI."""
+        self._cancel.clear()   # an earlier Esc must not cancel this compaction
         try:
             notice = self.compact(summarise=summarise)
             self.event_queue.put(ChatEvent("system", notice))
@@ -1048,8 +1236,14 @@ class Harness:
         finally:
             self.event_queue.put(DoneEvent())
 
-    def _estimate(self) -> int:
-        return _estimate_tokens(self.messages)
+    def _estimate(self, schemas: bool = False) -> int:
+        """Estimated tokens of the messages the next request sends (stored thinking
+        is never sent).  With ``schemas`` the tool schemas are included too — the
+        full request, as the status bar shows it.  Compaction measures without
+        them: they are fixed per mode, so compacting cannot shrink them."""
+        cats = self._context_categories()
+        total = sum(cats[k] for k, _, sent in _CTX_CATEGORIES if sent and k != "generating")
+        return total if schemas else total - cats["schemas"]
 
     def cancel(self):
         """Interrupt the running LLM call immediately."""
@@ -1070,6 +1264,7 @@ class Harness:
                 self._execute_plan()
                 return
             self.messages.append({"role": "user", "content": text})
+            self._turn_user = self.messages[-1]
             tools = [] if not self.tools_enabled else self._current_tools()
             outcome = self._run_loop(tools, 40 if self.mode == "design" else 100)
             if outcome == "plan_approved":
@@ -1086,10 +1281,11 @@ class Harness:
         last = self.messages[-1]["role"] if self.messages else ""
         if last == "user":
             self.messages[-1]["content"] = f"{self.messages[-1].get('content') or ''}\n\n{text}".strip()
-            return
-        if last == "tool":
-            self.messages.append({"role": "assistant", "content": None})
-        self.messages.append({"role": "user", "content": text})
+        else:
+            if last == "tool":
+                self.messages.append({"role": "assistant", "content": None})
+            self.messages.append({"role": "user", "content": text})
+        self._turn_user = self.messages[-1]
 
     def _run_loop(self, tools: list[dict], max_iterations: int) -> str:
         """Run the model/tool loop on the current history until the model gives a
@@ -1110,6 +1306,7 @@ class Harness:
         _suppress_think_next = False  # disable thinking for one turn after cutoff or thinking-only retry
         _nudged = False
         _write_nudged = False  # one write-intent recovery nudge per send()
+        compact_notice = ""    # last auto-compaction notice, to not repeat a no-op one
         while True:
             if self._cancel.is_set():
                 self.event_queue.put(ChatEvent("system", "Interrupted."))
@@ -1119,11 +1316,15 @@ class Harness:
                 return "limit"
             iteration += 1
             # auto-compact if needed
-            self._token_estimate = self._estimate()
-            if self._token_estimate > self.context_limit:
-                notice = self.compact()
-                self.event_queue.put(ChatEvent("system", notice))
-                self._emit_status()
+            self._stream_chars = 0
+            self._token_estimate = self._estimate(schemas=True)
+            if self._estimate() > self.context_limit:
+                changed, notice = self._compact()
+                # A compaction that could not help is reported once, not every iteration.
+                if changed or notice != compact_notice:
+                    self.event_queue.put(ChatEvent("system", notice))
+                    self._emit_status()
+                compact_notice = notice
 
             self.logger.log_request(
                 self.mode, self.client.model,
@@ -1151,6 +1352,7 @@ class Harness:
                     if stream_kw:
                         stream_kw["on_delta"].flush()
                         self.event_queue.put(StreamEndEvent())
+                    self._stream_chars = 0
             except Exception as e:
                 if self._cancel.is_set():
                     self.event_queue.put(ChatEvent("system", "Interrupted."))
@@ -1166,6 +1368,11 @@ class Harness:
 
             if prompt_tokens is not None:
                 self._token_estimate = (prompt_tokens or 0) + (eval_tokens or 0)
+                self._measured_tokens = self._token_estimate
+            else:
+                # No server count: fold the streamed reply into the estimate so the
+                # bar does not fall back when the stream preview ends.
+                self._token_estimate += _text_tokens((response.content or "") + (response.thinking or ""))
 
             # Extract thinking tokens from two sources:
             # 1. response.thinking — the adapter's reasoning field (Ollama's msg.thinking,
@@ -1317,13 +1524,16 @@ class Harness:
             # _calls holds both native (adapter-parsed) and text-recovered calls;
             # _strip_text_tool_calls scrubs any raw tool markup left in content so
             # tagged/XML formats don't corrupt Qwen3's prompt on the next turn.
-            _qwen = _is_qwen(self.client.model)
+            # Arguments are stored verbatim, write_file content included.  Replacing
+            # it with a placeholder made the model doubt its write landed: it
+            # rewrote the same file in a loop and eventually copied the placeholder
+            # itself, overwriting the file.  Ollama's Qwen3 template is protected
+            # by the adapter's XML escaping instead.
             self.messages.append({
                 "role": "assistant",
                 "content": _strip_text_tool_calls(content) or None,
                 "tool_calls": [
-                    {"function": {"name": n,
-                                  "arguments": _sanitize_tool_args(n, a) if _qwen else a}}
+                    {"function": {"name": n, "arguments": a}}
                     for n, a in _calls
                 ],
             })
@@ -1479,7 +1689,14 @@ class Harness:
 
         def flush():
             if buf and state["kind"]:
-                self.event_queue.put(DeltaEvent(state["kind"], "".join(buf)))
+                text = "".join(buf)
+                self.event_queue.put(DeltaEvent(state["kind"], text))
+                # Streamed tokens (content and thinking alike) occupy the window
+                # while they are generated: move the status bar with them.
+                before = self._ctx_pct()
+                self._stream_chars += len(text)
+                if self._ctx_pct() != before:
+                    self._emit_status()
             buf.clear()
             state["ts"] = time.monotonic()
 
@@ -1848,7 +2065,8 @@ class Harness:
         # disk — saved sessions carry a snapshot; role/skill edits must take effect.
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
-        self._token_estimate = self._estimate()
+        self._token_estimate = self._estimate(schemas=True)
+        self._measured_tokens = None
         self._emit_status()
         return f"Session loaded: {path.name} ({len(self.messages)} messages)"
 
@@ -1868,7 +2086,8 @@ class Harness:
         self._momo_recap_turn = 0
         self._turn_count = 0
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
-        self._token_estimate = self._estimate()
+        self._token_estimate = self._estimate(schemas=True)
+        self._measured_tokens = None
         self._emit_status()
         return f"Started a new session: {self.session_path().name}"
 
@@ -1879,7 +2098,8 @@ class Harness:
             if self.messages[i].get("role") == "user":
                 content = self.messages[i].get("content") or ""
                 del self.messages[i:]
-                self._token_estimate = self._estimate()
+                self._token_estimate = self._estimate(schemas=True)
+                self._measured_tokens = None
                 self._autosave()
                 self._emit_status()
                 return content

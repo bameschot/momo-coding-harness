@@ -492,6 +492,7 @@ function applyStatus(s) {
   $("#ctx-pct").textContent = `${s.ctx_pct}%`;
   $("#ctx-fill").style.width = `${Math.min(100, s.ctx_pct)}%`;
   $(".ctx").className = `ctx ${s.ctx_color}`;
+  if (!$("#ctx-menu").hidden) scheduleCtxRefresh();
   $("#tools-badge").hidden = s.tools_enabled;
   const run = $("#run-badge");
   run.textContent = s.run_confirm ? "RUN: confirm" : "RUN: auto";
@@ -1259,7 +1260,7 @@ $("#net-max-bytes").onchange = (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.target === input || e.target.matches?.("input, select, textarea")) return;
   if (e.key === "Escape") {
-    if (!$("#view-menu").hidden || !$("#model-menu").hidden) return closeMenu();
+    if (!$("#view-menu").hidden || !$("#model-menu").hidden || !$("#ctx-menu").hidden) return closeMenu();
     for (const d of ["#plan-drawer", "#sessions-drawer", "#files-drawer"]) {
       if (!$(d).hidden) return ($(d).hidden = true);
     }
@@ -1286,16 +1287,20 @@ function syncViewMenu() {
 function closeMenu() {
   $("#view-menu").hidden = true;
   $("#model-menu").hidden = true;
+  $("#ctx-menu").hidden = true;
   $("#view-btn").setAttribute("aria-expanded", "false");
+  $("#ctx-btn").setAttribute("aria-expanded", "false");
 }
 $("#view-btn").onclick = (e) => {
   e.stopPropagation();
   const m = $("#view-menu");
-  m.hidden = !m.hidden;
+  const open = m.hidden;
+  closeMenu();
+  m.hidden = !open;
   $("#view-btn").setAttribute("aria-expanded", String(!m.hidden));
 };
 document.addEventListener("click", (e) => {
-  if (!$("#view-menu").contains(e.target) && !$("#model-menu").contains(e.target)) closeMenu();
+  if (!["#view-menu", "#model-menu", "#ctx-menu"].some((m) => $(m).contains(e.target))) closeMenu();
 });
 for (const cb of document.querySelectorAll("[data-view]")) {
   cb.onchange = () => { view[cb.dataset.view] = cb.checked; saveView(); syncViewMenu(); rerenderAll(); };
@@ -1347,6 +1352,69 @@ $("#model-btn").onclick = async (e) => {
     rows.push(b);
   }
   menu.replaceChildren(...rows);
+};
+
+// ── context breakdown ─────────────────────────────────────────────────────────
+// Clicking the CTX meter shows where the context is spent. While it is open,
+// status events (which arrive live as a reply streams in) re-fetch it.
+const fmtTok = (n) => n.toLocaleString("en-US");
+let ctxRefreshTimer = null;
+function scheduleCtxRefresh() {
+  if (ctxRefreshTimer) return;
+  ctxRefreshTimer = setTimeout(() => { ctxRefreshTimer = null; refreshCtxMenu(); }, 500);
+}
+async function refreshCtxMenu() {
+  const menu = $("#ctx-menu");
+  if (menu.hidden) return;
+  let b;
+  try {
+    b = await (await fetch("api/context")).json();
+  } catch (err) {
+    menu.replaceChildren(el("div", "menu-title", "Context"), el("div", "muted", `Could not load: ${err.message}`));
+    return;
+  }
+  if (menu.hidden) return;
+  renderCtxMenu(menu, b);
+}
+function renderCtxMenu(menu, b) {
+  const pctOf = (n) => (b.limit ? (n / b.limit) * 100 : 0);
+  const shown = b.categories.filter((c) => c.key !== "generating" || b.streaming);
+  const sent = shown.filter((c) => c.sent);
+  const bar = el("div", "ctx-stack");
+  for (const c of sent) {
+    if (!c.tokens) continue;
+    const seg = el("span", `ctx-seg ctx-${c.key}`);
+    seg.style.width = `${Math.min(100, pctOf(c.tokens))}%`;
+    seg.title = `${c.label}: ~${fmtTok(c.tokens)} tokens`;
+    bar.append(seg);
+  }
+  const rows = el("div", "ctx-rows");
+  for (const c of shown) {
+    const row = el("div", `ctx-row${c.sent ? "" : " unsent"}`);
+    row.append(el("span", `ctx-swatch ctx-${c.key}`), el("span", "ctx-name", c.label),
+      el("span", "ctx-tok mono", fmtTok(c.tokens)),
+      el("span", "ctx-pc mono", c.sent ? `${pctOf(c.tokens).toFixed(0)}%` : "—"));
+    if (!c.sent) row.title = "Kept in the transcript but not sent to the model";
+    rows.append(row);
+  }
+  const meta = [`limit ${fmtTok(b.limit)}`];
+  if (b.model_max) meta.push(`model max ${fmtTok(b.model_max)}`);
+  if (b.measured != null) meta.push(`last measured ${fmtTok(b.measured)}`);
+  menu.replaceChildren(
+    el("div", "menu-title", `Context · ~${fmtTok(b.used)} tokens (${b.pct}%)${b.streaming ? " · streaming" : ""}`),
+    bar, rows,
+    el("div", "muted small", meta.join(" · ")),
+    el("div", "muted small", `Categories are estimates (~4 chars/token), total ~${fmtTok(b.estimated)}. Thinking stays in the transcript but is not re-sent.`));
+}
+$("#ctx-btn").onclick = (e) => {
+  e.stopPropagation();
+  const menu = $("#ctx-menu");
+  if (!menu.hidden) return closeMenu();
+  closeMenu();
+  menu.replaceChildren(el("div", "menu-title", "Context"), el("div", "muted", "Loading…"));
+  menu.hidden = false;
+  $("#ctx-btn").setAttribute("aria-expanded", "true");
+  refreshCtxMenu();
 };
 
 // ── left drawers: sessions and workspace files ────────────────────────────────

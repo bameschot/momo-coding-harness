@@ -32,6 +32,33 @@ class CommandResult:
     retry: bool = False                     # controller re-sends the last user message
 
 
+
+def _format_context(harness) -> str:
+    """/context: usage against the limit, then tokens per category with a bar."""
+    b = harness.context_breakdown()
+    limit = b["limit"]
+    head = f"Context: ~{b['used']:,} / {limit:,} tokens ({b['pct']}%)"
+    if harness.context_pct is not None:
+        head += f" | limit is {harness.context_pct}% of model max"
+    if b["model_max"]:
+        head += f" | model max {b['model_max']:,}"
+    if b["measured"] is not None:
+        head += f" | last measured {b['measured']:,}"
+    lines = [head]
+    width = 20
+    for c in b["categories"]:
+        if c["key"] == "generating" and not b["streaming"]:
+            continue
+        if not c["sent"]:
+            lines.append(f"  {c['label']:<14}{c['tokens']:>8,}     —  (kept in transcript, not sent to the model)")
+            continue
+        frac = c["tokens"] / limit if limit else 0
+        fill = min(width, round(frac * width))
+        lines.append(f"  {c['label']:<14}{c['tokens']:>8,}  {frac * 100:>3.0f}%  "
+                     + "█" * fill + "░" * (width - fill))
+    lines.append(f"  (per-category figures are estimates, ~4 chars per token; total ~{b['estimated']:,})")
+    return "\n".join(lines)
+
 def handle(line: str, harness: Harness) -> CommandResult:
     """Parse and execute a /command. Returns CommandResult."""
     parts = line.strip().split(None, 1)
@@ -146,7 +173,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             plan_note = "; " + harness.cancel_plan()  # also refreshes messages[0]
         system_msg = harness.messages[0]
         harness.messages = [system_msg]
-        harness._token_estimate = harness._estimate()
+        harness._token_estimate = harness._estimate(schemas=True)
         harness._emit_status()
         return CommandResult(handled=True, output="Conversation cleared" + plan_note)
 
@@ -213,12 +240,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/context":
         if not arg:
-            usage_pct = harness._ctx_pct()
-            est = harness._token_estimate
-            scale = f" | scale: {harness.context_pct}% of model max" if harness.context_pct is not None else ""
-            return CommandResult(handled=True,
-                                 output=(f"Context limit: {harness.context_limit} tokens | "
-                                         f"usage: ~{est} tokens ({usage_pct}%){scale}"))
+            return CommandResult(handled=True, output=_format_context(harness))
         if arg.endswith("%"):
             try:
                 n = int(arg[:-1])

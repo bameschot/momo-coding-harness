@@ -13,6 +13,7 @@ Routes
   GET  /api/last-user the last user message's typed text + attachment names
   GET  /api/sessions  recent sessions for the session drawer
   GET  /api/models    models available on the backend
+  GET  /api/context   context usage broken down per category (system, tools, …)
   GET  /api/export    the conversation as a Markdown download
   GET  /api/files     ?path= → directory listing (read-only, confined to the workspace)
   GET  /api/file      ?path= → file contents as text (same conversion as uploads)
@@ -318,6 +319,8 @@ class WebServer:
                     self._json({"current": h.client.model, "models": h.client.list_models(),
                                 "can_switch": h.client.can_switch_model,
                                 "provider": h.client.provider_name})
+                elif path == "/api/context":
+                    self._json(h.context_breakdown())
                 elif path == "/api/last-user":
                     self._json(web.controller.last_user_message() or {})
                 elif path == "/api/export":

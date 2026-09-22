@@ -56,11 +56,11 @@
   <div class="status-row second">
     <span id="workdir" class="field muted mono collapse" dir="rtl"></span>
     <span class="spacer"></span>
-    <span class="ctx" title="Context used">
+    <button id="ctx-btn" class="ctx" type="button" title="Context used — click for a breakdown" aria-haspopup="true" aria-expanded="false">
       <span class="ctx-label">CTX</span>
       <span class="meter"><span id="ctx-fill"></span></span>
       <span id="ctx-pct" class="mono">0%</span>
-    </span>
+    </button>
     <button id="tools-badge" class="chip button warn" type="button" title="Tools are disabled — click to enable" hidden>TOOLS: off</button>
     <button id="run-badge" class="chip button" type="button" title="Toggle run_command confirmation (Shift+P)">RUN: auto</button>
     <button id="net-badge" class="chip button" type="button" title="Internet access is off — click to turn it on">NET: off</button>
@@ -96,6 +96,7 @@
     <a id="export-link" class="menu-link" href="api/export" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download conversation (.md)</a>
   </div>
   <div id="model-menu" class="menu model-menu" role="menu" hidden></div>
+  <div id="ctx-menu" class="menu ctx-menu" role="dialog" aria-label="Context usage" hidden></div>
 </header>
 
 <main id="transcript" tabindex="-1" aria-live="polite" aria-label="Conversation"></main>

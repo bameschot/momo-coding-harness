@@ -151,6 +151,8 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
 .icon-btn[aria-expanded="true"] { color: var(--text); background: var(--surface-2); }
 .with-icon { display: inline-flex; align-items: center; gap: 6px; }
 .ctx { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+button.ctx { background: none; border: 1px solid transparent; border-radius: 6px; padding: 2px 4px; cursor: pointer; }
+button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border); }
 .ctx-label { color: var(--muted); font-family: var(--mono); }
 .meter { width: 90px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; border: 1px solid var(--border); }
 #ctx-fill { display: block; height: 100%; width: 0; background: var(--ok); transition: width .3s; }
@@ -439,6 +441,26 @@ body.is-busy .user-actions { display: none; }
 .model-btn .icon { color: var(--muted); }
 .model-btn:hover { border-color: var(--border); background: var(--surface-2); }
 .model-menu { left: 12px; right: auto; max-height: 60vh; overflow-y: auto; }
+
+/* Context breakdown popover: a stacked bar (share of the limit) + one row per category. */
+.ctx-menu { width: min(340px, calc(100vw - 24px)); }
+.ctx-stack { display: flex; height: 10px; margin: 8px 0 10px; border-radius: 4px; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border); }
+.ctx-seg { display: block; height: 100%; min-width: 2px; transition: width .3s; }
+.ctx-rows { display: grid; gap: 3px; margin-bottom: 8px; }
+.ctx-row { display: grid; grid-template-columns: 10px 1fr auto 3.5em; align-items: center; gap: 8px; }
+.ctx-row.unsent { color: var(--muted); }
+.ctx-swatch { width: 10px; height: 10px; border-radius: 2px; }
+.ctx-row.unsent .ctx-swatch { opacity: .45; }
+.ctx-tok, .ctx-pc { text-align: right; font-size: 12px; }
+.ctx-system       { background: var(--system); }
+.ctx-tools        { background: var(--muted); }
+.ctx-user         { background: var(--user); }
+.ctx-assistant    { background: var(--assistant); }
+.ctx-tool_calls   { background: var(--tool); }
+.ctx-tool_results { background: var(--ok); }
+.ctx-thinking     { background: var(--think); }
+.ctx-generating   { background: repeating-linear-gradient(45deg, var(--assistant) 0 4px, transparent 4px 8px); }
 .menu-item {
   display: block; width: 100%; text-align: left; background: none; border: none; border-radius: 6px;
   padding: 4px 8px; cursor: pointer; font: 13px var(--mono);
