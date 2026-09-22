@@ -80,11 +80,14 @@
     <div class="menu-sub">Companion</div>
     <label><input type="checkbox" id="idle-recap"> Recap when I'm idle <kbd>/companion-idle-recap</kbd></label>
     <label class="menu-num">Idle for <input type="number" id="idle-recap-secs" min="10" step="10" value="90"> seconds</label>
+    <div class="menu-sub">Context</div>
+    <label><input type="checkbox" id="guides"> Load AGENTS.md / CLAUDE.md <kbd>/guides</kbd></label>
     <div class="menu-sub">Network</div>
     <label><input type="checkbox" id="net-on"> Internet access <kbd>/net</kbd></label>
     <label><input type="checkbox" id="net-local"> Allow localhost and LAN <kbd>/net local</kbd></label>
     <label><input type="checkbox" id="net-confirm"> Confirm POST/PUT/DELETE <kbd>/net-confirm</kbd></label>
-    <label class="menu-num">Max response <input type="text" id="net-max-bytes" size="7" placeholder="100kb"></label>
+    <label class="menu-num">Max download <input type="text" id="net-max-bytes" size="7" placeholder="2mb"></label>
+    <label class="menu-num">Text per fetch <input type="text" id="net-max-chars" size="7" placeholder="24000"></label>
     <div class="menu-sub">Model</div>
     <label><input type="checkbox" id="think-mode"> Thinking mode <kbd>/think</kbd></label>
     <div class="menu-sub">Skills</div>

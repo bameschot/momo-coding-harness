@@ -33,6 +33,12 @@ _MUTATING_TOOLS = {
 _ROLES_DIR  = Path(__file__).parent.parent / "roles"
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
+# Project guide files for coding agents, read from the workdir root (matched
+# case-insensitively) when /guides is on, in this order.
+_GUIDE_FILES = ("AGENTS.md", "CLAUDE.md", "MOMO.md", "GEMINI.md",
+                ".github/copilot-instructions.md", ".cursorrules")
+_GUIDE_MAX_CHARS = 24_000   # all guides together; also capped at context_limit chars (~1/4)
+
 
 # ── text tool-call recovery ───────────────────────────────────────────────────
 # Static regexes for known tagged formats.  The tier-3 bare-JSON pattern is
@@ -426,10 +432,12 @@ class StatusEvent:
     run_confirm: bool = False
     net_access: str = "off"     # "off" | "on" | "local"
     net_confirm: bool = True    # ask y/N before a write request
-    net_max_bytes: int = 102400  # ceiling on one fetch_url response
+    net_max_bytes: int = 2097152  # ceiling on one fetch_url download
+    net_max_chars: int = 24000    # text returned per fetch_url call
     host: str = ""
     provider: str = ""
     plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
+    guides: bool = False     # project guide files (AGENTS.md, ...) in the system prompt
 
 @dataclass
 class ErrorEvent:
@@ -587,6 +595,7 @@ _TRIM_FLOOR_TOKENS = 256       # a trimmed tool result keeps at least this much
 # Context breakdown categories, in display order: (key, label, sent to the model).
 _CTX_CATEGORIES = (
     ("system", "System prompt", True),
+    ("guides", "Project guides", True),
     ("tools", "Tools", True),
     ("user", "User", True),
     ("assistant", "Assistant", True),
@@ -663,8 +672,11 @@ class Harness:
         self.net_access: str = "off"
         # When True, POST/PUT/PATCH/DELETE ask y/N first.  /net-confirm
         self.net_confirm: bool = True
-        # Ceiling on a single fetch_url response.  /net-max-bytes
+        # Ceiling on a single fetch_url download.  /net-max-bytes
         self.net_max_bytes: int = net_mod.DEFAULT_MAX_BYTES
+        # Text returned per fetch_url call (the rest is paged with offset=/find=).
+        # /net-max-chars
+        self.net_max_chars: int = net_mod.DEFAULT_MAX_CHARS
         self.active_skills: list[str] = []
         self.input_history: list[str] = []
         # Idle recap: when on, momo recaps the last turns in its speech bubble after
@@ -681,6 +693,12 @@ class Harness:
         self.plan: Plan | None = None
         self.plan_phase: str = "investigating"
         self._tool_ref = ""
+        # Project guides: when on, the workdir's AGENTS.md / CLAUDE.md / ... are
+        # appended to the system prompt; re-read on new/loaded session, /clear,
+        # compaction and a workdir change (reload_guides).  /guides
+        self.guides: bool = False
+        self._guides: list[tuple[str, str]] = []   # (relpath, text) as last read
+        self._guides_text = ""                     # the rendered prompt block
         self._schema_cache: tuple = (None, 0)
         self._turn_user: dict | None = None  # the user message the running turn answers
         self.messages: list[dict] = [
@@ -723,6 +741,13 @@ class Harness:
             return self._user_input_queue.get()
         finally:
             self.awaiting_input = False
+
+    def _fetch_chars(self) -> int:
+        """Text budget for one fetch_url result: /net-max-chars, but never above
+        /tool-result, which fetch_url is exempt from because it windows itself."""
+        if self.max_tool_result > 0:
+            return min(self.net_max_chars, self.max_tool_result)
+        return self.net_max_chars
 
     def _net_confirm_prompt(self, args: dict) -> str | None:
         """The y/N question to ask before a fetch_url write, or None to just run it.
@@ -886,6 +911,13 @@ class Harness:
         # Kept so the context breakdown can attribute it to tools without re-rendering.
         self._tool_ref = render_tool_reference(self._current_tools())
         base += "\n\n---\n\n" + self._tool_ref
+        self._guides_text = ""
+        if self._guides:
+            self._guides_text = (
+                "## Project guides\n\nInstructions from this project's own guide files "
+                "— follow them.\n\n"
+                + "\n\n".join(f"### {name}\n\n{text}" for name, text in self._guides))
+            base += "\n\n---\n\n" + self._guides_text
         parts = []
         for name in self.active_skills:
             p = _SKILLS_DIR / f"{name}.md"
@@ -909,6 +941,53 @@ class Harness:
         that emit text-format tool calls by copying that reference.
         """
         self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
+
+    def _read_guides(self) -> list[tuple[str, str]]:
+        """The workdir's guide files as (relpath, text), capped in total size."""
+        budget = min(_GUIDE_MAX_CHARS, self.context_limit)
+        found, seen = [], set()
+        for rel in _GUIDE_FILES:
+            parent = (self.workdir / rel).parent
+            try:
+                path = next((p for p in sorted(parent.iterdir())
+                             if p.name.lower() == Path(rel).name.lower() and p.is_file()), None)
+            except OSError:
+                continue
+            if path is None:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            name = str(path.relative_to(self.workdir))
+            if budget <= 0:
+                found.append((name, f"[… omitted: {name} is {len(text):,} chars, over the guide size cap]"))
+                continue
+            if len(text) > budget:
+                text = text[:budget] + f"\n\n[… truncated: {name} is {len(text):,} chars]"
+            budget -= len(text)
+            found.append((name, text))
+        return found
+
+    def reload_guides(self) -> str:
+        """Re-read the project guide files (or drop them when /guides is off) and
+        rebuild the system prompt.  Returns a notice, '' when the toggle is off."""
+        self._guides = self._read_guides() if self.guides else []
+        if self.messages:
+            self.rebuild_system_prompt()
+        return self.guides_summary()
+
+    def guides_summary(self) -> str:
+        """What the last reload_guides() loaded, as a notice; '' when /guides is off."""
+        if not self.guides:
+            return ""
+        if not self._guides:
+            return f"No project guide files found in {self.workdir}"
+        names = ", ".join(name for name, _ in self._guides)
+        return f"Project guides loaded: {names} (~{_text_tokens(self._guides_text):,} tokens)"
 
     # ── context management ────────────────────────────────────────────────────
 
@@ -938,6 +1017,10 @@ class Harness:
                 if ref and ref in text:
                     cats["tools"] += _text_tokens(ref)
                     text = text.replace(ref, "", 1)
+                guides = self._guides_text
+                if guides and guides in text:
+                    cats["guides"] += _text_tokens(guides)
+                    text = text.replace(guides, "", 1)
                 cats["system"] += _text_tokens(text)
             elif role == "user":
                 cats["user"] += _text_tokens(text)
@@ -999,6 +1082,11 @@ class Harness:
         dropped — deleting the result the model just asked for makes it ask again.
         Nothing is changed until the summary is in, so a cancel leaves it intact.
         """
+        # Re-read the guides first, so the fixed size below includes any edits.
+        old_guides = self._guides
+        guides_notice = self.reload_guides() if self.guides else ""
+        if self._guides == old_guides:
+            guides_notice = ""
         msgs = self.messages
         before = self._token_estimate or self._estimate(schemas=True)
         costs = [_msg_tokens(m) for m in msgs]
@@ -1109,6 +1197,8 @@ class Harness:
         if trims:
             notice += f", trimmed {len(trims)} tool result{'s' if len(trims) > 1 else ''}"
         notice += f" (was ~{before:,} tokens, now ~{after:,} tokens)"
+        if guides_notice:
+            notice += f"\n{guides_notice}"
         self.logger.log_compact(self.mode, self.client.model, len(drop), before, after)
         return True, notice
 
@@ -1598,21 +1688,28 @@ class Harness:
                             f"Run this command? Reply 'y' to allow, anything else to decline.\n  $ {cmd}"
                         ).strip().lower()
                         if answer in ("y", "yes"):
-                            result = dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes)
+                            result = dispatch(name, args, self.workdir, self.net_access,
+                                              self.net_max_bytes, self._fetch_chars())
                         else:
                             result = "ERROR: command declined by user"
                     elif name == "fetch_url" and (q := self._net_confirm_prompt(args)):
                         answer = self._ask_user(q).strip().lower()
                         if answer in ("y", "yes"):
-                            result = dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes)
+                            result = dispatch(name, args, self.workdir, self.net_access,
+                                              self.net_max_bytes, self._fetch_chars())
                         else:
                             result = ("ERROR: the user declined this request, so it was "
                                       "never sent. The server was not contacted and nothing "
                                       "is wrong with it. Do not retry — ask the user what "
                                       "they would like to do instead.")
                     else:
-                        result = dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes)
-                    if self.max_tool_result > 0 and len(result) > self.max_tool_result:
+                        result = dispatch(name, args, self.workdir, self.net_access,
+                                          self.net_max_bytes, self._fetch_chars())
+                    # fetch_url windows its own output (net_max_chars) and says how to
+                    # page on; a generic cut here would slice through the untrusted-
+                    # content fence and point the model at read_file.
+                    if (self.max_tool_result > 0 and len(result) > self.max_tool_result
+                            and name != "fetch_url"):
                         total = len(result)
                         cutoff = result.rfind("\n", 0, self.max_tool_result)
                         if cutoff < self.max_tool_result // 2:
@@ -1951,9 +2048,11 @@ class Harness:
             net_access=self.net_access,
             net_confirm=self.net_confirm,
             net_max_bytes=self.net_max_bytes,
+            net_max_chars=self.net_max_chars,
             host=self.client.host,
             provider=self.provider,
             plan_progress=self._plan_progress(),
+            guides=self.guides,
         )
 
     def list_available_skills(self) -> list[str]:
@@ -2061,6 +2160,7 @@ class Harness:
         self._momo_recap_turn = data.get("momo_recap_turn", 0)
         self._turn_count = data.get("turn_count",
                                     sum(1 for m in self.messages if m.get("role") == "user"))
+        self._guides = self._read_guides() if self.guides else []
         # Always rebuild the system prompt from the current role files and skills on
         # disk — saved sessions carry a snapshot; role/skill edits must take effect.
         if self.messages and self.messages[0].get("role") == "system":
@@ -2085,11 +2185,15 @@ class Harness:
         self.momo_lines = []
         self._momo_recap_turn = 0
         self._turn_count = 0
+        self._guides = self._read_guides() if self.guides else []
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
         self._token_estimate = self._estimate(schemas=True)
         self._measured_tokens = None
         self._emit_status()
-        return f"Started a new session: {self.session_path().name}"
+        notice = f"Started a new session: {self.session_path().name}"
+        if (guides := self.guides_summary()):
+            notice += f"\n{guides}"
+        return notice
 
     def truncate_at_last_user(self) -> str | None:
         """Drop the last user message and everything after it (replies, tool calls,

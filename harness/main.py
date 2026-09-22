@@ -53,8 +53,11 @@ def main():
                         help="Ask y/N before each fetch_url POST/PUT/PATCH/DELETE "
                              "(default: on). Writes to private addresses always ask.")
     parser.add_argument("--net-max-bytes", default=None, metavar="SIZE",
-                        help="Ceiling on a single fetch_url response, in bytes or with a "
-                             "unit: 200000, 500kb, 2mb (default: 100kb)")
+                        help="Ceiling on a single fetch_url download, in bytes or with a "
+                             "unit: 200000, 500kb, 2mb (default: 2mb)")
+    parser.add_argument("--net-max-chars", type=int, default=None, metavar="N",
+                        help="Characters of page text one fetch_url call returns; the model "
+                             "pages through the rest (default: 24000)")
     parser.add_argument("--no-stream", action="store_true", default=False,
                         help="Wait for complete replies instead of streaming them as they are generated")
     parser.add_argument("--companion-idle-recap", action=argparse.BooleanOptionalAction, default=None,
@@ -62,6 +65,9 @@ def main():
                              "(default: last /companion-idle-recap setting, else off)")
     parser.add_argument("--companion-idle-recap-secs", default=None, type=int, metavar="N",
                         help="Seconds of inactivity before momo recaps (default 90)")
+    parser.add_argument("--guides", action=argparse.BooleanOptionalAction, default=None,
+                        help="Put the workdir's AGENTS.md / CLAUDE.md / ... in the system prompt "
+                             "(default: last /guides setting, else off)")
     parser.add_argument("--web", action=argparse.BooleanOptionalAction, default=True,
                         help="Serve the browser chat UI alongside the TUI")
     parser.add_argument("--web-host", default="127.0.0.1", metavar="HOST",
@@ -100,9 +106,15 @@ def main():
             harness.net_max_bytes = min(size, net_mod.HARD_MAX_BYTES)
         else:
             parser.error(f"--net-max-bytes: not a size: {args.net_max_bytes}")
+    if args.net_max_chars:
+        if not 1000 <= args.net_max_chars <= net_mod.HARD_MAX_CHARS:
+            parser.error(f"--net-max-chars: expected 1000..{net_mod.HARD_MAX_CHARS}")
+        harness.net_max_chars = args.net_max_chars
     harness.idle_recap = bool(args.companion_idle_recap if args.companion_idle_recap is not None
                               else prefs.get("idle_recap", False))
     harness.idle_recap_secs = max(10, args.companion_idle_recap_secs or prefs.get("idle_recap_secs") or 90)
+    harness.guides = bool(args.guides if args.guides is not None else prefs.get("guides", False))
+    harness.reload_guides()   # load_session re-reads them for a restored workdir
 
     # Restore last session unless --fresh
     sessions = session_mod.list_sessions()
@@ -122,6 +134,8 @@ def main():
 
     # One Controller drives the harness for every frontend (TUI and web).
     controller = Controller(harness)
+    if (guides_note := harness.guides_summary()):
+        harness.event_queue.put(ChatEvent("system", guides_note))
 
     web = None
     if args.web:

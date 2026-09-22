@@ -224,9 +224,11 @@ class Controller:
         for ev in transcript_events(self.harness.messages):
             self.bus.put(ev)
         h = self.harness
+        guides = h.guides_summary()
         self._system(notice or (
             f"Session loaded: {h.session_path().name} ({len(h.messages)} messages)\n"
-            f"Model: {h.client.model} | Mode: {h.mode} | Dir: {h.workdir}"))
+            f"Model: {h.client.model} | Mode: {h.mode} | Dir: {h.workdir}"
+            + (f"\n{guides}" if guides else "")))
         self._emit_companion()  # the loaded session's remembered recap lines
 
     def _resend_guard(self) -> str | None:

@@ -506,10 +506,14 @@ function applyStatus(s) {
   $("#net-local").checked = s.net_access === "local";
   $("#net-local").disabled = !netOn;
   $("#net-confirm").checked = s.net_confirm;
+  $("#guides").checked = s.guides;
   $("#net-confirm").disabled = !netOn;
   const mb = $("#net-max-bytes");
   if (document.activeElement !== mb) mb.value = formatSize(s.net_max_bytes);
   mb.disabled = !netOn;
+  const mc = $("#net-max-chars");
+  if (document.activeElement !== mc) mc.value = s.net_max_chars ?? "";
+  mc.disabled = !netOn;
   updateTitle();
   if (planChanged) refreshState();
 }
@@ -1251,9 +1255,14 @@ $("#net-badge").onclick = () => send(`/net ${status.net_access !== "off" ? "off"
 $("#net-on").onchange = (e) => send(`/net ${e.target.checked ? "on" : "off"}`);
 $("#net-local").onchange = (e) => send(`/net ${e.target.checked ? "local" : "on"}`);
 $("#net-confirm").onchange = (e) => send(`/net-confirm ${e.target.checked ? "on" : "off"}`);
+$("#guides").onchange = (e) => send(`/guides ${e.target.checked ? "on" : "off"}`);
 $("#net-max-bytes").onchange = (e) => {
   const v = e.target.value.trim();
   if (v) send(`/net-max-bytes ${v}`);
+};
+$("#net-max-chars").onchange = (e) => {
+  const v = e.target.value.trim();
+  if (v) send(`/net-max-chars ${v}`);
 };
 
 // Shift+letter shortcuts when focus is outside the text box (TUI: chat focus).

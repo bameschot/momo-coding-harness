@@ -15,6 +15,8 @@ Run with:  python -m unittest discover tests
 import gzip
 import http.client
 import io
+import json
+import re
 import socket
 import threading
 import time
@@ -508,12 +510,26 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(self.tools._REQUIRED_ARGS["fetch_url"], ["url"])
 
 
+LONG_HTML = ("<html><title>Guide</title><body><div role='navigation'>crumbs</div><main>"
+             + "".join(f"<h2>Section {i}</h2><p>{'lorem ipsum ' * 40}</p>" for i in range(30))
+             + "<h2>Installation</h2><pre>pip install thing\n    --upgrade</pre>"
+             + "</main></body></html>").encode()
+API_JSON = json.dumps({"info": {"version": "2.31.0", "name": "thing"},
+                       "releases": {f"1.{i}.0": [{"size": i}] for i in range(400)}}).encode()
+HITS: dict[str, int] = {}
+
+
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
     def do_GET(self):
-        if self.path == "/hop":
+        HITS[self.path] = HITS.get(self.path, 0) + 1
+        if self.path == "/long":
+            self._body(LONG_HTML, "text/html")
+        elif self.path == "/api":
+            self._body(API_JSON, "application/json")
+        elif self.path == "/hop":
             self.send_response(302)
             self.send_header("Location", "/secret")
             self.end_headers()
@@ -651,7 +667,7 @@ class LiveServer(unittest.TestCase):
 
     def test_size_cap_enforced(self):
         out = self.fetch("/big", max_bytes=2000)
-        self.assertIn("truncated", out)
+        self.assertIn("download stopped", out)
         self.assertLess(len(out), 20_000)
 
     def test_error_status_keeps_body(self):
@@ -677,7 +693,7 @@ class LiveServer(unittest.TestCase):
 
     def test_max_bytes_accepts_units(self):
         out = self.fetch("/big", max_bytes="2kb")
-        self.assertIn("truncated", out)
+        self.assertIn("download stopped", out)
         self.assertIn("2 KB", out)
 
     def test_model_cannot_raise_the_ceiling(self):
@@ -685,7 +701,7 @@ class LiveServer(unittest.TestCase):
         # asking for more must still be clamped to it.
         out = net.fetch_url(f"{self.base}/big", workdir=WD, net_access="local",
                             max_bytes="10mb", net_max_bytes=4096)
-        self.assertIn("truncated", out)
+        self.assertIn("download stopped", out)
         self.assertIn("4 KB", out)
 
     def test_bad_max_bytes_reported(self):
@@ -695,7 +711,7 @@ class LiveServer(unittest.TestCase):
     def test_ceiling_used_when_unset(self):
         out = net.fetch_url(f"{self.base}/big", workdir=WD, net_access="local",
                             net_max_bytes=3000)
-        self.assertIn("truncated", out)
+        self.assertIn("download stopped", out)
 
     def test_off_blocks_even_local(self):
         out = net.fetch_url(f"{self.base}/", workdir=WD, net_access="off")
@@ -705,6 +721,279 @@ class LiveServer(unittest.TestCase):
         out = net.fetch_url(f"{self.base}/", workdir=WD, net_access="on")
         self.assertIn("ERROR:", out)
         self.assertIn("loopback", out)
+
+
+class Extraction(unittest.TestCase):
+    """The efficiency pass: chrome dropped, main content preferred, structure kept."""
+
+    FILLER = "<p>" + "real article text " * 40 + "</p>"
+
+    def test_aria_navigation_and_hidden_dropped(self):
+        out = net.html_to_text(
+            "<body><div role='navigation'><div>Home</div> &raquo; Docs</div>"
+            "<div aria-hidden='true'>HIDDEN</div><span hidden>ALSO</span>"
+            "<p>body text</p></body>")
+        for bad in ("Home", "Docs", "HIDDEN", "ALSO"):
+            self.assertNotIn(bad, out)
+        self.assertIn("body text", out)
+
+    def test_nested_same_tag_inside_drop(self):
+        # The drop must end at the </div> that matches its opener, not the first.
+        out = net.html_to_text("<div role='banner'><div>a</div>STILL-BANNER</div><p>after</p>")
+        self.assertNotIn("STILL-BANNER", out)
+        self.assertIn("after", out)
+
+    def test_headerlink_pilcrow_dropped(self):
+        out = net.html_to_text('<h2>Usage<a class="headerlink" href="#usage">¶</a></h2>')
+        self.assertIn("## Usage", out)
+        self.assertNotIn("¶", out)
+
+    def test_main_preferred(self):
+        out = net.html_to_text(f"<body><div>SIDEBAR JUNK</div><main>{self.FILLER}</main>"
+                               "<div>MORE JUNK</div></body>")
+        self.assertIn("real article text", out)
+        self.assertNotIn("SIDEBAR", out)
+        self.assertNotIn("MORE JUNK", out)
+
+    def test_single_article_preferred(self):
+        out = net.html_to_text(f"<body><div>SIDEBAR</div><article>{self.FILLER}</article></body>")
+        self.assertNotIn("SIDEBAR", out)
+
+    def test_tiny_main_falls_back_to_whole_page(self):
+        out = net.html_to_text("<body><p>the real text</p><main>widget</main></body>")
+        self.assertIn("the real text", out)
+
+    def test_unclosed_attribute_drop_falls_back(self):
+        html = "<body><div role='navigation'><p>" + "content words " * 500 + "</p></body>"
+        self.assertIn("content words", net.html_to_text(html))
+
+    def test_markdown_structure(self):
+        out = net.html_to_text("<h3>Title</h3><ul><li>one</li><li>two</li></ul>"
+                               "<ol><li>first</li><li>second</li></ol><p>use <code>x()</code></p>")
+        self.assertIn("### Title", out)
+        self.assertIn("- one", out)
+        self.assertIn("2. second", out)
+        self.assertIn("`x()`", out)
+
+    def test_pre_whitespace_preserved(self):
+        out = net.html_to_text("<pre>def f():\n    return  1\n</pre>")
+        self.assertIn("```\ndef f():\n    return  1\n```", out)
+
+    def test_code_in_pre_gets_no_backticks(self):
+        out = net.html_to_text("<pre><code>a = 1</code></pre>")
+        self.assertIn("```\na = 1\n```", out)
+
+    def test_self_links_and_duplicates_not_repeated(self):
+        base = "https://example.com/page"
+        out = net.html_to_text('<a href="/page#x">here</a> <a href="/other">o</a> '
+                               '<a href="/other">o again</a> '
+                               '<a href="https://example.com/raw">https://example.com/raw</a>', base)
+        self.assertNotIn("<https://example.com/page", out)
+        self.assertEqual(out.count("<https://example.com/other>"), 1)
+        self.assertNotIn("<https://example.com/raw>", out)
+
+    def test_language_switcher_and_empty_bullets_dropped(self):
+        out = net.html_to_text('<ul><li><a href="https://af.example/x" hreflang="af">Afrikaans</a></li>'
+                               '<li>kept</li></ul>')
+        self.assertNotIn("Afrikaans", out)
+        self.assertEqual(out, "- kept")
+
+    def test_words_separated_between_inline_elements(self):
+        self.assertIn("x y", net.html_to_text("<p><a>x</a> <a>y</a></p>"))
+
+
+class Windowing(unittest.TestCase):
+    BODY = "\n".join(f"## Part {i}\n" + "text " * 50 for i in range(20))
+
+    def test_small_body_whole(self):
+        notes = []
+        self.assertEqual(net._window("short", 0, None, 1000, notes), "short")
+        self.assertEqual(notes, [])
+
+    def test_window_and_next_offset(self):
+        notes = []
+        out = net._window(self.BODY, 0, None, 1000, notes)
+        self.assertLessEqual(len(out.split("\n\n[sections")[0]), 1000)
+        self.assertIn("offset=", notes[0])
+        self.assertIn("[sections on this page:]", out)
+        self.assertIn("## Part 19", out)        # the outline lists every heading
+
+    def test_offset_continues(self):
+        notes = []
+        first = net._window(self.BODY, 0, None, 1000, notes)
+        nxt = int(re.search(r"offset=(\d+)", notes[0]).group(1))
+        second = net._window(self.BODY, nxt, None, 1000, [])
+        self.assertTrue(self.BODY[nxt:].startswith(second.split("\n\n[sections")[0][:50]))
+        self.assertNotEqual(first[:50], second[:50])
+
+    def test_find_prefers_heading(self):
+        body = "intro mentions Part 7 in passing\n" + self.BODY
+        out = net._window(body, 0, "part 7", 400, [])
+        self.assertTrue(out.startswith("## Part 7"))
+
+    def test_find_tolerates_regex_and_heading_syntax(self):
+        out = net._window(self.BODY, 0, "^## Part 7$", 400, [])
+        self.assertTrue(out.startswith("## Part 7"))
+
+    def test_find_falls_back_to_heading_word(self):
+        body = "intro\n## Constants\nUse CAPS.\n## Other\n" + "x " * 400
+        notes = []
+        out = net._window(body, 0, "module-level constants", 200, notes)
+        self.assertTrue(out.startswith("## Constants"))
+        self.assertIn("does not occur verbatim", notes[0])
+
+    def test_find_miss_reported_with_outline(self):
+        notes = []
+        out = net._window(self.BODY, 0, "nonexistent", 400, notes)
+        self.assertIn("does not occur", notes[0])
+        self.assertIn("## Part 3", out)
+
+    def test_offset_past_end(self):
+        notes = []
+        self.assertEqual(net._window("abc", 99, None, 10, notes), "")
+        self.assertIn("past the end", notes[0])
+
+    def test_fence_survives_windowing(self):
+        body = ("x" * 5000) + net._END + ("y" * 5000)
+        out = net._render("u", "u", 200, "OK", _headers("Content-Type: text/plain\n"),
+                          "text", body, [], [], "GET", max_chars=6000, offset=4000)
+        self.assertEqual(out.count(net._END), 1)
+        self.assertTrue(out.rstrip().endswith("question.]"))
+        self.assertIn("END-MARKER-REMOVED", out)
+
+
+class JsonHandling(unittest.TestCase):
+    DATA = {"info": {"version": "1.2"}, "releases": {"2.31.0": [{"size": 5}]},
+            "items": [{"name": "a"}, {"name": "b"}]}
+
+    def test_paths(self):
+        self.assertEqual(net._json_select(self.DATA, "info.version"), ("1.2", None))
+        self.assertEqual(net._json_select(self.DATA, "items.1.name"), ("b", None))
+        self.assertEqual(net._json_select(self.DATA, "items[0].name"), ("a", None))
+        self.assertEqual(net._json_select(self.DATA, "releases.2.31.0.0.size"), (5, None))
+
+    def test_miss_lists_keys(self):
+        val, err = net._json_select(self.DATA, "info.nope")
+        self.assertIsNone(val)
+        self.assertIn("Keys there: version", err)
+        _, err = net._json_select(self.DATA, "items.9")
+        self.assertIn("2-item list", err)
+
+    def test_large_json_compact(self):
+        raw = json.dumps({"k": list(range(5000))}).encode()
+        kind, text = net._decode_body(raw, _headers("Content-Type: application/json\n"), "u")
+        self.assertIn("compact", kind)
+        self.assertNotIn("\n", text)
+
+    def test_json_path_via_decode(self):
+        notes = []
+        kind, text = net._decode_body(json.dumps(self.DATA).encode(),
+                                      _headers("Content-Type: application/json\n"), "u",
+                                      "info.version", notes)
+        self.assertEqual(text, '"1.2"')
+        self.assertEqual(kind, "json at info.version")
+
+
+class Budget(unittest.TestCase):
+    """The output budget, its injection, and how it composes with /tool-result."""
+
+    def setUp(self):
+        from harness import tools
+        self.tools = tools
+
+    def test_model_cannot_set_budget(self):
+        out = self.tools.dispatch("fetch_url", {"url": "https://example.com",
+                                                "net_max_chars": 10**6}, WD, "on")
+        self.assertIn("does not accept argument", out)
+
+    def test_tool_result_cap_lowers_fetch_budget(self):
+        from types import SimpleNamespace
+        from harness.harness import Harness
+        h = SimpleNamespace(max_tool_result=5000, net_max_chars=24000)
+        self.assertEqual(Harness._fetch_chars(h), 5000)
+        h.max_tool_result = 0
+        self.assertEqual(Harness._fetch_chars(h), 24000)
+
+    def test_schema_advertises_paging(self):
+        desc = next(t for t in self.tools.NET_TOOLS
+                    if t["function"]["name"] == "fetch_url")["function"]
+        self.assertIn("find=", desc["description"][:400])
+        for arg in ("find", "offset", "json_path"):
+            self.assertIn(arg, desc["parameters"]["properties"])
+
+
+class PagingLive(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.srv.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def setUp(self):
+        net.clear_cache()
+        HITS.clear()
+
+    def fetch(self, path, **kw):
+        kw.setdefault("net_max_chars", 2000)
+        return net.fetch_url(f"{self.base}{path}", workdir=WD, net_access="local", **kw)
+
+    def test_budget_applied_after_extraction(self):
+        out = self.fetch("/long")
+        self.assertIn("showing chars 0–", out)
+        self.assertNotIn("crumbs", out)
+        self.assertIn("## Installation", out)       # via the section outline
+        body = out.split(net._BEGIN)[1].split("[sections on this page:]")[0]
+        self.assertLess(len(body), 2100)
+
+    def test_find_served_from_cache(self):
+        self.fetch("/long")
+        out = self.fetch("/long", find="installation")
+        self.assertEqual(HITS["/long"], 1)
+        self.assertIn("page cache", out)
+        self.assertIn("```\npip install thing\n    --upgrade\n```", out)
+
+    def test_offset_served_from_cache(self):
+        first = self.fetch("/long")
+        nxt = int(re.search(r"offset=(\d+)", first).group(1))
+        out = self.fetch("/long", offset=nxt)
+        self.assertEqual(HITS["/long"], 1)
+        self.assertIn(f"showing chars {nxt:,}–", out)
+
+    def test_plain_fetch_always_refetches(self):
+        self.fetch("/long")
+        self.fetch("/long")
+        self.assertEqual(HITS["/long"], 2)
+
+    def test_request_headers_never_cached(self):
+        self.fetch("/long", headers={"Authorization": "Bearer x"})
+        self.fetch("/long", headers={"Authorization": "Bearer x"}, offset=100)
+        self.assertEqual(HITS["/long"], 2)
+
+    def test_error_status_never_cached(self):
+        self.fetch("/boom")
+        self.fetch("/boom", offset=1)
+        self.assertEqual(HITS["/boom"], 2)
+
+    def test_json_path_live(self):
+        out = self.fetch("/api", json_path="info.version")
+        self.assertIn('"2.31.0"', out)
+        self.assertIn("body: json at info.version", out)
+        out = self.fetch("/api", json_path="info.missing")
+        self.assertEqual(HITS["/api"], 1)
+        self.assertIn("Keys there: version, name", out)
+
+    def test_big_json_windowed(self):
+        out = self.fetch("/api")
+        self.assertIn("(compact)", out)
+        self.assertIn("offset=", out)
+
+    def test_bad_offset_rejected(self):
+        self.assertIn("not a number", self.fetch("/long", offset="soon"))
 
 
 if __name__ == "__main__":

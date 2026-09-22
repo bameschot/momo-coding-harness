@@ -173,9 +173,11 @@ def handle(line: str, harness: Harness) -> CommandResult:
             plan_note = "; " + harness.cancel_plan()  # also refreshes messages[0]
         system_msg = harness.messages[0]
         harness.messages = [system_msg]
+        guides_note = harness.reload_guides()
         harness._token_estimate = harness._estimate(schemas=True)
         harness._emit_status()
-        return CommandResult(handled=True, output="Conversation cleared" + plan_note)
+        return CommandResult(handled=True, output="Conversation cleared" + plan_note
+                             + (f"\n{guides_note}" if guides_note else ""))
 
     if cmd in ("/workspace", "/workdir"):  # /workdir kept as a backward-compatible alias
         if not arg:
@@ -189,7 +191,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
                     return f"ERROR: could not create directory: {e}"
                 harness.workdir = p
                 harness.set_mode(harness.mode)
-                return f"Created and set working directory: {p}"
+                guides_note = harness.reload_guides()
+                return f"Created and set working directory: {p}" + (f"\n{guides_note}" if guides_note else "")
             return CommandResult(
                 handled=True,
                 confirm_prompt=f"Directory does not exist: {p}\nCreate it?",
@@ -197,7 +200,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
             )
         harness.workdir = p
         harness.set_mode(harness.mode)  # always refresh system prompt with new workdir
-        return CommandResult(handled=True, output=f"Working directory set to: {p}")
+        guides_note = harness.reload_guides()
+        harness._emit_status()
+        return CommandResult(handled=True, output=f"Working directory set to: {p}"
+                             + (f"\n{guides_note}" if guides_note else ""))
 
     if cmd == "/tool-output":
         if arg.lower() in ("on", "true", "1", "yes"):
@@ -316,6 +322,23 @@ def handle(line: str, harness: Harness) -> CommandResult:
         session_mod.save_prefs(idle_recap=harness.idle_recap, idle_recap_secs=harness.idle_recap_secs)
         return CommandResult(handled=True, output=_state())
 
+    if cmd == "/guides":
+        sub = arg.lower()
+        if sub in ("on", "true", "1", "yes", "off", "false", "0", "no"):
+            harness.guides = sub in ("on", "true", "1", "yes")
+            session_mod.save_prefs(guides=harness.guides)
+        elif sub and sub != "reload":
+            return CommandResult(handled=True, output=f"ERROR: expected 'on', 'off' or 'reload', got: {arg}")
+        if sub:
+            note = harness.reload_guides()
+            harness._token_estimate = harness._estimate(schemas=True)
+            harness._emit_status()
+        else:
+            note = harness.guides_summary()
+        if not harness.guides:
+            return CommandResult(handled=True, output="Project guides: off")
+        return CommandResult(handled=True, output=f"Project guides: on\n{note}")
+
     if cmd == "/tools":
         if not arg:
             state = "on" if harness.tools_enabled else "off"
@@ -398,8 +421,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
         cur = net_mod.format_size(harness.net_max_bytes)
         if not arg:
             return CommandResult(handled=True, output=(
-                f"fetch_url response cap: {cur} ({harness.net_max_bytes} bytes)\n"
-                f"Set it with a size, e.g. /net-max-bytes 500kb or /net-max-bytes 2mb."))
+                f"fetch_url download cap: {cur} ({harness.net_max_bytes} bytes)\n"
+                f"Set it with a size, e.g. /net-max-bytes 500kb or /net-max-bytes 8mb. "
+                f"This bounds the download only; /net-max-chars sets how much text "
+                f"reaches the context."))
         size = net_mod.parse_size(arg)
         if size is None:
             return CommandResult(handled=True, output=(
@@ -410,13 +435,31 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"{net_mod.format_size(net_mod.HARD_MAX_BYTES)} hard limit."))
         harness.net_max_bytes = size
         harness._emit_status()
-        warn = ""
-        if size > 1024 * 1024 and not harness.max_tool_result:
-            # /tool-result is the context guard; without it a big fetch lands whole.
-            warn = ("\nThat is large: with /tool-result unlimited, one fetch of this size "
-                    "goes into the context in full. Consider /tool-result 20000.")
         return CommandResult(handled=True, output=(
-            f"fetch_url response cap: {net_mod.format_size(size)} ({size} bytes)" + warn))
+            f"fetch_url download cap: {net_mod.format_size(size)} ({size} bytes)"))
+
+    if cmd == "/net-max-chars":
+        if not arg:
+            return CommandResult(handled=True, output=(
+                f"fetch_url text per call: {harness.net_max_chars:,} characters "
+                f"(~{harness.net_max_chars // 4:,} tokens); the model pages through the "
+                f"rest with offset=/find=.\nSet it with a number, e.g. /net-max-chars 12000."))
+        try:
+            n = int(arg.replace(",", "").replace("_", ""))
+        except ValueError:
+            n = 0
+        if n < 1000 or n > net_mod.HARD_MAX_CHARS:
+            return CommandResult(handled=True, output=(
+                f"ERROR: expected a number of characters between 1000 and "
+                f"{net_mod.HARD_MAX_CHARS:,}, got: {arg}"))
+        harness.net_max_chars = n
+        harness._emit_status()
+        warn = ""
+        if n // 4 > harness.context_limit // 2:
+            warn = (f"\nThat is large: one fetch (~{n // 4:,} tokens) can fill over half "
+                    f"the context ({harness.context_limit:,} tokens).")
+        return CommandResult(handled=True, output=(
+            f"fetch_url text per call: {n:,} characters" + warn))
 
     if cmd == "/cost":
         return CommandResult(handled=True, output=harness.logger.cost_summary())
@@ -633,8 +676,14 @@ Available commands:
   /net local          Also allow localhost and the LAN (off by default)
   /net-confirm        Show whether fetch_url writes ask for confirmation
   /net-confirm on|off Ask y/N before each POST/PUT/PATCH/DELETE (default on)
-  /net-max-bytes      Show the fetch_url response size cap
+  /net-max-bytes      Show the fetch_url download size cap
   /net-max-bytes <n>  Set it, in bytes or with a unit: 200000, 500kb, 2mb
+  /net-max-chars      Show how much page text one fetch_url call returns
+  /net-max-chars <n>  Set it in characters (default 24000); the rest is paged
+  /guides             Show whether project guide files are loaded, and which
+  /guides on|off      Put AGENTS.md / CLAUDE.md / ... from the workdir in the system prompt
+                      (re-read on new session, /clear and compaction)
+  /guides reload      Re-read the guide files now
   /list-skills        List available skills and show which are active
   /load-skill <name>  Append a skill's instructions to the system prompt
   /unload-skill <name> Remove a skill from the system prompt
