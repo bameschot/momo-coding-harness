@@ -569,7 +569,7 @@ class ReviewFixes(Base):
 
 
 class IndexRouting(Base):
-    """/index-route (off by default): plain-text grep_files and file-name
+    """/index-route (on by default): plain-text grep_files and file-name
     find_files are answered from the index; the rest still goes to the disk."""
 
     files = {**CHAIN, "img/logo.png": "\0PNG" * 8, "gen/.keep": ""}
@@ -623,7 +623,7 @@ class IndexRouting(Base):
         self.assertNotIn(tools._INDEX_GREP_TIP.strip(), out)        # led, not trailed
         self.assertEqual(self.run_tool("find_files", {"pattern": "a.py"}, route=False), "a.py")
         self.assertEqual(tools.dispatch("grep_files", {"pattern": "zzz_none"}, self.root,
-                                        index=self.idx), "(no matches)")
+                                        index=self.idx, index_route=False), "(no matches)")
 
     def test_file_tools_point_at_the_index_tools(self):
         self.assertIn("index_map()", self.run_tool("list_directory", {"path": "."}))
@@ -759,24 +759,23 @@ class HarnessIndex(unittest.TestCase):
         self.assertNotIn("Code index is ON", self.h.messages[0]["content"])
 
     def test_route_toggle(self):
-        self.assertFalse(self.h.index_route)                       # off by default
-        self.assertFalse(self.h.status_event().index_route)
+        self.assertTrue(self.h.index_route)                        # on by default
+        self.assertTrue(self.h.status_event().index_route)
         self.cmd("/index on")
         self.assertIsNone(self.h.index.wait_fresh())
-        out = self.h._dispatch("grep_files", {"pattern": "leaf"})
-        self.assertTrue(out.startswith("(the code index is on:"), out)
-        self.assertIn("on", self.cmd("/index-route on"))
         self.assertTrue(self.h._dispatch("grep_files", {"pattern": "leaf"}).startswith("(grep_files is"))
         self.assertIn("off", self.cmd("/index-route off"))
         self.assertFalse(self.h.index_route)
         self.assertEqual(json.loads((Path(self.home.name) / "prefs.json").read_text())["index_route"],
                          False)
         self.assertFalse(self.h.status_event().index_route)
-        self.assertFalse(self.h._dispatch("grep_files", {"pattern": "leaf"}).startswith("(grep_files is"))
+        out = self.h._dispatch("grep_files", {"pattern": "leaf"})
+        self.assertTrue(out.startswith("(the code index is on:"), out)   # disk grep, index hint
         self.assertIn("Code index is ON", self.h.messages[0]["content"])   # the bias stays
         self.assertIn("Route grep/find to the index: off", self.cmd("/index"))
-        self.cmd("/index-route on")
+        self.assertIn("on", self.cmd("/index-route on"))
         self.assertTrue(self.h.index_route)
+        self.assertTrue(self.h._dispatch("grep_files", {"pattern": "leaf"}).startswith("(grep_files is"))
 
     def test_workdir_change_reindexes(self):
         self.cmd("/index on")

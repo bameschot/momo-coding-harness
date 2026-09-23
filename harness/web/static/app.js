@@ -535,7 +535,7 @@ function applyIndexStatus(s) {
       + "Code index — click for what it holds";
   $("#index-on").checked = on;
   $("#index-persist").checked = !!s.index_persist;
-  $("#index-route").checked = !!s.index_route;
+  $("#index-route").checked = s.index_route !== false;
   const im = $("#index-max-mem");
   if (document.activeElement !== im) im.value = formatSize(s.index_max_bytes);
   $("#index-save").disabled = !on;
@@ -1576,7 +1576,7 @@ function renderIndexMenu(menu, b) {
     el("div", "menu-sub", "By language"), langs,
     ...notes.map((n) => el("div", "muted small", n)),
     el("div", "muted small", `Sizes are estimates of the index's own data. Save/load to disk: ${b.persist ? "on" : "off"}. `
-      + `grep/find answered from the index: ${b.route ? "on" : "off"}.`),
+      + `grep/find answered from the index: ${b.route === false ? "off" : "on"}.`),
     actions);
 }
 

@@ -55,7 +55,7 @@ from harness.harness import (Harness, ChatEvent, DoneEvent, ErrorEvent,  # noqa:
 _SHELL_SEARCH = re.compile(r"^\s*(grep|rg|ag|find|fd|ack)\b")
 
 
-def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=False):
+def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True):
     """One task, one fresh conversation.  Returns what the model did."""
     h = Harness(host=host, model=model, workdir=REPO / task.workdir, provider=provider)
     h.mode = mode
@@ -190,7 +190,7 @@ def _project_hash(workdir: Path) -> str:
 _env_cache: dict = {}
 
 
-def fingerprint(task, *, mode, think, index, model, provider, host, route=False) -> str:
+def fingerprint(task, *, mode, think, index, model, provider, host, route=True) -> str:
     """Everything that can change a run's outcome, hashed."""
     key = (task.workdir, mode, index, route)
     if key not in _env_cache:
@@ -213,7 +213,7 @@ def fingerprint(task, *, mode, think, index, model, provider, host, route=False)
     spec = json.dumps({"id": task.id, "prompt": task.prompt, "must": list(task.must),
                        "ideal": sorted(task.ideal), "max_calls": task.max_calls,
                        "mode": mode, "think": think, "index": index, "provider": provider,
-                       **({"route": True} if route else {})},
+                       **({} if route else {"route": False})},
                       sort_keys=True)
     return hashlib.sha256((spec + _env_cache[key]).encode()).hexdigest()[:24]
 
@@ -316,9 +316,9 @@ def main():
                          "all = every task")
     ap.add_argument("--index", action="store_true",
                     help="turn the code index on, so the model gets the index_* tools")
-    ap.add_argument("--index-route", dest="route", action="store_true", default=False,
-                    help="with --index: answer plain-text grep_files / find_files from the index "
-                         "(/index-route on; off by default), to compare")
+    ap.add_argument("--no-index-route", dest="route", action="store_false", default=True,
+                    help="with --index: do not answer grep_files / find_files from the index "
+                         "(/index-route off), to compare")
     ap.add_argument("--cache", metavar="PATH",
                     help="JSONL store of past runs: reuse those whose fingerprint matches, "
                          "append new ones (e.g. evals/.cache/runs.jsonl)")

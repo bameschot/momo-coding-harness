@@ -62,7 +62,7 @@ def _format_index(harness) -> str:
         lines.append(f"Last error: {b['error']}")
     lines.append(f"  (sizes are estimates of the index's own data; save/load to disk: "
                  f"{'on' if b['persist'] else 'off'} — {code_index.pickle_path(harness.workdir)})")
-    lines.append(f"  Route grep/find to the index: {'on' if b.get('route', False) else 'off'} "
+    lines.append(f"  Route grep/find to the index: {'on' if b.get('route', True) else 'off'} "
                  f"(/index-route)")
     return "\n".join(lines)
 
@@ -828,7 +828,7 @@ Available commands:
   /index save|load    Write the index to disk now, or load the saved one
   /index-max-mem <n>  Memory budget for the index (default 100mb)
   /index-persist on|off  Load the saved index at start, save it on exit
-  /index-route on|off  Answer plain-text grep_files / find_files from the index (default off)
+  /index-route on|off  Answer plain-text grep_files / find_files from the index (default on)
   /list-skills        List available skills and show which are active
   /load-skill <name>  Append a skill's instructions to the system prompt
   /unload-skill <name> Remove a skill from the system prompt

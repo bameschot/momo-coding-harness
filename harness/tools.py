@@ -247,7 +247,7 @@ def _with_fallback_note(tool: dict, route: bool) -> dict:
     return {**tool, "function": {**fn, "description": note + fn["description"]}}
 
 
-def with_index_tools(tools: list[dict], route: bool = False) -> list[dict]:
+def with_index_tools(tools: list[dict], route: bool = True) -> list[dict]:
     """The tool list with the index tools in place of the code-nav tools they
     replace, placed where the code-nav block starts so related tools stay
     together, and grep_files / find_files described as the fallback."""
@@ -1054,7 +1054,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              net_max_bytes: int = net.DEFAULT_MAX_BYTES,
              net_max_chars: int = net.DEFAULT_MAX_CHARS,
              index: "code_index.ProjectIndex | None" = None, cancel=None,
-             index_route: bool = False) -> str:
+             index_route: bool = True) -> str:
     if index is not None and index_route and name in _ROUTED:
         routed = _route_to_index(name, args, workdir, index, cancel)
         if routed is not None:
@@ -1072,7 +1072,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
     return result
 
 
-# ── index-first search (/index-route, off by default) ────────────────────────
+# ── index-first search (/index-route, on by default) ─────────────────────────
 # With the code index on, the 9B still reached for grep_files / find_files out
 # of habit.  A plain-text grep and a file-name glob are answered from the index
 # instead — the same hits, plus the definition each one sits in — with a first

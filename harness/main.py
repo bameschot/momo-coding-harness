@@ -80,7 +80,7 @@ def main():
                              "~/.momo-harness/index/ (default: last /index-persist setting, else off)")
     parser.add_argument("--index-route", action=argparse.BooleanOptionalAction, default=None,
                         help="With the code index on, answer plain-text grep_files and file-name "
-                             "find_files from the index (default: last /index-route setting, else off)")
+                             "find_files from the index (default: last /index-route setting, else on)")
     parser.add_argument("--web", action=argparse.BooleanOptionalAction, default=True,
                         help="Serve the browser chat UI alongside the TUI")
     parser.add_argument("--web-host", default="127.0.0.1", metavar="HOST",
@@ -137,7 +137,7 @@ def main():
     harness.index_persist = bool(args.index_persist if args.index_persist is not None
                                  else prefs.get("index_persist", False))
     harness.index_route = bool(args.index_route if args.index_route is not None
-                               else prefs.get("index_route", False))
+                               else prefs.get("index_route", True))
     index_on = bool(args.index if args.index is not None else prefs.get("index", True))
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 
