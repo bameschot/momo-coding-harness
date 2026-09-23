@@ -964,7 +964,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
        (also at https://my-mac.local:8765/momo-ca.pem), SHA-256 97:9A:56:…</code></pre></div>
     <ol>
       <li><strong>First start:</strong> momo creates a small certificate authority and a server certificate for <code>localhost</code>, your hostname, <code>&lt;hostname&gt;.local</code> and this machine's LAN addresses. They're stored in <code>~/.momo-harness/tls/</code>, readable only by you. It needs just the <code>openssl</code> command; macOS's built-in one works. Add extra names or a VPN address with <code>--web-tls-name</code>.</li>
-      <li><strong>Trust the CA once per device.</strong> Download <code>/momo-ca.pem</code> from the running server (no token needed; a CA certificate is public), check that its SHA-256 fingerprint matches the one momo printed, and install it:
+      <li><strong>Trust the CA once per device.</strong> The file to trust is <code>~/.momo-harness/tls/momo-ca.pem</code> on the machine running momo (see <a href="#storage">Where momo stores data</a>). Either copy it from there (AirDrop, <code>scp</code>, a USB stick), or download it from <code>/momo-ca.pem</code> on the running server (no token needed; a CA certificate is public). Check that its SHA-256 fingerprint matches the one momo printed, then install it. Only ever share <code>momo-ca.pem</code>, never <code>momo-ca.key</code>.
         <div class="table-scroll"><table>
           <tr><th>Device</th><th>How</th></tr>
           <tr><td>macOS</td><td class="wrap">Open it in Keychain Access, then set <em>When using this certificate</em> to <em>Always Trust</em></td></tr>
@@ -1100,7 +1100,41 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
 
   <section id="sessions" data-voice="sessions">
     <h2>Sessions</h2>
-    <p>Sessions auto-save after every reply to <code>~/.momo-harness/sessions/&lt;timestamp&gt;.json</code>, including the model, host, mode, workdir, context settings, active skills, input history and messages. The auth token is the one thing deliberately left out. An NDJSON <code>.log</code> alongside records every request, response, tool call and token count.</p>
+    <p>Sessions auto-save after every reply to <code>~/.momo-harness/sessions/&lt;timestamp&gt;.json</code>, including the model, host, mode, workdir, context settings, active skills, input history and messages. The auth token is the one thing deliberately left out. An NDJSON <code>.log</code> alongside records every request, response, tool call and token count. See <a href="#storage">Where momo stores data</a> for everything else momo keeps.</p>
+  </section>
+
+  <section id="storage" data-voice="storage">
+    <h2>Where momo stores data</h2>
+    <p>Everything momo keeps between runs lives in one folder in your home directory. Nothing is sent anywhere, and deleting the folder resets momo completely.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">~/.momo-harness/</span></div><pre><code>~/.momo-harness/
+├── prefs.json            <span class="com"># remembered settings</span>
+├── sessions/
+│   ├── 2026-09-23T18-04-11.json   <span class="com"># one conversation</span>
+│   └── 2026-09-23T18-04-11.log    <span class="com"># its request/tool log (NDJSON)</span>
+├── index/
+│   └── 3f2a9c…e1.pickle  <span class="com"># saved code index, one per workdir (only with /index-persist)</span>
+└── tls/                  <span class="com"># only with --web-tls auto</span>
+    ├── momo-ca.pem       <span class="com"># the CA certificate you trust on your devices</span>
+    ├── momo-ca.key       <span class="com"># the CA's private key: never share</span>
+    ├── momo-ca.json      <span class="com"># the names the CA may vouch for</span>
+    ├── server.pem        <span class="com"># this machine's HTTPS certificate</span>
+    ├── server.key
+    └── server.json       <span class="com"># the names it covers, and its expiry</span></code></pre></div>
+    <div class="table-scroll"><table>
+      <tr><th>Path</th><th>What</th><th>Notes</th></tr>
+      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, code index settings, guides, companion idle recap</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools</code>, <code>/run-confirm</code>) are never saved and reset at every start.</td></tr>
+      <tr><td><code>sessions/*.json</code></td><td class="wrap">Each conversation: messages, mode, model, host, workdir, context settings, active skills, plan, input history</td><td class="wrap">Saved after every reply. <code>/sessions</code> lists them and <code>/session &lt;name&gt;</code> loads one. The auth token is never stored.</td></tr>
+      <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line</td><td class="wrap">For auditing what the model did. Secret request headers are masked.</td></tr>
+      <tr><td><code>index/*.pickle</code></td><td class="wrap">The code index, named by a hash of the workdir</td><td class="wrap">Written by <code>/index save</code> or <code>/index-persist on</code>. Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
+      <tr><td><code>tls/</code></td><td class="wrap">momo's local CA and HTTPS certificate</td><td class="wrap">Folder 0700, keys 0600. Deleting it makes a new CA on the next <code>--web-tls auto</code> start, and every device must then trust the new one.</td></tr>
+    </table></div>
+    <h3>Elsewhere</h3>
+    <ul>
+      <li><strong>In your project:</strong> <code>.momo-plan.md</code> while a plan exists (deleted when it completes or is cancelled), and <code>conversation-&lt;timestamp&gt;.md</code> when you run <code>/export</code>.</li>
+      <li><strong>In each browser:</strong> the web UI keeps its theme, view options and notification switches in <code>localStorage</code> (<code>momo.theme</code>, <code>momo.view</code>, <code>momo.notify</code>). The token cookie lasts only until the browser closes.</li>
+      <li><strong>Never stored:</strong> the model server token (<code>/token</code>) and the web UI access token.</li>
+    </ul>
+    <p class="note">Keep <code>~/.momo-harness/</code> private: sessions and logs contain your conversations, tool output from your code, and the paths of your projects. To start fresh, quit momo and delete the folder (or just <code>sessions/</code>).</p>
   </section>
 
   <section id="skills" data-voice="skills">
@@ -1344,6 +1378,10 @@ const SPEECH = {
     "< only this computer by default", "< ssh -L beats open ports", "< the token hides in the url",
     "< ?token= once, cookie after", "< --web-tls auto for https~", "< trust momo's ca once, purrr",
     "< bearer token for curl~", "< --web-insecure? trust all!", "< /run-confirm on, pls",
+  ],
+  storage: [
+    "< it all lives in ~/.momo-harness", "< saved after every reply~", "< tls/momo-ca.pem to trust",
+    "< never share momo-ca.key!", "< the token? never saved", "< delete the folder = fresh",
   ],
   tui: [
     "< ctrl+j for a newline", "< tab switches focus", "< shift+c interrupts",

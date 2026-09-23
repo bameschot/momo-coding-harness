@@ -321,7 +321,7 @@ python momo-coding-harness.py --web-host 0.0.0.0 --web-tls auto
 ```
 
 1. On first use momo creates a root CA in `~/.momo-harness/tls/` (directory `0700`, keys `0600`) and a server certificate for `localhost`, the hostname, `<hostname>.local` and this machine's LAN addresses. Later starts reuse them; the server certificate is re-issued automatically when those names change or it nears expiry, without a new trust step.
-2. Trust the CA **once per device**. Download it from `/momo-ca.pem` (no token needed, a CA certificate is public) and compare the SHA-256 fingerprint with the one momo printed:
+2. Trust the CA **once per device**. The file to trust is `~/.momo-harness/tls/momo-ca.pem` on the machine running momo (see [Where momo stores data](#where-momo-stores-data)): copy it from there, or download it from `/momo-ca.pem` on the running server (no token needed, a CA certificate is public). Compare the SHA-256 fingerprint with the one momo printed. Only ever share `momo-ca.pem`, never `momo-ca.key`:
    - macOS: open it in Keychain Access, then set *When using this certificate* to *Always Trust*
    - iOS / iPadOS: install the profile, then enable it under Settings → General → About → Certificate Trust Settings
    - Android: Settings → Security → Encryption & credentials → Install a certificate → CA certificate
@@ -994,3 +994,34 @@ A log file (`.log`) is written alongside the JSON, recording every request, resp
 /export               # save the current conversation as a Markdown file
 /copy                 # copy the last assistant response to the clipboard
 ```
+
+## Where momo stores data
+
+Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent anywhere; deleting the folder resets momo completely.
+
+```
+~/.momo-harness/
+├── prefs.json               # remembered settings
+├── sessions/
+│   ├── <timestamp>.json     # one conversation
+│   └── <timestamp>.log      # its request/tool log (NDJSON)
+├── index/<hash>.pickle      # saved code index per workdir (/index save, /index-persist)
+└── tls/                     # only with --web-tls auto (folder 0700, keys 0600)
+    ├── momo-ca.pem          # the CA certificate you trust on your devices
+    ├── momo-ca.key          # the CA's private key — never share
+    ├── momo-ca.json         # the names the CA may vouch for
+    ├── server.pem / .key    # this machine's HTTPS certificate
+    └── server.json          # the names it covers, and its expiry
+```
+
+| Path | What | Notes |
+|---|---|---|
+| `prefs.json` | Provider, model, code index settings, guides, companion idle recap | Security switches (`/net`, `/net-confirm`, `/tools`, `/run-confirm`) are never saved |
+| `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, plan, input history | Saved after every reply; the auth token is never stored |
+| `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
+| `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |
+| `tls/` | momo's local CA and HTTPS certificate | Deleting it creates a new CA on the next `--web-tls auto` start; every device must trust it again |
+
+Elsewhere: `.momo-plan.md` in the workdir while a plan exists, `conversation-<timestamp>.md` from `/export`, and the web UI's theme, view and notification settings in each browser's `localStorage`. The `/token` value and the web UI access token are never stored anywhere.
+
+Keep `~/.momo-harness/` private: sessions and logs contain your conversations, tool output from your code and your project paths.
