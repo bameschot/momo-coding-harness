@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -82,3 +83,35 @@ def find_session(name: str) -> Path | None:
         if p.stem.startswith(name):
             return p
     return None
+
+
+# A session name is a file stem in SESSION_DIR: no separators, no leading dot,
+# so a name can never point outside the folder.
+_NAME_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]*$")
+
+
+def delete_sessions(names: list[str], current: str | None) -> tuple[list[str], list[dict]]:
+    """Delete saved sessions by exact name, with their .log files.  The session
+    that is open (`current`) is never deleted.  Returns (deleted names,
+    [{"name", "reason"}] for the ones kept)."""
+    deleted: list[str] = []
+    skipped: list[dict] = []
+    for name in names:
+        if not isinstance(name, str) or not _NAME_RE.match(name) or ".." in name:
+            skipped.append({"name": str(name), "reason": "not a session name"})
+            continue
+        if name == current:
+            skipped.append({"name": name, "reason": "it is the current session"})
+            continue
+        path = SESSION_DIR / f"{name}.json"
+        if not path.is_file():
+            skipped.append({"name": name, "reason": "not found"})
+            continue
+        try:
+            path.unlink()
+        except OSError as e:
+            skipped.append({"name": name, "reason": str(e)})
+            continue
+        (SESSION_DIR / f"{name}.log").unlink(missing_ok=True)
+        deleted.append(name)
+    return deleted, skipped

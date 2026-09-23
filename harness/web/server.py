@@ -12,6 +12,7 @@ Routes
   POST /api/edit      {"text": ...} → replace the last user message and re-send
   GET  /api/last-user the last user message's typed text + attachment names
   GET  /api/sessions  recent sessions for the session drawer
+  POST /api/sessions/delete {"names": [...]} → delete saved sessions (never the current one)
   GET  /api/models    models available on the backend
   GET  /api/context   context usage broken down per category (system, tools, …)
   GET  /api/index     code index memory broken down per category and language
@@ -511,6 +512,17 @@ class WebServer:
                         return
                     c.set_mode(mode)
                     self._json({"mode": mode})
+                elif path == "/api/sessions/delete":
+                    names = data.get("names")
+                    if (not isinstance(names, list) or not names or len(names) > 1000
+                            or not all(isinstance(n, str) for n in names)):
+                        self._send(HTTPStatus.BAD_REQUEST, b"Expected {names: [session names]}\n")
+                        return
+                    deleted, skipped = session_mod.delete_sessions(
+                        names, current=c.harness.session_path().stem)
+                    for name in deleted:
+                        _session_cache.pop(session_mod.SESSION_DIR / f"{name}.json", None)
+                    self._json({"deleted": deleted, "skipped": skipped})
                 elif path == "/api/retry":
                     self._json({"ok": c.retry_last()})
                 elif path == "/api/edit":

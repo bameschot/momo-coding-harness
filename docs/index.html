@@ -858,7 +858,7 @@ ollama serve</code></pre></div>
     </ul>
     <h3>What's in it</h3>
     <ul>
-      <li><strong>Status bar:</strong> the session drawer, a workspace file browser, mode and model pickers, a CTX meter with a per-category breakdown, and <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges.</li>
+      <li><strong>Status bar:</strong> the session drawer (load, start or delete sessions), a workspace file browser, mode and model pickers, a CTX meter with a per-category breakdown, and <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges.</li>
       <li><strong>Transcript:</strong> streamed markdown replies, collapsible thinking, one-line tool calls that expand to show arguments and results, coloured diffs and question cards with Yes/No buttons.</li>
       <li><strong>Input:</strong> <kbd>/</kbd> command autocomplete, <kbd>@</kbd> fuzzy path search, a queue for messages sent while the model is busy, and Retry / Edit on your last message.</li>
       <li><strong>Attachments:</strong> drag, paste or pick files. Text and PDFs are converted to text. Chips show a token estimate and turn amber when a file would use more than a quarter of the context.</li>
@@ -884,6 +884,7 @@ ollama serve</code></pre></div>
       <tr><td><code>POST /api/cancel</code></td><td class="wrap">Interrupt the running response</td></tr>
       <tr><td><code>POST /api/mode</code></td><td class="wrap"><code>{"mode": "coding"}</code></td></tr>
       <tr><td><code>GET /api/sessions</code></td><td class="wrap">Recent sessions</td></tr>
+      <tr><td><code>POST /api/sessions/delete</code></td><td class="wrap"><code>{"names": [...]}</code>: delete saved sessions and their logs. The current one is always kept.</td></tr>
       <tr><td><code>GET /api/export</code></td><td class="wrap">The conversation as a Markdown download</td></tr>
     </table></div>
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>curl -s localhost:8765/api/state | jq .status
@@ -1100,7 +1101,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
 
   <section id="sessions" data-voice="sessions">
     <h2>Sessions</h2>
-    <p>Sessions auto-save after every reply to <code>~/.momo-harness/sessions/&lt;timestamp&gt;.json</code>, including the model, host, mode, workdir, context settings, active skills, input history and messages. The auth token is the one thing deliberately left out. An NDJSON <code>.log</code> alongside records every request, response, tool call and token count. See <a href="#storage">Where momo stores data</a> for everything else momo keeps.</p>
+    <p>Sessions auto-save after every reply to <code>~/.momo-harness/sessions/&lt;timestamp&gt;.json</code>, including the model, host, mode, workdir, context settings, active skills, input history and messages. The auth token is the one thing deliberately left out. An NDJSON <code>.log</code> alongside records every request, response, tool call and token count. See <a href="#storage">Where momo stores data</a> for everything else momo keeps. In the web UI, the session drawer (clock icon) loads, starts and <strong>deletes</strong> sessions: hover a row for its trash button, or use <strong>Select</strong> to delete several at once.</p>
   </section>
 
   <section id="storage" data-voice="storage">
@@ -1123,7 +1124,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     <div class="table-scroll"><table>
       <tr><th>Path</th><th>What</th><th>Notes</th></tr>
       <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, code index settings, guides, companion idle recap</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools</code>, <code>/run-confirm</code>) are never saved and reset at every start.</td></tr>
-      <tr><td><code>sessions/*.json</code></td><td class="wrap">Each conversation: messages, mode, model, host, workdir, context settings, active skills, plan, input history</td><td class="wrap">Saved after every reply. <code>/sessions</code> lists them and <code>/session &lt;name&gt;</code> loads one. The auth token is never stored.</td></tr>
+      <tr><td><code>sessions/*.json</code></td><td class="wrap">Each conversation: messages, mode, model, host, workdir, context settings, active skills, plan, input history</td><td class="wrap">Saved after every reply. <code>/sessions</code> lists them and <code>/session &lt;name&gt;</code> loads one. The auth token is never stored. Delete them from the session drawer in the web UI.</td></tr>
       <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line</td><td class="wrap">For auditing what the model did. Secret request headers are masked.</td></tr>
       <tr><td><code>index/*.pickle</code></td><td class="wrap">The code index, named by a hash of the workdir</td><td class="wrap">Written by <code>/index save</code> or <code>/index-persist on</code>. Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
       <tr><td><code>tls/</code></td><td class="wrap">momo's local CA and HTTPS certificate</td><td class="wrap">Folder 0700, keys 0600. Deleting it makes a new CA on the next <code>--web-tls auto</code> start, and every device must then trust the new one.</td></tr>
@@ -1134,7 +1135,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <li><strong>In each browser:</strong> the web UI keeps its theme, view options and notification switches in <code>localStorage</code> (<code>momo.theme</code>, <code>momo.view</code>, <code>momo.notify</code>). The token cookie lasts only until the browser closes.</li>
       <li><strong>Never stored:</strong> the model server token (<code>/token</code>) and the web UI access token.</li>
     </ul>
-    <p class="note">Keep <code>~/.momo-harness/</code> private: sessions and logs contain your conversations, tool output from your code, and the paths of your projects. To start fresh, quit momo and delete the folder (or just <code>sessions/</code>).</p>
+    <p class="note">Keep <code>~/.momo-harness/</code> private: sessions and logs contain your conversations, tool output from your code, and the paths of your projects. To remove single conversations, use the trash button or <strong>Select</strong> in the web UI's session drawer (the open session is always kept). To start completely fresh, quit momo and delete the folder.</p>
   </section>
 
   <section id="skills" data-voice="skills">

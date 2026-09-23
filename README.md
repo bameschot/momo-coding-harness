@@ -215,6 +215,8 @@ The **Sessions** button (clock icon, top left) opens the session drawer. It list
 - Click a session to load it in both windows, like `/session <name>`.
 - **+ New** saves the current session and starts an empty one, like the new `/new` command, which also works in the TUI. Model, host and mode stay the same.
 - Neither is possible while the model is working.
+- **Delete** a session with the trash button that appears when you hover over it (always visible on touch screens), then confirm. To delete several, click **Select**, tick them (or **Select all**) and click **Delete**. Its `.json` file and its `.log` are both removed. This can't be undone.
+- The session that is open can't be deleted: it has no trash button and can't be selected. Start a **+ New** one first, or load another.
 
 ### Workspace files
 
@@ -371,6 +373,7 @@ The page talks to the harness through a small JSON API, which can also be script
 | `GET /api/last-user` | The last user message's typed text and attachment names |
 | `GET /api/sessions` | Recent sessions: `{current, sessions: [{name, mtime, mode, model, provider, workdir, messages, preview}]}` |
 | `GET /api/models` | `{current, models, can_switch, provider}` |
+| `POST /api/sessions/delete` `{"names": [...]}` | Delete saved sessions (and their logs) by name. Returns `{deleted, skipped: [{name, reason}]}`; the current session and anything that isn't a plain session name are skipped |
 | `GET /api/export` | The conversation as a Markdown download |
 | `GET /api/files?path=&hidden=0\|1` | Workspace directory listing |
 | `GET /api/file?path=` | A workspace file converted to text (same conversion as uploads) |
@@ -1017,7 +1020,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 | Path | What | Notes |
 |---|---|---|
 | `prefs.json` | Provider, model, code index settings, guides, companion idle recap | Security switches (`/net`, `/net-confirm`, `/tools`, `/run-confirm`) are never saved |
-| `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, plan, input history | Saved after every reply; the auth token is never stored |
+| `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |
 | `tls/` | momo's local CA and HTTPS certificate | Deleting it creates a new CA on the next `--web-tls auto` start; every device must trust it again |

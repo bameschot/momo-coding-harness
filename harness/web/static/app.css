@@ -505,6 +505,26 @@ button.small { padding: 3px 10px; font-size: 12px; }
 .session-row.current { border-color: var(--focus); cursor: default; }
 .session-preview { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-meta { font: 11px var(--mono); color: var(--muted); }
+/* A row plus its checkbox (Select mode) or trash button; the trash shows on hover. */
+.session-item { display: flex; align-items: center; gap: 4px; }
+.session-item .session-row { flex: 1; min-width: 0; }
+.session-item input[type="checkbox"] { flex: none; margin: 0 2px 0 8px; cursor: pointer; }
+.session-item input[type="checkbox"]:disabled { cursor: default; opacity: .4; }
+.session-del { opacity: 0; transition: opacity .15s; }
+.session-item:hover .session-del, .session-del:focus-visible { opacity: 1; }
+.session-del:hover { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
+@media (hover: none) { .session-del { opacity: 1; } }
+.session-confirm {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; font-size: 13px;
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, transparent); border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+}
+.session-confirm button.small:not(.danger), #select-sessions, #sessions-all {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); cursor: pointer;
+}
+.session-note { font-size: 12px; color: var(--muted); padding: 4px 10px 8px; }
+.sessions-bulk { align-items: center; }
+#select-sessions[aria-pressed="true"] { border-color: var(--focus); color: var(--focus); }
 
 .tree { font: 13px var(--mono); }
 .tree-row {
