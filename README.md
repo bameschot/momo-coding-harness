@@ -7,7 +7,7 @@ A local AI coding assistant that connects to a running [Ollama](https://ollama.c
 - Python 3.14+ (uses `/opt/homebrew/bin/python3.14` by default)
 - One of:
   - A running **Ollama** instance with at least one tool-calling capable model (e.g. `qwen3.5:9b`, `qwen2.5-coder`, `mistral-nemo`), or
-  - A running **llama.cpp** server started with `--jinja` (required for tool calling), e.g. `llama-server -m model.gguf -c 8192 --jinja --port 8080`. Add `--reasoning-format ...` if you want the model's reasoning surfaced as thinking output.
+  - A running **llama.cpp** server with Jinja chat templates enabled (required for tool calling), e.g. `llama-server -m model.gguf -c 8192 --port 8080`. Current builds enable Jinja by default; on older builds add `--jinja`, and never start it with `--no-jinja`. The default `--reasoning-format auto` already returns the model's reasoning separately, so it shows as thinking output; with `none`, it is recovered from `<think>` tags instead.
 
 ## Setup
 

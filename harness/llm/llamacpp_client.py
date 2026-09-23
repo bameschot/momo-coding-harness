@@ -13,9 +13,11 @@ class LlamaCppClient(LLMClient):
     Talks to `{host}/v1/chat/completions` for chat, `{host}/props` for the
     server's context size, and `{host}/v1/models` for the loaded model list.
 
-    Note: the llama.cpp server must be started with `--jinja` for tool calling
-    to work, and with `--reasoning-format ...` for `reasoning_content` to be
-    populated (thinking is otherwise recovered from <think> tags downstream)."""
+    Note: tool calling needs the server's Jinja chat templates. Current builds
+    enable them by default; older builds need `--jinja`, and `--no-jinja`
+    breaks tool calls. `reasoning_content` is populated under the default
+    `--reasoning-format auto`; with `none`, thinking is recovered from <think>
+    tags downstream."""
 
     provider_name = "llama.cpp"
     # A llama.cpp server serves the single model it was launched with; the

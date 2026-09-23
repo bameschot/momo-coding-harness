@@ -1,0 +1,1405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>momo coding harness</title>
+<meta name="description" content="A local AI coding assistant for Ollama and llama.cpp, with a terminal UI, a browser UI and a small black cat.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<script>
+  // Apply the saved light/dark choice before first paint (no flash).
+  try { const t = localStorage.getItem("momo-site.theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
+</script>
+<style>
+/* Standalone copy of the momo web UI palette (harness/web/static/app.css).
+   Deliberately duplicated: this page must not depend on the harness sources. */
+:root {
+  color-scheme: light;
+  --bg:         #f7f7f5;
+  --surface:    #ffffff;
+  --surface-2:  #efefeb;
+  --border:     #dcdcd6;
+  --text:       #1d1f21;
+  --muted:      #6b6f76;
+  --user:       #0a7f8c;
+  --user-bg:    #e3f3f5;
+  --assistant:  #2856b8;
+  --system:     #9a3fa8;
+  --tool:       #9a6a00;
+  --think:      #c0610a;
+  --ok:         #1f8a3a;
+  --warn:       #b07900;
+  --danger:     #c62f2f;
+  --add:        #1f8a3a;
+  --add-bg:     #e6f4ea;
+  --del:        #c62f2f;
+  --del-bg:     #fbe9e9;
+  --hunk:       #0a7f8c;
+  --focus:      #2856b8;
+  --code-bg:    #f1f1ed;
+  --shadow:     0 6px 24px rgb(0 0 0 / .12);
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #111315; --surface: #181b1e; --surface-2: #202428; --border: #2d3237;
+    --text: #dfe2e5; --muted: #8a9199; --user: #5fd3de; --user-bg: #16303a;
+    --assistant: #7aa7ff; --system: #d38ae0; --tool: #e2b640; --think: #f09a4a;
+    --ok: #5fce7a; --warn: #e2b640; --danger: #f06b6b; --add: #6fdc8c; --add-bg: #14301d;
+    --del: #ff7b7b; --del-bg: #3a1a1a; --hunk: #5fd3de; --focus: #7aa7ff; --code-bg: #1e2226;
+    --shadow: 0 8px 28px rgb(0 0 0 / .5);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111315; --surface: #181b1e; --surface-2: #202428; --border: #2d3237;
+  --text: #dfe2e5; --muted: #8a9199; --user: #5fd3de; --user-bg: #16303a;
+  --assistant: #7aa7ff; --system: #d38ae0; --tool: #e2b640; --think: #f09a4a;
+  --ok: #5fce7a; --warn: #e2b640; --danger: #f06b6b; --add: #6fdc8c; --add-bg: #14301d;
+  --del: #ff7b7b; --del-bg: #3a1a1a; --hunk: #5fd3de; --focus: #7aa7ff; --code-bg: #1e2226;
+  --shadow: 0 8px 28px rgb(0 0 0 / .5);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 64px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.6 var(--sans);
+  padding-bottom: 76px;   /* room for the companion bar */
+}
+body.no-companion { padding-bottom: 0; }
+button { font: inherit; color: inherit; }
+a { color: var(--focus); }
+kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; white-space: nowrap; }
+code { font: .88em var(--mono); background: var(--code-bg); border-radius: 4px; padding: 1px 4px; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.spacer { flex: 1; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+[hidden] { display: none !important; }
+
+/* ── icons ── */
+.icon {
+  width: 18px; height: 18px; flex: none; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
+}
+.icon.sm { width: 14px; height: 14px; display: inline-block; vertical-align: -2px; }
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 30px; height: 30px; padding: 0; cursor: pointer; color: var(--muted);
+  background: none; border: 1px solid transparent; border-radius: 7px; text-decoration: none;
+}
+.icon-btn:hover { color: var(--text); border-color: var(--border); background: var(--surface-2); }
+.icon-btn[aria-pressed="false"] { opacity: .55; }
+
+/* ── status-bar style header ── */
+#status {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 8px 16px; font-size: 13px;
+}
+.status-row { display: flex; align-items: center; gap: 8px; max-width: 1160px; margin: 0 auto; min-width: 0; }
+.brand { font-weight: 700; display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--text); text-decoration: none; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; }
+.seg-nav { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px; }
+.seg-nav a {
+  padding: 1px 12px; border-radius: 999px; font-weight: 600; color: var(--muted); text-decoration: none;
+}
+.seg-nav a.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / .08); }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2);
+  padding: 1px 9px; font: 12px var(--mono); white-space: nowrap; color: var(--text);
+}
+.chip.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+.chip.sys { color: var(--system); border-color: color-mix(in srgb, var(--system) 50%, transparent); }
+.collapse { }
+
+/* ── layout ── */
+.wrap { max-width: 1160px; margin: 0 auto; padding: 0 16px; }
+section { scroll-margin-top: 64px; }
+
+/* ── hero ── */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 40px; align-items: center; padding: 56px 0 40px; }
+.hero h1 { font-size: 40px; line-height: 1.1; margin: 0 0 14px; letter-spacing: -.02em; }
+.hero h1 .accent { color: var(--user); }
+.hero p.lede { font-size: 17px; color: var(--muted); margin: 0 0 22px; max-width: 34em; }
+.hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; text-decoration: none; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text);
+  padding: 7px 16px; font-size: 14px; font-weight: 600;
+}
+.btn.primary { background: var(--focus); border-color: var(--focus); color: var(--surface); }
+.btn:hover { border-color: var(--focus); }
+.hero-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ── mock window (transcript look from the web UI) ── */
+.window {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow); overflow: hidden; font-size: 13.5px;
+}
+.win-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.win-bar .mode { background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 0 10px; font-weight: 600; }
+.win-bar .meter { width: 60px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; border: 1px solid var(--border); display: inline-block; }
+.win-bar .meter i { display: block; height: 100%; width: 38%; background: var(--ok); }
+.win-body { padding: 12px 14px 14px; background: var(--bg); }
+.msg { margin: 8px 0; overflow-wrap: anywhere; }
+.msg.user { display: flex; justify-content: flex-end; }
+.msg.user .bubble {
+  background: var(--user-bg); border: 1px solid color-mix(in srgb, var(--user) 35%, transparent);
+  border-radius: 14px 14px 4px 14px; padding: 6px 12px; max-width: 85%;
+}
+.think { color: var(--think); font: 12.5px var(--mono); opacity: .85; }
+.tool { display: flex; gap: 10px; align-items: baseline; font: 12.5px/1.5 var(--mono); color: var(--tool); padding: 2px 6px; border-radius: 6px; }
+.tool b { font-weight: 700; }
+.tool .targs { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.tool .ok { color: var(--muted); white-space: nowrap; }
+.tool .ok::before { content: "✓ "; color: var(--ok); }
+.diff { margin: 8px 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font: 12px/1.45 var(--mono); background: var(--surface); }
+.diff-head { display: flex; gap: 10px; padding: 4px 10px; background: var(--surface-2); border-bottom: 1px solid var(--border); font-weight: 700; }
+.diff-head .a { color: var(--add); font-weight: 400; } .diff-head .d { color: var(--del); font-weight: 400; }
+.diff-body { overflow-x: auto; }
+.dl { display: flex; white-space: pre; min-width: max-content; }
+.dl .gut { color: var(--muted); padding: 0 8px; user-select: none; border-right: 1px solid var(--border); text-align: right; }
+.dl .txt { padding: 0 10px; flex: 1; }
+.dl.add { background: var(--add-bg); } .dl.add .txt { color: var(--add); }
+.dl.hunk .txt { color: var(--hunk); font-weight: 700; }
+.ask { margin: 10px 0 0; border: 1px solid var(--warn); border-radius: 10px; background: color-mix(in srgb, var(--warn) 8%, var(--surface)); padding: 8px 12px; }
+.ask-title { font: 600 11.5px var(--mono); color: var(--warn); margin-bottom: 2px; }
+.ask-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+.ask-actions span { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); padding: 2px 12px; font-size: 12px; }
+.ask-actions span.p { background: var(--focus); border-color: var(--focus); color: var(--surface); font-weight: 600; }
+
+/* ── section headings ── */
+.section-head { display: flex; align-items: baseline; gap: 12px; margin: 40px 0 6px; flex-wrap: wrap; }
+.section-head h2 { font-size: 26px; margin: 0; letter-spacing: -.01em; }
+.eyebrow { font: 600 11px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+.section-sub { color: var(--muted); margin: 0 0 22px; max-width: 46em; }
+
+/* ── feature cards ── */
+.features { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.card h3 { margin: 0; font-size: 15.5px; display: flex; align-items: center; gap: 8px; }
+.card h3 .icon { color: var(--c, var(--focus)); }
+.card p { margin: 0; color: var(--muted); font-size: 14px; }
+.feature-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
+@media (max-width: 760px) { .feature-pair { grid-template-columns: minmax(0, 1fr); } }
+.card a.more { margin-top: auto; padding-top: 6px; font: 12px var(--mono); text-decoration: none; }
+.card a.more:hover { text-decoration: underline; }
+
+.modes { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-top: 14px; }
+.mode-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface); }
+.mode-card .name { font: 700 13px var(--mono); color: var(--user); }
+.mode-card p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+.recipes { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 14px; margin: .8em 0; }
+.recipe { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 12px 14px 4px; min-width: 0; }
+.recipe h4 { margin: 0 0 2px; font-size: 14.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.recipe .step-label { font: 600 11px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 -2px; }
+.recipe p { font-size: 14px; }
+.recipe .code-block pre { font-size: 12.5px; }
+
+/* ── docs ── */
+.docs-intro { border-top: 1px solid var(--border); margin-top: 56px; padding-top: 8px; }
+.docs { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 36px; align-items: start; }
+.toc { position: sticky; top: 64px; max-height: calc(100vh - 150px); overflow-y: auto; font-size: 13.5px; padding: 4px 0; }
+.toc .menu-sub { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 4px 0 6px 10px; }
+.toc a { display: block; padding: 3px 10px; border-left: 2px solid transparent; color: var(--muted); text-decoration: none; }
+.toc a:hover { color: var(--text); }
+.toc a.on { color: var(--text); border-left-color: var(--user); font-weight: 600; }
+.toc-mobile { display: none; }
+
+.doc { min-width: 0; }
+.doc section { padding-bottom: 12px; }
+.doc h2 { font-size: 21px; color: var(--user); margin: 34px 0 8px; padding-top: 4px; }
+.doc section:first-child h2 { margin-top: 10px; }
+.doc h3 { font-size: 16px; margin: 22px 0 6px; }
+.doc h4 { font-size: 14.5px; margin: 18px 0 4px; }
+.doc p { margin: .55em 0; }
+.doc ul, .doc ol { margin: .4em 0; padding-left: 1.4em; }
+.doc li { margin: .2em 0; }
+.doc blockquote, .note {
+  margin: .8em 0; padding: 8px 12px; border-left: 3px solid var(--warn); color: var(--text);
+  background: color-mix(in srgb, var(--warn) 7%, transparent); border-radius: 0 8px 8px 0; font-size: 14px;
+}
+.note.sys { border-left-color: var(--system); background: color-mix(in srgb, var(--system) 7%, transparent); }
+
+.code-block { position: relative; margin: .7em 0; }
+.code-block pre {
+  margin: 0; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 28px 12px 10px; overflow-x: auto; font: 13px/1.5 var(--mono);
+}
+.code-block pre code { background: none; padding: 0; font-size: inherit; }
+.code-bar { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; padding: 4px 6px 0 12px; pointer-events: none; }
+.code-lang { font: 11px var(--mono); color: var(--muted); flex: 1; }
+.copy-btn {
+  pointer-events: auto; font: 11px var(--mono); color: var(--muted); cursor: pointer;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1px 8px;
+  opacity: .6; transition: opacity .15s;
+}
+.code-block:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+.copy-btn:hover { color: var(--text); border-color: var(--focus); }
+.copy-btn.done { color: var(--ok); border-color: var(--ok); opacity: 1; }
+@media (hover: none) { .copy-btn { opacity: 1; } }
+.com { color: var(--muted); }
+
+.table-scroll {
+  overflow-x: auto; margin: .7em 0; max-width: 100%;
+  background:
+    linear-gradient(to right, var(--bg) 30%, transparent) left / 24px 100% no-repeat local,
+    linear-gradient(to left,  var(--bg) 30%, transparent) right / 24px 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / .25), transparent) left / 10px 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / .25), transparent) right / 10px 100% no-repeat scroll;
+}
+table { border-collapse: collapse; font-size: 14px; width: 100%; }
+th, td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; vertical-align: top; }
+th { background: var(--surface-2); white-space: nowrap; }
+td:first-child { white-space: nowrap; }
+td:first-child code { white-space: nowrap; }
+td.wrap { white-space: normal; }
+
+.pipeline { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: .8em 0; font: 12.5px var(--mono); }
+.pipeline .step { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 4px 10px; }
+.pipeline .arrow { color: var(--muted); }
+
+footer.site { border-top: 1px solid var(--border); margin-top: 48px; padding: 20px 0 28px; color: var(--muted); font-size: 13px; }
+footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+
+/* ── companion bar ── */
+#companion-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 9;
+  background: var(--surface); border-top: 1px solid var(--border);
+  padding: 4px 16px 6px;
+}
+#companion-bar .inner { max-width: 1160px; margin: 0 auto; display: flex; align-items: flex-end; gap: 8px; }
+#companion {
+  flex: 1; min-width: 0; margin: 0; height: 4.4em; font: 11px/1.1 var(--mono); color: var(--system);
+  white-space: pre; overflow: hidden; padding-top: 4px; cursor: pointer;
+}
+#companion-bar .icon-btn { margin-bottom: 4px; }
+
+/* ── responsive ── */
+@media (max-width: 960px) {
+  .hero { grid-template-columns: minmax(0, 1fr); padding-top: 32px; gap: 28px; }
+  .docs { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .toc { display: none; }
+  .toc-mobile { display: block; margin: 8px 0 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 6px 12px; font-size: 14px; }
+  .toc-mobile summary { cursor: pointer; font-weight: 600; }
+  .toc-mobile nav { columns: 2; padding: 6px 0; }
+  .toc-mobile a { display: block; padding: 2px 0; text-decoration: none; }
+}
+@media (max-width: 640px) {
+  .window { min-width: 0; }
+  body { font-size: 14.5px; }
+  .collapse { display: none; }
+  .hero h1 { font-size: 30px; }
+  .hero p.lede { font-size: 16px; }
+  .section-head h2 { font-size: 22px; }
+  .toc-mobile nav { columns: 1; }
+  .features { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<!-- Icon set: 24×24 line icons, stroked with currentColor (same drawing style as the web UI). -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
+  <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 8.2v7.6M18 11.2c0 3-3 3.8-9.8 5.6"/></symbol>
+  <symbol id="i-plan" viewBox="0 0 24 24"><path d="M11 6h9M11 12h9M11 18h9"/><path d="M3.5 6.5 5 8l3-3"/><path d="M3.5 12.5 5 14l3-3"/><path d="M4 18h3"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 2.5-3 2.5M12.5 15h4.5"/></symbol>
+  <symbol id="i-browser" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M3 9h18M6 6.8h.01M8.5 6.8h.01"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></symbol>
+  <symbol id="i-tree" viewBox="0 0 24 24"><rect x="3" y="3.5" width="6" height="5" rx="1"/><rect x="15" y="9.5" width="6" height="5" rx="1"/><rect x="15" y="16" width="6" height="5" rx="1"/><path d="M6 8.5v10h9M6 12h9"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.6 3.8 5.6 3.8 9s-1.2 6.4-3.8 9c-2.6-2.6-3.8-5.6-3.8-9S9.4 5.6 12 3z"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.2 7.5 9.5 4.3-1.3 7.5-4.9 7.5-9.5V6z"/><path d="m9 12 2.2 2.2L15.5 10"/></symbol>
+  <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4 17a8 8 0 1 1 16 0"/><path d="m12 17 4-5"/><path d="M4 17h16"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.64-6.36L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-paw" viewBox="0 0 24 24"><ellipse cx="12" cy="16" rx="4.2" ry="3.6"/><circle cx="6.2" cy="10.5" r="1.8"/><circle cx="9.6" cy="6.8" r="1.8"/><circle cx="14.4" cy="6.8" r="1.8"/><circle cx="17.8" cy="10.5" r="1.8"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-feather" viewBox="0 0 24 24"><path d="M20 4c-7 0-12.5 3.5-13.8 11.2L5 20"/><path d="M20 4c-.5 6.5-4.6 11.6-12.6 12.2"/><path d="M9.5 12.5h6"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="16" height="6.5" rx="1.5"/><path d="M7.5 7.25h.01M7.5 16.75h.01M11 7.25h5M11 16.75h5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+</svg>
+
+<header id="status">
+  <div class="status-row">
+    <a class="brand" href="#top"><span class="dot" title="Runs locally"></span>momo</a>
+    <nav class="seg-nav" aria-label="Page sections">
+      <a href="#overview" data-part="overview" class="on">Overview</a>
+      <a href="#docs" data-part="docs">Docs</a>
+    </nav>
+    <span class="chip collapse">ollama · llama.cpp</span>
+    <span class="spacer"></span>
+    <a class="icon-btn" href="https://github.com/bameschot/momo-coding-harness" title="Source on GitHub" aria-label="Source on GitHub"><svg class="icon" aria-hidden="true"><use href="#i-git"/></svg></a>
+    <button id="companion-btn" class="icon-btn" type="button" title="Show or hide momo (Shift+Q)" aria-label="Show or hide momo" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-paw"/></svg></button>
+    <button id="theme-btn" class="icon-btn" type="button" title="Switch theme" aria-label="Switch theme"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button>
+  </div>
+</header>
+
+<main id="top">
+<div class="wrap">
+
+<!-- ═══════════════════════════ OVERVIEW ═══════════════════════════ -->
+<section id="overview" data-voice="overview">
+  <div class="hero">
+    <div>
+      <div class="eyebrow">lightweight · local · AI coding harness</div>
+      <h1>A coding assistant that stays <span class="accent">on your machine</span>.</h1>
+      <p class="lede">momo connects to a local <strong>Ollama</strong> or <strong>llama.cpp</strong> server and gives the model tools to read, search, edit and run your project. Use it from a split-pane terminal UI, a browser window, or both at once. It's <strong>lightweight</strong>: three Python dependencies, no build step, and about 60 MB of RAM. A small black cat keeps you company.</p>
+      <div class="hero-actions">
+        <a class="btn primary" href="#start">Get started <svg class="icon sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></a>
+        <a class="btn" href="#features">Features</a>
+        <a class="btn" href="https://github.com/bameschot/momo-coding-harness"><svg class="icon sm" aria-hidden="true"><use href="#i-git"/></svg> GitHub</a>
+      </div>
+      <div class="hero-chips">
+        <span class="chip ok">no cloud API</span>
+        <span class="chip ok">~60 MB RAM</span>
+        <span class="chip ok">~35 MB installed</span>
+        <span class="chip ok">no build step</span>
+        <span class="chip">Python 3.14</span>
+        <span class="chip">curses TUI</span>
+        <span class="chip">stdlib web UI</span>
+        <span class="chip sys">tree-sitter</span>
+      </div>
+    </div>
+
+    <div class="window" aria-label="Example of the momo web UI" role="img">
+      <div class="win-bar">
+        <span class="brand"><span class="dot"></span>momo</span>
+        <span class="mode">coding</span>
+        <span class="mono muted collapse">qwen3.5:9b</span>
+        <span class="spacer"></span>
+        <span class="mono muted">CTX</span><span class="meter"><i></i></span><span class="mono">38%</span>
+      </div>
+      <div class="win-body">
+        <div class="msg user"><div class="bubble">add a --verbose flag to main.py</div></div>
+        <div class="think">▸ thinking (412 words)</div>
+        <div class="msg">I'll find the argument parser first.</div>
+        <div class="tool"><b>index_search</b><span class="targs">query="argument parser"</span><span class="ok">3 hits</span></div>
+        <div class="tool"><b>read_symbol</b><span class="targs">path="main.py" name="parse_args"</span><span class="ok">24 lines</span></div>
+        <div class="tool"><b>edit_file</b><span class="targs">path="main.py"</span><span class="ok">applied</span></div>
+        <div class="diff">
+          <div class="diff-head">± main.py <span class="a">+1</span><span class="d">−0</span></div>
+          <div class="diff-body">
+            <div class="dl hunk"><span class="gut">   </span><span class="txt">@@ -38,1 +38,2 @@</span></div>
+            <div class="dl"><span class="gut">38 38</span><span class="txt">    parser.add_argument("--no-think", …)</span></div>
+            <div class="dl add"><span class="gut">   39</span><span class="txt">+   parser.add_argument("--verbose", action="store_true")</span></div>
+          </div>
+        </div>
+        <div class="ask">
+          <div class="ask-title">? momo asks</div>
+          <div>Run this command? <code>$ python -m unittest</code></div>
+          <div class="ask-actions"><span class="p">Yes (y)</span><span>No</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features" data-voice="features">
+  <div class="section-head"><span class="eyebrow">feature overview</span><h2>What it does</h2></div>
+  <p class="section-sub">Everything below works offline against a model you run yourself. Each card links to the detailed documentation further down this page.</p>
+
+  <div class="feature-pair">
+    <div class="card" style="--c: var(--ok)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg>Ollama or llama.cpp, local or remote</h3>
+      <p>Point momo at an <strong>Ollama</strong> server (native API, switch models with <code>/model</code>) or a <strong>llama.cpp</strong> <code>llama-server</code> (OpenAI-compatible API, with Jinja chat templates for tool calling). Either can run on your own machine or a GPU box elsewhere. Pick one with <code>--provider</code> and <code>--host</code>, move between servers with <code>/host</code>, and add a Bearer token with <code>/token</code>; it is never written to disk. Every mode, tool and UI works the same on both.</p>
+      <a class="more" href="#backends">Backends &amp; setup →</a>
+    </div>
+    <div class="card" style="--c: var(--user)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-feather"/></svg>Lightweight by design</h3>
+      <p>momo is a plain Python program with three dependencies: the Ollama client, tree-sitter with its grammars, and optionally pypdf. About 35 MB installed. The terminal UI is <code>curses</code> and the web UI is Python's own HTTP server, so there's no Node, no build step, no database and no background daemon. It uses about <strong>60 MB of RAM</strong> idle, and 105–150 MB with the code index built for projects of 180 to 2,100 files. The model's memory lives in Ollama or llama.cpp, not in momo.</p>
+      <a class="more" href="#requirements">Requirements &amp; footprint →</a>
+    </div>
+  </div>
+
+  <div class="features">
+    <div class="card" style="--c: var(--user)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg>Terminal UI</h3>
+      <p>A three-pane curses interface: chat, status bar and a multi-line input. Replies stream in, tool calls and thinking are colour-coded, and file edits show as coloured diffs.</p>
+      <a class="more" href="#tui">TUI docs →</a>
+    </div>
+    <div class="card" style="--c: var(--assistant)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-browser"/></svg>Web UI, same session</h3>
+      <p>A browser chat window served by Python's standard library, with no CDN or build step. It shows the same session as the terminal, so you can type in either one.</p>
+      <a class="more" href="#web">Web UI docs →</a>
+    </div>
+    <div class="card" style="--c: var(--system)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-plan"/></svg>Five modes</h3>
+      <p>Design, chat, plan, coding and momo. Each mode has its own role prompt and tool set, from read-only exploration to full edit-and-run.</p>
+      <a class="more" href="#modes">Modes →</a>
+    </div>
+    <div class="card" style="--c: var(--ok)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg>Plan, approve, execute</h3>
+      <p>Plan mode investigates first and writes a step-by-step plan to <code>.momo-plan.md</code>. Nothing changes until you approve it. Then it runs one step at a time and can pause and resume.</p>
+      <a class="more" href="#plan">Plan mode →</a>
+    </div>
+    <div class="card" style="--c: var(--tool)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-tree"/></svg>Syntax-aware navigation</h3>
+      <p>Tree-sitter outlines, symbol lookup and references for Python, Java, C/C++, Kotlin, Rust, JS/TS and more, plus config keys, CSS selectors, SQL tables and Dockerfile stages.</p>
+      <a class="more" href="#tools">Tools →</a>
+    </div>
+    <div class="card" style="--c: var(--think)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>In-memory code index</h3>
+      <p>On by default. It supports fuzzy definition search, full-text search, callers grouped by function and a ranked project map, and it waits for pending changes before answering so results are never stale.</p>
+      <a class="more" href="#index">Code index →</a>
+    </div>
+    <div class="card" style="--c: var(--focus)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>Guarded internet access</h3>
+      <p>An opt-in <code>fetch_url</code> tool that is off by default. Private addresses are blocked, redirects are re-checked, credentials are dropped across origins and page content is fenced off as untrusted.</p>
+      <a class="more" href="#net">Internet access →</a>
+    </div>
+    <div class="card" style="--c: var(--danger)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Sandboxed by default</h3>
+      <p>Every file operation stays inside the working directory. <code>run_command</code> can ask first, and the web UI binds to loopback and needs a token off-loopback.</p>
+      <a class="more" href="#security">Security →</a>
+    </div>
+    <div class="card" style="--c: var(--user)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg>Sessions &amp; context</h3>
+      <p>Sessions auto-save after every reply. The CTX meter tracks token use, and compaction summarises old history with the model when the limit is reached.</p>
+      <a class="more" href="#context">Context →</a>
+    </div>
+    <div class="card" style="--c: var(--system)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg>Skills &amp; project guides</h3>
+      <p>Stack Markdown skills (python, rust, tdd, sql …) into the system prompt, and optionally load <code>AGENTS.md</code> / <code>CLAUDE.md</code> from the project.</p>
+      <a class="more" href="#skills">Skills →</a>
+    </div>
+    <div class="card" style="--c: var(--think)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-paw"/></svg>momo, the companion</h3>
+      <p>An ASCII cat walks along the input bar and mews lines that fit the mode you're in. When you've been idle for a while, it can recap what you just did. It's walking along the bottom of this page too.</p>
+      <a class="more" href="#companion-docs">Companion →</a>
+    </div>
+    <div class="card" style="--c: var(--ok)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>Measured, not guessed</h3>
+      <p>Unit tests check that the tools work. A separate eval suite checks whether a small local model actually <em>uses</em> them, run several times with the spread reported.</p>
+      <a class="more" href="#dev">Tests &amp; evals →</a>
+    </div>
+  </div>
+
+  <div class="modes" aria-label="Modes at a glance">
+    <div class="mode-card"><div class="name">design</div><p>Explores the code, asks grounded questions and writes the spec. Doesn't touch code.</p></div>
+    <div class="mode-card"><div class="name">chat</div><p>A read-only conversation partner for understanding code and documents.</p></div>
+    <div class="mode-card"><div class="name">plan</div><p>Investigate → plan → approve → execute, one step at a time.</p></div>
+    <div class="mode-card"><div class="name">coding</div><p>The full tool suite: edit, move, delete, run commands and use git.</p></div>
+    <div class="mode-card"><div class="name">momo</div><p>Talk to the cat. It's a companion first, but it still has every tool.</p></div>
+  </div>
+
+</section>
+
+<!-- ═══════════════════════════ DOCUMENTATION ═══════════════════════════ -->
+<div id="docs" class="docs-intro" data-voice="docs">
+  <div class="section-head"><span class="eyebrow">documentation</span><h2>Reference</h2></div>
+  <p class="section-sub">Commands, flags, tools and behaviour in detail. The repository's README is the canonical source; this page is a condensed tour of it.</p>
+  <details class="toc-mobile"><summary>On this page</summary><nav id="toc-mobile"></nav></details>
+</div>
+
+<div class="docs">
+  <nav class="toc" id="toc" aria-label="Documentation contents"><div class="menu-sub">Contents</div></nav>
+
+  <article class="doc">
+
+  <section id="start" data-voice="start">
+    <h2>Getting started</h2>
+    <h3>Requirements</h3>
+    <ul>
+      <li>Python 3.14+</li>
+      <li>Either a running <strong>Ollama</strong> instance with a tool-calling model (e.g. <code>qwen3.5:9b</code>, <code>qwen2.5-coder</code>, <code>mistral-nemo</code>)</li>
+      <li>or a <strong>llama.cpp</strong> <code>llama-server</code> with Jinja chat templates enabled, which tool calling needs. Current builds enable them by default; on older builds, pass <code>--jinja</code>.</li>
+    </ul>
+    <h3>Install</h3>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>git clone https://github.com/bameschot/momo-coding-harness.git
+cd momo-coding-harness
+python3.14 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt</code></pre></div>
+    <h3>Run</h3>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py                     <span class="com"># TUI + web UI on 127.0.0.1:8765</span>
+
+<span class="com"># a specific project on a remote Ollama</span>
+python momo-coding-harness.py --workdir ~/projects/myapp \
+    --model qwen3-coder:30b --host http://192.168.1.10:11434
+
+<span class="com"># a local llama.cpp server</span>
+python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</code></pre></div>
+    <p>The chosen provider is remembered for the next launch, and the status bar shows it as <code>VIA: &lt;provider&gt;</code>. See <a href="#running">Running against a backend</a> for step-by-step setups for local and remote Ollama and llama.cpp.</p>
+
+    <h3 id="flags">Command-line flags</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Flag</th><th>Default</th><th>Description</th></tr>
+      <tr><td><code>--provider</code></td><td>last used / <code>ollama</code></td><td class="wrap"><code>ollama</code> or <code>llamacpp</code></td></tr>
+      <tr><td><code>--host</code></td><td>:11434 / :8080</td><td class="wrap">Backend base URL, including the scheme</td></tr>
+      <tr><td><code>--model</code></td><td><code>qwen3.5:9b</code></td><td class="wrap">Model name. llama.cpp serves whatever model it was started with.</td></tr>
+      <tr><td><code>--workdir</code></td><td><code>.</code></td><td class="wrap">Root for all file operations (alias <code>--workspace</code>)</td></tr>
+      <tr><td><code>--context</code></td><td>auto</td><td class="wrap">Context token limit. The default is half the model's maximum.</td></tr>
+      <tr><td><code>--mode</code></td><td><code>design</code></td><td class="wrap">Starting mode: <code>design</code>, <code>chat</code>, <code>plan</code>, <code>coding</code> or <code>momo</code></td></tr>
+      <tr><td><code>--max-tool-result</code></td><td><code>0</code></td><td class="wrap">Max characters per tool result (0 = unlimited)</td></tr>
+      <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
+      <tr><td><code>--no-think</code></td><td>off</td><td class="wrap">Turn off the model's thinking/reasoning mode</td></tr>
+      <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
+      <tr><td><code>--web</code> / <code>--no-web</code></td><td>on</td><td class="wrap">Serve the browser UI alongside the TUI</td></tr>
+      <tr><td><code>--web-host</code></td><td><code>127.0.0.1</code></td><td class="wrap">Interface to bind. Any non-loopback host requires a token.</td></tr>
+      <tr><td><code>--web-port</code></td><td><code>8765</code></td><td class="wrap">Port for the web UI</td></tr>
+      <tr><td><code>--web-token</code></td><td>generated</td><td class="wrap">A fixed access token instead of a random one</td></tr>
+      <tr><td><code>--headless</code></td><td>off</td><td class="wrap">Web UI only, with no terminal UI</td></tr>
+      <tr><td><code>--no-index</code></td><td>index on</td><td class="wrap">Start with the code index off. <code>--index-max-mem</code> and <code>--index-persist</code> set its budget and persistence.</td></tr>
+      <tr><td><code>--net</code></td><td><code>off</code></td><td class="wrap"><code>off</code>, <code>on</code> or <code>local</code> at startup (<code>--net-confirm</code>, <code>--net-max-bytes</code> and <code>--net-max-chars</code> go with it)</td></tr>
+      <tr><td><code>--guides</code></td><td>off</td><td class="wrap">Load the project's guide files into the system prompt</td></tr>
+      <tr><td><code>--companion-idle-recap</code></td><td>off</td><td class="wrap">Let momo recap recent turns when you're idle (<code>--companion-idle-recap-secs</code>)</td></tr>
+    </table></div>
+
+    <h3>Remote hosts with a token</h3>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/host https://my-remote-ollama.example.com
+/token sk-your-api-key-here</code></pre></div>
+    <p>The token is sent as <code>Authorization: Bearer …</code>. It is <strong>never written to disk</strong>: not to the session, the log or the input history. It is masked on screen as <code>sk***ere</code>. The host is saved with the session; the token has to be entered again after a restart.</p>
+  </section>
+
+  <section id="requirements" data-voice="requirements">
+    <h2>Requirements &amp; footprint</h2>
+    <p>momo is meant to sit beside your editor and use very little of the machine. Nearly all the memory and compute goes to the model, which runs in Ollama or llama.cpp, not in momo.</p>
+    <h3>What you need</h3>
+    <ul>
+      <li><strong>macOS or Linux.</strong> The terminal UI uses Python's built-in <code>curses</code>, which Windows lacks; on Windows, use WSL.</li>
+      <li><strong>Python 3.14+.</strong></li>
+      <li><strong>A model server</strong> you can reach: Ollama or llama.cpp, on this machine or another (see <a href="#backends">Backends</a>).</li>
+    </ul>
+    <h3>Dependencies</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Package</th><th>Used for</th><th>Needed?</th></tr>
+      <tr><td><code>ollama</code></td><td class="wrap">The Ollama client. It brings <code>httpx</code>, which the llama.cpp adapter also uses.</td><td>yes</td></tr>
+      <tr><td><code>tree-sitter</code> + 16 grammars</td><td class="wrap">Code navigation and the code index. The grammar wheels are prebuilt and work offline.</td><td class="wrap">optional: without them, the code-navigation tools aren't offered</td></tr>
+      <tr><td><code>pypdf</code></td><td class="wrap">Turning PDF attachments into text in the web UI (pure Python)</td><td class="wrap">optional</td></tr>
+    </table></div>
+    <p>Everything else is Python's standard library: <code>curses</code> for the TUI, <code>http.server</code> for the web UI, <code>urllib</code> for <code>fetch_url</code>, and <code>threading</code> for the background work. The web UI is hand-written HTML, CSS and JavaScript with no npm, bundler or CDN. On disk, the dependencies take about <strong>35 MB</strong> (18 MB of that is grammars) and the harness itself about 2 MB.</p>
+    <h3 id="memory">Memory while running</h3>
+    <p>Measured on 2026-09-23 on an Apple Silicon Mac with Python 3.14.7. Each figure is the resident memory of the momo process run with <code>--headless</code>, after the index had finished building. The model server isn't included.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Setup</th><th>Files indexed</th><th>Index build</th><th>Index size</th><th>momo process</th></tr>
+      <tr><td>Idle, index off</td><td>—</td><td>—</td><td>—</td><td><strong>61 MB</strong></td></tr>
+      <tr><td>Index on: this repository</td><td>182</td><td>0.5 s</td><td>4 MB</td><td>105 MB</td></tr>
+      <tr><td>Index on: Maestro (Kotlin)</td><td>1,462</td><td>~1 s</td><td>17 MB</td><td>111 MB</td></tr>
+      <tr><td>Index on: mgba (C emulator)</td><td>2,087</td><td>~7.5 s</td><td>42 MB</td><td>149 MB</td></tr>
+    </table></div>
+    <ul>
+      <li>Turning the index on costs about 40 MB before the index itself, for the loaded grammars and parser caches. After that it grows with the project: here, 4 to 42 MB.</li>
+      <li>The index never grows past its budget (<code>/index-max-mem</code>, default 100 MB). Over budget it drops optional parts instead; see <a href="#index">Code index</a>. On a tight machine, lower the budget or start with <code>--no-index</code>.</li>
+      <li>The model is what needs real memory. A 9B model quantised to 4 bits typically needs several gigabytes of RAM or VRAM in Ollama or llama.cpp. momo adds only the figures above, and nothing at all if the model runs on another machine.</li>
+      <li>No database, no language server and no file watcher run in the background. The index checks file times and sizes when a tool asks, which takes about 20 ms per 1,500 files.</li>
+    </ul>
+  </section>
+
+  <section id="backends" data-voice="backends">
+    <h2>Backends</h2>
+    <p>The harness talks to the model through a small adapter layer (<code>harness/llm/</code>), with one adapter per backend. Both adapters return the same response shape, so modes, tools, streaming, thinking, compaction and both UIs work the same whichever backend you pick. Choose one with <code>--provider ollama</code> or <code>--provider llamacpp</code>. The choice is remembered for the next launch and saved with each session.</p>
+    <div class="table-scroll"><table>
+      <tr><th></th><th>Ollama</th><th>llama.cpp</th></tr>
+      <tr><td>Provider</td><td class="wrap"><code>--provider ollama</code> (default)</td><td class="wrap"><code>--provider llamacpp</code></td></tr>
+      <tr><td>API used</td><td class="wrap">Native Ollama API, via the <code>ollama</code> Python library</td><td class="wrap">OpenAI-compatible <code>/v1/chat/completions</code>, via <code>httpx</code></td></tr>
+      <tr><td>Default host</td><td class="wrap"><code>http://localhost:11434</code></td><td class="wrap"><code>http://localhost:8080</code></td></tr>
+      <tr><td>Models</td><td class="wrap"><code>/model</code> lists every pulled model and switches between them at runtime</td><td class="wrap">One model, fixed when <code>llama-server</code> starts. <code>/model</code> shows it but can't switch.</td></tr>
+      <tr><td>Context window</td><td class="wrap">Read from the model's info. The full window is sent as <code>num_ctx</code> on every request.</td><td class="wrap">Read from <code>/props</code> (<code>n_ctx</code>). Fixed at launch with <code>-c</code>.</td></tr>
+      <tr><td>Tool calling</td><td class="wrap">Needs a model with tool support (e.g. <code>qwen3.5:9b</code>, <code>qwen2.5-coder</code>, <code>mistral-nemo</code>)</td><td class="wrap">Needs Jinja chat templates (the default in current builds; <code>--jinja</code> on older ones, never <code>--no-jinja</code>), plus a model whose template supports tools</td></tr>
+      <tr><td>Thinking</td><td class="wrap">Toggled with Ollama's <code>think</code> option</td><td class="wrap">Toggled via <code>chat_template_kwargs.enable_thinking</code> (Qwen3-style templates). The server's default <code>--reasoning-format auto</code> returns reasoning as a separate stream. With <code>none</code>, momo recovers it from <code>&lt;think&gt;</code> tags instead.</td></tr>
+      <tr><td>Streaming</td><td class="wrap">Yes</td><td class="wrap">Yes (Server-Sent Events)</td></tr>
+      <tr><td>Auth</td><td class="wrap" colspan="2"><code>/token &lt;key&gt;</code> sends <code>Authorization: Bearer &lt;key&gt;</code> to either backend. It's kept in memory only.</td></tr>
+    </table></div>
+    <p>By default the compaction threshold is half the detected window. Change it with <code>/context 75%</code>, or set an absolute number with <code>/context 16384</code> or <code>--context</code>.</p>
+    <h3>Local or remote</h3>
+    <p>"Remote" just means <code>--host</code> points somewhere other than <code>localhost</code>. It can be another machine on your LAN, a GPU box, or a hosted endpoint behind a reverse proxy. The harness, the tools and your files always stay on the machine where you run momo; only the chat requests go to the model server. Always give the full URL, including the scheme: <code>http://192.168.1.10:11434</code>, not <code>192.168.1.10:11434</code>.</p>
+    <p>The host is saved with the session and restored when you start again. The token is not saved and has to be entered again.</p>
+  </section>
+
+  <section id="running" data-voice="running">
+    <h2>Running against a backend</h2>
+    <p>Pick the recipe that matches where your model runs. Every recipe starts both the TUI and the web UI. Add <code>--workdir ~/projects/myapp</code> to point momo at a project, or <code>--headless</code> to run only the web UI.</p>
+
+    <div class="recipes">
+      <div class="recipe">
+        <h4>Ollama <span class="chip ok">local</span></h4>
+        <div class="step-label">model server</div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>ollama pull qwen3.5:9b
+<span class="com"># skip if it already runs as a service</span>
+ollama serve</code></pre></div>
+        <div class="step-label">harness</div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --model qwen3.5:9b</code></pre></div>
+        <p>With no <code>--provider</code> or <code>--host</code>, momo uses Ollama on <code>localhost:11434</code>.</p>
+      </div>
+
+      <div class="recipe">
+        <h4>Ollama <span class="chip sys">remote</span></h4>
+        <div class="step-label">on the server</div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>OLLAMA_HOST=0.0.0.0:11434 ollama serve</code></pre></div>
+        <div class="step-label">harness</div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py \
+    --host http://192.168.1.10:11434 \
+    --model qwen3-coder:30b</code></pre></div>
+        <p>Ollama itself has no authentication. If it's behind a reverse proxy or a hosted endpoint that expects a key, set it once momo is running:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/token sk-your-api-key-here</code></pre></div>
+      </div>
+
+      <div class="recipe">
+        <h4>llama.cpp <span class="chip ok">local</span></h4>
+        <div class="step-label">model server</div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>llama-server -m model.gguf -c 32768 --port 8080</code></pre></div>
+        <div class="step-label">harness</div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --provider llamacpp</code></pre></div>
+        <p>Tool calls need Jinja chat templates. They are on by default in current llama.cpp builds; add <code>--jinja</code> on older ones. <code>-c</code> sets the context window momo will detect. <code>--model</code> isn't needed here, since the server decides the model.</p>
+      </div>
+
+      <div class="recipe">
+        <h4>llama.cpp <span class="chip sys">remote</span></h4>
+        <div class="step-label">on the server</div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>llama-server -m model.gguf -c 32768 \
+    --host 0.0.0.0 --port 8080 --api-key sk-secret</code></pre></div>
+        <div class="step-label">harness</div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --provider llamacpp \
+    --host http://gpu-box.lan:8080</code></pre></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/token sk-secret             <span class="com"># matches --api-key</span></code></pre></div>
+      </div>
+    </div>
+
+    <h3>Switching while running</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Effect</th></tr>
+      <tr><td><code>/host</code></td><td class="wrap">Show the current backend URL</td></tr>
+      <tr><td><code>/host &lt;url&gt;</code></td><td class="wrap">Connect to another server of the <em>same</em> provider, e.g. move from a local Ollama to a remote one</td></tr>
+      <tr><td><code>/model [name]</code></td><td class="wrap">List or switch models (Ollama). On llama.cpp this only shows the loaded model.</td></tr>
+      <tr><td><code>/token &lt;key&gt;</code>, <code>/clear-token</code></td><td class="wrap">Set or remove the Bearer token for the current host</td></tr>
+    </table></div>
+    <p>To change the <em>provider</em>, restart with <code>--provider</code>. Passing <code>--provider</code>, <code>--host</code> or <code>--model</code> at launch overrides whatever the restored session had.</p>
+
+    <h3>Tips</h3>
+    <ul>
+      <li><strong>Prefer an SSH tunnel to exposing the model port.</strong> <code>ssh -L 11434:127.0.0.1:11434 gpu-box</code> (or <code>8080</code> for llama.cpp) lets momo use the default <code>localhost</code> host, and the server stays unreachable from the network.</li>
+      <li><strong>Traffic to the model is plain HTTP</strong> unless your URL is <code>https://</code>. Put a TLS-terminating proxy in front of a remote server you reach over an untrusted network, especially if you send a token.</li>
+      <li><strong>Check the status bar.</strong> <code>VIA: ollama</code> or <code>VIA: llamacpp</code>, the host and the model are always visible. The startup message also says which context window was detected.</li>
+      <li><strong>Nothing detected?</strong> If the server can't report its window, set one with <code>--context 16384</code>.</li>
+    </ul>
+  </section>
+
+  <section id="modes" data-voice="modes">
+    <h2>Modes</h2>
+    <p>Cycle with <kbd>Shift+Tab</kbd> (design → chat → plan → coding → momo), or switch directly with <code>/design</code>, <code>/chat</code>, <code>/plan</code>, <code>/code</code> or <code>/momo</code>. Each mode swaps the role prompt and the set of tools offered to the model.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Mode</th><th>What it's for</th><th>Tools</th></tr>
+      <tr><td><code>design</code></td><td class="wrap">A design partner. It explores the codebase, asks questions grounded in what it finds and writes the design document once it knows enough. It never edits code.</td><td class="wrap">read-only + code nav + <code>write_file</code>, <code>ask_user</code></td></tr>
+      <tr><td><code>chat</code></td><td class="wrap">A conversation partner for understanding code and documents. It reads, explains and asks follow-up questions, and never writes.</td><td class="wrap">read-only + code nav + <code>ask_user</code></td></tr>
+      <tr><td><code>plan</code></td><td class="wrap">Think it through before touching anything. See <a href="#plan">Plan mode</a>.</td><td class="wrap">investigating: read-only + <code>run_command</code>, <code>create_plan</code><br>executing: coding + <code>complete_step</code>, <code>revise_plan</code></td></tr>
+      <tr><td><code>coding</code></td><td class="wrap">An engineer. It makes targeted edits, runs tests and uses git.</td><td class="wrap">everything in design + <code>edit_file</code>, <code>delete_file</code>, <code>move_file</code>, <code>append_to_file</code>, <code>run_command</code></td></tr>
+      <tr><td><code>momo</code></td><td class="wrap">Talk to the cat. Replies are short, warm and lowercase. It's a companion first, but it still does the work when asked.</td><td class="wrap">same as coding</td></tr>
+    </table></div>
+  </section>
+
+  <section id="plan" data-voice="plan">
+    <h2>Plan mode</h2>
+    <div class="pipeline"><span class="step">1 investigate</span><span class="arrow">→</span><span class="step">2 plan</span><span class="arrow">→</span><span class="step">3 confirm</span><span class="arrow">→</span><span class="step">4 execute</span></div>
+    <ol>
+      <li><strong>Investigate.</strong> The model follows the code path the change touches, tries to reproduce a bug with <code>run_command</code> and finds out how the project is tested. It uses <code>ask_user</code> for questions that would change the plan, one at a time.</li>
+      <li><strong>Plan.</strong> It calls <code>create_plan</code> with a title, a goal and ordered steps. Each step names the file and function it changes, the change itself and how to verify it. The harness writes this to <code>.momo-plan.md</code>.</li>
+      <li><strong>Confirm.</strong> Answer <code>y</code> to run the plan now, or <code>n</code> to keep it for <code>/plan run</code>. Anything else counts as feedback, and the model revises the plan. You can edit <code>.momo-plan.md</code> by hand first. It's re-read on approval, and <code>[-]</code> skips a step.</li>
+      <li><strong>Execute.</strong> The harness runs one step at a time. The plan, with <code>▶</code> on the current step, is in the system prompt, so the model knows where it is even after compaction. A step ends with <code>complete_step</code> or a text-only reply. <code>revise_plan</code> replaces the remaining steps and reports any it dropped.</li>
+    </ol>
+    <p>Checkboxes in the file update as steps run: <code>[~]</code> while a step is in progress, <code>[x]</code> when it's done. When the plan is finished, the file is deleted. An interrupt, backend error or exhausted iteration budget <strong>pauses</strong> the plan. <code>/plan resume</code>, or any message you type, carries on, even after a restart.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Effect</th></tr>
+      <tr><td><code>/plan</code></td><td class="wrap">Switch to plan mode, showing the current plan's state if there is one</td></tr>
+      <tr><td><code>/plan show</code></td><td class="wrap">The plan with the status of each step</td></tr>
+      <tr><td><code>/plan run</code></td><td class="wrap">Approve a kept plan and execute it (re-reads the file)</td></tr>
+      <tr><td><code>/plan resume</code></td><td class="wrap">Continue a paused plan from its current step</td></tr>
+      <tr><td><code>/plan cancel</code></td><td class="wrap">Discard the plan and delete <code>.momo-plan.md</code></td></tr>
+    </table></div>
+  </section>
+
+  <section id="tools" data-voice="tools">
+    <h2>Tools</h2>
+    <p>The tool reference in each system prompt is generated from the tool schemas, so the model always sees exactly the tools its current mode offers. All file operations are sandboxed to the working directory, and <code>..</code> escapes are rejected.</p>
+    <h3>Read-only (all modes)</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Tool</th><th>Description</th></tr>
+      <tr><td><code>list_directory</code></td><td class="wrap">Directory contents: folders first, then files with sizes</td></tr>
+      <tr><td><code>file_info</code></td><td class="wrap">Whether it exists, type, size, mtime and line count</td></tr>
+      <tr><td><code>find_files</code></td><td class="wrap">Glob search (<code>*.py</code>, <code>src/**/*.ts</code>), recursive for simple patterns, at most 100 results</td></tr>
+      <tr><td><code>read_file</code></td><td class="wrap">Read a file, optionally a line range</td></tr>
+      <tr><td><code>grep_file</code> / <code>grep_files</code></td><td class="wrap">Regex search in one file, or recursively (at most 200 matches)</td></tr>
+      <tr><td><code>grep_extract</code></td><td class="wrap">Only the matched text, or a capture group</td></tr>
+    </table></div>
+    <h3>Code navigation (tree-sitter)</h3>
+    <p>Languages: Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript (including JSX/TSX), plus inline <code>&lt;script&gt;</code> in HTML. It also covers YAML/TOML/JSON key paths, HTML ids, CSS selectors and custom properties, SQL tables and columns, shell functions and Dockerfile stages. Without tree-sitter installed, these tools simply aren't offered.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Tool</th><th>Description</th></tr>
+      <tr><td><code>code_outline</code></td><td class="wrap">Classes, functions and methods with line ranges. Given a directory, it returns a one-line-per-file map.</td></tr>
+      <tr><td><code>find_symbol</code></td><td class="wrap">Where a name (or <code>Class.method</code>) is defined. Wildcards list definitions, e.g. every class.</td></tr>
+      <tr><td><code>read_symbol</code></td><td class="wrap">The full source of one definition. Pass a line number to get the definition containing it.</td></tr>
+      <tr><td><code>find_references</code></td><td class="wrap">Every use of an identifier outside comments and strings, tagged <code>(call)</code>, <code>(def)</code>, <code>(import)</code>, <code>(type)</code> …</td></tr>
+      <tr><td><code>file_dependencies</code></td><td class="wrap">What a file imports and which files import it: the blast radius of a change</td></tr>
+    </table></div>
+    <h3>Writing &amp; running</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Tool</th><th>Modes</th><th>Description</th></tr>
+      <tr><td><code>write_file</code></td><td>design, coding, momo</td><td class="wrap">Write a file. Reports line and byte counts, or <code>No change:</code> if the content is identical.</td></tr>
+      <tr><td><code>ask_user</code></td><td>all modes</td><td class="wrap">Pause and ask you a focused question. The status bar shows <code>? waiting for input</code>.</td></tr>
+      <tr><td><code>edit_file</code></td><td>coding, momo</td><td class="wrap">Replace <code>old_string</code> with <code>new_string</code>. It must match exactly once unless <code>replace_all</code> is set.</td></tr>
+      <tr><td><code>append_to_file</code></td><td>coding, momo</td><td class="wrap">Append, creating the file if it's missing</td></tr>
+      <tr><td><code>move_file</code> / <code>delete_file</code></td><td>coding, momo</td><td class="wrap">Rename or move (creates parent folders), or delete</td></tr>
+      <tr><td><code>run_command</code></td><td>coding, momo, plan</td><td class="wrap">Any shell command. 900 s timeout. <code>/run-confirm on</code> asks before each one.</td></tr>
+    </table></div>
+  </section>
+
+  <section id="index" data-voice="index">
+    <h2>Code index</h2>
+    <p>An in-memory index of the working directory, <strong>on by default</strong>. While it's on, <code>index_callers</code> and <code>index_file</code> replace <code>find_references</code> and <code>file_dependencies</code>, so the model never has to choose between two tools that answer the same question. With <code>/index-route on</code> (the default), plain-text <code>grep_files</code> and <code>find_files</code> calls are answered from the index too.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Tool</th><th>Description</th></tr>
+      <tr><td><code>index_search</code></td><td class="wrap">Find a definition by exact, partial or approximate name, or by words from its docstring. <code>config parse</code> finds <code>parse_config</code>, and <code>database</code> finds <code>db</code>.</td></tr>
+      <tr><td><code>index_text</code></td><td class="wrap">Fast full-text search of every file. Each hit names the definition it's in.</td></tr>
+      <tr><td><code>index_callers</code></td><td class="wrap">Uses of a name, grouped by the enclosing function. <code>depth=2</code> or <code>3</code> also follows the callers of those functions.</td></tr>
+      <tr><td><code>index_map</code></td><td class="wrap">Files ranked by how much the rest of the code uses them (PageRank), fitted to a token budget</td></tr>
+      <tr><td><code>index_file</code></td><td class="wrap">One file in one call: outline, imports, importers and its most-used definitions</td></tr>
+      <tr><td><code>index_status</code></td><td class="wrap">Coverage per language, skipped files and memory against the budget</td></tr>
+    </table></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/index                <span class="com"># memory vs budget, per part and per language</span>
+/index on|off
+/index rebuild
+/index save|load      <span class="com"># ~/.momo-harness/index/&lt;hash&gt;.pickle, mode 0600</span>
+/index-max-mem 200mb
+/index-persist on     <span class="com"># load at start, save on exit</span>
+/index-route on|off</code></pre></div>
+    <ul>
+      <li><strong>What is indexed:</strong> <code>git ls-files -co --exclude-standard</code> in a repo, which respects <code>.gitignore</code>. Binary files and files over 2 MB are skipped.</li>
+      <li><strong>Always current:</strong> before answering, the index compares mtimes and sizes and <em>waits</em> for any changes to be indexed. It never answers from a stale index. Edits made by the harness are re-indexed immediately.</li>
+      <li><strong>Memory budget</strong> (default 100 MB): when it's over budget, the index drops the text signatures first, then the identifier index, then stops adding files. It says so in every affected result.</li>
+      <li><strong>Safe loading:</strong> the pickle loader only accepts the index's own classes, and refuses files that aren't yours or are writable by others.</li>
+    </ul>
+  </section>
+
+  <section id="index-parsing" data-voice="index-parsing">
+    <h2>How the index parses a project</h2>
+    <p>The index is built once in a background thread when you start momo, or when you run <code>/index on</code>. After that it's kept current file by file. Every <code>index_*</code> tool reads from memory; nothing is re-parsed per question except the handful of files a caller search needs.</p>
+    <div class="pipeline"><span class="step">list files</span><span class="arrow">→</span><span class="step">skip binary &amp; large</span><span class="arrow">→</span><span class="step">parse (tree-sitter)</span><span class="arrow">→</span><span class="step">definitions &amp; imports</span><span class="arrow">→</span><span class="step">identifier occurrences</span><span class="arrow">→</span><span class="step">text signature</span><span class="arrow">→</span><span class="step">keep fresh</span></div>
+    <ol>
+      <li><strong>List.</strong> In a git repository: <code>git ls-files -co --exclude-standard</code>, meaning tracked plus untracked files, with <code>.gitignore</code> respected. That's why a repo with a virtualenv indexes hundreds of files, not thousands. Outside git, it walks the tree and skips <code>.git</code>, <code>node_modules</code>, <code>.venv</code>, other build folders and hidden entries. The cap is 100,000 files.</li>
+      <li><strong>Skip.</strong> The first 4 KB of each file are checked for binary content, and files over 2 MB are left out. Skipped files are remembered by size and modification time, so they aren't read again on every query.</li>
+      <li><strong>Parse.</strong> The file extension picks a tree-sitter grammar, and each file is parsed once. Inline <code>&lt;script&gt;</code> blocks in HTML are parsed as JavaScript at their real line numbers. A file with syntax errors is still indexed, but marked incomplete in results, so a missing hit there isn't taken as proof.</li>
+      <li><strong>Definitions &amp; imports.</strong> The same extractor as <code>code_outline</code> records each definition's kind, qualified name (<code>Class.method</code>), line range, signature and the first line of its docstring or doc comment. It also records the file's imports.</li>
+      <li><strong>Identifier occurrences.</strong> A single tree-sitter query collects every identifier in the file. Each occurrence is stored as a packed (file, line) pair in 8 bytes, and names are shared rather than copied. What a use <em>is</em> (call, definition, import, type or local) is only worked out at question time, and only in the files that contain the name.</li>
+      <li><strong>Text signature.</strong> Each file gets a compact set of the three-letter sequences in its text. <code>index_text</code> uses it to open only the files that could contain the query.</li>
+      <li><strong>Keep fresh.</strong> Before every <code>index_*</code> answer, file times and sizes are compared with the index, and the answer waits until any changes are re-indexed. Files momo edits itself are re-indexed immediately, and <code>run_command</code> triggers a full re-check.</li>
+    </ol>
+    <p><strong>Imports</strong> are matched only within a language family (JavaScript/TypeScript/TSX/HTML, C/C++, Java/Kotlin), so <code>java.util.List</code> never resolves to a <code>util.c</code>. <strong>Callers</strong> come from syntax, not types. Receiver and scope rules remove the usual false hits (<code>self.x</code> in another class, a local that shares the name), but it isn't a type checker and there's no language server. Where it can't be sure, it keeps the hit and labels it.</p>
+
+    <h3 id="languages">Supported languages</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Language</th><th>Extensions</th><th>Definitions</th><th>Imports</th><th>Checked against</th></tr>
+      <tr><td>Python</td><td><code>.py .pyi</code></td><td class="wrap">classes, functions, methods</td><td class="wrap"><code>import</code>, <code>from … import</code></td><td class="wrap">Python's <code>ast</code> + <code>symtable</code>: definitions and call sites 100%/100% (496 files)</td></tr>
+      <tr><td>Java</td><td><code>.java</code></td><td class="wrap">classes, interfaces, enums, records, annotations, methods, constructors</td><td class="wrap"><code>import</code></td><td class="wrap">grammar tags: definitions 100% recall, calls 100%/100% (78 files)</td></tr>
+      <tr><td>Kotlin</td><td><code>.kt .kts</code></td><td class="wrap">classes, objects, named companions, functions, type aliases</td><td class="wrap"><code>import</code></td><td class="wrap">Kotlin 2.2 compiler: calls 100% of 28,416 (514 files)</td></tr>
+      <tr><td>C</td><td><code>.c</code></td><td class="wrap">functions, structs, unions, enums, typedefs</td><td class="wrap"><code>#include</code></td><td class="wrap">clang: 100%/100% on cleanly parsed files, ~99% of calls in files with parse errors</td></tr>
+      <tr><td>C++</td><td><code>.cpp .cc .cxx .h .hpp .hh .hxx</code></td><td class="wrap">as C, plus classes and namespaces</td><td class="wrap"><code>#include</code></td><td class="wrap">grammar tags: definitions 100% recall (82 files)</td></tr>
+      <tr><td>Rust</td><td><code>.rs</code></td><td class="wrap">structs, enums, unions, traits, impls, functions, modules, macros, consts/statics</td><td class="wrap"><code>use</code></td><td class="wrap">fixture projects only</td></tr>
+      <tr><td>JavaScript</td><td><code>.js .mjs .cjs .jsx</code>, HTML <code>&lt;script&gt;</code></td><td class="wrap">classes, functions, methods, <code>const f = () =&gt;</code>, function-valued fields and object keys</td><td class="wrap"><code>import</code>, <code>export</code>, <code>require()</code></td><td class="wrap">grammar tags: calls 100%/100%; <code>el.onclick = …</code> handlers skipped by design</td></tr>
+      <tr><td>TypeScript / TSX</td><td><code>.ts .mts .cts .tsx</code></td><td class="wrap">as JavaScript, plus interfaces, type aliases, enums, namespaces, signatures</td><td class="wrap"><code>import</code>, <code>export</code></td><td class="wrap">grammar tags: 100% recall on a small sample</td></tr>
+    </table></div>
+    <p>Config, markup and script files are indexed too, and their "definitions" are the things you'd look them up by:</p>
+    <div class="table-scroll"><table>
+      <tr><th>Format</th><th>Extensions</th><th>Definitions</th></tr>
+      <tr><td>YAML, TOML, JSON</td><td><code>.yaml .yml .toml .json</code></td><td class="wrap">key paths such as <code>services.web.ports</code> or <code>tool.poetry.dependencies</code>, with array items shown as <code>[]</code>. YAML key paths were checked against Ruby's Psych: 100% (373 files).</td></tr>
+      <tr><td>HTML</td><td><code>.html .htm</code></td><td class="wrap">element ids, custom elements, scripts (whose JavaScript is indexed as above)</td></tr>
+      <tr><td>CSS</td><td><code>.css</code></td><td class="wrap">selectors, <code>--custom-properties</code>, <code>@keyframes</code>, <code>@media</code> blocks</td></tr>
+      <tr><td>SQL</td><td><code>.sql</code></td><td class="wrap"><code>CREATE TABLE / VIEW / FUNCTION / INDEX …</code>, with table columns as members</td></tr>
+      <tr><td>Shell</td><td><code>.sh .bash</code></td><td class="wrap">functions</td></tr>
+      <tr><td>Dockerfile</td><td><code>Dockerfile*</code>, <code>.dockerfile</code></td><td class="wrap">build stages, with their <code>ARG</code> and <code>ENV</code></td></tr>
+      <tr><td>Everything else</td><td>Markdown, text, logs …</td><td class="wrap">no definitions, but fully searchable with <code>index_text</code></td></tr>
+    </table></div>
+    <p class="note">Accuracy figures come from <code>evals/oracle_bench.py</code> (2026-09-23), which compares the index with tools it has no say in, run on real code: the Python interpreter, clang, the Kotlin compiler, each grammar's own tag queries and Ruby's YAML parser. <code>evals/lang_bench.py</code> scores one fixture project per language in about a second, and a unit test gates on it.</p>
+  </section>
+
+  <section id="net" data-voice="net">
+    <h2>Internet access</h2>
+    <p><code>fetch_url</code> is the only tool that sends anything off your machine, so it's <strong>off by default</strong> and the model isn't even offered it until you turn it on. Neither setting is saved: both reset to the safe default at every launch.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/net on | local | off     <span class="com"># public only · also localhost + LAN · blocked</span>
+/net-confirm on|off       <span class="com"># ask before POST/PUT/PATCH/DELETE (default on)</span>
+/net-max-bytes 2mb        <span class="com"># download cap</span>
+/net-max-chars 24000      <span class="com"># text returned per call; the rest is paged</span></code></pre></div>
+    <p>HTML is converted to readable text, keeping link targets, and JSON is pretty-printed. The model can page through long pages with <code>offset=</code>, jump to a section with <code>find=</code> or pick part of a JSON response with <code>json_path=</code>. Those follow-up calls are served from a short cache.</p>
+    <h3>What is blocked</h3>
+    <ul>
+      <li>Any scheme except <code>http</code> and <code>https</code>. The client is built without urllib's file, ftp and data handlers.</li>
+      <li>Loopback, private, CGNAT and link-local addresses, unless you use <code>/net local</code>. Every <em>resolved</em> address is checked, so <code>http://2130706433/</code> and <code>http://127.1/</code> are blocked too.</li>
+      <li>Redirects into blocked addresses, because every hop is re-checked. <code>Authorization</code>, <code>Cookie</code> and API-key headers are dropped when a redirect changes the scheme, host or port.</li>
+      <li>Credentials in the URL, control characters in URLs and responses, and compressed bodies (so no gzip bombs).</li>
+      <li>Writes to local or private addresses <strong>always</strong> ask for confirmation, even with <code>/net-confirm off</code>.</li>
+    </ul>
+    <p class="note">Prompt injection and exfiltration aren't solved. Fetched pages are fenced as untrusted content, but small models don't resist injection well. Turn on <code>/run-confirm on</code> while browsing, and keep an eye on the URLs in the transcript.</p>
+  </section>
+
+  <section id="web" data-voice="web">
+    <h2>Web UI</h2>
+    <p>This starts automatically at <code>http://127.0.0.1:8765</code>. It's plain HTML, CSS and JavaScript served by Python's standard-library HTTP server, with no CDN, no web fonts and no build step, and it works fully offline.</p>
+    <h3>One session, two windows</h3>
+    <ul>
+      <li>Messages, replies, tool calls and diffs appear in both the browser and the terminal.</li>
+      <li>A question from the model can be answered in either window.</li>
+      <li>Mode, model, host, context and plan progress are shared. View options, such as hiding thinking, are per window.</li>
+      <li>Reloading the page replays the conversation so far.</li>
+    </ul>
+    <h3>What's in it</h3>
+    <ul>
+      <li><strong>Status bar:</strong> the session drawer, a workspace file browser, mode and model pickers, a CTX meter with a per-category breakdown, and <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges.</li>
+      <li><strong>Transcript:</strong> streamed markdown replies, collapsible thinking, one-line tool calls that expand to show arguments and results, coloured diffs and question cards with Yes/No buttons.</li>
+      <li><strong>Input:</strong> <kbd>/</kbd> command autocomplete, <kbd>@</kbd> fuzzy path search, a queue for messages sent while the model is busy, and Retry / Edit on your last message.</li>
+      <li><strong>Attachments:</strong> drag, paste or pick files. Text and PDFs are converted to text. Chips show a token estimate and turn amber when a file would use more than a quarter of the context.</li>
+      <li><strong>Notifications:</strong> a synthesised kitten mew (rising for a question, falling when a turn ends) and an optional desktop notification when the window isn't focused.</li>
+      <li>Syntax highlighting for about 20 languages, copy buttons on code blocks, and light and dark themes.</li>
+    </ul>
+    <h3>Starting and stopping</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Result</th></tr>
+      <tr><td><code>momo-coding-harness.py</code></td><td class="wrap">TUI <em>and</em> web UI</td></tr>
+      <tr><td><code>… --no-web</code></td><td class="wrap">TUI only</td></tr>
+      <tr><td><code>… --headless</code></td><td class="wrap">Web UI only. <kbd>Ctrl+C</kbd> saves the session and stops.</td></tr>
+      <tr><td><code>… --web-host 0.0.0.0</code></td><td class="wrap">Reachable from other machines, with an access token (see <a href="#remote-access">below</a>)</td></tr>
+    </table></div>
+    <h3 id="security">Security</h3>
+    <ul>
+      <li><strong>Loopback only by default.</strong> A <code>Host</code> header that isn't a loopback name is rejected, which blocks DNS rebinding.</li>
+      <li><strong>Same-origin writes.</strong> Requests that change anything must be JSON and come from the page itself.</li>
+      <li><strong>Token off-loopback.</strong> Binding to anything other than loopback requires a token. See <a href="#remote-access">Opening the web UI from another machine</a>.</li>
+      <li>Traffic is plain HTTP. For remote use, prefer an SSH tunnel: <code>ssh -L 8765:127.0.0.1:8765 host</code>.</li>
+    </ul>
+    <h3 id="remote-access">Opening the web UI from another machine</h3>
+    <p>With <code>--web-host</code> set to anything other than loopback, every request needs an access token. There's no login form: the token travels inside the URL that momo prints, and your browser swaps it for a cookie the first time you open that URL.</p>
+
+    <h4>1. Start momo on a reachable address</h4>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --web-host 0.0.0.0
+
+<span class="com"># or pick your own token, so it survives restarts</span>
+python momo-coding-harness.py --web-host 0.0.0.0 --web-token "$(openssl rand -hex 16)"</code></pre></div>
+    <p>Without <code>--web-token</code>, momo generates a random token (<code>secrets.token_urlsafe(24)</code>, about 32 characters) at every start. It's never written to disk.</p>
+
+    <h4>2. Fetch the token</h4>
+    <p>The token appears in only one place: the web UI URL momo prints at startup. With <code>0.0.0.0</code>, the address is replaced by the machine's hostname.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Running as</th><th>Where the URL appears</th></tr>
+      <tr><td>TUI (default)</td><td class="wrap">A <code>[system]</code> line near the top of the chat pane: <code>Web UI: http://my-mac.local:8765/?token=Xq3…</code></td></tr>
+      <tr><td><code>--headless</code></td><td class="wrap">The terminal it was started from: <code>momo web UI: http://my-mac.local:8765/?token=Xq3…</code></td></tr>
+    </table></div>
+    <p>The token is everything after <code>?token=</code>. No command shows it again later. If it has scrolled away, scroll the chat pane back up, restart momo, or use <code>--web-token</code> so you already know it.</p>
+
+    <h4>3. Use it in a browser</h4>
+    <ol>
+      <li>On the other machine, open the <strong>full URL</strong>, token included.</li>
+      <li>momo checks the token and replies with a redirect to <code>/</code> that sets a cookie: <code>momo_token</code>, HttpOnly and SameSite=Strict. The token disappears from the address bar and history, and page scripts can't read it.</li>
+      <li>From then on the cookie authorises every request, so bookmark plain <code>http://my-mac.local:8765/</code>.</li>
+    </ol>
+    <p class="note">If the hostname doesn't resolve on the other machine (it relies on <code>.local</code> / mDNS or your DNS), replace it with the machine's IP address and keep the token: <code>http://192.168.1.20:8765/?token=Xq3…</code>.</p>
+
+    <h4>4. Use it from scripts</h4>
+    <p>Scripts don't need the cookie: send the token as a Bearer header on every request.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>TOKEN=Xq3…      <span class="com"># the part after ?token=</span>
+curl -s -H "Authorization: Bearer $TOKEN" http://my-mac.local:8765/api/state | jq .status
+curl -s -X POST http://my-mac.local:8765/api/submit \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"text": "/context"}'</code></pre></div>
+
+    <h4>5. When it stops working</h4>
+    <div class="table-scroll"><table>
+      <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+      <tr><td><code>401 Unauthorized</code> after restarting momo</td><td class="wrap">A new token was generated, so the old cookie no longer matches</td><td class="wrap">Open the newly printed URL, or start with a fixed <code>--web-token</code></td></tr>
+      <tr><td><code>401</code> after reopening the browser</td><td class="wrap">The cookie only lasts for the browser session</td><td class="wrap">Open the URL with <code>?token=…</code> again</td></tr>
+      <tr><td><code>401</code> on first visit</td><td class="wrap">The token is missing or mistyped</td><td class="wrap">Copy the whole URL from momo's output</td></tr>
+      <tr><td>Page doesn't load</td><td class="wrap">The hostname doesn't resolve, or a firewall blocks the port</td><td class="wrap">Use the IP address, and allow port 8765 (or your <code>--web-port</code>)</td></tr>
+    </table></div>
+
+    <h4>6. Keep it secret</h4>
+    <ul>
+      <li>Anyone with the token controls momo, which includes editing files and running commands in your workspace. Treat it like a password, and remember it sits in your terminal scrollback.</li>
+      <li>Traffic is plain HTTP, so the token and cookie are visible to anyone on the network path. Only use this on a network you trust, or put a TLS reverse proxy in front.</li>
+      <li><strong>Simpler and safer:</strong> leave momo on loopback and tunnel to it. No token is needed, because momo never leaves <code>127.0.0.1</code>:
+        <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>ssh -L 8765:127.0.0.1:8765 my-mac      <span class="com"># then open http://localhost:8765</span></code></pre></div></li>
+    </ul>
+
+    <h3>HTTP API</h3>
+    <p>The page talks to the harness through a small JSON API that you can script too:</p>
+    <div class="table-scroll"><table>
+      <tr><th>Endpoint</th><th>Description</th></tr>
+      <tr><td><code>GET /api/state</code></td><td class="wrap">Snapshot of status, busy/waiting flags, modes, commands, skills and plan</td></tr>
+      <tr><td><code>GET /api/events</code></td><td class="wrap">Server-Sent Events: replays the conversation, then streams live events</td></tr>
+      <tr><td><code>POST /api/submit</code></td><td class="wrap"><code>{"text": "…"}</code>, exactly like typing in the input box</td></tr>
+      <tr><td><code>POST /api/cancel</code></td><td class="wrap">Interrupt the running response</td></tr>
+      <tr><td><code>POST /api/mode</code></td><td class="wrap"><code>{"mode": "coding"}</code></td></tr>
+      <tr><td><code>GET /api/sessions</code></td><td class="wrap">Recent sessions</td></tr>
+      <tr><td><code>GET /api/export</code></td><td class="wrap">The conversation as a Markdown download</td></tr>
+    </table></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>curl -s localhost:8765/api/state | jq .status
+curl -s -X POST localhost:8765/api/submit -H 'Content-Type: application/json' -d '{"text": "/context"}'
+curl -sN localhost:8765/api/events</code></pre></div>
+  </section>
+
+  <section id="tui" data-voice="tui">
+    <h2>Terminal UI</h2>
+    <p>The chat pane is at the top, with tool calls in yellow and thinking in orange. The status bar shows the mode, backend, model, host, CTX % and working directory, and below it is a five-row multi-line input.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td><kbd>Enter</kbd></td><td class="wrap">Send</td></tr>
+      <tr><td><kbd>Ctrl+J</kbd></td><td class="wrap">New line (works in every terminal; <kbd>Shift+Enter</kbd> works with CSI-u)</td></tr>
+      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td class="wrap">Move between lines. At the top or bottom edge, browse history.</td></tr>
+      <tr><td><kbd>Shift+↑</kbd> / <kbd>Shift+↓</kbd></td><td class="wrap">History, wherever the cursor is</td></tr>
+      <tr><td><kbd>Ctrl+A</kbd> <kbd>Ctrl+E</kbd> <kbd>Ctrl+K</kbd> <kbd>Ctrl+U</kbd></td><td class="wrap">Start of line, end of line, delete to end, delete to start</td></tr>
+      <tr><td><kbd>Tab</kbd></td><td class="wrap">Switch focus between chat and input</td></tr>
+      <tr><td><kbd>PgUp</kbd> / <kbd>PgDn</kbd>, <kbd>←</kbd> / <kbd>→</kbd></td><td class="wrap">Scroll the chat, and scroll wide tables sideways</td></tr>
+      <tr><td><kbd>Shift+Tab</kbd></td><td class="wrap">Cycle mode</td></tr>
+      <tr><td><kbd>Shift+T</kbd> / <kbd>M</kbd> / <kbd>D</kbd> / <kbd>Q</kbd></td><td class="wrap">Toggle thinking, markdown, diffs or the companion</td></tr>
+      <tr><td><kbd>Shift+P</kbd></td><td class="wrap">Toggle <code>run_command</code> confirmation</td></tr>
+      <tr><td><kbd>Shift+C</kbd> (web: <kbd>Esc</kbd>)</td><td class="wrap">Interrupt the running response</td></tr>
+      <tr><td><kbd>@</kbd> / <kbd>/</kbd></td><td class="wrap">Path autocomplete, command autocomplete</td></tr>
+    </table></div>
+  </section>
+
+  <section id="commands" data-voice="commands">
+    <h2>Slash commands</h2>
+    <p>Commands work the same in the terminal and the browser. <code>/help</code> lists them all.</p>
+    <h3>Modes, model &amp; backend</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/design /chat /plan /code /momo</code></td><td class="wrap">Switch mode</td></tr>
+      <tr><td><code>/model [name]</code></td><td class="wrap">List models on the backend, or switch to one</td></tr>
+      <tr><td><code>/host [url]</code></td><td class="wrap">Show the backend, or connect to another</td></tr>
+      <tr><td><code>/token [key]</code>, <code>/clear-token</code></td><td class="wrap">Set, show (masked) or remove the Bearer token</td></tr>
+      <tr><td><code>/workspace [path]</code></td><td class="wrap">Show or change the working directory (alias <code>/workdir</code>)</td></tr>
+      <tr><td><code>/think on|off</code></td><td class="wrap">The model's reasoning mode</td></tr>
+      <tr><td><code>/tools on|off</code></td><td class="wrap">Turn tool calls on or off entirely</td></tr>
+      <tr><td><code>/run-confirm on|off</code></td><td class="wrap">Ask y/N before each <code>run_command</code></td></tr>
+    </table></div>
+    <h3>Conversation &amp; context</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/clear</code></td><td class="wrap">Clear the history and discard any plan</td></tr>
+      <tr><td><code>/new</code></td><td class="wrap">Save this session and start an empty one</td></tr>
+      <tr><td><code>/retry</code></td><td class="wrap">Re-send your last message, replacing the reply it got</td></tr>
+      <tr><td><code>/compact</code>, <code>/fast-compact</code></td><td class="wrap">Compact the context with or without an LLM summary</td></tr>
+      <tr><td><code>/context [n|n%]</code></td><td class="wrap">Show usage, or set the limit in tokens or as a % of the model's maximum</td></tr>
+      <tr><td><code>/tool-result [n]</code></td><td class="wrap">Character cap per tool result (0 = unlimited)</td></tr>
+      <tr><td><code>/cost</code></td><td class="wrap">Token usage by mode and model</td></tr>
+    </table></div>
+    <h3>Display</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/tool-output on|off</code></td><td class="wrap">Full tool output, or one abbreviated line</td></tr>
+      <tr><td><code>/think-output on|off</code></td><td class="wrap">Show or hide thinking blocks</td></tr>
+      <tr><td><code>/markdown on|off</code></td><td class="wrap">Rendered markdown or plain text</td></tr>
+      <tr><td><code>/diff on|off</code>, <code>/diff-style git|compact</code></td><td class="wrap">Edit diffs and their layout</td></tr>
+      <tr><td><code>/companion on|off</code></td><td class="wrap">Show or hide momo</td></tr>
+      <tr><td><code>/companion-idle-recap on|off|&lt;secs&gt;</code></td><td class="wrap">Idle recaps in momo's bubble</td></tr>
+    </table></div>
+    <h3>Features</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/index …</code></td><td class="wrap">See <a href="#index">Code index</a></td></tr>
+      <tr><td><code>/net …</code></td><td class="wrap">See <a href="#net">Internet access</a></td></tr>
+      <tr><td><code>/guides on|off|reload</code></td><td class="wrap">Project guide files in the system prompt</td></tr>
+      <tr><td><code>/list-skills</code>, <code>/load-skill</code>, <code>/unload-skill</code></td><td class="wrap">Manage <a href="#skills">skills</a></td></tr>
+    </table></div>
+    <h3>Sessions &amp; files</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/sessions</code></td><td class="wrap">Recent sessions with their mode and model</td></tr>
+      <tr><td><code>/session [name]</code></td><td class="wrap">Show the current session, or load one by name or prefix</td></tr>
+      <tr><td><code>/export [file]</code></td><td class="wrap">The conversation as Markdown, saved in the workspace</td></tr>
+      <tr><td><code>/copy [all]</code></td><td class="wrap">Copy the last reply, or everything, to the clipboard</td></tr>
+      <tr><td><code>/ls</code>, <code>/read</code>, <code>/grep</code></td><td class="wrap">Inspect files directly, with no model round-trip</td></tr>
+      <tr><td><code>/exit</code>, <code>/quit</code></td><td class="wrap">Save and exit</td></tr>
+    </table></div>
+  </section>
+
+  <section id="context" data-voice="context">
+    <h2>Context &amp; compaction</h2>
+    <p>At startup the harness detects the model's native context window and uses half of it as the working limit. Override it with <code>--context</code> or <code>/context</code>. The CTX meter turns yellow at 75% and red at 90%.</p>
+    <p>When usage passes the limit, compaction runs on the worker thread:</p>
+    <ol>
+      <li>Old tool-call groups are removed first, oldest first.</li>
+      <li>Then whole old turns.</li>
+      <li>Then the largest remaining tool results are trimmed.</li>
+    </ol>
+    <p>The dropped history is summarised by the model into a single summary block. The system prompt, the question currently being worked on and its latest tool results are never dropped. <code>/fast-compact</code> skips the summary.</p>
+  </section>
+
+  <section id="sessions" data-voice="sessions">
+    <h2>Sessions</h2>
+    <p>Sessions auto-save after every reply to <code>~/.momo-harness/sessions/&lt;timestamp&gt;.json</code>, including the model, host, mode, workdir, context settings, active skills, input history and messages. The auth token is the one thing deliberately left out. An NDJSON <code>.log</code> alongside records every request, response, tool call and token count.</p>
+  </section>
+
+  <section id="skills" data-voice="skills">
+    <h2>Skills &amp; project guides</h2>
+    <p>Skills are Markdown files in <code>skills/</code> that are appended to the active role prompt. They stack, are saved with the session and survive mode switches.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/list-skills
+/load-skill python
+/unload-skill python</code></pre></div>
+    <p>Built in: <code>bash</code>, <code>c</code>, <code>code-review</code>, <code>data-analysis</code>, <code>document-editing</code>, <code>html-javascript</code>, <code>java</code>, <code>kotlin</code>, <code>maven-dependency-updates</code>, <code>python</code>, <code>rust</code>, <code>software-design</code>, <code>sql</code>, <code>storytelling</code>, <code>tdd</code>, <code>text-based-game-design</code>, <code>typescript</code>. To add your own, drop a <code>.md</code> file into the folder.</p>
+    <p><strong>Project guides</strong> (<code>/guides on</code>) load the workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>MOMO.md</code>, <code>GEMINI.md</code>, <code>.github/copilot-instructions.md</code> or <code>.cursorrules</code> into the system prompt, where compaction can't drop them. They're re-read on a new session, <code>/clear</code>, compaction and workdir changes.</p>
+  </section>
+
+  <section id="companion-docs" data-voice="companion">
+    <h2>The companion</h2>
+    <p>momo is the ASCII cat walking along the top of the input box, in both the TUI and the browser. It walks, sits, blinks and mews lines that fit the current mode and whether the model is busy. <kbd>Shift+Q</kbd> or <code>/companion off</code> hides it.</p>
+    <p>With <code>/companion-idle-recap on</code>, a companion left alone for 90 seconds (configurable) recaps what you just did instead of saying its canned lines. It does this at most once per turn, with a cooldown.</p>
+    <p class="note sys">The cat at the bottom of this page is a standalone copy of it. On this page it quotes whichever section you're reading. Click it to make it talk.</p>
+  </section>
+
+  <section id="dev" data-voice="dev">
+    <h2>Tests &amp; evals</h2>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python -m unittest discover tests                 <span class="com"># do the tools work?</span>
+python evals/run_evals.py --runs 3                <span class="com"># does the model use them? (needs a server)</span></code></pre></div>
+    <p><code>tests/</code> uses the standard-library <code>unittest</code>. It includes one fixture per tree-sitter grammar, so a grammar upgrade that renames a node fails a test instead of silently emptying a tool's output. <code>evals/</code> asks questions with known answers and scores whether the model reached the right tool, how many calls it took and how much output it pulled into context. Sampling isn't pinned, so read the min–max spread, not a single run.</p>
+  </section>
+
+  </article>
+</div>
+
+</div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span class="brand"><span class="dot"></span>momo coding harness</span>
+    <span>MIT licensed ·</span>
+    <a href="https://github.com/bameschot/momo-coding-harness">github.com/bameschot/momo-coding-harness</a>
+  </div>
+</footer>
+
+<div id="companion-bar">
+  <div class="inner">
+    <pre id="companion" aria-hidden="true" title="Click momo"></pre>
+    <button id="companion-close" class="icon-btn" type="button" title="Hide momo (Shift+Q)" aria-label="Hide momo"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+
+// ── theme ────────────────────────────────────────────────────────────────────
+function isDark() {
+  const t = document.documentElement.dataset.theme;
+  return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+}
+function syncThemeBtn() {
+  const dark = isDark(), b = $("#theme-btn");
+  b.querySelector("use").setAttribute("href", dark ? "#i-sun" : "#i-moon");
+  b.title = b.ariaLabel = dark ? "Switch to light mode" : "Switch to dark mode";
+}
+$("#theme-btn").onclick = () => {
+  const next = isDark() ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  store.set("momo-site.theme", next);
+  syncThemeBtn();
+};
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncThemeBtn);
+syncThemeBtn();
+
+// ── table of contents + scroll spy ───────────────────────────────────────────
+const docSections = [...document.querySelectorAll(".doc section")];
+for (const s of docSections) {
+  const label = s.querySelector("h2").textContent;
+  for (const nav of [$("#toc"), $("#toc-mobile")]) {
+    const a = document.createElement("a");
+    a.href = "#" + s.id; a.textContent = label; a.dataset.id = s.id;
+    nav.append(a);
+  }
+}
+$("#toc-mobile").addEventListener("click", (e) => { if (e.target.closest("a")) $(".toc-mobile").open = false; });
+
+let voice = "overview";
+const spied = [...document.querySelectorAll("[data-voice]")];
+// The last sections are too short for their headings to scroll up to `y`, so
+// the page bottoms out first. A section jumped to by link stays current while its
+// heading is on screen; otherwise, at the very bottom, the last section is.
+let pinned = null;
+function onScroll() {
+  const y = 90;
+  let cur = spied[0];
+  for (const el of spied) if (el.getBoundingClientRect().top <= y) cur = el;
+  const atBottom = innerHeight + scrollY >= document.documentElement.scrollHeight - 2;
+  const pinTop = pinned ? pinned.getBoundingClientRect().top : NaN;
+  if (pinTop >= 0 && pinTop < innerHeight) cur = pinned;
+  else if (atBottom) cur = spied[spied.length - 1];
+  voice = cur.dataset.voice;
+  const inDocs = $("#docs").getBoundingClientRect().top <= y;
+  document.querySelectorAll(".seg-nav a").forEach((a) =>
+    a.classList.toggle("on", a.dataset.part === (inDocs ? "docs" : "overview")));
+  document.querySelectorAll("#toc a").forEach((a) => a.classList.toggle("on", a.dataset.id === cur.id));
+}
+addEventListener("scroll", onScroll, { passive: true });
+function pinTo(hash) {
+  const el = hash && document.getElementById(decodeURIComponent(hash.slice(1)));
+  pinned = el && el.matches("[data-voice]") ? el : null;
+  onScroll();
+}
+addEventListener("hashchange", () => pinTo(location.hash));
+// Clicking the link for the section already in the URL fires no hashchange.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest('a[href^="#"]');
+  if (a) setTimeout(() => pinTo(a.getAttribute("href")), 0);
+});
+// The reader scrolling on their own ends the pin.
+for (const ev of ["wheel", "touchmove"]) addEventListener(ev, () => { pinned = null; }, { passive: true });
+addEventListener("keydown", (e) => {
+  if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) pinned = null;
+});
+pinTo(location.hash);
+
+// ── copy buttons on code blocks ──────────────────────────────────────────────
+for (const block of document.querySelectorAll(".code-block")) {
+  const btn = document.createElement("button");
+  btn.type = "button"; btn.className = "copy-btn"; btn.textContent = "Copy";
+  block.querySelector(".code-bar").append(btn);
+  btn.onclick = async () => {
+    const text = block.querySelector("code").textContent;
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.append(ta); ta.select();
+      try { ok = document.execCommand("copy"); } catch {}
+      ta.remove();
+    }
+    btn.textContent = ok ? "Copied ✓" : "Copy failed";
+    btn.classList.toggle("done", ok);
+    setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1400);
+  };
+}
+
+// ── momo companion ───────────────────────────────────────────────────────────
+// A standalone copy of the harness companion: the same frames and walk/sit/bubble
+// behaviour, but its lines are quotes from whichever part of this page is on screen.
+const F = {
+  cat_w: 8, bubble_max: 40,
+  walk_right: [
+    ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " /\\/\\/\\ "],
+    ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " \\/\\/\\/ "],
+  ],
+  walk_left: [
+    [" /\\   \\ ", "(' )  ( ", "(  ¯¯ ) ", " /\\/\\/\\ "],
+    [" /\\   \\ ", "(' )  ( ", "(  ¯¯ ) ", " \\/\\/\\/ "],
+  ],
+  sit: [
+    ["\\    /\\ ", " )  ( ')", "(  /  ) ", " \\(__)| "],
+    ["\\    /\\ ", " )  ( -)", "(  /  ) ", " \\(__)| "],
+  ],
+  sit_left: [
+    [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", "|(__)/ "],
+    [" /\\   \\ ", "(- )  ( ", "(  \\  ) ", "|(__)/ "],
+  ],
+  walk_right_blink: ["\\    /\\ ", " )  ( -)", "(  ¯  ) ", " /\\/\\/\\ "],
+  walk_left_blink: [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " /\\/\\/\\ "],
+};
+
+// Every line ≤ 40 visible chars including the "< " prefix.
+const SPEECH = {
+  overview: [
+    "< mew~", "< purrr", "< hi there!", "< stays on your machine!",
+    "< no cloud api needed~", "< ollama or llama.cpp!", "< a small black cat. me!",
+    "< terminal and browser, both!", "< scroll down, i'll follow",
+  ],
+  features: [
+    "< five modes, one cat", "< tree-sitter goes brrr", "< diffs in colour!",
+    "< nothing edits till you say y", "< the index never goes stale",
+    "< fetch_url is off by default", "< sessions save themselves~",
+    "< skills stack like treats", "< measured, not guessed!",
+  ],
+  docs: ["< the fine print, purrr", "< reference time!", "< pick a section~", "< readme, but prettier"],
+  start: [
+    "< python 3.14 please!", "< jinja templates on? good", "< pip install -r ...",
+    "< web ui on port 8765", "< --headless for web only",
+    "< tokens never touch disk", "< --mode design is default",
+  ],
+  backends: [
+    "< ollama or llama.cpp, both!", "< one adapter each, purrr", "< --provider llamacpp",
+    "< old llama.cpp? add --jinja", "< /model switches on ollama", "< context from /props~",
+    "< full url, http:// too!", "< files stay on your machine",
+  ],
+  requirements: [
+    "< only ~60 MB of ram, purrr", "< three deps, that's it!", "< no node, no npm~",
+    "< no build step, ever", "< curses + http.server", "< the model eats the ram",
+    "< windows? try wsl", "< python 3.14 please!",
+  ],
+  "index-parsing": [
+    "< git ls-files, then parse", "< one parse per file", "< 8 bytes per occurrence!",
+    "< trigrams find the text", "< never a stale answer", "< yaml keys count too",
+    "< css selectors? indexed!", "< markdown: text search", "< syntax, not types",
+  ],
+  running: [
+    "< ollama serve, then me!", "< OLLAMA_HOST=0.0.0.0", "< --api-key + /token",
+    "< ssh -L beats open ports", "< /host moves servers", "< -c sets the window",
+    "< remote gpu box? nice!", "< token never hits disk",
+  ],
+  modes: [
+    "< shift+tab cycles modes", "< design never edits code", "< chat is read-only~",
+    "< coding: full tool suite", "< momo mode is me!", "< /code, /plan, /momo...",
+  ],
+  plan: [
+    "< investigate, then plan", "< nothing edits till y!", "< edit .momo-plan.md!",
+    "< [-] skips a step", "< /plan resume after a nap", "< ▶ marks the current step",
+    "< complete_step!", "< ticking [x]~", "< plan done? file deleted",
+  ],
+  tools: [
+    "< grep is love", "< read_symbol by line no.", "< find_references!",
+    "< sandboxed to the workdir", "< .. escapes? rejected", "< edit_file: one match only",
+    "< run_command can ask first", "< code_outline a folder!",
+  ],
+  index: [
+    "< on by default!", "< never a stale answer", "< config parse→parse_config",
+    "< database finds db~", "< pagerank for code, purrr", "< callers, depth=3!",
+    "< over budget? drops a part", "< /index-persist on",
+  ],
+  net: [
+    "< off by default!", "< /net local for the lan", "< 127.1 is still blocked",
+    "< every hop re-checked", "< no file:// sneaking", "< cookies stay home",
+    "< untrusted content fence", "< /run-confirm on pls",
+  ],
+  web: [
+    "< one session, two windows", "< no cdn, no build step", "< @ for paths, / for cmds",
+    "< a mew rises for questions", "< loopback only by default", "< ssh -L for remote~",
+    "< retry or edit, your call", "< drag a pdf in!",
+    "< the token hides in the url", "< ?token= once, cookie after", "< bearer token for curl~",
+  ],
+  tui: [
+    "< ctrl+j for a newline", "< tab switches focus", "< shift+c interrupts",
+    "< shift+q hides me :(", "< curses, but cute", "< pgup pgdn, scroll scroll",
+  ],
+  commands: [
+    "< /help lists them all", "< /retry drops the reply", "< /new: fresh session",
+    "< /fast-compact, instant!", "< /cost counts tokens", "< /copy all~",
+    "< /ls /read /grep, direct",
+  ],
+  context: [
+    "< ctx yellow at 75%", "< red at 90%, eep", "< half the model's max",
+    "< old tool groups go first", "< your question stays!", "< summarised, not lost",
+  ],
+  sessions: [
+    "< saved after every reply", "< ~/.momo-harness/", "< /session 2026-06-22",
+    "< ndjson logs, for audits", "< the token is never saved",
+  ],
+  skills: [
+    "< /load-skill python", "< skills stack!", "< drop a .md in skills/",
+    "< /guides on for AGENTS.md", "< compaction can't eat guides",
+  ],
+  companion: [
+    "< that's me!", "< click me, i talk", "< mew mew~", "< i recap when you're idle",
+    "< once per turn, promise", "< shift+q hides me", "< *kneads the footer*",
+  ],
+  dev: [
+    "< tests pass?", "< --runs 3, read the spread", "< tools work ≠ tools used",
+    "< one fixture per grammar", "< unittest, no deps~",
+  ],
+};
+const EXTRA = ["< mew~", "< purrr~", "< mew mew~"];
+
+const companion = { x: 4, dir: 1, st: "walk", sitTicks: 0, step: 0, blink: 0, mewTicks: 0, mew: "", frame: null, last: "" };
+const bubbleFits = (x, cols, catW, dir, n) => dir < 0 ? x >= n : x + 1 + catW + 1 + n < cols - 1;
+const bubbleDir = (x, cols, catW, dir, n) => [dir, -dir].find((d) => bubbleFits(x, cols, catW, d, n)) ?? null;
+const bubbleRoom = (x, cols, catW) => Math.max(0, x, cols - 2 - (x + 1 + catW + 1));
+
+let charW = 0;
+function measureCharW(pre) {
+  const ctx = document.createElement("canvas").getContext("2d");
+  const cs = getComputedStyle(pre);
+  ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  charW = ctx.measureText("M".repeat(10)).width / 10 || 6.6;
+}
+addEventListener("resize", () => { charW = 0; });
+
+function say(cols, force) {
+  const c = companion;
+  const room = bubbleRoom(c.x, cols, F.cat_w);
+  const pool = [...(SPEECH[voice] || []), ...EXTRA].filter((t) => t.length <= room && t !== c.last);
+  if (!pool.length || (!force && Math.random() >= 0.8)) return;
+  const text = pool[Math.floor(Math.random() * pool.length)];
+  c.mew = c.last = text;
+  c.mewTicks = 18 + Math.floor(Math.random() * 15) + Math.floor(text.length / 2);
+  c.sitTicks = Math.max(c.sitTicks, c.mewTicks + 10);
+  c.dir = bubbleDir(c.x, cols, F.cat_w, c.dir, text.length) ?? c.dir;
+}
+
+let cols = 40;
+function tickCompanion(force) {
+  const c = companion, pre = $("#companion");
+  if (document.body.classList.contains("no-companion") || pre.offsetParent === null) return;
+  if (!charW) measureCharW(pre);
+  cols = Math.max(20, Math.floor(pre.clientWidth / charW));
+  const catW = F.cat_w;
+  const bmax = Math.min(F.bubble_max, Math.max(10, cols - catW - 6));
+  const maxX = Math.max(0, cols - 2 - catW - (bmax + 2));
+  if (force === true) {
+    c.st = "sit"; c.sitTicks = 40; c.blink = 0; say(cols, true);
+  } else if (c.st === "walk") {
+    c.step ^= 1;
+    c.x = Math.max(0, Math.min(c.x + c.dir, maxX));
+    if (c.x === 0 || c.x === maxX || Math.random() < 0.02) {
+      c.st = "sit";
+      c.sitTicks = 50 + Math.floor(Math.random() * 50);
+      c.blink = 0;
+      say(cols, false);
+    }
+  } else if (--c.sitTicks <= 0) {
+    c.dir = c.x <= 2 ? 1 : c.x >= maxX - 2 ? -1 : (Math.random() < 0.5 ? -1 : 1);
+    c.st = "walk";
+    c.mewTicks = 0;
+  }
+  if (c.st === "walk") {
+    if (c.blink > 0) {
+      c.blink--;
+      c.frame = c.dir > 0 ? F.walk_right_blink : F.walk_left_blink;
+    } else {
+      c.frame = (c.dir > 0 ? F.walk_right : F.walk_left)[c.step];
+      if (Math.random() < 0.03) c.blink = 2;
+    }
+  } else {
+    const sit = c.dir < 0 ? F.sit_left : F.sit;
+    c.frame = sit[Math.random() < 0.08 ? 1 : 0];
+    if (c.mewTicks > 0) c.mewTicks--;
+  }
+  const rows = c.frame.map((l) => " ".repeat(c.x + 1) + l);
+  if (c.mewTicks > 0 && c.st === "sit") {
+    if (c.dir < 0) {
+      const t = c.mew.startsWith("< ") ? c.mew.slice(2) + " >" : c.mew;
+      const mx = c.x + 1 - t.length - 1;
+      if (mx >= 0) rows[1] = " ".repeat(mx) + t + " " + c.frame[1];
+    } else if (bubbleFits(c.x, cols, catW, 1, c.mew.length)) {
+      rows[1] = rows[1].padEnd(c.x + 1 + catW) + " " + c.mew;
+    }
+  }
+  pre.textContent = rows.join("\n");
+}
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+setInterval(tickCompanion, reduceMotion ? 480 : 120);
+$("#companion").onclick = () => tickCompanion(true);
+
+function setCompanion(on) {
+  document.body.classList.toggle("no-companion", !on);
+  $("#companion-bar").hidden = !on;
+  $("#companion-btn").setAttribute("aria-pressed", String(on));
+  store.set("momo-site.companion", on ? "1" : "0");
+}
+$("#companion-btn").onclick = () => setCompanion(document.body.classList.contains("no-companion"));
+$("#companion-close").onclick = () => setCompanion(false);
+addEventListener("keydown", (e) => {
+  if (e.shiftKey && e.key === "Q" && !e.target.closest("input, textarea")) setCompanion(document.body.classList.contains("no-companion"));
+});
+setCompanion(store.get("momo-site.companion") !== "0");
+</script>
+</body>
+</html>
