@@ -8,6 +8,7 @@ are statistical rather than pass/fail.  It lives outside tests/ so
     python evals/run_evals.py --runs 3
     python evals/run_evals.py --mode coding --runs 3 --tasks line-to-definition
     python evals/run_evals.py --json baseline.json
+    python evals/run_evals.py --index --runs 3      # with the code index on (/index on)
 
 The model server samples with its own defaults (llama.cpp typically temperature
 0.8 and a random seed) and the harness sends no sampling parameters at all, so
@@ -38,12 +39,17 @@ from harness.harness import (Harness, ChatEvent, DoneEvent, ErrorEvent,  # noqa:
                              ToolCallEvent, ToolResultEvent)
 
 
-def run_once(task, *, host, model, provider, mode, think, timeout):
+def run_once(task, *, host, model, provider, mode, think, timeout, index=False):
     """One task, one fresh conversation.  Returns what the model did."""
     h = Harness(host=host, model=model, workdir=REPO, provider=provider)
     h.mode = mode
     h.stream = False          # deltas would just duplicate the final ChatEvent
     h.think = think
+    # Nobody is there to answer: without this a run that calls ask_user blocks forever.
+    h._ask_user = lambda q: "No one can answer right now — use your best judgement."
+    if index:
+        h.set_index(True)
+        h.index.wait_fresh()  # the build is not the model's time
     h.messages = [{"role": "system", "content": h._build_system_prompt()}]
 
     sub = h.event_queue.subscribe(replay=False)
@@ -82,11 +88,12 @@ def run_once(task, *, host, model, provider, mode, think, timeout):
         err = f"{type(e).__name__}: {e}"
     t.join(timeout=timeout + 30)
     sub.close()
+    h.shutdown_index()
 
     names = [c[0] for c in calls]
     low = answer.lower()
     return {
-        "task": task.id, "mode": mode, "think": think,
+        "task": task.id, "mode": mode, "think": think, "index": index,
         "secs": round(time.time() - t0, 1),
         "tools": names,
         "args": [c[1] for c in calls],
@@ -143,7 +150,8 @@ def summarise(rows):
             f"{sum(d['coached_calls'] for d in ds):6d}")
     total = len(rows)
     tool_total = sum(r["n_calls"] for r in rows)
-    nav = {"code_outline", "find_symbol", "read_symbol", "find_references", "file_dependencies"}
+    nav = {"code_outline", "find_symbol", "read_symbol", "find_references", "file_dependencies",
+           "index_search", "index_text", "index_callers", "index_map", "index_file", "index_status"}
     counts: dict[str, int] = {}
     for r in rows:
         for t in r["tools"]:
@@ -192,6 +200,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="per-run seconds")
     ap.add_argument("--tasks", nargs="*", help="only these task ids")
     ap.add_argument("--json", metavar="PATH", help="write the full per-run records here")
+    ap.add_argument("--index", action="store_true",
+                    help="turn the code index on, so the model gets the index_* tools")
     args = ap.parse_args()
 
     if "://" not in args.host:
@@ -212,7 +222,7 @@ def main():
             for i in range(args.runs):
                 r = run_once(task, host=args.host, model=args.model,
                              provider=args.provider, mode=mode,
-                             think=args.think, timeout=args.timeout)
+                             think=args.think, timeout=args.timeout, index=args.index)
                 rows.append(r)
                 flag = "" if r["used_ideal"] else "  <- ideal tool not used"
                 print(f"[{len(rows):3d}] {task.id:22s} {mode:6s} run{i} "

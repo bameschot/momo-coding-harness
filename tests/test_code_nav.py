@@ -57,12 +57,43 @@ HAS_RUN_FUNCTION = {"sample.py", "sample.c", "sample.cpp", "sample.kt",
                     "sample.rs", "sample.js", "sample.ts"}
 
 
+# Config / markup / script grammars.  Their "definitions" are keys, ids,
+# selectors, tables and functions; each fixture pins the qualified names its
+# extractor must produce, so a renamed node type in a wheel upgrade fails here.
+DATA_LANGS = {
+    "sample.yaml": "yaml",
+    "sample.toml": "toml",
+    "sample.json": "json",
+    "sample.html": "html",
+    "sample.css":  "css",
+    "sample.sql":  "sql",
+    "sample.sh":   "bash",
+    "Dockerfile":  "dockerfile",
+}
+DATA_SYMBOLS = {
+    "sample.yaml": [("services.web", "table"), ("services.web.environment.LOG_LEVEL", "key"),
+                    ("services.web.ports", "list")],
+    "sample.toml": [("title", "key"), ("tool.poetry", "table"),
+                    ("tool.poetry.dependencies.requests.optional", "key"),
+                    ("servers[]", "table"), ("servers[].host", "key")],
+    "sample.json": [("scripts", "table"), ("scripts.build", "key"), ("workspaces[].path", "key")],
+    "sample.html": [("app", "id"), ("app.top-nav", "id"), ("app.row-template", "id"),
+                    ("app.js", "script")],
+    "sample.css":  [(":root", "rule"), (".btn.primary", "rule"), ("#app > nav", "rule"),
+                    ("--accent", "var"), ("spin", "keyframes")],
+    "sample.sql":  [("users", "table"), ("users.email", "column"), ("active_users", "view"),
+                    ("idx_users_email", "index"), ("add_one", "function")],
+    "sample.sh":   [("build", "function"), ("deploy", "function")],
+    "Dockerfile":  [("builder", "stage"), ("builder.VERSION", "arg"), ("builder.APP_HOME", "env")],
+}
+
+
 class LanguageCoverage(unittest.TestCase):
     """Every grammar in _EXTENSIONS must have a fixture, or it is untested."""
 
     def test_every_grammar_has_a_fixture(self):
-        grammars = set(code_nav._EXTENSIONS.values())
-        self.assertEqual(grammars, set(LANGS.values()))
+        grammars = set(code_nav._EXTENSIONS.values()) | {"dockerfile"}
+        self.assertEqual(grammars, set(LANGS.values()) | set(DATA_LANGS.values()))
 
     def test_fixtures_parse_without_errors(self):
         for name in LANGS:
@@ -75,6 +106,93 @@ class LanguageCoverage(unittest.TestCase):
         for name, lang in LANGS.items():
             with self.subTest(name):
                 self.assertEqual(code_nav.language_for(FIXTURES / name), lang)
+
+
+class DataGrammars(unittest.TestCase):
+
+    def test_fixtures_parse_without_errors(self):
+        for name, lang in DATA_LANGS.items():
+            with self.subTest(name):
+                self.assertEqual(code_nav.language_for(FIXTURES / name), lang)
+                parsed = code_nav.parse(FIXTURES / name)
+                self.assertFalse(parsed.tree.root_node.has_error, f"{name} does not parse cleanly")
+
+    def test_expected_symbols(self):
+        for name, want in DATA_SYMBOLS.items():
+            got = {(s.qualname, s.kind) for s in code_nav.parse(FIXTURES / name).symbols}
+            for q, kind in want:
+                with self.subTest(name=name, symbol=q):
+                    self.assertIn((q, kind), got)
+
+    def test_block_ends_before_the_next_key(self):
+        # A TOML table / YAML mapping node ends at column 0 of the next line;
+        # its span must not claim that line.
+        syms = {s.qualname: s for s in code_nav.parse(FIXTURES / "sample.toml").symbols}
+        self.assertEqual((syms["tool.poetry"].start, syms["tool.poetry"].end), (3, 5))
+        syms = {s.qualname: s for s in code_nav.parse(FIXTURES / "sample.yaml").symbols}
+        self.assertEqual(syms["services"].end, 11)
+
+    def test_read_symbol_on_a_key_path(self):
+        out = code_nav.read_symbol("sample.yaml", "services.web", workdir=FIXTURES)
+        self.assertIn("image: nginx", out)
+        self.assertNotIn("postgres", out)
+
+    def test_dockerfile_detected_by_basename(self):
+        self.assertEqual(code_nav.language_for(Path("sub/Dockerfile.prod")), "dockerfile")
+        self.assertEqual(code_nav.language_for(Path("Makefile")), None)
+
+
+class ModuleConstants(unittest.TestCase):
+    """Module-level constants and variables are definitions too; locals are not."""
+
+    CASES = {
+        "c.py":   ("MAX_SIZE = 10\n_UNITS: dict = {\n  'k': 1,\n}\nx, y = 1, 2\n"
+                   "if True:\n    FLAG = 1\nclass A:\n    ATTR = 1\n    def f(self):\n        local = 1\n",
+                   {("MAX_SIZE", "constant", 1, 1), ("_UNITS", "constant", 2, 4),
+                    ("FLAG", "constant", 7, 7), ("A", "class", 8, 11)}),
+        "c.js":   ("const MAX = 1;\nlet counter = 0;\nexport const API_URL = 'x';\nconst f = () => 1;\n",
+                   {("MAX", "constant", 1, 1), ("counter", "variable", 2, 2),
+                    ("API_URL", "constant", 3, 3), ("f", "function", 4, 4)}),
+        "c.c":    ('#define MAX_LEN 64\n#define SQ(x) ((x)*(x))\nstatic int counter = 0;\n'
+                   'int f(void);\nextern int g;\n',
+                   {("MAX_LEN", "constant", 1, 1), ("counter", "variable", 3, 3)}),
+        "c.rs":   ("const MAX: usize = 3;\nstatic mut COUNT: u32 = 0;\n",
+                   {("MAX", "constant", 1, 1), ("COUNT", "constant", 2, 2)}),
+        "C.java": ("class C {\n  public static final int MAX = 3;\n  private int count = 0;\n}\n",
+                   {("C", "class", 1, 4), ("MAX", "constant", 2, 2)}),
+    }
+
+    def test_constants_per_language(self):
+        for name, (src, want) in self.CASES.items():
+            with self.subTest(name):
+                f = SCRATCH / name
+                f.write_text(src)
+                got = {(s.name, s.kind, s.start, s.end) for s in code_nav.parse(f).symbols
+                       if s.kind != "method"}
+                self.assertEqual(got, want)
+
+    def test_exported_definitions_are_found(self):
+        f = SCRATCH / "exp.ts"
+        f.write_text("export function exported() { return helper(); }\nexport class Ex {}\n"
+                     "function helper() {}\nexport { a } from './m';\n")
+        names = {s.name for s in code_nav.parse(f).symbols}
+        self.assertEqual(names, {"exported", "Ex", "helper"})
+        out = code_nav.find_references("helper", "exp.ts", workdir=SCRATCH)
+        self.assertIn("(call)", out)           # was tagged (import) inside an export
+        self.assertIn("./m", code_nav.file_dependencies("exp.ts", direction="imports",
+                                                         workdir=SCRATCH))
+
+
+class DocLines(unittest.TestCase):
+
+    def test_python_docstring_and_js_comment(self):
+        src = SCRATCH / "doc.py"
+        src.write_text('def f():\n    """First line.\n\n    More."""\n\n\ndef g():\n    pass\n')
+        syms = {s.name: s.doc for s in code_nav.parse(src).symbols}
+        self.assertEqual(syms, {"f": "First line.", "g": ""})
+        js = SCRATCH / "doc.js"
+        js.write_text("/**\n * Adds two numbers.\n * @param a\n */\nfunction add(a, b) { return a + b; }\n")
+        self.assertEqual(code_nav.parse(js).symbols[0].doc, "Adds two numbers.")
 
 
 class Outline(unittest.TestCase):

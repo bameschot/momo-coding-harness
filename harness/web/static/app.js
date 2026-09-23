@@ -493,6 +493,7 @@ function applyStatus(s) {
   $("#ctx-fill").style.width = `${Math.min(100, s.ctx_pct)}%`;
   $(".ctx").className = `ctx ${s.ctx_color}`;
   if (!$("#ctx-menu").hidden) scheduleCtxRefresh();
+  if (!$("#index-menu").hidden) scheduleIndexRefresh();
   $("#tools-badge").hidden = s.tools_enabled;
   const run = $("#run-badge");
   run.textContent = s.run_confirm ? "RUN: confirm" : "RUN: auto";
@@ -514,8 +515,30 @@ function applyStatus(s) {
   const mc = $("#net-max-chars");
   if (document.activeElement !== mc) mc.value = s.net_max_chars ?? "";
   mc.disabled = !netOn;
+  applyIndexStatus(s);
   updateTitle();
   if (planChanged) refreshState();
+}
+
+// The INDEX badge and the View → Code index section, mirroring the NET ones.
+function applyIndexStatus(s) {
+  const on = !!s.index_enabled;
+  const trouble = on && (s.index_degraded || s.index_state === "stopped");
+  const badge = $("#index-badge");
+  badge.classList.toggle("warn", trouble);
+  badge.textContent = !on ? "INDEX: off"
+    : s.index_progress ? `INDEX: ${s.index_state} ${s.index_progress}`
+    : s.index_state === "stopped" ? "INDEX: stopped"
+    : `INDEX: ${s.index_files} files · ${formatSize(s.index_mem)}/${formatSize(s.index_max_bytes)}`;
+  badge.title = !on ? "Code index is off — click to turn it on"
+    : (s.index_degraded ? "Code index is over its memory budget and dropped a part. " : "")
+      + "Code index — click for what it holds";
+  $("#index-on").checked = on;
+  $("#index-persist").checked = !!s.index_persist;
+  const im = $("#index-max-mem");
+  if (document.activeElement !== im) im.value = formatSize(s.index_max_bytes);
+  $("#index-save").disabled = !on;
+  $("#index-load").disabled = !on;
 }
 
 // Mirrors net.format_size in Python so the field shows what /net-max-bytes accepts.
@@ -1256,6 +1279,25 @@ $("#net-on").onchange = (e) => send(`/net ${e.target.checked ? "on" : "off"}`);
 $("#net-local").onchange = (e) => send(`/net ${e.target.checked ? "local" : "on"}`);
 $("#net-confirm").onchange = (e) => send(`/net-confirm ${e.target.checked ? "on" : "off"}`);
 $("#guides").onchange = (e) => send(`/guides ${e.target.checked ? "on" : "off"}`);
+$("#index-badge").onclick = (e) => {
+  e.stopPropagation();
+  if (!status.index_enabled) return send("/index on");
+  const menu = $("#index-menu");
+  if (!menu.hidden) return closeMenu();
+  closeMenu();
+  menu.replaceChildren(el("div", "menu-title", "Code index"), el("div", "muted", "Loading…"));
+  menu.hidden = false;
+  $("#index-badge").setAttribute("aria-expanded", "true");
+  refreshIndexMenu();
+};
+$("#index-on").onchange = (e) => send(`/index ${e.target.checked ? "on" : "off"}`);
+$("#index-persist").onchange = (e) => send(`/index-persist ${e.target.checked ? "on" : "off"}`);
+$("#index-max-mem").onchange = (e) => {
+  const v = e.target.value.trim();
+  if (v) send(`/index-max-mem ${v}`);
+};
+$("#index-save").onclick = () => send("/index save");
+$("#index-load").onclick = () => send("/index load");
 $("#net-max-bytes").onchange = (e) => {
   const v = e.target.value.trim();
   if (v) send(`/net-max-bytes ${v}`);
@@ -1269,7 +1311,8 @@ $("#net-max-chars").onchange = (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.target === input || e.target.matches?.("input, select, textarea")) return;
   if (e.key === "Escape") {
-    if (!$("#view-menu").hidden || !$("#model-menu").hidden || !$("#ctx-menu").hidden) return closeMenu();
+    if (!$("#view-menu").hidden || !$("#model-menu").hidden || !$("#ctx-menu").hidden
+        || !$("#index-menu").hidden) return closeMenu();
     for (const d of ["#plan-drawer", "#sessions-drawer", "#files-drawer"]) {
       if (!$(d).hidden) return ($(d).hidden = true);
     }
@@ -1297,8 +1340,10 @@ function closeMenu() {
   $("#view-menu").hidden = true;
   $("#model-menu").hidden = true;
   $("#ctx-menu").hidden = true;
+  $("#index-menu").hidden = true;
   $("#view-btn").setAttribute("aria-expanded", "false");
   $("#ctx-btn").setAttribute("aria-expanded", "false");
+  $("#index-badge").setAttribute("aria-expanded", "false");
 }
 $("#view-btn").onclick = (e) => {
   e.stopPropagation();
@@ -1309,7 +1354,7 @@ $("#view-btn").onclick = (e) => {
   $("#view-btn").setAttribute("aria-expanded", String(!m.hidden));
 };
 document.addEventListener("click", (e) => {
-  if (!["#view-menu", "#model-menu", "#ctx-menu"].some((m) => $(m).contains(e.target))) closeMenu();
+  if (!["#view-menu", "#model-menu", "#ctx-menu", "#index-menu"].some((m) => $(m).contains(e.target))) closeMenu();
 });
 for (const cb of document.querySelectorAll("[data-view]")) {
   cb.onchange = () => { view[cb.dataset.view] = cb.checked; saveView(); syncViewMenu(); rerenderAll(); };
@@ -1425,6 +1470,112 @@ $("#ctx-btn").onclick = (e) => {
   $("#ctx-btn").setAttribute("aria-expanded", "true");
   refreshCtxMenu();
 };
+
+// ── code index composition ────────────────────────────────────────────────────
+// Clicking the INDEX badge (while the index is on) shows what the index's memory
+// is spent on: a meter against the budget, then a stacked bar and one row per
+// category, then per language — the CTX popover's layout. Status events
+// (progress while building) re-fetch it while it is open.
+let indexRefreshTimer = null;
+function scheduleIndexRefresh() {
+  if (indexRefreshTimer) return;
+  indexRefreshTimer = setTimeout(() => { indexRefreshTimer = null; refreshIndexMenu(); }, 500);
+}
+async function refreshIndexMenu() {
+  const menu = $("#index-menu");
+  if (menu.hidden) return;
+  let b;
+  try {
+    b = await (await fetch("api/index")).json();
+  } catch (err) {
+    menu.replaceChildren(el("div", "menu-title", "Code index"), el("div", "muted", `Could not load: ${err.message}`));
+    return;
+  }
+  if (menu.hidden) return;
+  if (!b.enabled) return closeMenu();
+  renderIndexMenu(menu, b);
+}
+function renderIndexMenu(menu, b) {
+  const used = b.used || 1;
+  const pc = (n) => `${((n / used) * 100).toFixed(0)}%`;
+  const budget = el("div", "ctx-stack");
+  const fill = el("span", `ctx-seg ${b.degraded ? "idx-over" : "idx-used"}`);
+  fill.style.width = `${Math.min(100, b.pct)}%`;
+  fill.title = `${formatSize(b.used)} of ${formatSize(b.limit)}`;
+  budget.append(fill);
+
+  const stack = el("div", "ctx-stack");
+  const rows = el("div", "ctx-rows");
+  for (const c of b.categories) {
+    if (c.enabled && c.bytes) {
+      const seg = el("span", `ctx-seg idx-${c.key}`);
+      seg.style.width = `${(c.bytes / used) * 100}%`;
+      seg.title = `${c.label}: ${formatSize(c.bytes)} — ${c.detail}`;
+      stack.append(seg);
+    }
+    const row = el("div", `ctx-row${c.enabled ? "" : " unsent"}`);
+    row.title = c.enabled ? c.detail : "Dropped to stay inside the memory budget — raise it to rebuild";
+    row.append(el("span", `ctx-swatch idx-${c.key}`), el("span", "ctx-name", c.label),
+      el("span", "ctx-tok mono", c.enabled ? formatSize(c.bytes) : "dropped"),
+      el("span", "ctx-pc mono", c.enabled ? pc(c.bytes) : "—"));
+    rows.append(row);
+  }
+
+  const langs = el("div", "ctx-rows");
+  for (const l of b.languages.slice(0, 8)) {
+    const row = el("div", "ctx-row idx-lang");
+    const mini = el("span", "idx-mini");
+    const f = el("span", "idx-mini-fill");
+    f.style.width = `${(l.bytes / used) * 100}%`;
+    mini.append(f);
+    row.title = `${l.files} file${l.files === 1 ? "" : "s"}`;
+    row.append(mini, el("span", "ctx-name", `${l.lang} · ${l.files}`),
+      el("span", "ctx-tok mono", formatSize(l.bytes)), el("span", "ctx-pc mono", pc(l.bytes)));
+    langs.append(row);
+  }
+  if (b.shared) {
+    const row = el("div", "ctx-row idx-lang");
+    const mini = el("span", "idx-mini");
+    const f = el("span", "idx-mini-fill");
+    f.style.width = `${(b.shared / used) * 100}%`;
+    mini.append(f);
+    row.title = "Distinct identifier names, shared by every file that uses them";
+    row.append(mini, el("span", "ctx-name", "shared names"),
+      el("span", "ctx-tok mono", formatSize(b.shared)), el("span", "ctx-pc mono", pc(b.shared)));
+    langs.append(row);
+  }
+  if (b.languages.length > 8) {
+    const rest = b.languages.slice(8);
+    langs.append(el("div", "muted small", `… ${rest.length} more languages, `
+      + `${rest.reduce((n, l) => n + l.files, 0)} files, ${formatSize(rest.reduce((n, l) => n + l.bytes, 0))}`));
+  }
+
+  const state = b.progress ? `${b.state} ${b.progress}` : b.state;
+  const actions = el("div", "menu-row");
+  const act = (label, cmd) => {
+    const btn = el("button", "menu-link", label);
+    btn.type = "button";
+    btn.onclick = () => send(cmd);
+    return btn;
+  };
+  actions.append(act("Rebuild", "/index rebuild"), act("Save now", "/index save"), act("Turn off", "/index off"));
+
+  const notes = [];
+  if (b.partial) notes.push("Partial: the budget was reached, so further files are not indexed.");
+  if (Object.keys(b.skipped).length) {
+    notes.push("Skipped: " + Object.entries(b.skipped).map(([k, v]) => `${v} ${k.replace("_", " ")}`).join(", "));
+  }
+  if (b.error) notes.push(`Error: ${b.error}`);
+  menu.replaceChildren(
+    el("div", "menu-title", `Code index · ${b.files.toLocaleString("en-US")} files · ${state}`),
+    el("div", "muted small", `Memory ${formatSize(b.used)} of ${formatSize(b.limit)} (${b.pct}%)`),
+    budget,
+    el("div", "menu-sub", "Made of"), stack, rows,
+    el("div", "menu-sub", "By language"), langs,
+    ...notes.map((n) => el("div", "muted small", n)),
+    el("div", "muted small", `Sizes are estimates of the index's own data. Save/load to disk: ${b.persist ? "on" : "off"}.`),
+    actions);
+}
 
 // ── left drawers: sessions and workspace files ────────────────────────────────
 function openDrawer(id) {

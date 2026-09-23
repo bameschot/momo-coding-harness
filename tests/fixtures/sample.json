@@ -1,0 +1,10 @@
+{
+  "name": "demo",
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "node --test"
+  },
+  "workspaces": [
+    {"path": "packages/a"}
+  ]
+}

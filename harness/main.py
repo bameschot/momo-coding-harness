@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import code_index
 from . import net as net_mod
 from . import session as session_mod
 from .controller import Controller
@@ -68,6 +69,15 @@ def main():
     parser.add_argument("--guides", action=argparse.BooleanOptionalAction, default=None,
                         help="Put the workdir's AGENTS.md / CLAUDE.md / ... in the system prompt "
                              "(default: last /guides setting, else off)")
+    parser.add_argument("--index", action=argparse.BooleanOptionalAction, default=None,
+                        help="Index the workdir in memory and give the model the index_* search "
+                             "tools (default: last /index setting, else off)")
+    parser.add_argument("--index-max-mem", default=None, metavar="SIZE",
+                        help="Memory budget for the code index: 100mb, 512kb, 1gb (default: last "
+                             "/index-max-mem setting, else 100mb)")
+    parser.add_argument("--index-persist", action=argparse.BooleanOptionalAction, default=None,
+                        help="Load the saved code index at start and save it on exit, in "
+                             "~/.momo-harness/index/ (default: last /index-persist setting, else off)")
     parser.add_argument("--web", action=argparse.BooleanOptionalAction, default=True,
                         help="Serve the browser chat UI alongside the TUI")
     parser.add_argument("--web-host", default="127.0.0.1", metavar="HOST",
@@ -114,6 +124,16 @@ def main():
                               else prefs.get("idle_recap", False))
     harness.idle_recap_secs = max(10, args.companion_idle_recap_secs or prefs.get("idle_recap_secs") or 90)
     harness.guides = bool(args.guides if args.guides is not None else prefs.get("guides", False))
+    if args.index_max_mem:
+        size = net_mod.parse_size(args.index_max_mem)
+        if not size or size < code_index.MIN_MAX_BYTES:
+            parser.error(f"--index-max-mem: not a size of at least 1mb: {args.index_max_mem}")
+        harness.index_max_bytes = size
+    elif isinstance(prefs.get("index_max_mem"), int) and prefs["index_max_mem"] >= code_index.MIN_MAX_BYTES:
+        harness.index_max_bytes = prefs["index_max_mem"]
+    harness.index_persist = bool(args.index_persist if args.index_persist is not None
+                                 else prefs.get("index_persist", False))
+    index_on = bool(args.index if args.index is not None else prefs.get("index", False))
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 
     # Restore last session unless --fresh
@@ -131,6 +151,10 @@ def main():
                 model=args.model or (model if switched else harness.client.model))
     else:
         harness.set_mode(args.mode)
+
+    # Start the index only now, so a restored session's workdir is the one indexed.
+    if index_on:
+        harness.event_queue.put(ChatEvent("system", harness.set_index(True)))
 
     # One Controller drives the harness for every frontend (TUI and web).
     controller = Controller(harness)
@@ -169,6 +193,7 @@ def main():
     finally:
         if web is not None:
             web.close()
+        harness.shutdown_index()
         harness.logger.close()
 
 

@@ -988,7 +988,16 @@ class TUI:
                     self._st_ctx   = ev.ctx_pct
                     self._st_dir   = ev.workdir
                     guides_str = " | GUIDES" if ev.guides else ""
-                    self._st_extra = f"{tools_str}{run_str}{net_str}{guides_str}"
+                    idx_str = ""
+                    if ev.index_enabled:
+                        idx_str = " | IDX"
+                        if ev.index_progress:
+                            idx_str += f" {ev.index_progress}"
+                        elif ev.index_state == "stopped":
+                            idx_str += " stopped"
+                        if ev.index_degraded:
+                            idx_str += " (degraded)"
+                    self._st_extra = f"{tools_str}{run_str}{net_str}{idx_str}{guides_str}"
                     changed = True
                 elif isinstance(ev, ThinkEvent):
                     self._add_think(ev.text)

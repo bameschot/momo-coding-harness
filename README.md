@@ -149,7 +149,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - Clicking the **model name** opens a model picker listing the models on the backend, like `/model`. llama.cpp serves a single model, so there the list is informational.
   - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
   - The **CTX meter** turns yellow at ≥ 75% and red at ≥ 90%, as in the TUI.
-  - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on. A **`NET: on`** / **`NET: local`** badge appears when internet access is on; click it to turn it off. Both are also in View → Network.
+  - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on. A **`NET: on`** / **`NET: local`** badge appears when internet access is on; click it to turn it off. Both are also in View → Network. The **`INDEX`** badge shows the [code index](#code-index): `off`, build progress (`building 812/1873`), or files and memory against the budget (`312 files · 4MB/100MB`). While the index is off, clicking it turns it on. While it is on, clicking it opens a popover like the CTX one: a meter of memory against the budget, a stacked bar and one row per part of the index (file records, definitions, imports, identifiers, text signatures), the same split per language, and Rebuild / Save now / Turn off. It turns yellow when the index is over its memory budget and has dropped a part.
   - **View options** (sliders icon, far right) opens the view options (below).
 - **Conversation**
   - Replies **stream in** as they're generated, with a blinking cursor. Reasoning streams into an open *thinking…* block that folds away once the answer starts. When the reply is complete, it's re-rendered as markdown. Use `--no-stream` to turn streaming off.
@@ -243,6 +243,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
+| Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, and Save now / Load. Shared with the TUI |
 | Play a sound | — | An audible cue (a synthesised kitten mew), focused or not, see [Notifications](#notifications) |
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
 | Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
@@ -501,6 +502,8 @@ Switch modes with `/design`, `/chat`, `/plan`, `/code`, `/momo`, or `Shift+Tab`.
 
 Syntax-aware tools built on [tree-sitter](https://tree-sitter.github.io/) for Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript (including JSX/TSX). The grammars are installed from `requirements.txt` and work offline. If tree-sitter is not installed, these tools are simply not offered.
 
+Config, markup and script files are parsed too, and their "definitions" are what you would look them up by: YAML/TOML/JSON **key paths** (`services.web.ports`, `tool.poetry.dependencies`; array items appear as `[]`), HTML element **ids**, custom elements and scripts, CSS **selectors**, `--custom-properties`, `@keyframes` and `@media` blocks, SQL `CREATE TABLE/VIEW/FUNCTION/INDEX/…` with **columns** as members, shell **functions**, and Dockerfile **stages** with their `ARG`/`ENV`. So `read_symbol("docker-compose.yml", "services.web")` returns just that block.
+
 | Tool | Description |
 |---|---|
 | `code_outline` | Structure of one file — classes, functions and methods with line ranges and signatures. Given a **directory** instead, a one-line-per-file map of every source file under it, which is the cheapest way to get your bearings in an unfamiliar tree. `depth` controls how much nesting is shown. |
@@ -510,6 +513,19 @@ Syntax-aware tools built on [tree-sitter](https://tree-sitter.github.io/) for Py
 | `file_dependencies` | What one file imports (including imports nested inside functions) and which files import it. Use it to judge the blast radius of a change. Importers are matched on the text of each import rather than resolved, so a same-named module elsewhere can appear and dynamic imports can be missed. |
 
 `find_symbol` and `find_references` say so when a file in the scanned tree could not be parsed or was skipped for size, so an empty result is never mistaken for proof of absence.
+
+### Code index (all modes, off by default)
+
+Offered only while the [code index](#code-index) is on (`/index on`). They **replace** `find_references` and `file_dependencies`, so the model never has to choose between two tools that answer the same question. `code_outline`, `read_symbol` and `find_symbol` stay and read from the index too; `find_symbol` stays because its line form answers "which definition is line N in?" in one line, where `read_symbol` returns the whole body.
+
+| Tool | Description |
+|---|---|
+| `index_search` | Find any definition by name, exact, partial or approximate: code, config keys, HTML ids, CSS selectors, SQL tables and columns, shell functions, Dockerfile stages. Words in any order work (`config parse` finds `parse_config`). Exact matches come first, then a `— approximate matches —` block. A line number with `path=` set to one file names the definition that line is in. |
+| `index_text` | Full-text search of every file (code, docs, config) from the index, the fast replacement for `grep_files`. Plain text and case-insensitive by default, `regex=true` for a Python regex. Each hit names the definition it sits in. |
+| `index_callers` | Every use of a name grouped by the function it sits in, tagged `(call)`, `(import)`, `(type)` or `(other)`. `depth=2` or `3` also follows who uses *those* functions: the blast radius of a change in one call. Capped at ~9,000 characters. |
+| `index_map` | The project's files ranked by how much the rest of the code uses them (PageRank over the identifier graph), each with its most-used definitions, fitted to a token budget. `path=` zooms into a directory. |
+| `index_file` | One file in one call: outline, imports, the files that import it, and its most-used definitions. |
+| `index_status` | What the index covers: files per language, skipped files, memory against the budget. |
 ### Shared (design, coding, momo modes)
 
 | Tool | Description |
@@ -540,6 +556,40 @@ Offered only while internet access is on (`/net on`), so the model never sees a 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
 
 `grep_files` returns at most 200 matches; `find_files` returns at most 100 files. Results over the cap include a trailer explaining how many were omitted.
+
+## Code index
+
+```
+/index              # memory against the budget, then what it is made of, per part and per language
+/index on           # index the workdir in memory; the model gets the index_* tools
+/index off
+/index rebuild      # forget everything and index again
+/index save|load    # write the index to disk now, or load the saved one
+/index-max-mem 200mb
+/index-persist on   # load the saved index at start, save it on exit
+```
+
+`--index`, `--index-max-mem` and `--index-persist` set these at startup; all three are remembered in `prefs.json`. In the web UI they are under View → Code index, and the `INDEX` badge shows the state.
+
+**What is indexed.** In a git repository, `git ls-files -co --exclude-standard`: tracked and untracked files, with `.gitignore` respected. Outside a repository, every file not in the usual noise directories (`.git`, `node_modules`, `.venv`, …) or hidden ones. Binary files and files over 2 MB are skipped, and at most 100,000 files are indexed. For each file the index holds:
+
+- its symbols and imports, the same ones `code_outline` shows;
+- every identifier and the lines it appears on, packed into 8 bytes per occurrence, so `index_callers` only parses the files that actually use a name;
+- a trigram signature of its text, so `index_text` reads only files that can contain the query.
+
+This repository indexes in about 0.2 s; a 325-file C++/Python tree with a 17,000-line `imgui.cpp` in about 4 s.
+
+**Always current.** A background thread builds the index and keeps it current. Before an index tool answers, it compares every file's mtime and size with the index (at most once every 2 seconds) and **waits** until the changes are indexed. It never answers from a stale index, and there is no fallback. The status bar shows the progress (`IDX 812/1873`), and Esc cancels the wait. Files the harness writes itself (`write_file`, `edit_file`, …) are re-indexed immediately, and `run_command` forces a full re-check at the next query.
+
+**Memory budget.** `/index-max-mem` (default 100 MB). The index estimates its own size and over budget it degrades in a fixed order, saying so in every affected result:
+
+1. drop the text signatures: `index_text` then scans the files;
+2. drop the identifier index: `index_callers` then re-parses the files;
+3. stop adding files: results say the index is partial.
+
+Raising the budget rebuilds whatever was dropped. The estimate counts the index's own data structures (it matches a deep `sys.getsizeof` walk within a few percent), not the Python interpreter or the tree-sitter grammars.
+
+**Saving to disk.** `/index save` writes `~/.momo-harness/index/<hash of the workdir>.pickle` (mode `0600`). With `/index-persist on` it is loaded when the index starts and saved after the first build, on a workdir change and on exit. After a load, only files that changed since the save are re-indexed. The file starts with a header (format version, workdir, Python version, tree-sitter and grammar versions); if any of these differ it is discarded and the index rebuilt. Loading a pickle can run code, so the loader only accepts this module's own classes, `array` and builtin sets. A tampered file fails to load instead. It also refuses a file that is not owned by you or is writable by others.
 
 ## Internet access
 
@@ -736,6 +786,10 @@ read-only → list_directory  file_info  find_files  read_file
 code nav  → code_outline  find_symbol  read_symbol  find_references
             file_dependencies          (omitted if tree-sitter is not installed)
 
+/index on → index_search  index_text  index_callers  index_map  index_file
+            index_status  replace find_references  file_dependencies
+            in every mode that has code nav
+
 design  → read-only + code nav + write_file  ask_user
 
 coding  → all design tools + edit_file  delete_file  move_file
@@ -782,6 +836,12 @@ Type any command in the input bar:
 | `/net-confirm on\|off` | Ask y/N before each `fetch_url` POST/PUT/PATCH/DELETE (default: on) |
 | `/net-max-bytes` | Show the `fetch_url` response size cap |
 | `/net-max-bytes <size>` | Set it, in bytes or with a unit: `200000`, `500kb`, `2mb` |
+| `/index` | Show the code index: memory against the budget, then its composition per part and per language, with bars like `/context` — see [Code index](#code-index) |
+| `/index on\|off` | Index the workdir in memory and give the model the `index_*` tools |
+| `/index rebuild` | Forget the index and build it again |
+| `/index save\|load` | Write the index to `~/.momo-harness/index/` now, or load the saved one |
+| `/index-max-mem <size>` | Memory budget for the index (default `100mb`) |
+| `/index-persist on\|off` | Load the saved index when it starts, save it on exit |
 | `/tool-output on\|off` | Show or hide the tool calls pane |
 | `/think-output on\|off` | Show or hide model thinking/reasoning blocks (also `Shift+T`) |
 | `/markdown on\|off` | Enable or disable markdown rendering for assistant output (also `Shift+M`) |

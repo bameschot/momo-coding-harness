@@ -1,0 +1,11 @@
+title = "sample"
+
+[tool.poetry]
+name = "demo"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+requests = { version = "2.31", optional = true }
+
+[[servers]]
+host = "alpha"

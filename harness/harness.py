@@ -19,8 +19,9 @@ from .logger import Logger
 from .plan import Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file, delete_plan_file
 from .tools import (DESIGN_TOOLS, ALL_TOOLS, CHAT_TOOLS, NET_TOOLS,
                     PLAN_INVESTIGATE_TOOLS, PLAN_EXECUTE_TOOLS,
-                    dispatch, render_tool_reference)
+                    dispatch, render_tool_reference, with_index_tools)
 from . import net as net_mod
+from . import code_index, code_nav
 
 # Tools that mutate a file on disk — the harness snapshots the target before and
 # after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
@@ -438,6 +439,14 @@ class StatusEvent:
     provider: str = ""
     plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
     guides: bool = False     # project guide files (AGENTS.md, ...) in the system prompt
+    index_enabled: bool = False   # /index: the code index and its index_* tools
+    index_state: str = "off"      # off | building | refreshing | idle | stopped
+    index_progress: str = ""      # "812/1873" while building/refreshing
+    index_files: int = 0
+    index_mem: int = 0            # estimated bytes in use
+    index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
+    index_persist: bool = False   # /index-persist: load/save a pickle
+    index_degraded: bool = False  # over budget: a component was dropped
 
 @dataclass
 class ErrorEvent:
@@ -699,6 +708,14 @@ class Harness:
         self.guides: bool = False
         self._guides: list[tuple[str, str]] = []   # (relpath, text) as last read
         self._guides_text = ""                     # the rendered prompt block
+        # Code index: when on, a ProjectIndex for the workdir is kept current in
+        # the background and the index_* tools replace find_references /
+        # file_dependencies.  /index, /index-max-mem, /index-persist
+        self.index_enabled: bool = False
+        self.index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
+        self.index_persist: bool = False
+        self.index: code_index.ProjectIndex | None = None
+        self._index_saved_version = -1
         self._schema_cache: tuple = (None, 0)
         self._turn_user: dict | None = None  # the user message the running turn answers
         self.messages: list[dict] = [
@@ -888,7 +905,106 @@ class Harness:
             tools = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
         if self.net_access != "off":
             tools = tools + NET_TOOLS
+        if self.index is not None:
+            tools = with_index_tools(tools)
         return tools
+
+    # ── code index ────────────────────────────────────────────────────────────
+
+    def set_index(self, enabled: bool) -> str:
+        """Turn the code index on or off; returns a notice."""
+        self.index_enabled = enabled
+        if enabled and self.index is None:
+            self._start_index()
+            note = (f"Code index: on — indexing {self.workdir} in the background "
+                    f"(budget {net_mod.format_size(self.index_max_bytes)}"
+                    + (", loading the saved index first" if self.index_persist else "") + ").")
+        elif not enabled and self.index is not None:
+            note = "Code index: off" + self._stop_index()
+        else:
+            note = f"Code index: {'on' if enabled else 'off'}"
+        self.rebuild_system_prompt()
+        self._emit_status()
+        return note
+
+    def _start_index(self) -> None:
+        idx = code_index.ProjectIndex(self.workdir, self.index_max_bytes,
+                                      on_change=self._on_index_change)
+        self.index = idx
+        self._index_saved_version = -1
+        code_nav.set_index_provider(idx.provide)
+        idx.start(load_pickle=self.index_persist)
+
+    def _stop_index(self, save: bool = True) -> str:
+        """Stop the index (saving it first when persistence is on).  Returns
+        a notice suffix, '' when there is nothing to say."""
+        idx, self.index = self.index, None
+        if idx is None:
+            return ""
+        note = ""
+        if save and self.index_persist and idx.is_fresh():
+            note = "\n" + idx.save()
+        idx.stop()
+        code_nav.set_index_provider(None)
+        return note
+
+    def restart_index(self) -> str:
+        """The workdir changed: index the new one instead."""
+        if not self.index_enabled:
+            return ""
+        note = self._stop_index()
+        self._start_index()
+        self.rebuild_system_prompt()
+        self._emit_status()
+        return f"Code index: re-indexing {self.workdir}" + note
+
+    def shutdown_index(self) -> None:
+        """On exit: save when persistence is on, then stop the thread."""
+        self._stop_index()
+
+    def _on_index_change(self, idx: "code_index.ProjectIndex") -> None:
+        # Called from the indexer thread.
+        if idx is not self.index:
+            return
+        for note in idx.pop_notices():
+            self.event_queue.put(ChatEvent("system", note))
+        if (self.index_persist and idx.state == "idle" and self._index_saved_version < 0
+                and idx.is_fresh()):
+            # Save once after the first complete build; exit and workdir changes save again.
+            self._index_saved_version = idx.version
+            threading.Thread(target=self._save_index_quietly, args=(idx,), daemon=True).start()
+        self._emit_status()
+
+    def index_breakdown(self) -> dict:
+        """The index's memory composition (/index, web INDEX popover)."""
+        idx = self.index
+        if idx is None:
+            return {"enabled": False, "limit": self.index_max_bytes, "persist": self.index_persist}
+        return {**code_index.breakdown(idx), "persist": self.index_persist}
+
+    def _save_index_quietly(self, idx) -> None:
+        msg = idx.save()
+        if msg.startswith("ERROR"):
+            self.event_queue.put(ChatEvent("system", msg))
+
+    def _wait_index(self, name: str) -> str | None:
+        """Block an index-backed tool until the index is current.  Returns an
+        ERROR string when cancelled, else None."""
+        idx = self.index
+        if idx is None or name not in code_index.WAIT_TOOLS:
+            return None
+
+        def on_wait(done: int, total: int) -> None:
+            prog = f" ({done}/{total} files)" if total else ""
+            self.event_queue.put(ChatEvent("system", f"Waiting for the code index{prog}…"))
+        return idx.wait_fresh(self._cancel, on_wait=on_wait)
+
+    def _dispatch(self, name: str, args: dict) -> str:
+        err = self._wait_index(name)
+        if err:
+            return err
+        return dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes,
+                        self._fetch_chars(), index=self.index, cancel=self._cancel)
 
     def _build_system_prompt(self) -> str:
         if self._plan_executing():
@@ -1688,23 +1804,20 @@ class Harness:
                             f"Run this command? Reply 'y' to allow, anything else to decline.\n  $ {cmd}"
                         ).strip().lower()
                         if answer in ("y", "yes"):
-                            result = dispatch(name, args, self.workdir, self.net_access,
-                                              self.net_max_bytes, self._fetch_chars())
+                            result = self._dispatch(name, args)
                         else:
                             result = "ERROR: command declined by user"
                     elif name == "fetch_url" and (q := self._net_confirm_prompt(args)):
                         answer = self._ask_user(q).strip().lower()
                         if answer in ("y", "yes"):
-                            result = dispatch(name, args, self.workdir, self.net_access,
-                                              self.net_max_bytes, self._fetch_chars())
+                            result = self._dispatch(name, args)
                         else:
                             result = ("ERROR: the user declined this request, so it was "
                                       "never sent. The server was not contacted and nothing "
                                       "is wrong with it. Do not retry — ask the user what "
                                       "they would like to do instead.")
                     else:
-                        result = dispatch(name, args, self.workdir, self.net_access,
-                                          self.net_max_bytes, self._fetch_chars())
+                        result = self._dispatch(name, args)
                     # fetch_url windows its own output (net_max_chars) and says how to
                     # page on; a generic cut here would slice through the untrusted-
                     # content fence and point the model at read_file.
@@ -2053,7 +2166,20 @@ class Harness:
             provider=self.provider,
             plan_progress=self._plan_progress(),
             guides=self.guides,
+            **self._index_status_fields(),
         )
+
+    def _index_status_fields(self) -> dict:
+        idx = self.index
+        base = {"index_enabled": self.index_enabled, "index_max_bytes": self.index_max_bytes,
+                "index_persist": self.index_persist}
+        if idx is None:
+            return {**base, "index_state": "off"}
+        busy = idx.state in ("building", "refreshing") and idx.total
+        return {**base, "index_state": idx.state,
+                "index_progress": f"{idx.done}/{idx.total}" if busy else "",
+                "index_files": idx.live_count(), "index_mem": idx.mem_used(),
+                "index_degraded": idx.degraded()}
 
     def list_available_skills(self) -> list[str]:
         if not _SKILLS_DIR.exists():
@@ -2161,6 +2287,10 @@ class Harness:
         self._turn_count = data.get("turn_count",
                                     sum(1 for m in self.messages if m.get("role") == "user"))
         self._guides = self._read_guides() if self.guides else []
+        # A restored session can point at another workdir: index that one instead.
+        if self.index_enabled and (self.index is None or self.index.root != self.workdir.resolve()):
+            self._stop_index()
+            self._start_index()
         # Always rebuild the system prompt from the current role files and skills on
         # disk — saved sessions carry a snapshot; role/skill edits must take effect.
         if self.messages and self.messages[0].get("role") == "system":

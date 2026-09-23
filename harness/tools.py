@@ -8,7 +8,7 @@ import textwrap
 from datetime import datetime
 from pathlib import Path
 
-from . import code_nav, net
+from . import code_index, code_nav, net
 
 
 # ── schema helpers ───────────────────────────────────────────────────────────
@@ -85,7 +85,8 @@ READ_ONLY_TOOLS = [
 
 # Syntax-aware navigation (tree-sitter).  Empty when tree-sitter is not
 # installed, so no mode ever offers a tool that cannot run.
-_CODE_NAV_LANGS = "Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript"
+_CODE_NAV_LANGS = ("Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript; also "
+                   "keys in YAML/TOML/JSON, HTML ids, CSS rules, SQL, shell and Dockerfiles")
 CODE_NAV_TOOLS = [
     _fn("code_outline",
         f"Show the structure of source code ({_CODE_NAV_LANGS}). Given a FILE: every class, "
@@ -151,6 +152,98 @@ CODE_NAV_TOOLS = [
          "direction": {"type": "string", "description": "'both' (default), 'imports' for only what it imports, or 'importers' for only what imports it"}},
         ["path"]),
 ] if code_nav.AVAILABLE else []
+
+# The code index (/index on).  These replace find_references and
+# file_dependencies while the index is on (INDEX_REPLACES), so the model never
+# has to choose between two tools that answer the same question.  find_symbol
+# stays: its line form ("which definition is line N in?") is a one-line answer
+# the model reliably reaches for, and read_symbol's description points at it —
+# hiding it sent the 9B to read_symbol, which returns the whole body (evals,
+# 2026-09-23: 0.1 KB / 3 s with find_symbol vs 26 KB / 13-51 s without).  It
+# reads the index through code_nav's provider hook, so it is just as fresh.
+INDEX_TOOLS = [
+    _fn("index_search",
+        "Find any definition by name — exact, partial or approximate — across the whole project, "
+        "from the code index: classes, functions and methods, plus config keys (YAML/TOML/JSON "
+        "paths like 'services.web.ports'), HTML ids, CSS selectors, SQL tables and columns, shell "
+        "functions and Dockerfile stages. Use it FIRST when you know roughly what something is "
+        "called: words in any order work ('config parse' finds parse_config). Returns "
+        "file:L<start>-<end>, kind, qualified name and signature line, best match first — then "
+        "read_symbol reads one. Pass a LINE NUMBER ('1300') with path set to that one file to "
+        "learn which definition the line is in.",
+        {"query": {"type": "string", "description": "A name or part of one: 'parse_config', 'Harness.send', 'services.web', 'retry delay', a pattern like '*_handler', or a line number like '1300' (then path must be the file)"},
+         "kind":  {"type": "string", "description": "Only this kind: class, function, method, key, table, rule, id, column, stage, ..., or 'file' to find files by path (default: any; a path-like query also finds files)"},
+         "path":  {"type": "string", "description": "Only under this directory or file, or matching a glob like '*.yaml' (default: whole project)"},
+         "lang":  {"type": "string", "description": "Only this language: python, typescript, yaml, sql, css, ... (default: any)"}},
+        ["query"]),
+
+    _fn("index_text",
+        "Search the text of every file in the project (code, docs, config) from the code index — "
+        "the fast replacement for grep_files. Plain text, case-insensitive, by default; "
+        "regex=true for a Python regex (case-sensitive). Each hit names the definition it sits "
+        "in, e.g. 'L120 [in Parser.parse]'. To find where something is DEFINED, use index_search "
+        "instead.",
+        {"query": {"type": "string", "description": "Text to find, e.g. 'retry_delay' or 'TODO'; a regex when regex is true"},
+         "path":  {"type": "string", "description": "Only under this directory or file, or matching a glob like '*.sql' (default: whole project)"},
+         "regex": {"type": "boolean", "description": "Treat query as a Python regular expression (default: false)"}},
+        ["query"]),
+
+    _fn("index_callers",
+        "Who uses a function, class, method or variable, and what breaks if you change it — in "
+        "ONE call. Lists every use grouped by the function it sits in, tagged (call), (import), "
+        "(type) or (other); depth=2 or 3 also shows who uses THOSE functions: the blast radius of "
+        "a change. Use it before renaming something or changing a signature. Write a method as "
+        "'Class.method'; a qualifier that is not a class filters by receiver ('JSON.parse').",
+        {"name":  {"type": "string", "description": "What to look up, e.g. 'parse_config', 'Harness.send'"},
+         "depth": {"type": "integer", "description": "1 = direct uses (default); 2 or 3 = also the users of those functions"},
+         "role":  {"type": "string", "description": "Only direct uses of this kind: call, import, type, other (default: all)"}},
+        ["name"]),
+
+    _fn("index_map",
+        "Get your bearings in a project in one call: its files ranked by how much the rest of the "
+        "code uses them, each with its most-used definitions, fitted to a size budget. Start here "
+        "in an unfamiliar codebase; pass path to zoom into one directory.",
+        {"path":   {"type": "string", "description": "Only this directory (default: whole project)"},
+         "budget": {"type": "integer", "description": "Approximate size of the answer in tokens (default 1500)"}},
+        []),
+
+    _fn("index_file",
+        "Everything about ONE file in one call: its outline with line ranges, what it imports, "
+        "which files import it, and which of its definitions the rest of the project uses most. "
+        "Use it before changing a file, instead of reading the whole file.",
+        {"path": {"type": "string", "description": "File to describe, e.g. 'src/parser.py'"}},
+        ["path"]),
+
+    _fn("index_status",
+        "Show what the code index covers: files per language, skipped files and memory use. Only "
+        "needed when another index_* result says something is missing.",
+        {},
+        []),
+] if code_nav.AVAILABLE else []
+INDEX_TOOL_NAMES = {t["function"]["name"] for t in INDEX_TOOLS}
+INDEX_REPLACES = {"find_references", "file_dependencies"}
+_CODE_NAV_NAMES = {t["function"]["name"] for t in CODE_NAV_TOOLS}
+
+
+def with_index_tools(tools: list[dict]) -> list[dict]:
+    """The tool list with the index tools in place of the code-nav tools they
+    replace, placed where the code-nav block starts so related tools stay together."""
+    out: list[dict] = []
+    inserted = False
+    for t in tools:
+        name = t["function"]["name"]
+        if name in INDEX_TOOL_NAMES:
+            continue
+        if name in _CODE_NAV_NAMES and not inserted:
+            out.extend(INDEX_TOOLS)
+            inserted = True
+        if name in INDEX_REPLACES:
+            continue
+        out.append(t)
+    if not inserted:
+        out.extend(INDEX_TOOLS)
+    return out
+
 
 CODING_ONLY_TOOLS = [
     _fn("move_file",
@@ -405,6 +498,10 @@ def _read_footer(p: Path, path: str, n: int, start_line: int, end_line: int | No
     if whole:
         if n <= _READ_FOOTER_LINES:
             return ""
+        if code_nav._index_provider is not None:
+            return (f"\n[{n} lines total, {len(idx.symbols)} definitions — index_file shows this "
+                    f"{idx.lang} file's outline, imports and users for a fraction of the tokens, "
+                    f"and read_symbol reads one definition; or use start_line/end_line]")
         return (f"\n[{n} lines total, {len(idx.symbols)} definitions — code_outline shows this "
                 f"{idx.lang} file's structure for a fraction of the tokens, and read_symbol reads "
                 f"one definition; or use start_line/end_line]")
@@ -519,12 +616,16 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
                     except ValueError:
                         rel = fpath
                     results.append(f"{rel}:{i}: {line}")
+    # With the code index on, point at the indexed search: it is faster and names
+    # the definition each hit sits in.
+    tip = ("\n(index_text runs this search from the code index and names the definition "
+           "each hit is in)") if code_nav._index_provider is not None else ""
     if not results:
-        return "(no matches)"
+        return "(no matches)" + tip
     total = len(results)
     if total > _MAX_GREP_RESULTS:
-        return "\n".join(results[:_MAX_GREP_RESULTS]) + f"\n... (first {_MAX_GREP_RESULTS} of {total} matches — narrow the pattern or specify a directory)"
-    return "\n".join(results)
+        return "\n".join(results[:_MAX_GREP_RESULTS]) + f"\n... (first {_MAX_GREP_RESULTS} of {total} matches — narrow the pattern or specify a directory)" + tip
+    return "\n".join(results) + tip
 
 
 def _list_directory(path: str = ".", show_hidden: bool = False, *, workdir: Path) -> str:
@@ -847,7 +948,7 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
 # clear error messages before Python's TypeError exposes internal function names.
 _REQUIRED_ARGS: dict[str, list[str]] = {}
 _KNOWN_ARGS: dict[str, set[str]] = {}
-for _tl in (READ_ONLY_TOOLS, CODE_NAV_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS, NET_TOOLS):
+for _tl in (READ_ONLY_TOOLS, CODE_NAV_TOOLS, INDEX_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS, NET_TOOLS):
     for _t in _tl:
         _tname = _t["function"]["name"]
         _props = _t["function"]["parameters"].get("properties", {})
@@ -880,6 +981,12 @@ if code_nav.AVAILABLE:
         "read_symbol":        code_nav.read_symbol,
         "find_references":    code_nav.find_references,
         "file_dependencies":  code_nav.file_dependencies,
+        "index_search":       code_index.index_search,
+        "index_text":         code_index.index_text,
+        "index_callers":      code_index.index_callers,
+        "index_map":          code_index.index_map,
+        "index_file":         code_index.index_file,
+        "index_status":       code_index.index_status,
     })
 
 
@@ -889,6 +996,12 @@ if code_nav.AVAILABLE:
 _NEEDS_NET_ACCESS = {"fetch_url"}
 # run_command only needs to know whether /net is off, to steer curl/wget.
 _NEEDS_NET_STATE = {"run_command"}
+# The index tools get the live ProjectIndex and the turn's cancel flag.
+_NEEDS_INDEX = INDEX_TOOL_NAMES
+# Tools that change files: their paths are re-indexed right away, so the next
+# index query does not depend on the stat-diff throttle to see the change.
+_WRITES_PATHS = {"write_file": ("path",), "edit_file": ("path",), "append_to_file": ("path",),
+                 "delete_file": ("path",), "move_file": ("src", "dst")}
 
 
 _PLACEHOLDER_RE = re.compile(r"^\s*\[written to [^\]]*\]\s*$")
@@ -901,7 +1014,19 @@ _CUT_MARKER_RE = re.compile(r"\[… [\d,]+ chars removed by context compaction �
 
 def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              net_max_bytes: int = net.DEFAULT_MAX_BYTES,
-             net_max_chars: int = net.DEFAULT_MAX_CHARS) -> str:
+             net_max_chars: int = net.DEFAULT_MAX_CHARS,
+             index: "code_index.ProjectIndex | None" = None, cancel=None) -> str:
+    result = _dispatch(name, args, workdir, net_access, net_max_bytes, net_max_chars, index, cancel)
+    if index is not None:
+        if name in _WRITES_PATHS:
+            index.invalidate([args.get(k) for k in _WRITES_PATHS[name] if isinstance(args.get(k), str)])
+        elif name == "run_command":
+            index.mark_dirty()
+    return result
+
+
+def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_bytes: int,
+              net_max_chars: int, index, cancel) -> str:
     fn = _EXECUTORS.get(name)
     if fn is None:
         return f"ERROR: unknown tool '{name}'"
@@ -913,7 +1038,8 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
             and "content" not in args and "path" in args):
         routed = {k: args[k] for k in ("path", "old_string", "new_string", "replace_all")
                   if k in args}
-        return "(note: routed write_file to edit_file) " + dispatch("edit_file", routed, workdir)
+        return "(note: routed write_file to edit_file) " + dispatch("edit_file", routed, workdir,
+                                                                      index=index)
 
     # Sessions saved before the harness stopped eliding write content hold
     # "[written to <path>]" in place of past file bodies, and a model reading that
@@ -960,6 +1086,8 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
                  "net_max_chars": net_max_chars}
     elif name in _NEEDS_NET_STATE:
         extra = {"net_access": net_access}
+    elif name in _NEEDS_INDEX:
+        extra = {"index": index, "cancel": cancel}
     else:
         extra = {}
     try:
@@ -1004,6 +1132,12 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "read_symbol":    {"path": "src/parser.py", "name": "Parser.parse"},
     "find_references": {"name": "parse_config", "role": "call"},
     "file_dependencies": {"path": "src/parser.py"},
+    "index_search":   {"query": "parse config"},
+    "index_text":     {"query": "retry_delay", "path": "src"},
+    "index_callers":  {"name": "parse_config", "depth": 2},
+    "index_map":      {},
+    "index_file":     {"path": "src/parser.py"},
+    "index_status":   {},
     "write_file":     {"path": "hello.py", "content": "print('hello!')"},
     "edit_file":      {"path": "main.py", "old_string": "existing line", "new_string": "replacement line"},
     "append_to_file": {"path": "notes.md", "content": "\n## New section\n"},

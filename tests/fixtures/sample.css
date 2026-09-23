@@ -1,0 +1,13 @@
+:root {
+  --accent: #ff6600;
+}
+.btn.primary,
+#app > nav {
+  color: var(--accent);
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+}
+@media (max-width: 600px) {
+  .btn { display: block; }
+}

@@ -64,6 +64,7 @@
     <button id="tools-badge" class="chip button warn" type="button" title="Tools are disabled — click to enable" hidden>TOOLS: off</button>
     <button id="run-badge" class="chip button" type="button" title="Toggle run_command confirmation (Shift+P)">RUN: auto</button>
     <button id="net-badge" class="chip button" type="button" title="Internet access is off — click to turn it on">NET: off</button>
+    <button id="index-badge" class="chip button" type="button" title="Code index is off — click to turn it on" aria-haspopup="true" aria-expanded="false">INDEX: off</button>
   </div>
   <div id="view-menu" class="menu" role="menu" hidden>
     <div class="menu-title">View</div>
@@ -88,6 +89,14 @@
     <label><input type="checkbox" id="net-confirm"> Confirm POST/PUT/DELETE <kbd>/net-confirm</kbd></label>
     <label class="menu-num">Max download <input type="text" id="net-max-bytes" size="7" placeholder="2mb"></label>
     <label class="menu-num">Text per fetch <input type="text" id="net-max-chars" size="7" placeholder="24000"></label>
+    <div class="menu-sub">Code index</div>
+    <label><input type="checkbox" id="index-on"> Code index <kbd>/index</kbd></label>
+    <label><input type="checkbox" id="index-persist"> Save/load to disk <kbd>/index-persist</kbd></label>
+    <label class="menu-num">Memory budget <input type="text" id="index-max-mem" size="7" placeholder="100mb"></label>
+    <div class="menu-row">
+      <button type="button" id="index-save" class="menu-link">Save now</button>
+      <button type="button" id="index-load" class="menu-link">Load</button>
+    </div>
     <div class="menu-sub">Model</div>
     <label><input type="checkbox" id="think-mode"> Thinking mode <kbd>/think</kbd></label>
     <div class="menu-sub">Skills</div>
@@ -100,6 +109,7 @@
   </div>
   <div id="model-menu" class="menu model-menu" role="menu" hidden></div>
   <div id="ctx-menu" class="menu ctx-menu" role="dialog" aria-label="Context usage" hidden></div>
+  <div id="index-menu" class="menu ctx-menu" role="dialog" aria-label="Code index composition" hidden></div>
 </header>
 
 <main id="transcript" tabindex="-1" aria-live="polite" aria-label="Conversation"></main>

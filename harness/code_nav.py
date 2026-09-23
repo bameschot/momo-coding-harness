@@ -10,6 +10,7 @@ import fnmatch
 import importlib
 import os
 import re
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,8 +38,18 @@ _EXTENSIONS = {
     ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".jsx": "javascript",
     ".ts": "typescript", ".mts": "typescript", ".cts": "typescript",
     ".tsx": "tsx",
+    # Config, markup and scripts: their "definitions" are keys, ids, selectors,
+    # tables and functions (see _DATA_EXTRACTORS), not classes.
+    ".yaml": "yaml", ".yml": "yaml",
+    ".toml": "toml",
+    ".json": "json",
+    ".html": "html", ".htm": "html",
+    ".css": "css",
+    ".sql": "sql",
+    ".sh": "bash", ".bash": "bash",
+    ".dockerfile": "dockerfile",
 }
-SUPPORTED_EXTENSIONS = ", ".join(sorted(_EXTENSIONS))
+SUPPORTED_EXTENSIONS = ", ".join(sorted(_EXTENSIONS)) + ", Dockerfile"
 
 # grammar name -> (module, function returning the language pointer), for the
 # grammars that do not follow the tree_sitter_<name>.language() convention.
@@ -118,6 +129,8 @@ _DEFS: dict[str, dict[str, str]] = {
         "function_signature_item": "function",
         "mod_item":               "module",
         "macro_definition":       "macro",
+        "const_item":             "constant",
+        "static_item":            "constant",
     },
     "javascript": _JS_DEFS,
     "typescript": _TS_DEFS,
@@ -171,7 +184,17 @@ _parsers: dict = {}
 
 
 def language_for(path: Path) -> str | None:
-    return _EXTENSIONS.get(path.suffix.lower())
+    lang = _EXTENSIONS.get(path.suffix.lower())
+    if lang is None and (path.name == "Dockerfile" or path.name.startswith("Dockerfile.")):
+        lang = "dockerfile"
+    if lang is None or not grammar_available(lang):
+        return None
+    return lang
+
+
+# Grammars whose wheel failed to import, so they are skipped rather than
+# failing every scan that meets such a file.
+_missing: set[str] = set()
 
 
 def _parser(lang: str):
@@ -179,8 +202,26 @@ def _parser(lang: str):
     if p is None:
         mod_name, attr = _GRAMMAR_LOADERS.get(lang, (f"tree_sitter_{lang}", "language"))
         mod = importlib.import_module(mod_name)
-        p = _parsers[lang] = Parser(Language(getattr(mod, attr)()))
+        # Older grammar wheels (tree-sitter-dockerfile) hand back a bare int,
+        # which tree-sitter accepts with a DeprecationWarning — and a warning
+        # printed to stderr corrupts the curses screen.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            p = _parsers[lang] = Parser(Language(getattr(mod, attr)()))
     return p
+
+
+def grammar_available(lang: str) -> bool:
+    if lang in _parsers:
+        return True
+    if lang in _missing:
+        return False
+    try:
+        _parser(lang)
+        return True
+    except (ImportError, AttributeError, ValueError):
+        _missing.add(lang)
+        return False
 
 
 # ── symbol extraction ────────────────────────────────────────────────────────
@@ -195,6 +236,7 @@ class Symbol:
     name_line: int   # 1-based line of the name itself
     signature: str   # first source line of the definition, stripped
     depth: int
+    doc: str = ""    # first line of its docstring / leading doc comment, for search
 
 
 @dataclass
@@ -291,6 +333,132 @@ def _def_name(node, lang: str, kind: str) -> tuple[str, int] | None:
     return _text(n), n.start_point[0]
 
 
+_MAX_DOC = 120
+_DOC_MARKERS = re.compile(r"^\s*(?:/\*\*?|\*/|\*|///?|//!|#|--|\"\"\"|\'\'\'|[rbuRBU]?\"\"\"|\")\s*")
+
+
+def _clean_doc(text: str) -> str:
+    """The first line of prose in a docstring or comment, markers stripped."""
+    for raw in text.splitlines():
+        line = _DOC_MARKERS.sub("", raw).strip().rstrip("*/").strip().strip('"\'').strip()
+        if line and not line.startswith("@"):
+            return line[:_MAX_DOC]
+    return ""
+
+
+def _doc_line(node, span) -> str:
+    """A definition's docstring (Python: first statement of the body) or the doc
+    comment directly above it (every other grammar).  Lets index_search match a
+    description ('turns a size string into bytes') as well as a name."""
+    body = node.child_by_field_name("body")
+    if body is not None and body.named_child_count:
+        first = body.named_children[0]
+        if first.type == "expression_statement" and first.named_child_count \
+                and first.named_children[0].type == "string":
+            return _clean_doc(_text(first.named_children[0]))
+    prev = span.prev_named_sibling
+    if prev is not None and "comment" in prev.type and prev.end_point[0] >= span.start_point[0] - 1:
+        # Walk back over a run of line comments (/// a, /// b) to its first line.
+        while True:
+            p2 = prev.prev_named_sibling
+            if p2 is None or "comment" not in p2.type or p2.end_point[0] < prev.start_point[0] - 1:
+                break
+            prev = p2
+        return _clean_doc(_text(prev))
+    return ""
+
+
+# ── module-level constants and variables ──────────────────────────────────────
+# `MAX_SIZE = 10`, `const API_URL = ...`, `#define LEN 64`, Java `static final`
+# fields: things a model looks up by name exactly like a function.  Only module
+# (or namespace) scope, plus Java/Kotlin class constants — locals inside a
+# function body would flood the index.
+
+_UPPER = re.compile(r"_*[A-Z][A-Z0-9_]*")
+
+
+def _var_kind(name: str, declared_const: bool = False) -> str:
+    return "constant" if declared_const or _UPPER.fullmatch(name) else "variable"
+
+
+def _c_decl_name(node):
+    """The identifier a C/C++ declarator declares, or None for a function
+    prototype (those are declarations of functions, not variables)."""
+    while node is not None:
+        if node.type == "function_declarator":
+            return None
+        if node.type == "identifier":
+            return node
+        node = node.child_by_field_name("declarator")
+    return None
+
+
+def _bindings(node, lang: str, parent_kind: str | None) -> list[tuple[str, object, str, object]]:
+    """(name, name node, kind, span node) for each variable `node` declares at
+    module scope (or, for Java/Kotlin, as a class constant)."""
+    out = []
+    t = node.type
+    module = parent_kind is None or (lang == "cpp" and parent_kind == "namespace")
+    if lang == "python" and module and t == "expression_statement":
+        for a in node.named_children:
+            if a.type == "assignment":
+                left = a.child_by_field_name("left")
+                if left is not None and left.type == "identifier":
+                    out.append((_text(left), left, _var_kind(_text(left)), node))
+    elif lang in ("javascript", "typescript", "tsx") and module \
+            and t in ("lexical_declaration", "variable_declaration"):
+        decls = [d for d in node.named_children if d.type == "variable_declarator"]
+        for d in decls:
+            n = d.child_by_field_name("name")
+            v = d.child_by_field_name("value")
+            if n is None or n.type != "identifier" or (v is not None and v.type in _FUNCTION_VALUES):
+                continue
+            out.append((_text(n), n, _var_kind(_text(n)), node if len(decls) == 1 else d))
+    elif lang in ("c", "cpp") and module:
+        if t == "preproc_def":
+            n = node.child_by_field_name("name")
+            if n is not None:
+                out.append((_text(n), n, "constant", node))
+        elif t == "declaration" and not any(c.type == "storage_class_specifier" and _text(c) == "extern"
+                                            for c in node.children):
+            const = any(c.type == "type_qualifier" and _text(c) in ("const", "constexpr")
+                        for c in node.children)
+            decls = [node.children[i] for i in range(node.child_count)
+                     if node.field_name_for_child(i) == "declarator"]
+            for d in decls:
+                n = _c_decl_name(d)
+                if n is not None:
+                    out.append((_text(n), n, _var_kind(_text(n), const), node if len(decls) == 1 else d))
+    elif lang == "java" and t in ("field_declaration", "constant_declaration") \
+            and parent_kind in ("class", "interface", "enum", "record"):
+        mods = next((c for c in node.children if c.type == "modifiers"), None)
+        words = set(_text(mods).split()) if mods is not None else set()
+        if t == "constant_declaration" or parent_kind == "interface" or {"static", "final"} <= words:
+            decls = [node.children[i] for i in range(node.child_count)
+                     if node.field_name_for_child(i) == "declarator"]
+            for d in decls:
+                n = d.child_by_field_name("name")
+                if n is not None:
+                    out.append((_text(n), n, "constant", node if len(decls) == 1 else d))
+    elif lang == "kotlin" and t == "property_declaration":
+        mods = next((c for c in node.children if c.type == "modifiers"), None)
+        const = mods is not None and "const" in _text(mods).split()
+        if module or const:
+            v = next((c for c in node.named_children if c.type == "variable_declaration"), None)
+            n = next((c for c in v.named_children if c.type in ("identifier", "simple_identifier")),
+                     None) if v is not None else None
+            if n is not None:
+                out.append((_text(n), n, _var_kind(_text(n), const), node))
+    return out
+
+
+def _is_local_export(node) -> bool:
+    """`export function f() {}` / `export const X = 1`: an export_statement that
+    declares something here rather than re-exporting from another module
+    (`export {x} from './m'`).  Only the re-export form is an import."""
+    return node.type == "export_statement" and node.child_by_field_name("source") is None
+
+
 def _extract(root, lang: str, lines: list[str],
              imports_out: list | None = None) -> list[Symbol]:
     """Collect definitions, and (when `imports_out` is given) import statement
@@ -302,10 +470,24 @@ def _extract(root, lang: str, lines: list[str],
 
     def walk(node, parent_qual: str, parent_kind: str | None, depth: int) -> None:
         for child in node.children:
-            if child.type in import_types:
+            if child.type in import_types and not _is_local_export(child):
                 # An import statement holds no definitions, so stop here.
                 imports_out.append(child)
                 continue
+            for vname, vnode, vkind, vspan in _bindings(child, lang, parent_kind):
+                vrow = vspan.start_point[0]
+                out.append(Symbol(
+                    name=vname,
+                    qualname=f"{parent_qual}.{vname}" if parent_qual else vname,
+                    kind=vkind,
+                    start=vrow + 1,
+                    # A #define ends at column 0 of the next line.
+                    end=vspan.end_point[0] + (0 if vspan.end_point[1] == 0
+                                              and vspan.end_point[0] > vrow else 1),
+                    name_line=vnode.start_point[0] + 1,
+                    signature=lines[vrow].strip()[:_MAX_SIGNATURE] if vrow < len(lines) else "",
+                    depth=depth,
+                ))
             kind = defs.get(child.type)
             if kind is None:
                 walk(child, parent_qual, parent_kind, depth)
@@ -336,11 +518,339 @@ def _extract(root, lang: str, lines: list[str],
                 name_line=name_row + 1,
                 signature=lines[sig_row].strip()[:_MAX_SIGNATURE] if sig_row < len(lines) else "",
                 depth=depth,
+                doc=_doc_line(child, span),
             ))
             walk(child, qual, kind, depth + 1)
 
     walk(root, "", None, 0)
     return out
+
+
+# ── config / markup / script "definitions" ──────────────────────────────────
+# These grammars have no classes or functions, but they do have things a model
+# looks up by name: a YAML/TOML/JSON key path, an HTML id, a CSS selector, a SQL
+# table, a shell function, a Dockerfile stage.  Each extractor returns ordinary
+# Symbols, so find_symbol / read_symbol / code_outline work on them unchanged.
+
+_MAX_DATA_DEPTH = 6        # key paths deeper than this are not listed
+_MAX_DATA_SYMBOLS = 2000   # a generated lockfile must not flood the index
+
+
+def _sym(name: str, qual: str, kind: str, node, depth: int, lines: list[str],
+         name_node=None, end_row: int | None = None) -> Symbol:
+    row = node.start_point[0]
+    name_row = name_node.start_point[0] if name_node is not None else row
+    if end_row is None:
+        end_row = node.end_point[0]
+        # A node that ends at column 0 ends on the line before: YAML and TOML
+        # blocks swallow the newline that separates them from the next key.
+        if node.end_point[1] == 0 and end_row > row:
+            end_row -= 1
+    return Symbol(name=name, qualname=qual, kind=kind, start=row + 1,
+                  end=end_row + 1,
+                  name_line=name_row + 1,
+                  signature=lines[row].strip()[:_MAX_SIGNATURE] if row < len(lines) else "",
+                  depth=depth)
+
+
+def _unquote(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        return s[1:-1]
+    return s
+
+
+def _value_kind(node) -> str:
+    if node is None:
+        return "key"
+    t = node.type
+    if "mapping" in t or t in ("object", "inline_table", "table"):
+        return "table"
+    if "sequence" in t or t == "array":
+        return "list"
+    for c in node.named_children:          # YAML wraps values in block_node/flow_node
+        if c.type in ("block_mapping", "flow_mapping"):
+            return "table"
+        if c.type in ("block_sequence", "flow_sequence"):
+            return "list"
+    return "key"
+
+
+def _extract_yaml(root, lines: list[str]) -> list[Symbol]:
+    out: list[Symbol] = []
+
+    def walk(node, parent: str, depth: int) -> None:
+        for c in node.named_children:
+            if len(out) >= _MAX_DATA_SYMBOLS:
+                return
+            if c.type in ("block_mapping_pair", "flow_pair"):
+                k = c.child_by_field_name("key")
+                v = c.child_by_field_name("value")
+                if k is None:
+                    continue
+                key = _unquote(_text(k))
+                qual = f"{parent}.{key}" if parent else key
+                out.append(_sym(key, qual, _value_kind(v), c, depth, lines, k))
+                if v is not None and depth + 1 < _MAX_DATA_DEPTH:
+                    walk(v, qual, depth + 1)
+            elif c.type in ("block_sequence_item", "flow_sequence"):
+                walk(c, f"{parent}[]" if parent else "[]", depth)
+            else:
+                walk(c, parent, depth)
+
+    walk(root, "", 0)
+    return out
+
+
+def _toml_key(node) -> list[str]:
+    if node.type == "dotted_key":
+        parts: list[str] = []
+        for c in node.named_children:
+            parts.extend(_toml_key(c))
+        return parts
+    return [_unquote(_text(node))]
+
+
+def _extract_toml(root, lines: list[str]) -> list[Symbol]:
+    out: list[Symbol] = []
+    _KEYS = ("bare_key", "quoted_key", "dotted_key")
+
+    def pairs(node, parent: str, depth: int) -> None:
+        for c in node.named_children:
+            if len(out) >= _MAX_DATA_SYMBOLS:
+                return
+            if c.type != "pair":
+                continue
+            k = next((x for x in c.named_children if x.type in _KEYS), None)
+            if k is None:
+                continue
+            parts = _toml_key(k)
+            qual = ".".join([parent, *parts] if parent else parts)
+            v = c.named_children[-1] if len(c.named_children) > 1 else None
+            out.append(_sym(parts[-1], qual, _value_kind(v), c, depth, lines, k))
+            if v is not None and v.type == "inline_table" and depth + 1 < _MAX_DATA_DEPTH:
+                pairs(v, qual, depth + 1)
+
+    pairs(root, "", 0)   # top-level pairs before the first [table]
+    for c in root.named_children:
+        if c.type not in ("table", "table_array_element"):
+            continue
+        k = next((x for x in c.named_children if x.type in _KEYS), None)
+        if k is None:
+            continue
+        parts = _toml_key(k)
+        qual = ".".join(parts) + ("[]" if c.type == "table_array_element" else "")
+        out.append(_sym(parts[-1], qual, "table", c, 0, lines, k))
+        pairs(c, qual, 1)
+    return out
+
+
+def _extract_json(root, lines: list[str]) -> list[Symbol]:
+    out: list[Symbol] = []
+
+    def walk(node, parent: str, depth: int) -> None:
+        for c in node.named_children:
+            if len(out) >= _MAX_DATA_SYMBOLS or depth >= _MAX_DATA_DEPTH:
+                return
+            if c.type == "pair":
+                k = c.child_by_field_name("key")
+                v = c.child_by_field_name("value")
+                if k is None:
+                    continue
+                key = _unquote(_text(k))
+                qual = f"{parent}.{key}" if parent else key
+                out.append(_sym(key, qual, _value_kind(v), c, depth, lines, k))
+                if v is not None:
+                    walk(v, qual + ("[]" if v.type == "array" else ""), depth + 1)
+            elif c.type == "array":
+                walk(c, f"{parent}[]" if parent else "[]", depth)
+            elif c.type == "object":
+                walk(c, parent, depth)
+
+    walk(root, "", 0)
+    return out
+
+
+def _html_attrs(start_tag) -> dict[str, str]:
+    attrs = {}
+    for a in start_tag.named_children:
+        if a.type != "attribute":
+            continue
+        n = next((x for x in a.named_children if x.type == "attribute_name"), None)
+        v = next((x for x in a.named_children
+                  if x.type in ("attribute_value", "quoted_attribute_value")), None)
+        if n is not None:
+            attrs[_text(n).lower()] = _unquote(_text(v)) if v is not None else ""
+    return attrs
+
+
+def _extract_html(root, lines: list[str]) -> list[Symbol]:
+    out: list[Symbol] = []
+
+    def walk(node, parent: str, depth: int) -> None:
+        for c in node.named_children:
+            if len(out) >= _MAX_DATA_SYMBOLS:
+                return
+            if c.type not in ("element", "script_element", "style_element", "template_element"):
+                walk(c, parent, depth)
+                continue
+            tag_node = next((x for x in c.named_children
+                             if x.type in ("start_tag", "self_closing_tag")), None)
+            if tag_node is None:
+                walk(c, parent, depth)
+                continue
+            tn = next((x for x in tag_node.named_children if x.type == "tag_name"), None)
+            tag = _text(tn).lower() if tn is not None else ""
+            attrs = _html_attrs(tag_node)
+            name = kind = None
+            if attrs.get("id"):
+                name, kind = attrs["id"], "id"
+            elif c.type == "script_element":
+                name, kind = (attrs.get("src") or "script"), "script"
+            elif c.type == "style_element":
+                name, kind = "style", "style"
+            elif "-" in tag:
+                name, kind = tag, "element"
+            elif tag == "template":
+                name, kind = "template", "template"
+            if name is None:
+                walk(c, parent, depth)
+                continue
+            qual = f"{parent}.{name}" if parent and kind == "id" else name
+            out.append(_sym(name, qual, kind, c, depth, lines, tag_node))
+            walk(c, qual if kind == "id" else parent, depth + 1)
+
+    walk(root, "", 0)
+    return out
+
+
+def _extract_css(root, lines: list[str]) -> list[Symbol]:
+    out: list[Symbol] = []
+
+    def walk(node, depth: int) -> None:
+        for c in node.named_children:
+            if len(out) >= _MAX_DATA_SYMBOLS:
+                return
+            if c.type == "rule_set":
+                sels = next((x for x in c.named_children if x.type == "selectors"), None)
+                if sels is not None:
+                    # One symbol per selector in a comma list, so '.btn' finds
+                    # the rule written as '.btn, .link'.
+                    for sel in " ".join(_text(sels).split()).split(","):
+                        sel = sel.strip()
+                        if sel:
+                            out.append(_sym(sel, sel, "rule", c, depth, lines, sels))
+                block = next((x for x in c.named_children if x.type == "block"), None)
+                if block is not None:
+                    for d in block.named_children:
+                        pn = next((x for x in d.named_children if x.type == "property_name"), None) \
+                            if d.type == "declaration" else None
+                        if pn is not None and _text(pn).startswith("--"):
+                            out.append(_sym(_text(pn), _text(pn), "var", d, depth + 1, lines, pn))
+                    walk(block, depth + 1)
+            elif c.type == "keyframes_statement":
+                n = next((x for x in c.named_children if x.type == "keyframes_name"), None)
+                if n is not None:
+                    out.append(_sym(_text(n), _text(n), "keyframes", c, depth, lines, n))
+            elif c.type in ("media_statement", "supports_statement", "at_rule"):
+                head = lines[c.start_point[0]].strip() if c.start_point[0] < len(lines) else ""
+                head = head.split("{", 1)[0].strip()[:_MAX_SIGNATURE] or c.type
+                out.append(_sym(head, head, "media" if c.type == "media_statement" else "at-rule",
+                                c, depth, lines))
+                block = next((x for x in c.named_children if x.type == "block"), None)
+                if block is not None:
+                    walk(block, depth + 1)
+
+    walk(root, 0)
+    return out
+
+
+def _extract_sql(root, lines: list[str]) -> list[Symbol]:
+    out: list[Symbol] = []
+    stack = [root]
+    while stack and len(out) < _MAX_DATA_SYMBOLS:
+        node = stack.pop()
+        if not node.type.startswith("create_"):
+            stack.extend(reversed(node.named_children))
+            continue
+        kind = node.type.removeprefix("create_")
+        ref = next((x for x in node.named_children if x.type == "object_reference"), None)
+        if kind == "index":
+            ref = node.child_by_field_name("column") or ref
+        if ref is None:
+            continue
+        nn = ref.child_by_field_name("name") or ref
+        name = _unquote(_text(nn).strip("`[]"))
+        qual = _unquote(_text(ref).replace('"', "").replace("`", ""))
+        out.append(_sym(name, qual, kind, node, 0, lines, nn))
+        if kind == "table":
+            cols = next((x for x in node.named_children if x.type == "column_definitions"), None)
+            for col in (cols.named_children if cols is not None else []):
+                cn = col.child_by_field_name("name") if col.type == "column_definition" else None
+                if cn is not None:
+                    out.append(_sym(_text(cn), f"{qual}.{_text(cn)}", "column", col, 1, lines, cn))
+    return out
+
+
+def _extract_bash(root, lines: list[str]) -> list[Symbol]:
+    out: list[Symbol] = []
+
+    def walk(node, parent: str, depth: int) -> None:
+        for c in node.named_children:
+            if c.type == "function_definition":
+                n = c.child_by_field_name("name")
+                if n is None:
+                    continue
+                qual = f"{parent}.{_text(n)}" if parent else _text(n)
+                out.append(_sym(_text(n), qual, "function", c, depth, lines, n))
+                walk(c, qual, depth + 1)
+            else:
+                walk(c, parent, depth)
+
+    walk(root, "", 0)
+    return out
+
+
+def _extract_dockerfile(root, lines: list[str]) -> list[Symbol]:
+    out: list[Symbol] = []
+    instrs = root.named_children
+    froms = [i for i, c in enumerate(instrs) if c.type == "from_instruction"]
+    stage_q = ""
+    for i, c in enumerate(instrs):
+        if c.type == "from_instruction":
+            alias = c.child_by_field_name("as")
+            spec = next((x for x in c.named_children if x.type == "image_spec"), None)
+            name = _text(alias) if alias is not None else (_text(spec) if spec is not None
+                                                            else f"stage{froms.index(i)}")
+            nxt = next((j for j in froms if j > i), None)
+            end_row = (instrs[nxt].start_point[0] - 1 if nxt is not None
+                       else instrs[-1].end_point[0])
+            out.append(_sym(name, name, "stage", c, 0, lines, alias or spec, end_row=end_row))
+            stage_q = name
+        elif c.type in ("arg_instruction", "env_instruction"):
+            kind = "arg" if c.type == "arg_instruction" else "env"
+            targets = [c] if kind == "arg" else [x for x in c.named_children if x.type == "env_pair"]
+            for t in targets:
+                n = t.child_by_field_name("name")
+                if n is None:
+                    continue
+                qual = f"{stage_q}.{_text(n)}" if stage_q else _text(n)
+                out.append(_sym(_text(n), qual, kind, t, 1 if stage_q else 0, lines, n))
+    return out
+
+
+_DATA_EXTRACTORS = {
+    "yaml": _extract_yaml, "toml": _extract_toml, "json": _extract_json,
+    "html": _extract_html, "css": _extract_css, "sql": _extract_sql,
+    "bash": _extract_bash, "dockerfile": _extract_dockerfile,
+}
+
+
+def _symbols_for(root, lang: str, lines: list[str], imports_out: list | None = None) -> list[Symbol]:
+    data = _DATA_EXTRACTORS.get(lang)
+    if data is not None:
+        return data(root, lines)
+    return _extract(root, lang, lines, imports_out)
 
 
 # ── import extraction ────────────────────────────────────────────────────────
@@ -467,7 +977,7 @@ def parse(path: Path) -> _Parsed | None:
     tree = _parser(lang).parse(raw)
     lines = raw.decode("utf-8", errors="replace").splitlines()
     imp_nodes: list = []
-    symbols = _extract(tree.root_node, lang, lines, imp_nodes)
+    symbols = _symbols_for(tree.root_node, lang, lines, imp_nodes)
     parsed = _Parsed(lang, lines, tree, symbols, _build_imports(imp_nodes, lang, lines))
     while len(_cache) >= _MAX_CACHE:
         _cache.popitem(last=False)
@@ -483,6 +993,18 @@ def _put_index(key: str, stamp: tuple[int, int], parsed: _Parsed) -> None:
                                        parsed.imports, parsed.tree.root_node.has_error))
 
 
+# The project index (code_index.ProjectIndex) registers itself here while /index
+# is on, so every index() caller — read_file's footer, the directory outline,
+# find_symbol's line form — reads the one shared store instead of keeping a
+# second copy of the same symbols in _index_cache.
+_index_provider = None  # callable(key: str, stamp) -> _Index | None
+
+
+def set_index_provider(fn) -> None:
+    global _index_provider
+    _index_provider = fn
+
+
 def index(path: Path) -> _Index | None:
     """Symbols and imports for a supported file, without retaining the parse
     tree.  Use this for project-wide scans; use parse() when the tree is needed.
@@ -493,6 +1015,11 @@ def index(path: Path) -> _Index | None:
     st = path.stat()
     key = str(path)
     stamp = (st.st_mtime_ns, st.st_size)
+    provider = _index_provider
+    if provider is not None:
+        got = provider(key, stamp)
+        if got is not None:
+            return got
     hit = _index_cache.get(key)
     if hit and hit[0] == stamp:
         _index_cache.move_to_end(key)
@@ -505,13 +1032,98 @@ def index(path: Path) -> _Index | None:
     tree = _parser(lang).parse(raw)
     lines = raw.decode("utf-8", errors="replace").splitlines()
     imp_nodes: list = []
-    symbols = _extract(tree.root_node, lang, lines, imp_nodes)
+    symbols = _symbols_for(tree.root_node, lang, lines, imp_nodes)
     idx = _Index(lang, len(lines), symbols, _build_imports(imp_nodes, lang, lines),
                  tree.root_node.has_error)
     while len(_index_cache) >= _MAX_INDEX_CACHE:
         _index_cache.popitem(last=False)
     _index_cache[key] = (stamp, idx)
     return idx  # tree goes out of scope here — that is the point
+
+
+def parse_uncached(path: Path, raw: bytes | None = None) -> _Parsed | None:
+    """Parse without touching either cache — for the project indexer, which
+    keeps what it needs itself and must not evict the trees read_symbol uses."""
+    lang = language_for(path)
+    if lang is None:
+        return None
+    if raw is None:
+        raw = path.read_bytes()
+    tree = _parser(lang).parse(raw)
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    imp_nodes: list = []
+    symbols = _symbols_for(tree.root_node, lang, lines, imp_nodes)
+    return _Parsed(lang, lines, tree, symbols, _build_imports(imp_nodes, lang, lines))
+
+
+def make_index(parsed: _Parsed) -> _Index:
+    return _Index(parsed.lang, len(parsed.lines), parsed.symbols, parsed.imports,
+                  parsed.tree.root_node.has_error)
+
+
+# ── identifier occurrences ───────────────────────────────────────────────────
+# One tree-sitter query per grammar capturing every *identifier leaf.  Running it
+# in C is ~3x faster than walking the tree in Python, which is what makes a
+# whole-project occurrence index affordable (5500 files: ~3 s).
+
+_ident_cursors: dict = {}
+
+
+def _ident_cursor(lang: str):
+    cur = _ident_cursors.get(lang)
+    if cur is None:
+        from tree_sitter import Query, QueryCursor
+        L = _parser(lang).language
+        kinds = sorted({L.node_kind_for_id(i) for i in range(L.node_kind_count)
+                        if L.node_kind_is_named(i) and L.node_kind_is_visible(i)
+                        and (L.node_kind_for_id(i) or "").endswith("identifier")})
+        if not kinds:
+            _ident_cursors[lang] = False
+            return False
+        cur = _ident_cursors[lang] = QueryCursor(
+            Query(L, "[" + " ".join(f"({k})" for k in kinds) + "] @id"))
+    return cur
+
+
+def identifier_rows(parsed: _Parsed) -> set[tuple[str, int]]:
+    """Every (identifier text, 1-based line) in a parsed file, deduplicated."""
+    cur = _ident_cursor(parsed.lang) if parsed.lang in _DEFS else False
+    if not cur:
+        return set()
+    caps = cur.captures(parsed.tree.root_node).get("id", [])
+    return {(_text(c), c.start_point[0] + 1) for c in caps if c.child_count == 0}
+
+
+def references_in(parsed: _Parsed, bare: str, rows: set[int] | None = None
+                  ) -> dict[int, tuple[str, str | None]]:
+    """{0-based row: (role, receiver)} for the uses of `bare` in one file.  With
+    `rows`, only those rows are examined and subtrees outside them are skipped,
+    so a lookup driven by the occurrence index touches a few nodes, not all."""
+    target = bare.encode()
+    def_lines = {s.name_line for s in parsed.symbols if s.name == bare}
+    out: dict[int, tuple[str, str | None]] = {}
+    lo = min(rows) if rows else 0
+    hi = max(rows) if rows else 1 << 30
+    stack = [parsed.tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.end_point[0] < lo or node.start_point[0] > hi:
+            continue
+        if node.child_count == 0:
+            # Leaf identifier nodes only: comments and string contents are
+            # separate node types, and substrings never match exactly.
+            if node.type.endswith("identifier") and node.text == target:
+                r = node.start_point[0]
+                if rows is not None and r not in rows:
+                    continue
+                kind, recv = _classify(node, parsed.lang, r + 1 in def_lines)
+                prev = out.get(r)
+                # "call" is the most informative label for a shared row.
+                if prev is None or (prev[0] != "call" and kind == "call"):
+                    out[r] = (kind, recv)
+        else:
+            stack.extend(node.children)
+    return out
 
 
 def _is_pattern(name: str) -> bool:
@@ -684,7 +1296,7 @@ def _classify(node, lang: str, is_def: bool) -> tuple[str, str | None]:
     import_types = _IMPORTS.get(lang, ())
     anc, depth = node.parent, 0
     while anc is not None and depth < _IMPORT_ANCESTOR_DEPTH:
-        if anc.type in import_types:
+        if anc.type in import_types and not _is_local_export(anc):
             return "import", None
         anc, depth = anc.parent, depth + 1
 
@@ -907,31 +1519,13 @@ def find_references(name: str, directory: str = ".", role: str | None = None,
     dotted = name.replace("::", ".")
     bare = dotted.rsplit(".", 1)[-1]
     want_recv = dotted.rsplit(".", 1)[0] if "." in dotted else None
-    target = bare.encode()
     stats: dict = {}
     hits = []
     by_role: dict[str, int] = {}
     recvs: dict[str, int] = {}
     direct = 0
     for f, parsed in _scan(root, stats, tree=True):
-        def_lines = {s.name_line for s in parsed.symbols if s.name == bare}
-        # One entry per row, keeping the first (leftmost) occurrence's role.
-        rows: dict[int, tuple[str, str | None]] = {}
-        stack = [parsed.tree.root_node]
-        while stack:
-            node = stack.pop()
-            if node.child_count == 0:
-                # Leaf identifier nodes only: comments and string contents are
-                # separate node types, and substrings never match exactly.
-                if node.type.endswith("identifier") and node.text == target:
-                    r = node.start_point[0]
-                    kind, recv = _classify(node, parsed.lang, r + 1 in def_lines)
-                    prev = rows.get(r)
-                    # "call" is the most informative label for a shared row.
-                    if prev is None or (prev[0] != "call" and kind == "call"):
-                        rows[r] = (kind, recv)
-            else:
-                stack.extend(node.children)
+        rows = references_in(parsed, bare)
         rel = _rel(f, workdir)
         for r in sorted(rows):
             kind, recv = rows[r]

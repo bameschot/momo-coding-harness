@@ -6,10 +6,63 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import code_index
 from . import net as net_mod
 from . import session as session_mod
 from .harness import Harness, ChatEvent
 from .tools import dispatch
+
+
+def _format_index(harness) -> str:
+    """/index: a meter of memory used against the budget, then what the index is
+    made of — per category and per language, each bar a share of the index —
+    in the same layout as /context."""
+    b = harness.index_breakdown()
+    if not b["enabled"]:
+        return ("Code index: off\nTurn it on with /index on — the model then gets the "
+                "index_* tools (search, text, callers, map, file).")
+    fmt = net_mod.format_size
+    width = 20
+
+    def bar(frac: float) -> str:
+        fill = min(width, round(frac * width))
+        return "█" * fill + "░" * (width - fill)
+
+    state = b["state"] + (f" {b['progress']}" if b["progress"] else "")
+    used = b["used"] or 1
+    lines = [f"Code index: {state} — {b['files']:,} files"
+             + (" | PARTIAL: budget reached" if b["partial"] else ""),
+             f"  {'Budget':<16}{fmt(b['used']):>9}  {b['pct']:>3}%  {bar(b['used'] / (b['limit'] or 1))}"
+             f"  of {fmt(b['limit'])} (/index-max-mem)",
+             "Made of:"]
+
+    def share_row(label: str, n: int, detail: str) -> str:
+        return (f"  {label:<16}{fmt(n):>9}  {n / used * 100:>3.0f}%  {bar(n / used)}"
+                + (f"  {detail}" if detail else ""))
+    for c in b["categories"]:
+        if not c["enabled"]:
+            lines.append(f"  {c['label']:<16}{'dropped':>9}     —  (over budget — /index-max-mem to restore)")
+        else:
+            lines.append(share_row(c["label"], c["bytes"], c["detail"]))
+    if b["languages"]:
+        lines.append("By language:")
+        for row in b["languages"][:10]:
+            lines.append(share_row(row["lang"], row["bytes"],
+                                   f"{row['files']:,} file{'s' if row['files'] != 1 else ''}"))
+        if len(b["languages"]) > 10:
+            rest = b["languages"][10:]
+            lines.append(f"  … {len(rest)} more ({sum(r['files'] for r in rest):,} files, "
+                         f"{fmt(sum(r['bytes'] for r in rest))})")
+        if b["shared"]:
+            lines.append(share_row("shared names", b["shared"], "identifier names used across files"))
+    if b["skipped"]:
+        lines.append("Skipped: " + ", ".join(f"{v:,} {k.replace('_', ' ')}"
+                                             for k, v in b["skipped"].items()))
+    if b["error"]:
+        lines.append(f"Last error: {b['error']}")
+    lines.append(f"  (sizes are estimates of the index's own data; save/load to disk: "
+                 f"{'on' if b['persist'] else 'off'} — {code_index.pickle_path(harness.workdir)})")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -192,7 +245,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 harness.workdir = p
                 harness.set_mode(harness.mode)
                 guides_note = harness.reload_guides()
-                return f"Created and set working directory: {p}" + (f"\n{guides_note}" if guides_note else "")
+                index_note = harness.restart_index()
+                return (f"Created and set working directory: {p}"
+                        + "".join(f"\n{n}" for n in (guides_note, index_note) if n))
             return CommandResult(
                 handled=True,
                 confirm_prompt=f"Directory does not exist: {p}\nCreate it?",
@@ -201,9 +256,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.workdir = p
         harness.set_mode(harness.mode)  # always refresh system prompt with new workdir
         guides_note = harness.reload_guides()
+        index_note = harness.restart_index()
         harness._emit_status()
         return CommandResult(handled=True, output=f"Working directory set to: {p}"
-                             + (f"\n{guides_note}" if guides_note else ""))
+                             + "".join(f"\n{n}" for n in (guides_note, index_note) if n))
 
     if cmd == "/tool-output":
         if arg.lower() in ("on", "true", "1", "yes"):
@@ -461,6 +517,67 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return CommandResult(handled=True, output=(
             f"fetch_url text per call: {n:,} characters" + warn))
 
+    if cmd == "/index":
+        sub = arg.lower()
+        if not sub or sub == "status":
+            return CommandResult(handled=True, output=_format_index(harness))
+        if sub in ("on", "true", "1", "yes", "off", "false", "0", "no"):
+            on = sub in ("on", "true", "1", "yes")
+            session_mod.save_prefs(index=on)
+            return CommandResult(handled=True, output=harness.set_index(on))
+        if harness.index is None:
+            return CommandResult(handled=True, output=f"ERROR: the code index is off — /index on first")
+        if sub == "rebuild":
+            harness.index.rebuild()
+            harness._emit_status()
+            return CommandResult(handled=True, output="Code index: rebuilding from scratch")
+        if sub == "save":
+            return CommandResult(handled=True, output=harness.index.save())
+        if sub == "load":
+            msg = harness.index.load() or (f"No saved code index for this workdir "
+                                           f"({code_index.pickle_path(harness.workdir)}).")
+            harness.index.mark_dirty()
+            harness._emit_status()
+            return CommandResult(handled=True, output=msg)
+        return CommandResult(handled=True, output=(
+            f"ERROR: expected on, off, status, rebuild, save or load, got: {arg}"))
+
+    if cmd == "/index-max-mem":
+        cur = net_mod.format_size(harness.index_max_bytes)
+        if not arg:
+            return CommandResult(handled=True, output=(
+                f"Code index memory budget: {cur}\nSet it with a size, e.g. /index-max-mem 200mb. "
+                f"Over budget the index drops text-search signatures first, then the identifier "
+                f"index, then stops adding files."))
+        size = net_mod.parse_size(arg)
+        if size is None:
+            return CommandResult(handled=True, output=(
+                f"ERROR: not a size: {arg}. Use bytes or a unit, e.g. 100mb, 512kb, 1gb."))
+        if size < code_index.MIN_MAX_BYTES:
+            return CommandResult(handled=True, output=(
+                f"ERROR: the minimum is {net_mod.format_size(code_index.MIN_MAX_BYTES)}"))
+        harness.index_max_bytes = size
+        session_mod.save_prefs(index_max_mem=size)
+        if harness.index is not None:
+            harness.index.set_max_bytes(size)
+        harness._emit_status()
+        return CommandResult(handled=True, output=f"Code index memory budget: {net_mod.format_size(size)}")
+
+    if cmd == "/index-persist":
+        if not arg:
+            state = "on" if harness.index_persist else "off"
+            return CommandResult(handled=True, output=(
+                f"Code index save/load to disk: {state} ({code_index.pickle_path(harness.workdir)})"))
+        if arg.lower() in ("on", "true", "1", "yes", "off", "false", "0", "no"):
+            harness.index_persist = arg.lower() in ("on", "true", "1", "yes")
+            session_mod.save_prefs(index_persist=harness.index_persist)
+            harness._emit_status()
+            extra = (" — saved on exit, on a workdir change and after the first build; loaded "
+                     "when the index starts") if harness.index_persist else ""
+            return CommandResult(handled=True, output=(
+                f"Code index save/load to disk: {'on' if harness.index_persist else 'off'}{extra}"))
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+
     if cmd == "/cost":
         return CommandResult(handled=True, output=harness.logger.cost_summary())
 
@@ -684,6 +801,12 @@ Available commands:
   /guides on|off      Put AGENTS.md / CLAUDE.md / ... from the workdir in the system prompt
                       (re-read on new session, /clear and compaction)
   /guides reload      Re-read the guide files now
+  /index              Show the code index: memory per category and language, state
+  /index on|off       Index the workdir in memory and give the model the index_* search tools
+  /index rebuild      Forget the index and build it again
+  /index save|load    Write the index to disk now, or load the saved one
+  /index-max-mem <n>  Memory budget for the index (default 100mb)
+  /index-persist on|off  Load the saved index at start, save it on exit
   /list-skills        List available skills and show which are active
   /load-skill <name>  Append a skill's instructions to the system prompt
   /unload-skill <name> Remove a skill from the system prompt

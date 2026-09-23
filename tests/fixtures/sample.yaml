@@ -1,0 +1,11 @@
+# compose-style config
+version: "3.8"
+services:
+  web:
+    image: nginx:1.25
+    ports:
+      - "8080:80"
+    environment:
+      LOG_LEVEL: debug
+  db:
+    image: postgres:16

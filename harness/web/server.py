@@ -14,6 +14,7 @@ Routes
   GET  /api/sessions  recent sessions for the session drawer
   GET  /api/models    models available on the backend
   GET  /api/context   context usage broken down per category (system, tools, …)
+  GET  /api/index     code index memory broken down per category and language
   GET  /api/export    the conversation as a Markdown download
   GET  /api/files     ?path= → directory listing (read-only, confined to the workspace)
   GET  /api/file      ?path= → file contents as text (same conversion as uploads)
@@ -321,6 +322,8 @@ class WebServer:
                                 "provider": h.client.provider_name})
                 elif path == "/api/context":
                     self._json(h.context_breakdown())
+                elif path == "/api/index":
+                    self._json(h.index_breakdown())
                 elif path == "/api/last-user":
                     self._json(web.controller.last_user_message() or {})
                 elif path == "/api/export":

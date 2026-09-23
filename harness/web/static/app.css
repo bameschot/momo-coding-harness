@@ -462,6 +462,17 @@ body.is-busy .user-actions { display: none; }
 .ctx-tool_results { background: var(--ok); }
 .ctx-thinking     { background: var(--think); }
 .ctx-generating   { background: repeating-linear-gradient(45deg, var(--assistant) 0 4px, transparent 4px 8px); }
+/* Code index popover: same layout as the context one. */
+.idx-used     { background: var(--ok); }
+.idx-over     { background: var(--warn); }
+.idx-files    { background: var(--muted); }
+.idx-symbols  { background: var(--assistant); }
+.idx-imports  { background: var(--system); }
+.idx-idents   { background: var(--tool); }
+.idx-trigrams { background: var(--think); }
+.idx-lang { grid-template-columns: 40px 1fr auto 3.5em; }
+.idx-mini { display: block; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.idx-mini-fill { display: block; height: 100%; background: var(--focus); min-width: 1px; }
 .menu-item {
   display: block; width: 100%; text-align: left; background: none; border: none; border-radius: 6px;
   padding: 4px 8px; cursor: pointer; font: 13px var(--mono);
@@ -471,6 +482,9 @@ body.is-busy .user-actions { display: none; }
 .menu-item:disabled { cursor: default; opacity: 1; }
 .menu-link { display: flex; align-items: center; gap: 6px; padding: 4px 0; color: var(--focus); text-decoration: none; }
 .menu-link:hover { text-decoration: underline; }
+button.menu-link { background: none; border: 0; font: inherit; cursor: pointer; }
+button.menu-link:disabled { color: var(--muted, inherit); opacity: .5; cursor: default; text-decoration: none; }
+.menu-row { display: flex; gap: 14px; }
 .skills-list { max-height: 160px; overflow-y: auto; }
 .small { font-size: 12px; }
 button.small { padding: 3px 10px; font-size: 12px; }
