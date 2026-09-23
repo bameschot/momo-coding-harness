@@ -35,17 +35,22 @@ from pathlib import Path
 
 from . import code_nav
 
-FORMAT_VERSION = 6   # 5: package; 6: HTML inline-script JavaScript, scoping/extraction fixes
+FORMAT_VERSION = 7   # 6: HTML inline-script JavaScript; 7: skipped files, source fingerprint
 DEFAULT_MAX_BYTES = 100 * 1024 * 1024  # default memory budget of the index (/index-max-mem)
 MIN_MAX_BYTES = 1024 * 1024            # smallest budget /index-max-mem accepts
 
-_STAT_THROTTLE_S = 2.0      # a query within this long of the last stat-diff trusts it
+# Every query re-checks the disk (a stat-diff: ~20 ms for 1,500 files).  Only a
+# tree whose stat-diff is slow is throttled, to 10x what the last one took.
+_STAT_THROTTLE_S = 0.0      # a query within this long of the last stat-diff trusts it
+_SLOW_DIFF_S = 0.2
+_THROTTLE_PER_DIFF = 10
 _WAIT_POLL_S = 0.25         # wait_fresh re-checks the cancel flag this often
 _PROGRESS_EVERY_S = 0.25    # on_change is called at most this often while building
 _MAX_FILE_BYTES = 2_000_000 # same limit as grep_files
 _BINARY_SNIFF_BYTES = 4096
 _MAX_FILES = 100_000        # a workdir of $HOME must not index the whole disk
 _COMPACT_AFTER = 500        # dead files before the occurrence index is compacted mid-drain
+_UNPARTIAL_AT = 0.8         # budget share below which files left out are indexed again
 
 # Estimated bytes per stored object, measured with a deep getsizeof walk and
 # tracemalloc on this repo and a 325-file C++/Python tree (imgui), then rounded
@@ -241,9 +246,22 @@ def _grammar_versions() -> dict[str, str]:
     return out
 
 
+@lru_cache(maxsize=1)
+def _source_fingerprint() -> str:
+    """A hash of the extractor's own code: any change to what gets extracted
+    discards saved indexes, without relying on FORMAT_VERSION being bumped."""
+    h = hashlib.sha1()
+    for mod in (code_nav, sys.modules[__name__]):
+        try:
+            h.update(Path(mod.__file__).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:16]
+
+
 def _header(root: Path) -> dict:
     return {"format": FORMAT_VERSION, "root": str(root), "python": list(sys.version_info[:2]),
-            "grammars": _grammar_versions()}
+            "grammars": _grammar_versions(), "source": _source_fingerprint()}
 
 
 def _fmt_size(n: int) -> str:
@@ -283,7 +301,11 @@ class ProjectIndex:
         self.components = {"trigrams": True, "idents": True}
         self.partial = False                    # symbols alone exceeded the budget
         self.mem = {"files": 0, "idents": 0, "trigrams": 0}
-        self.skipped = {"binary": 0, "too_big": 0, "budget": 0, "limit": 0}
+        self.skipped = {"binary": 0, "too_big": 0, "budget": 0, "error": 0, "limit": 0}
+        # Files left out, with the stat they were judged at: an unchanged one is
+        # not re-read at every stat-diff.  rel -> (reason, mtime_ns, size)
+        self._skipped: dict[str, tuple[str, int, int]] = {}
+        self._diff_cost = 0.0
         self.version = 0
         self._notices: list[str] = []
         self._rank_cache: tuple | None = None
@@ -346,12 +368,13 @@ class ProjectIndex:
 
     def invalidate(self, paths) -> None:
         """Queue files the harness itself just wrote, moved or deleted."""
+        from .tools import _SKIP_DIRS
         with self._cond:
             for p in paths:
                 if not p:
                     continue
                 rel = self._rel(Path(p) if os.path.isabs(str(p)) else self.root / str(p))
-                if rel is not None:
+                if rel is not None and not any(part in _SKIP_DIRS for part in rel.split("/")[:-1]):
                     self._queue[rel] = None
             self._cond.notify_all()
 
@@ -390,7 +413,9 @@ class ProjectIndex:
     def _maybe_diff(self) -> None:
         if not self._built:
             return          # the worker's initial diff is still to come or running
-        if not self._dirty and time.monotonic() - self._last_diff < _STAT_THROTTLE_S:
+        slow = self._diff_cost if self._diff_cost > _SLOW_DIFF_S else 0.0
+        throttle = max(_STAT_THROTTLE_S, _THROTTLE_PER_DIFF * slow)
+        if not self._dirty and time.monotonic() - self._last_diff < throttle:
             return
         self._diff()
 
@@ -430,6 +455,7 @@ class ProjectIndex:
     def _diff(self) -> None:
         """Stat every project file against the index and queue what changed."""
         self._dirty = False
+        t0 = time.monotonic()
         listed = self._list_files()
         over = len(listed) - _MAX_FILES
         if over > 0:
@@ -437,6 +463,7 @@ class ProjectIndex:
         with self._lock:
             known = {rel: (self.files[fid].mtime_ns, self.files[fid].size)
                      for rel, fid in self._by_path.items()}
+            known.update((rel, (m, n)) for rel, (_, m, n) in self._skipped.items())
         changed: list[str] = []
         seen = set()
         for rel in listed:
@@ -457,6 +484,7 @@ class ProjectIndex:
             for rel in changed:
                 self._queue[rel] = None
             self._last_diff = time.monotonic()
+            self._diff_cost = self._last_diff - t0
             if changed:
                 self._cond.notify_all()
 
@@ -526,42 +554,51 @@ class ProjectIndex:
                 known = rel in self._by_path
                 blocked = self.partial and not known
             try:
-                entry, rows = (None, None) if blocked else self._build_entry(rel, want_idents, want_sig)
+                if blocked:
+                    entry, rows, skip = None, None, self._skip_stat(rel, "budget")
+                else:
+                    entry, rows, skip = self._build_entry(rel, want_idents, want_sig)
             except Exception:
-                entry, rows = None, None
+                entry, rows, skip = None, None, self._skip_stat(rel, "error")
             with self._cond:
                 self._busy = False
                 self.done += 1
-                if blocked:
-                    self.skipped["budget"] += 1
-                elif not self._stop:
-                    self._apply(rel, entry, rows)
+                if not self._stop:
+                    self._apply(rel, entry, rows, skip)
                     if len(self._dead) >= _COMPACT_AFTER:
                         self._compact()
                 self._cond.notify_all()
             self._changed()
 
+    def _skip_stat(self, rel: str, reason: str):
+        try:
+            st = (self.root / rel).stat()
+        except OSError:
+            return None                 # gone: nothing to remember
+        return reason, st.st_mtime_ns, st.st_size
+
     def _build_entry(self, rel: str, want_idents: bool, want_sig: bool):
-        """Read and index one file outside the lock.  (None, None) = remove it."""
+        """Read and index one file outside the lock.  Returns (entry, rows, skip):
+        entry None and skip None = the file is gone; skip = (reason, mtime, size)
+        of a file that is left out."""
         full = self.root / rel
         try:
             st = full.stat()
         except OSError:
-            return None, None
+            return None, None, None
         if not stat_mod.S_ISREG(st.st_mode):
-            return None, None
+            return None, None, None
+        stamp = (st.st_mtime_ns, st.st_size)
         if st.st_size > _MAX_FILE_BYTES:
-            with self._lock:
-                self.skipped["too_big"] += 1
-            return None, None
+            return None, None, ("too_big",) + stamp
         try:
-            raw = full.read_bytes()
+            with open(full, "rb") as f:
+                head = f.read(_BINARY_SNIFF_BYTES)
+                if b"\x00" in head:
+                    return None, None, ("binary",) + stamp     # never read the rest
+                raw = head + f.read()
         except OSError:
-            return None, None
-        if b"\x00" in raw[:_BINARY_SNIFF_BYTES]:
-            with self._lock:
-                self.skipped["binary"] += 1
-            return None, None
+            return None, None, None
         lang = code_nav.language_for(full)
         symbols: list = []
         imports: list = []
@@ -588,7 +625,7 @@ class ProjectIndex:
                           package=package)
         if want_sig:
             entry.sig, entry.sig_bits = _signature(raw.lower())
-        return entry, rows
+        return entry, rows, None
 
     # ── mutation (lock held) ─────────────────────────────────────────────────
 
@@ -606,9 +643,16 @@ class ProjectIndex:
         self.mem["trigrams"] -= e.cost_sig
         self.version += 1
 
-    def _apply(self, rel: str, entry: FileEntry | None, rows) -> None:
+    def _apply(self, rel: str, entry: FileEntry | None, rows, skip=None) -> None:
         self._remove(rel)
+        old_skip = self._skipped.pop(rel, None)
+        if skip is not None:
+            self._skipped[rel] = skip
+        if skip is not None or old_skip is not None:
+            self._count_skipped()
         if entry is None:
+            if self.partial and self.mem_used() <= self.max_bytes * _UNPARTIAL_AT:
+                self._unpartial()           # files were removed: room for the left-out ones
             return
         if self._free:
             fid = self._free.pop()
@@ -646,6 +690,21 @@ class ProjectIndex:
         self.mem["trigrams"] += entry.cost_sig
         self.version += 1
         self._enforce_budget()
+
+    def _count_skipped(self) -> None:
+        counts = dict.fromkeys(("binary", "too_big", "budget", "error"), 0)
+        for reason, _, _ in self._skipped.values():
+            counts[reason] = counts.get(reason, 0) + 1
+        self.skipped.update(counts)
+
+    def _unpartial(self) -> None:
+        """Index the files the budget left out again (their stat is forgotten,
+        so the next stat-diff queues them)."""
+        self.partial = False
+        for rel in [r for r, v in self._skipped.items() if v[0] == "budget"]:
+            del self._skipped[rel]
+            self._queue[rel] = None
+        self._count_skipped()
 
     def _compact(self) -> None:
         """Drop the removed files' occurrences and symbols, then free their ids."""
@@ -711,8 +770,7 @@ class ProjectIndex:
             elif self.degraded():
                 # Re-enable everything and re-index, so the dropped parts are rebuilt.
                 self.components = {"trigrams": True, "idents": True}
-                self.partial = False
-                self.skipped["budget"] = 0
+                self._unpartial()
                 self._built_rebuild()
             self.version += 1
             self._cond.notify_all()
@@ -735,6 +793,7 @@ class ProjectIndex:
             self.components = {"trigrams": True, "idents": True}
             self.partial = False
             self.skipped = {k: 0 for k in self.skipped}
+            self._skipped = {}
             self.mem = {k: 0 for k in self.mem}
             self._rescan = True
             self.version += 1
@@ -755,10 +814,23 @@ class ProjectIndex:
                 return None
             return code_nav._Index(e.lang, e.nlines, e.symbols, e.imports, e.has_error)
 
+    def paths_under(self, root: Path) -> "list[Path] | None":
+        """The indexed source files under `root`, for code_nav's directory scans
+        (find_symbol, code_outline) — the same files the index_* tools see.
+        None when `root` is outside the project."""
+        rel = self._rel(root)
+        if rel is None:
+            return None
+        prefix = "" if rel == "." else rel + "/"
+        with self._lock:
+            return [self.root / path for path, fid in sorted(self._by_path.items())
+                    if self.files[fid].lang and (not prefix or path.startswith(prefix))]
+
     # ── pickle ───────────────────────────────────────────────────────────────
 
     def save(self) -> str:
         path = pickle_path(self.root)
+        header = pickle.dumps(_header(self.root), protocol=pickle.HIGHEST_PROTOCOL)
         with self._lock:
             if not self._built:
                 return "Code index not saved: it is still being built."
@@ -767,18 +839,23 @@ class ProjectIndex:
                 "files": self.files, "free": self._free, "idents": self._idents,
                 "components": dict(self.components), "partial": self.partial,
                 "skipped": dict(self.skipped), "mem": dict(self.mem),
+                "skipped_files": dict(self._skipped),
             }
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                os.chmod(path.parent, 0o700)
-                tmp = path.with_suffix(f".tmp{os.getpid()}")
-                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, "wb") as f:
-                    pickle.dump(_header(self.root), f, protocol=pickle.HIGHEST_PROTOCOL)
-                    pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-                os.replace(tmp, path)
-            except OSError as e:
-                return f"ERROR: could not save the code index: {e}"
+            # Serialised under the lock (a consistent snapshot, in C); the
+            # slower disk write happens after queries and status polls may run.
+            data = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+            del payload
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(path.parent, 0o700)
+            tmp = path.with_suffix(f".tmp{os.getpid()}.{threading.get_ident()}")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(header)
+                f.write(data)
+            os.replace(tmp, path)
+        except OSError as e:
+            return f"ERROR: could not save the code index: {e}"
         return f"Code index saved: {path} ({_fmt_size(path.stat().st_size)})"
 
     def load(self) -> str:
@@ -834,6 +911,11 @@ class ProjectIndex:
             self.components = dict(payload.get("components", self.components))
             self.partial = bool(payload.get("partial", False))
             self.skipped = {**self.skipped, **payload.get("skipped", {})}
+            sk = payload.get("skipped_files", {})
+            self._skipped = {r: v for r, v in sk.items()
+                             if isinstance(r, str) and isinstance(v, tuple) and len(v) == 3} \
+                if isinstance(sk, dict) else {}
+            self._count_skipped()
             self.mem = {**{k: 0 for k in self.mem}, **payload.get("mem", {})}
             self._dead, self._dead_names = set(), set()
             self.version += 1
@@ -1006,15 +1088,45 @@ def _is_test(rel: str) -> bool:
 _PATHLIKE = re.compile(r"[/\\]|\.[A-Za-z0-9]{1,6}$")
 
 
-# A small model does not reliably tell a function from a method (an out-of-line
-# C++ `Circle::area` is a method; asked for as kind="function" it vanished and
-# the 9B wandered — evals 2026-09-23), so these kinds find each other.
-_CALLABLE_KINDS = {"function", "method", "constructor"}
+_CALLABLE_KINDS = code_nav.CALLABLE_KINDS
+_kind_matches = code_nav.kind_matches
+
+# What a model may pass as lang=, and the languages it also covers: JavaScript
+# lives in HTML pages too, and TSX is TypeScript.
+_LANG_ALIASES = {"js": "javascript", "jsx": "javascript", "node": "javascript", "mjs": "javascript",
+                 "ts": "typescript", "py": "python", "python3": "python", "kt": "kotlin",
+                 "kts": "kotlin", "rs": "rust", "c++": "cpp", "cxx": "cpp", "cc": "cpp",
+                 "hpp": "cpp", "sh": "bash", "shell": "bash", "yml": "yaml", "htm": "html",
+                 "docker": "dockerfile", "postgres": "sql", "postgresql": "sql", "mysql": "sql"}
+_LANG_ALSO = {"javascript": ("html",), "typescript": ("tsx",)}
+# Kinds the HTML extractor gives the page itself; everything else in an HTML
+# file comes from its inline <script> JavaScript.
+_HTML_KINDS = {"id", "script", "style", "element", "template"}
 
 
-def _kind_matches(actual: str, wanted: str) -> bool:
-    wanted = wanted.strip().lower()
-    return actual == wanted or (actual in _CALLABLE_KINDS and wanted in _CALLABLE_KINDS)
+def _norm_lang(lang: str | None) -> str | None:
+    if not lang:
+        return None
+    w = lang.strip().lower()
+    return _LANG_ALIASES.get(w, w)
+
+
+# Languages that can call or import each other's definitions.
+_FAMILY = {"javascript": "js", "typescript": "js", "tsx": "js", "html": "js",
+           "c": "c", "cpp": "c", "java": "jvm", "kotlin": "jvm"}
+
+
+def _family(lang: str | None) -> str | None:
+    return _FAMILY.get(lang, lang) if lang else None
+
+
+def _is_code_symbol(lang: str | None, sym) -> bool:
+    """A definition in code — not a config key, a CSS rule or an HTML id."""
+    if not lang:
+        return False
+    if lang == "html":
+        return sym.kind not in _HTML_KINDS
+    return lang not in _DATA_LANGS
 
 
 def _file_score(rel: str, q: str) -> int:
@@ -1044,6 +1156,7 @@ _MAX_INLINE_HITS = 8
 _MAX_APPROX_AFTER_EXACT = 5   # an exact hit is the answer; a few near misses are context
 _MAX_TEXT_HITS = 200
 _MAX_TEXT_LINE = 200
+_MAX_TEXT_CHARS = 9000      # the whole answer, like index_callers
 _MAX_CALLER_GROUPS = 25     # places listed at level 1
 _MAX_LINES_PER_GROUP = 3
 _MAX_EXPAND = 8             # level-1 definitions followed to level 2 (and so on)
@@ -1070,12 +1183,15 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
     pattern = code_nav._is_pattern(q)
     keep = _path_filter(path)
     want_files = kind == "file" or (kind is None and bool(_PATHLIKE.search(q)))
+    lang = _norm_lang(lang)
+    langs = {lang, *_LANG_ALSO.get(lang, ())} if lang else None
     hits = []
     file_hits = []
     with index._lock:
         for fid, e in index._alive():
-            if (lang and e.lang != lang) or not keep(e.path):
+            if (langs and e.lang not in langs) or not keep(e.path):
                 continue
+            page_js = lang == "javascript" and e.lang == "html"   # only its scripts
             if want_files:
                 fs = _file_score(e.path, q)
                 if fs:
@@ -1084,6 +1200,8 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
                 continue
             for s in e.symbols:
                 if kind and not _kind_matches(s.kind, kind):
+                    continue
+                if page_js and s.kind in _HTML_KINDS:
                     continue
                 sc = _score(s, q, ql, qtoks, pattern)
                 if sc:
@@ -1097,7 +1215,7 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
         if not other.startswith("(no definition"):
             return (f"(nothing of kind '{kind}' matches '{query}' — without kind= it matches "
                     f"these:)\n" + other)
-    if file_hits and (not hits or -file_hits[0][0] >= -min(hits)[0]):
+    if file_hits and (not hits or -file_hits[0][0] >= -min(h[0] for h in hits)):
         # The query names a file: say so, and point at the tool that describes one.
         lines = [f"{h[2]}  (file, {h[3].lang or 'text'}, {h[3].nlines} lines, "
                  f"{len(h[3].symbols)} definitions)" for h in file_hits[:_MAX_SEARCH]]
@@ -1308,19 +1426,30 @@ def index_text(query: str, path: str | None = None, regex: bool = False, *, work
                           f"by approximate name)", index, "trigrams")
     out = [f"{total} match{'es' if total != 1 else ''} in {len(files_hit)} file"
            f"{'s' if len(files_hit) != 1 else ''} for {query!r}:"]
+    size = len(out[0])
     cur = None
+    shown = 0
     for rel, ln, line, symbols in hits:
-        if rel != cur:
-            out.append(f"{rel} ({files_hit[rel]})")
-            cur = rel
         owner = code_nav._enclosing(symbols, ln) if symbols else None
         where = f" [in {owner.qualname}]" if owner else ""
         text = line.strip()
         if len(text) > _MAX_TEXT_LINE:
             text = text[:_MAX_TEXT_LINE] + " …"
-        out.append(f"  L{ln}{where}: {text}")
-    if total > len(hits):
-        out.append(f"... (first {len(hits)} of {total} matches — narrow with path= or a longer query)")
+        block = ([f"{rel} ({files_hit[rel]})"] if rel != cur else []) + [f"  L{ln}{where}: {text}"]
+        cost = sum(len(b) + 1 for b in block)
+        if size + cost > _MAX_TEXT_CHARS and shown:
+            break
+        out.extend(block)
+        size += cost
+        shown += 1
+        cur = rel
+    if total > shown:
+        rest = sorted((f for f in files_hit if f not in {h[0] for h in hits[:shown]}),
+                      key=lambda f: -files_hit[f])
+        more = (" — also in: " + ", ".join(f"{f} ({files_hit[f]})" for f in rest[:8])
+                + (" ..." if len(rest) > 8 else "")) if rest else ""
+        out.append(f"... (first {shown} of {total} matches{more} — narrow with path= or a "
+                   f"longer query)")
     if not ids:
         out.append("(note: the query has no 3-letter word, so every indexed file was scanned)")
     first = hits[0]
@@ -1363,16 +1492,41 @@ def _is_subtype(index: ProjectIndex, t: str, target: str, depth: int = 4) -> boo
     if depth == 0:
         return False
     with index._lock:
-        sigs = [index.files[f].symbols[i].signature
+        sigs = [(index.files[f].lang, index.files[f].symbols[i].signature)
                 for f, i in index._sym_by_name.get(t.lower(), [])
                 if index.files[f] is not None and index.files[f].symbols[i].name == t
                 and index.files[f].symbols[i].kind in code_nav._CONTAINER_KINDS]
-    for sig in sigs:
-        supers = [w for w in re.findall(r"[A-Za-z_]\w*", sig.split(t, 1)[-1]) if w != t]
+    for lang, sig in sigs:
+        rest = sig.split(t, 1)[-1]
+        if lang != "python":
+            rest = _drop_params(rest)       # Kotlin `class Box(val item: Circle) : Shape()`
+        supers = [w for w in re.findall(r"[A-Za-z_]\w*", rest) if w != t]
         if target in supers or any(_is_subtype(index, w, target, depth - 1)
                                    for w in supers if w[:1].isupper()):
             return True
     return False
+
+
+_CTOR_PARAMS = re.compile(r"\s*(?:<[^()]*>)?\s*(?:(?:private|protected|internal|public)\s+)?"
+                          r"(?:@\w+\s+)*(?:constructor\s*)?\(")
+
+
+def _drop_params(rest: str) -> str:
+    """'(val item: Circle) : Shape()' -> ' : Shape()': the constructor parameters
+    right after a class name (Kotlin, Java records) are not its bases.  Python's
+    parentheses ARE the bases, so Python never comes here."""
+    m = _CTOR_PARAMS.match(rest)
+    if not m:
+        return rest
+    depth = 0
+    for k in range(m.end() - 1, len(rest)):
+        if rest[k] == "(":
+            depth += 1
+        elif rest[k] == ")":
+            depth -= 1
+            if depth == 0:
+                return rest[:m.start()] + rest[k + 1:]
+    return ""
 
 
 def query_target(index: ProjectIndex, name: str) -> tuple[str, str | None, str | None]:
@@ -1399,8 +1553,19 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
     that defines `bare` itself."""
     cls_last = cls.rsplit(".", 1)[-1] if cls else None
     with index._lock:
-        named = [index.files[f].symbols[i] for f, i in index._sym_by_name.get(bare.lower(), [])
-                 if index.files[f] is not None and index.files[f].symbols[i].name == bare]
+        named = [(index.files[f].lang, index.files[f].symbols[i])
+                 for f, i in index._sym_by_name.get(bare.lower(), [])
+                 if index.files[f] is not None and index.files[f].symbols[i].name == bare
+                 and _is_code_symbol(index.files[f].lang, index.files[f].symbols[i])]
+    # The definitions asked about: for Cart.total only Cart's, not Report.total.
+    meant = [(lang, s) for lang, s in named
+             if not cls_last or s.qualname == f"{cls_last}.{bare}"
+             or s.qualname.endswith(f".{cls_last}.{bare}")] or named
+    # A Python method is never called from JavaScript: when every definition
+    # meant is in one language family, uses in other languages are other names.
+    fams = {_family(lang) for lang, _ in meant}
+    family = fams.pop() if len(fams) == 1 else None
+    named = [s for _, s in named]
     owners_of_name = {s.qualname.rsplit(".", 1)[0] for s in named}
     # Every definition of the name is top-level (a function, not a method), so
     # `self.total` / `this.total` is some object's attribute, never a use of it.
@@ -1408,11 +1573,13 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
     with index._lock:
         if index.components["idents"]:
             occ = index._occurrences(bare)
-            targets = [(index.files[fid].path, set(lines)) for fid, lines in occ.items()
-                       if index.files[fid] is not None and index.files[fid].lang]
+            targets = [(e.path, set(lines)) for fid, lines in occ.items()
+                       if (e := index.files[fid]) is not None and e.lang
+                       and (family is None or _family(e.lang) == family)]
         else:
             targets = [(e.path, None) for _, e in index._alive()
-                       if e.lang and e.lang not in _DATA_LANGS]
+                       if e.lang and (e.lang not in _DATA_LANGS or e.lang == "html")
+                       and (family is None or _family(e.lang) == family)]
     uses, defs = [], []
     for i, (rel, rows) in enumerate(sorted(targets, key=lambda t: t[0])):
         if cancel is not None and i % 20 == 0 and cancel.is_set():
@@ -1441,7 +1608,7 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
             if cls_last and role == "call":
                 if recv and recv.startswith(("self.", "this.")):
                     continue            # an attribute of self is a different object
-                if recv and recv.split("(", 1)[0] in ("super", "super."[:5]) and owner is not None \
+                if recv and recv.split("(", 1)[0] == "super" and owner is not None \
                         and cls_last in owner.qualname.split(".")[:-1]:
                     continue            # super().m() in C calls C's base, not C.m
                 if _other_type(index, rtype, cls_last):
@@ -1455,6 +1622,36 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
             line = parsed.lines[r].strip() if r < len(parsed.lines) else ""
             uses.append((rel, r + 1, role, recv, owner, line))
     return uses, defs
+
+
+_USE_ROLES = ("call", "import", "type", "other")
+
+
+def _data_defs(index: ProjectIndex, name: str) -> list:
+    """[(rel, Symbol)] config keys, CSS rules, SQL tables, HTML ids... named `name`."""
+    bare = name.rsplit(".", 1)[-1]
+    with index._lock:
+        return [(index.files[f].path, index.files[f].symbols[i])
+                for f, i in index._sym_by_name.get(bare.lower(), [])
+                if index.files[f] is not None
+                and not _is_code_symbol(index.files[f].lang, index.files[f].symbols[i])
+                and code_nav._matches(index.files[f].symbols[i], name)]
+
+
+def _data_callers(index: ProjectIndex, name: str, bare: str, data: list) -> str:
+    """index_callers on a config key / table / selector: code refers to those by
+    string, so the answer is where it is defined and which files mention it."""
+    where = "; ".join(f"{rel}:L{s.start}-{s.end} ({s.kind} {s.qualname})" for rel, s in data[:5])
+    out = [f"'{name}' is not code — it is defined at {where}"
+           + (f" and {len(data) - 5} more" if len(data) > 5 else "") + "."]
+    homes = {rel for rel, _ in data}
+    mentions = _text_mentions(index, bare, lambda rel: rel not in homes, limit=10)
+    if mentions:
+        out.append(f"Code refers to it by text; '{bare}' appears in: {mentions}.")
+        out.append(f'(next: index_text("{bare}") shows those lines)')
+    else:
+        out.append(f"No other file mentions '{bare}'.")
+    return _with_note("\n".join(out), index)
 
 
 def _files_named(index: ProjectIndex, name: str) -> list[str]:
@@ -1505,8 +1702,8 @@ def index_callers(name: str, depth: int = 1, role: str | None = None, *, workdir
         depth = max(1, min(3, int(depth)))
     except (TypeError, ValueError):
         depth = 1
-    if role and role not in code_nav.REFERENCE_ROLES:
-        return f"ERROR: unknown role '{role}' (use one of: {', '.join(code_nav.REFERENCE_ROLES)})"
+    if role and role not in _USE_ROLES:
+        return f"ERROR: unknown role '{role}' (use one of: {', '.join(_USE_ROLES)})"
     dotted = (name or "").strip().replace("::", ".")
     if not dotted:
         return "ERROR: name is empty"
@@ -1519,6 +1716,9 @@ def index_callers(name: str, depth: int = 1, role: str | None = None, *, workdir
     if role:
         uses = [u for u in uses if u[2] == role]
     if not defs and not uses:
+        data = _data_defs(index, dotted)
+        if data:
+            return _data_callers(index, dotted, bare, data)
         files = _files_named(index, dotted)
         if files:
             # `index_callers("format")` asks about a module, not a definition.
@@ -1573,7 +1773,9 @@ def index_callers(name: str, depth: int = 1, role: str | None = None, *, workdir
             if common or owner.name == bare:
                 lines.append(f"  via {owner.qualname}: (name too common to follow)")
                 continue
-            u2, _ = _uses(index, owner.name, None, cancel)
+            # Scoped like level 1: Cart.total's users, not every `total`.
+            b2, _recv, c2 = query_target(index, owner.qualname)
+            u2, _ = _uses(index, b2, None, cancel, c2)
             u2 = [u for u in u2 if u[2] in ("call", "other", "type")]
             if not u2:
                 continue
@@ -1649,6 +1851,10 @@ def _import_graph(index: ProjectIndex) -> dict[int, dict[int, int]]:
             for sym in e.symbols:
                 if sym.depth == 0:
                     fqns[f"{e.package}.{sym.name}"].add(fid)
+        elif e.lang in _DECL_IMPORT_LANGS:
+            for sym in e.symbols:           # the default package: `import CdpClient`
+                if sym.depth == 0:
+                    fqns[sym.name].add(fid)
     out: dict[int, dict[int, int]] = defaultdict(dict)
     for fid in alive:
         e = index.files[fid]
@@ -1724,10 +1930,21 @@ def _resolve_import(imp, lang: str | None, cands, fqns, index: ProjectIndex) -> 
         raw = imp.module.replace("::", ".")
         if raw.endswith(".*"):
             targets = set(fqns.get(raw, ()))
-        for k in range(len(parts), 1, -1):
+        for k in range(len(parts), 0, -1):
             if targets:
                 break
             targets = set(fqns.get(".".join(parts[:k]), ()))
+        if fqns:
+            # The project declares packages, so an import none of them covers
+            # is a library's (`java.util.List`), not a file named List or util
+            # — unless a file's path spells it out: maestro/drivers/AndroidDriver.kt
+            # for `maestro.drivers.AndroidDriver` (its class did not parse).
+            for k in range(len(parts), 1, -1):
+                if targets:
+                    break
+                targets = {d for d in cands.get(".".join(parts[:k]), ())
+                           if index.files[d].lang in _DECL_IMPORT_LANGS}
+            return targets
     # `from harness import tools` imports the module tools, not the package.
     for n in ([] if targets else imp.names):
         targets |= cands.get(f"{norm}.{n}" if norm else n, set())
@@ -1742,7 +1959,10 @@ def _resolve_import(imp, lang: str | None, cands, fqns, index: ProjectIndex) -> 
                 break
     if lang in ("c", "cpp") and imp.module.lower().endswith(_HEADER_EXTS):
         targets = {d for d in targets if index.files[d].path.lower().endswith(_HEADER_EXTS)}
-    return targets
+    # `import java.util.List` is not util.c; a Kotlin build script is not vite.config.ts.
+    fam = _family(lang)
+    return {d for d in targets if _family(index.files[d].lang) == fam
+            or (fam == "js" and index.files[d].lang in ("css", "json"))}
 
 
 def _ranks(index: ProjectIndex):

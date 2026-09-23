@@ -322,6 +322,72 @@ class OracleFindings(unittest.TestCase):
         self.assertEqual({s.qualname for s in p.symbols}, {"Module.locateFile", "globalThis.f0"})
 
 
+class KotlinGrammarQuirks(unittest.TestCase):
+    """tree-sitter-kotlin misparses these; found against the Kotlin compiler's
+    own parser on the Maestro repo (evals/oracle_bench.py --langs kotlin)."""
+
+    def roles(self, src, name):
+        f = SCRATCH / "quirk.kt"
+        f.write_text(src)
+        return {r + 1: v[:2] for r, v in code_nav.references_in(code_nav.parse(f), name).items()}
+
+    def test_generic_calls_parsed_as_comparisons(self):
+        src = ("fun f(x: X) {\n    assertThrows<E> { g() }\n    x.setAll<T>(m)\n"
+               "    val y = emptyList<String>()\n}\n")
+        self.assertEqual(self.roles(src, "assertThrows"), {2: ("call", None)})
+        self.assertEqual(self.roles(src, "setAll"), {3: ("call", "x")})
+        self.assertEqual(self.roles(src, "emptyList"), {4: ("call", None)})
+
+    def test_negated_call(self):
+        self.assertEqual(self.roles("fun f() = !isReady(p)\n", "isReady"), {1: ("call", None)})
+
+    def test_call_after_an_operator(self):
+        src = "fun f() {\n    val a = x ?: emptyList<String>()\n    val m = mapOf(\"k\" to emptyMap<A, B>())\n}\n"
+        self.assertEqual(self.roles(src, "emptyList"), {2: ("call", None)})
+        self.assertEqual(self.roles(src, "emptyMap"), {3: ("call", None)})
+
+    def test_named_companion_object(self):
+        f = SCRATCH / "comp.kt"
+        f.write_text("class A {\n    companion object Factory {\n        fun make() = A()\n    }\n}\n")
+        quals = {s.qualname for s in code_nav.parse(f).symbols}
+        self.assertTrue({"A.Factory", "A.Factory.make"} <= quals, quals)
+
+
+class CGrammarQuirks(unittest.TestCase):
+    """tree-sitter-c misreads macro-heavy C; found against clang's AST on the
+    mgba repo (evals/oracle_bench.py --langs c-clang)."""
+
+    def parse(self, src):
+        f = SCRATCH / "quirk.c"
+        f.write_text(src)
+        return code_nav.parse(f)
+
+    def roles(self, src, name):
+        return {r + 1: v[0] for r, v in code_nav.references_in(self.parse(src), name).items()}
+
+    def test_call_statement_misparsed_as_a_declaration_is_a_call(self):
+        # In macro-heavy files (`DEFINE_OP(B, ...; cycles += WritePC(cpu);)`)
+        # a call statement comes out as this shape: a declaration of a
+        # function inside a function body — which real C practically never has.
+        src = "void f(void) {\n\tcycles WritePC(cpu);\n}\n"
+        self.assertEqual(self.roles(src, "WritePC"), {2: "call"})
+
+    def test_function_pointer_variable_is_not_a_call(self):
+        src = "void f(void) {\n\tuint32_t (*lookup)(void*, uint32_t);\n\tlookup = g;\n}\n"
+        self.assertNotIn("call", self.roles(src, "lookup").values())
+
+    def test_prototypes_at_file_scope_stay_declarations(self):
+        self.assertEqual(self.roles("int clamp(int v);\n", "clamp"), {1: "decl"})
+
+    def test_keywords_are_never_names(self):
+        src = ("int f(int a) {\n#ifdef X\n\tif (a) { return 1; }\n#endif\n"
+               "\telse if (a > 2) {\n\t\treturn 2;\n\t}\n\treturn 0;\n}\n")
+        parsed = self.parse(src)
+        self.assertNotIn("if", {s.name for s in parsed.symbols})
+        self.assertEqual(code_nav.references_in(parsed, "if"), {})
+        self.assertNotIn("if", {n for n, _ in code_nav.identifier_rows(parsed)})
+
+
 class ConstantDocs(unittest.TestCase):
 
     def test_trailing_and_leading_comments(self):

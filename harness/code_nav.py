@@ -121,6 +121,7 @@ _DEFS: dict[str, dict[str, str]] = {
         "object_declaration":   "object",
         "function_declaration": "function",
         "type_alias":           "type",
+        "companion_object":     "object",   # only when named: companion object Factory
     },
     "rust": {
         "struct_item":            "struct",
@@ -1056,7 +1057,12 @@ def _symbols_for(root, lang: str, lines: list[str], imports_out: list | None = N
     data = _DATA_EXTRACTORS.get(lang)
     if data is not None:
         return data(root, lines)
-    return _extract(root, lang, lines, imports_out)
+    symbols = _extract(root, lang, lines, imports_out)
+    kw = _KEYWORDS.get(lang)
+    if kw:
+        # `#ifdef X ... #endif else if (c) {...}` parses as a function named `if`.
+        symbols = [s for s in symbols if s.name not in kw]
+    return symbols
 
 
 # ── import extraction ────────────────────────────────────────────────────────
@@ -1220,11 +1226,15 @@ def _put_index(key: str, stamp: tuple[int, int], parsed: _Parsed) -> None:
 # find_symbol's line form — reads the one shared store instead of keeping a
 # second copy of the same symbols in _index_cache.
 _index_provider = None  # callable(key: str, stamp) -> _Index | None
+# ...and its file list, so a directory scan sees the same files the index does
+# (git-tracked, not git-ignored) instead of walking the disk itself.
+_index_files = None     # callable(root: Path) -> list[Path] | None
 
 
-def set_index_provider(fn) -> None:
-    global _index_provider
+def set_index_provider(fn, files=None) -> None:
+    global _index_provider, _index_files
     _index_provider = fn
+    _index_files = files if fn is not None else None
 
 
 def index(path: Path) -> _Index | None:
@@ -1366,7 +1376,24 @@ def identifier_rows(parsed: _Parsed) -> set[tuple[str, int]]:
     if not cur:
         return set()
     caps = cur.captures(parsed.tree.root_node).get("id", [])
-    return {(_text(c), c.start_point[0] + 1) for c in caps if c.child_count == 0}
+    kw = _KEYWORDS.get(parsed.lang, ())
+    return {(t, c.start_point[0] + 1) for c in caps
+            if c.child_count == 0 and (t := _text(c)) not in kw}
+
+
+# Reserved words are never names — but in a region tree-sitter could not parse
+# (C code passed as a macro argument: `DEFINE_OP(MRC, if (x) {...})`) they
+# come out as identifiers, and `if (x)` as a call of `if`.
+_C_KEYWORDS = frozenset("""auto break case char const continue default do double else enum
+    extern float for goto if inline int long register restrict return short signed sizeof
+    static struct switch typedef union unsigned void volatile while _Bool _Complex _Atomic
+    _Alignas _Alignof _Generic _Noreturn _Static_assert _Thread_local""".split())
+_KEYWORDS = {"c": _C_KEYWORDS,
+             "cpp": _C_KEYWORDS | frozenset("""alignas alignof and asm bool catch class
+                 const_cast constexpr decltype delete dynamic_cast explicit export false friend
+                 mutable namespace new noexcept not nullptr operator or private protected public
+                 reinterpret_cast static_assert static_cast template this throw true try typeid
+                 typename using virtual""".split())}
 
 
 def _in_closing_tag(node) -> bool:
@@ -1389,7 +1416,10 @@ def _is_def_name(node) -> bool:
     use of that name on the same line."""
     if node.parent is not None and node.parent.type in _MEMBER_NODES \
             and node.parent.type not in ("qualified_identifier", "scoped_identifier"):
-        return False                  # obj.name / this.name: always a use
+        # obj.name / this.name is a use — unless it is what an assignment
+        # defines: `exports.makeCounter = function ...`, `C.prototype.inc = ...`
+        return _field_of(node) in ("property", "attribute", "field") \
+            and _field_of(node.parent) == "left"
     if node.parent is not None and node.parent.type in ("qualified_identifier", "scoped_identifier",
                                                         "destructor_name", "operator_name"):
         node = node.parent
@@ -1409,6 +1439,8 @@ def references_in(parsed: _Parsed, bare: str, rows: set[int] | None = None
     so a lookup driven by the occurrence index touches a few nodes, not all."""
     if parsed.sub is not None:
         return references_in(parsed.sub, bare, rows)   # HTML: its inline scripts
+    if bare in _KEYWORDS.get(parsed.lang, ()):
+        return {}
     target = bare.encode()
     def_lines = {s.name_line for s in parsed.symbols if s.name == bare}
     out: dict[int, tuple[str, str | None]] = {}
@@ -1436,6 +1468,17 @@ def references_in(parsed: _Parsed, bare: str, rows: set[int] | None = None
         else:
             stack.extend(node.children)
     return out
+
+
+# A small model does not reliably tell a function from a method (an out-of-line
+# C++ `Circle::area` is a method; asked for as kind="function" it vanished and
+# the 9B wandered — evals 2026-09-23), so these kinds find each other.
+CALLABLE_KINDS = {"function", "method", "constructor"}
+
+
+def kind_matches(actual: str, wanted: str) -> bool:
+    wanted = wanted.strip().lower()
+    return actual == wanted or (actual in CALLABLE_KINDS and wanted in CALLABLE_KINDS)
 
 
 def _is_pattern(name: str) -> bool:
@@ -1480,6 +1523,10 @@ def _iter_source_files(root: Path, stats: dict | None = None):
     if root.is_file():
         if language_for(root):
             yield root
+        return
+    listed = _index_files(root) if _index_files is not None else None
+    if listed is not None:
+        yield from listed
         return
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
@@ -1647,9 +1694,13 @@ def _function_scoped(binding) -> bool:
                                             "pattern_list", "tuple_pattern", "type_pattern"):
         return True
     n = binding
+    own_function = True
     while n.parent is not None:
-        if n.type == "variable_declaration" and n.parent.type != "property_declaration":
+        if own_function and n.type == "variable_declaration" \
+                and n.parent.type != "property_declaration":
             return True                               # JS `var`
+        if n.type in _FUNC_SCOPES:
+            own_function = False      # an enclosing function's `var` is not this binding's
         n = n.parent
     return n.type == "module"                         # Python's root node
 
@@ -1663,7 +1714,7 @@ def _in_scope(binding, use) -> bool:
     return block is None or (block.start_byte <= use.start_byte and use.end_byte <= block.end_byte)
 
 
-def _scan_binding(scope, target: bytes, skip_functions: bool, use=None):
+def _scan_binding(scope, target: bytes, use=None):
     """A binding of `target` in this scope.  A nested function or class is a
     scope of its own: only its NAME binds here, never its parameters or body —
     `items.map((total) => total)` must not make `total` local to the outer
@@ -1679,8 +1730,6 @@ def _scan_binding(scope, target: bytes, skip_functions: bool, use=None):
             nm = n.child_by_field_name("name")
             if nm is not None and nm.text == target and _is_ident(nm.type):
                 return nm
-            if not skip_functions and n.type not in _FUNC_SCOPES and n.type not in _NESTED_CLASSES:
-                stack.extend(n.children)
         else:
             stack.extend(n.children)
     return None
@@ -1710,10 +1759,14 @@ def _binding_of(node, fields: bool = False):
         return None
     innermost = scope
     found = None
+    root = scope
+    while root.parent is not None:
+        root = root.parent
+    python = root.type == "module"            # only Python has `global x`
     while scope is not None:
-        if _declared_global(scope, node.text):
+        if python and _declared_global(scope, node.text):
             return None
-        found = _scan_binding(scope, node.text, False, use=node)
+        found = _scan_binding(scope, node.text, use=node)
         if found is not None:
             break
         # a closure: the name may be a local of an enclosing function
@@ -1725,7 +1778,7 @@ def _binding_of(node, fields: bool = False):
         while body is not None and body.type not in _CLASS_BODIES:
             body = body.parent
         if body is not None:
-            found = _scan_binding(body, node.text, True)
+            found = _scan_binding(body, node.text)
     return found
 
 
@@ -1803,13 +1856,71 @@ def declared_type(binding) -> str | None:
     return None
 
 
-def _receiver_type(recv_node) -> str | None:
+def _receiver_type(recv_node, lang: str) -> str | None:
     if recv_node is None:
         return None
     if _is_ident(recv_node.type):
         b = _binding_of(recv_node, fields=True)
-        return declared_type(b) if b is not None else None
+        if b is not None:
+            return declared_type(b)
+        return _imported_name(recv_node, lang)
     return _ctor_type(recv_node)              # new Cart().add(...), Cart().total()
+
+
+def _imported_name(node, lang: str) -> str | None:
+    """The name a module-level import binds this receiver to, as imported:
+    `from . import session as session_mod` -> 'session', `import * as api` ->
+    'api', `import a.Cart` -> 'Cart'.  So `session_mod.save()` is known to be
+    the module's save, not some class's.  None when no import binds it."""
+    kinds = _IMPORTS.get(lang, ())
+    if not kinds:
+        return None
+    target = node.text
+    root = node
+    while root.parent is not None:
+        root = root.parent
+    for st in root.named_children:
+        if st.type not in kinds:
+            continue
+        if lang in ("java", "kotlin", "rust"):
+            # One path per statement; it binds its last name, or an alias.
+            path = st.child_by_field_name("argument") or \
+                (st.named_children[0] if st.named_child_count else None)
+            if path is None or "{" in _text(path):
+                continue
+            if path.type == "use_as_clause":             # Rust use a::B as C
+                alias, path = path.child_by_field_name("alias"), path.child_by_field_name("path")
+            else:
+                alias = next((c for c in st.named_children[1:] if _is_ident(c.type)), None)
+            if path is None:
+                continue
+            last = re.split(r"[.:]+", _text(path).replace("static ", ""))[-1]
+            if (alias.text if alias is not None else last.encode()) == target:
+                return last
+            continue
+        stack = [st]
+        while stack:
+            n = stack.pop()
+            if n.child_count:
+                stack.extend(n.children)
+                continue
+            if n.text != target or not _is_ident(n.type):
+                continue
+            p = n.parent
+            if lang == "python":
+                if not _binds(n):
+                    continue                              # the module path, not a name
+                if p is not None and p.type == "aliased_import":
+                    return re.split(r"[.]+", _text(p.child_by_field_name("name")))[-1]
+                return _text(n)
+            if p is not None and p.type == "import_specifier":
+                alias = p.child_by_field_name("alias")
+                if alias is not None:
+                    if alias.id != n.id:
+                        continue                          # {a as b}: `a` is not bound here
+                    return _text(p.child_by_field_name("name"))
+            return _text(n)
+    return None
 
 
 def _imported_binding(node) -> bool:
@@ -1835,9 +1946,71 @@ def _is_prototype(node) -> bool:
             host = d.parent
             while host is not None and host.type in ("pointer_declarator", "reference_declarator"):
                 host = host.parent
-            return host is not None and host.type in ("declaration", "field_declaration")
+            return host is not None and host.type in ("declaration", "field_declaration") \
+                and not _in_function_body(host)
         d = d.parent
     return False
+
+
+def _in_function_body(node) -> bool:
+    p = node.parent
+    while p is not None:
+        if p.type in ("compound_statement", "function_definition"):
+            return True
+        if p.type in ("translation_unit", "field_declaration_list", "declaration_list"):
+            return False
+        p = p.parent
+    return False
+
+
+def _misparsed_c_call(node) -> bool:
+    """C statements tree-sitter reads as something else, mostly next to a
+    preprocessor split or inside code passed to a macro:
+    * `x += f(a);)` / `free(p);` as a DECLARATION of `f` — a function
+      prototype inside a function body is legal but practically unheard of;
+    * `f(a, b);` as a macro type specifier `f(type)` in a declaration."""
+    parent = node.parent
+    if parent is None:
+        return False
+    if parent.type == "macro_type_specifier" and _field_of(node) == "name":
+        return _in_function_body(parent)
+    d = parent          # directly: `(*lookupEntry)(void*)` is a function-pointer variable
+    if d.type != "function_declarator" or _field_of(node) != "declarator":
+        return False
+    host = d.parent
+    while host is not None and host.type in ("pointer_declarator", "init_declarator"):
+        host = host.parent
+    return host is not None and host.type == "declaration" and _in_function_body(host)
+
+
+def _kotlin_misparsed_call(node):
+    """Calls tree-sitter-kotlin parses as something else, recovered from shape.
+    * `f<T>(x)` / `f<T> { }` / `a.f<T>(x)` come out as the comparison
+      `(f < T) > (x)`; chained comparisons are a compile error in Kotlin, so that
+      shape can only be a call with type arguments.
+    * `!f(x)`, `a ?: f<T>()` and `k to f<T>()` come out as a call of the
+      whole operator expression."""
+    parent = node.parent
+    if parent is None:
+        return None
+    callee, recv = node, None
+    if parent.type == "navigation_expression" and parent.named_children[-1].id == node.id:
+        callee, recv = parent, _text(parent.named_children[0])[:40]
+    lt = callee.parent
+    if lt is not None and lt.type == "binary_expression" and lt.child_count == 3 \
+            and lt.children[0].id == callee.id and lt.children[1].type == "<":
+        gt = lt.parent
+        if gt is not None and gt.type == "binary_expression" and gt.child_count == 3 \
+                and gt.children[0].id == lt.id and gt.children[1].type == ">" \
+                and gt.children[2].type in ("parenthesized_expression", "lambda_literal"):
+            return "call", recv, (callee.named_children[0] if recv else None)
+    if parent.type in ("unary_expression", "binary_expression", "infix_expression", "elvis_expression") \
+            and parent.named_children[-1].id == node.id and parent.parent is not None \
+            and parent.parent.type == "call_expression" and parent.parent.named_children[0].id == parent.id:
+        # `!f(x)`, `a ?: f<T>()`, `"k" to f<T>()`: the grammar calls the whole
+        # operator expression; the call belongs to its last operand.
+        return "call", None, None
+    return None
 
 
 def _classify(node, lang: str, is_def: bool) -> tuple[str, str | None, str | None]:
@@ -1845,7 +2018,7 @@ def _classify(node, lang: str, is_def: bool) -> tuple[str, str | None, str | Non
     what it hangs off when it is a member access.  Purely syntactic — there is
     no scope resolution here, so the receiver is reported rather than resolved."""
     role, recv, recv_node = _classify_node(node, lang, is_def)
-    return role, recv, _receiver_type(recv_node) if role == "call" and recv_node is not None else None
+    return role, recv, _receiver_type(recv_node, lang) if role == "call" and recv_node is not None else None
 
 
 def _classify_node(node, lang: str, is_def: bool):
@@ -1870,10 +2043,17 @@ def _classify_node(node, lang: str, is_def: bool):
     parent = node.parent
     if parent is None:
         return "other", None, None
-    if lang in ("c", "cpp") and _is_prototype(node):
-        return "decl", None, None
+    if lang in ("c", "cpp"):
+        if _is_prototype(node):
+            return "decl", None, None
+        if lang == "c" and _misparsed_c_call(node):      # C++: `Foo f(a, b);` constructs
+            return "call", None, None
     if parent.type not in _MEMBER_NODES and _is_local(node):
         return "local", None, None
+    if lang == "kotlin":
+        call = _kotlin_misparsed_call(node)
+        if call is not None:
+            return call
     field = _field_of(node)
     receiver = recv_node = None
     if parent.type in _MEMBER_NODES:
@@ -2024,7 +2204,7 @@ def find_symbol(name: str, directory: str = ".", kind: str | None = None, *, wor
     files = set()
     for f, parsed in _scan(root, stats):
         for s in parsed.symbols:
-            if _matches(s, name) and (not kind or s.kind == kind):
+            if _matches(s, name) and (not kind or kind_matches(s.kind, kind)):
                 hits.append(f"{_rel(f, workdir)}:L{s.start}-{s.end}  {s.kind} {s.qualname}  | {s.signature}")
                 kinds[s.kind] = kinds.get(s.kind, 0) + 1
                 files.add(f)

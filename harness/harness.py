@@ -932,7 +932,7 @@ class Harness:
                                       on_change=self._on_index_change)
         self.index = idx
         self._index_saved_version = -1
-        code_nav.set_index_provider(idx.provide)
+        code_nav.set_index_provider(idx.provide, idx.paths_under)
         idx.start(load_pickle=self.index_persist)
 
     def _stop_index(self, save: bool = True) -> str:

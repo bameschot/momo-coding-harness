@@ -9,6 +9,9 @@ the index with sources it has no say in:
            `symtable` (which names are local to each function)
   kotlin   the Kotlin 2.2 compiler's own parser (PSI), via evals/oracle/KtOracle.java
            (jars: `--fetch-kotlin` downloads them into evals/.cache/ktoracle)
+  c-clang  clang's own AST (evals/oracle/clang_c.py): definitions and call sites of
+           every C file clang compiles, preprocessor and all — so it also measures
+           the files tree-sitter cannot parse cleanly (macro-heavy C)
   others   each grammar's own tags.scm query (definitions and call references),
            shipped with the tree-sitter wheel by the grammar's maintainers
 
@@ -18,6 +21,7 @@ samples of each kind so they can be triaged.  No model involved.
     python evals/oracle_bench.py                           # default corpora
     python evals/oracle_bench.py --python ~/src/proj --limit 300 --show 15
     python evals/oracle_bench.py --tags ~/src/cproj --langs c cpp
+    python evals/oracle_bench.py --langs c-clang --clang ~/projects/mgba --limit 1000
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ import importlib
 import os
 import random
 import symtable
+import re
 import sys
 import sysconfig
 import time
@@ -478,6 +483,179 @@ def run_kotlin(paths: list[Path], show: int) -> list[str]:
     return out
 
 
+# ── C: clang's AST ───────────────────────────────────────────────────────────
+
+def _c_index_calls(parsed) -> set:
+    """Every identifier the index classifies as a call — what references_in
+    reports for that name."""
+    out = set()
+    kw = code_nav._KEYWORDS.get("c", ())
+    stack = [parsed.tree.root_node]
+    while stack:
+        n = stack.pop()
+        if n.child_count:
+            stack.extend(n.children)
+            continue
+        if not n.text or not code_nav._is_ident(n.type) or n.parent is None or n.text.decode() in kw:
+            continue
+        role = code_nav._classify(n, "c", False)[0]
+        if role == "call" or (role == "local" and n.parent.type in code_nav._CALL_NODES
+                              and code_nav._is_callee(n)):
+            out.add((code_nav._text(n), n.start_point[0] + 1))
+    return out
+
+
+def _c_preprocessor_text(parsed) -> tuple[set, set, set]:
+    """(#define names with their line, lines inside #define bodies, lines of
+    #if / #include conditions) — text the index does not read as code."""
+    names, bodies, conditions = set(), set(), set()
+    stack = [parsed.tree.root_node]
+    while stack:
+        n = stack.pop()
+        if n.type in ("preproc_def", "preproc_function_def"):
+            bodies.update(range(n.start_point[0] + 1, n.end_point[0] + 2))
+            nm = n.child_by_field_name("name")
+            if nm is not None:
+                names.add((code_nav._text(nm), nm.start_point[0] + 1))
+        if n.type in ("preproc_if", "preproc_elif", "preproc_include"):
+            c = n.child_by_field_name("condition") or n.child_by_field_name("path")
+            if c is not None:
+                conditions.update(range(c.start_point[0] + 1, c.end_point[0] + 2))
+        stack.extend(n.children)
+    return names, bodies, conditions
+
+
+def run_clang(roots: list[str], limit: int, show: int) -> list[str]:
+    """Compare with clang on every C file of `roots` that compiles without a
+    build system.  What the index cannot see by design is counted apart:
+    code in inactive #if branches (both sides dropped), macros (not in the AST),
+    calls or definitions that only exist after macro expansion, and index
+    "calls" in a macro argument the expansion drops."""
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+    sys.path.insert(0, str(REPO / "evals/oracle"))
+    import clang_c
+    if not clang_c.available():
+        return ["c-clang — no clang on PATH: the clang oracle is not available"]
+    t0 = time.perf_counter()
+    jobs = []
+    for root in roots:
+        root = Path(root).expanduser()
+        if root.is_dir():
+            incs = clang_c.include_dirs(root, Path(tempfile.mkdtemp(prefix="clang_stub_")))
+            jobs += [(p, incs) for p in files_under([root], (".c",), limit)]
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        facts = list(pool.map(lambda j: clang_c.facts(*j), jobs))
+    tally = {b: (Tally(), Tally()) for b in ("clean", "errors")}
+    files = Counter()
+    cat = Counter()
+    for (p, _), o in zip(jobs, facts):
+        if o is None:
+            files["clang errors"] += 1
+            continue
+        parsed = code_nav.parse_uncached(p)
+        bucket = "errors" if parsed.tree.root_node.has_error else "clean"
+        files[bucket] += 1
+        defines, bodies, conditions = _c_preprocessor_text(parsed)
+        macros = o["macros"] | {m for m, ln in defines if ln not in o["inactive"]}
+        skip = o["inactive"] | bodies | conditions
+
+        def keep(x):
+            return x[1] not in skip
+        t_defs, t_calls = tally[bucket]
+        cat["definitions made by a macro (oracle)"] += len(o["macro_defs"])
+        idx_defs = {(s.name, s.name_line) for s in parsed.symbols
+                    if s.name not in macros and keep((s.name, s.name_line))
+                    and (s.name, s.name_line) not in o["globals"]
+                    and (s.name, s.name_line) not in o["macro_defs"]}
+        t_defs.add({d for d in o["defs"] if keep(d)}, idx_defs, str(p))
+        truth = set()
+        for c in o["calls"]:
+            if c[1] in o["inactive"] or c[1] in conditions:
+                continue
+            if c[1] in bodies:
+                cat["calls inside #define bodies (oracle)"] += 1
+                continue
+            line = parsed.lines[c[1] - 1] if c[1] <= len(parsed.lines) else ""
+            if not re.search(r"\b" + re.escape(c[0]) + r"\s*\(", line):
+                cat["calls made only by macro expansion (oracle)"] += 1
+                continue
+            truth.add(c)
+        index_calls = _c_index_calls(parsed)
+        macro_lines = {c[1] for c in index_calls if c[0] in macros}
+        got = set()
+        for c in index_calls:
+            if not keep(c):
+                continue
+            if c[0] in macros:
+                cat["calls of function-like macros (index)"] += 1
+            elif c[1] in macro_lines and c not in o["calls"]:
+                cat["calls in a macro argument the expansion drops (index)"] += 1
+            else:
+                got.add(c)
+        t_calls.add(truth, got, str(p))
+    out = [f"c — {files['clean'] + files['errors']} files checked against clang's AST "
+           f"({files['errors']} of them with tree-sitter parse errors; {files['clang errors']} "
+           f"skipped: clang errors without their build system), {time.perf_counter() - t0:.1f}s"]
+    for bucket, label in (("clean", "parsed cleanly"), ("errors", "with parse errors")):
+        t_defs, t_calls = tally[bucket]
+        out += [f"  files {label}:", t_defs.line("definitions (clang)"), t_calls.line("call sites (clang)")]
+        for what, t in (("definitions", t_defs), ("call sites", t_calls)):
+            if t.missed:
+                out.append(f"    {what} the index missed, e.g.:")
+                out += [f"      {x}" for x in t.missed[:show]]
+            if t.extra:
+                out.append(f"    {what} only the index has, e.g.:")
+                out += [f"      {x}" for x in t.extra[:show]]
+    out.append("  not comparable by design: " + ", ".join(f"{k} {v}" for k, v in cat.items()))
+    return out
+
+
+# ── YAML: Ruby's Psych (libyaml) ─────────────────────────────────────────────
+
+def run_yaml(paths: list[Path], show: int) -> list[str]:
+    import shutil, subprocess, tempfile
+    if not shutil.which("ruby"):
+        return ["yaml — no ruby on PATH: the Psych oracle is not available"]
+    listing = Path(tempfile.mkdtemp()) / "files.txt"
+    listing.write_text("\n".join(str(p) for p in paths))
+    out = subprocess.run(["ruby", str(REPO / "evals/oracle/yaml_keys.rb"), str(listing)],
+                         capture_output=True, text=True, check=True).stdout
+    oracle: dict[str, set | None] = {}
+    cur = None
+    for line in out.splitlines():
+        f = line.split("\t")
+        if f[0] == "F":
+            cur = oracle.setdefault(f[1], set())
+        elif f[0] == "E":
+            oracle[list(oracle)[-1]] = None          # Psych rejects the file
+        elif f[0] == "K" and cur is not None:
+            cur.add((f[1], int(f[2])))
+    t = Tally()
+    n = rejected = 0
+    for p in paths:
+        truth = oracle.get(str(p))
+        parsed = code_nav.parse_uncached(p)
+        if truth is None or parsed is None or parsed.tree.root_node.has_error:
+            rejected += 1
+            continue
+        if len(parsed.symbols) >= code_nav._MAX_DATA_SYMBOLS:
+            rejected += 1                           # capped on purpose (generated files)
+            continue
+        n += 1
+        t.add(truth, {(s.qualname, s.name_line) for s in parsed.symbols}, str(p))
+    out_lines = [f"yaml — {n} files checked against Ruby's Psych (libyaml) ({rejected} skipped: "
+                 f"rejected by a parser, or over the {code_nav._MAX_DATA_SYMBOLS}-key cap)",
+                 t.line("key paths (Psych)")]
+    if t.missed:
+        out_lines.append("    key paths the index missed, e.g.:")
+        out_lines += [f"      {x}" for x in t.missed[:show]]
+    if t.extra:
+        out_lines.append("    key paths only the index has, e.g.:")
+        out_lines += [f"      {x}" for x in t.extra[:show]]
+    return out_lines
+
+
 _JS_TYPES = ("", "text/javascript", "application/javascript", "module", "text/babel")
 
 
@@ -526,14 +704,19 @@ def main() -> int:
                                                   "~/projects/claude-code-ws-moz-profiel",
                                                   str(REPO / "harness/web/static")],
                     help="roots for the tags.scm comparison")
+    ap.add_argument("--yaml", nargs="*", default=["~/projects/Maestro"],
+                    help="YAML roots to check against Ruby's Psych parser")
     ap.add_argument("--kotlin", nargs="*", default=["~/projects/Maestro"],
                     help="Kotlin roots to check against the Kotlin compiler's parser")
     ap.add_argument("--fetch-kotlin", action="store_true",
                     help="download the Kotlin compiler jars for the kotlin oracle (~61 MB)")
+    ap.add_argument("--clang", nargs="*", default=["~/projects/mgba"],
+                    help="C roots to check against clang's AST")
     ap.add_argument("--html", nargs="*", default=["~/projects/momo-agent-workspaces"],
                     help="roots whose HTML files' inline <script> JavaScript is checked too")
     ap.add_argument("--langs", nargs="*", default=["python", "c", "cpp", "java", "javascript",
-                                                   "typescript", "html-js", "kotlin"])
+                                                   "typescript", "html-js", "kotlin", "yaml",
+                                                   "c-clang"])
     ap.add_argument("--limit", type=int, default=200, help="files per language (sampled)")
     ap.add_argument("--show", type=int, default=8, help="disagreements to print per category")
     args = ap.parse_args()
@@ -542,8 +725,12 @@ def main() -> int:
     for lang in args.langs:
         if lang == "python":
             report = run_python(files_under(args.python, (".py",), args.limit), args.show)
+        elif lang == "yaml":
+            report = run_yaml(files_under(args.yaml, (".yaml", ".yml"), args.limit), args.show)
         elif lang == "kotlin":
             report = run_kotlin(files_under(args.kotlin, (".kt", ".kts"), args.limit), args.show)
+        elif lang == "c-clang":
+            report = run_clang(args.clang, args.limit, args.show)
         elif lang == "html-js":
             import tempfile
             tmp = Path(tempfile.mkdtemp(prefix="oracle_html_js_"))

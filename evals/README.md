@@ -188,5 +188,67 @@ Java: a 78-file Quarkus service; JS: badgeware + this web UI):
 | javascript (49) | 83.5% / 98.6% | 100% / 100% | misses: `$("#x").onclick = () => ...` handlers — skipped by design |
 
 C/C++ definitions are compared "with a body": tags.scm also tags prototypes and
-forward declarations, which the index deliberately does not. No real Kotlin,
-Rust, TypeScript or TSX code was available locally; those rely on the fixtures.
+forward declarations, which the index deliberately does not.
+
+Two more oracles, added for the Maestro repo (~/projects/Maestro, Kotlin-heavy):
+
+- **Kotlin:** the Kotlin 2.2 compiler's own parser (PSI), driven by
+  `evals/oracle/KtOracle.java`. Needs a JDK; `--fetch-kotlin` downloads the
+  compiler jars (~61 MB, Maven Central) into the git-ignored `evals/.cache/ktoracle`.
+- **YAML:** Ruby's Psych (libyaml), `evals/oracle/yaml_keys.rb` — uses the
+  system `ruby`, nothing to install.
+
+| Maestro | definitions | call sites | other |
+|---|---|---|---|
+| kotlin (514 files) | 100% / 99.3% | 100% / 100% (28,416) | imports 100/100 (3,670); member properties not indexed by design |
+| yaml (373) | key paths 100% / 100% (2,972) | | |
+| javascript (19), tsx (2), ts (1), html inline scripts (2) | 100% recall | 100% / 100% | tsx extras: type aliases/interfaces |
+
+Known Kotlin limits: 6 of 520 files (1.2%) hit tree-sitter-kotlin parse errors,
+where the index recovers only ~55% of definitions and ~59% of calls (it flags
+such files as incomplete); annotation arguments like `use = X.Id.NAME` before a
+declaration can make the grammar misread it (1 of 4,848 definitions). In `.kts`
+scripts the compiler treats top-level `val`s as script-local; the index lists
+them as definitions. No real Rust code was available locally; Rust relies on
+the fixtures.
+
+### C against clang (mgba)
+
+tags.scm has no call patterns for C, and the tags comparison only uses files
+tree-sitter parses cleanly — which leaves out exactly the macro-heavy C where
+the index is weakest. `--langs c-clang` uses **clang's own AST**
+(`evals/oracle/clang_c.py`, `-ast-dump=json`; needs `clang` on PATH, nothing to
+install) on every C file clang compiles without the project's build system
+(include/, src/ and each bundled `third-party/*` library on the include path;
+`*.h.prebuilt` config headers stand in for configure). Default corpus:
+`~/projects/mgba` (Game Boy emulator, ~420 C files).
+
+Comparing preprocessed C with source text needs these rules, all counted
+separately in the report ("not comparable by design"), never silently:
+
+- lines in `#if` branches the preprocessor does not take are dropped on both
+  sides (found with marker lines that clang's own preprocessor keeps or removes);
+- macros are not in the AST: index "calls" of function-like macros, and names in
+  a macro argument the expansion drops (`PRF(printf(...))`), are excluded;
+- calls and definitions that only exist after expansion — written inside a
+  `#define` body, or as a macro argument that the macro turns into a call or a
+  type (`DECL_BITFIELD(Flags, uint8_t)`) — are out of reach of any text parser.
+
+| mgba, 265 C files | definitions | call sites |
+|---|---|---|
+| 128 files tree-sitter parses cleanly | 100% / 100% (1,179) | 100% / 100% (4,459) |
+| 137 files with parse errors | 98.1% / 90.3% (2,446) | 99.1% / 99.4% (8,574) |
+| cpp, 89 files (tags.scm; the Qt C++ needs Qt headers for clang) | 100% / 94.2% | no oracle |
+
+Index bugs this found and fixed: in a region tree-sitter cannot parse (code
+passed as a macro argument, a function split by `#if/#else`), keywords came out
+as names — `if (x)` as a call of `if`, `else if (...) {...}` as a *function
+named `if`* — and call statements came out as declarations inside a function
+body, which the index read as prototypes and dropped. A first version of that
+recovery also turned a local function-pointer variable into a call; the oracle
+caught it.
+
+Known C limits: in files with parse errors, locals of a mis-split function
+land at file level and are listed as variables (most of the 9.7% extra
+definitions); K&R-style definitions (`int f(a, b) int a; ...`, all of zlib) are
+not parsed by tree-sitter-c at all.

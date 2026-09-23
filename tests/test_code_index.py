@@ -462,6 +462,112 @@ class Tools(Base):
         self.assertIn("code index is off", ci.index_search("x", workdir=self.root, index=None))
 
 
+class ReviewFixes(Base):
+    """Regressions from the 2026-09-23 review of the index."""
+
+    files = {
+        **CHAIN,
+        "blob.bin": "\0" * 64,
+        "shop.py": ("class Money:\n    def add(self, o):\n        return 1\n\n\n"
+                    "class Cart:\n    def total(self):\n        return Money().add(1)\n\n\n"
+                    "class Report:\n    def total(self):\n        return 5\n\n\n"
+                    "def show(r: Report):\n    return r.total()\n\n\n"
+                    "def pay(c: Cart):\n    return c.total()\n"),
+        "web/app.js": ("function total() { return 1; }\n"
+                       "var handler = function () {\n"
+                       "  if (x) { const total = 2; }\n"
+                       "  return total();\n"
+                       "};\n"),
+        "web/page.html": ("<html><body>\n<script>\nfunction go() { return 1; }\n"
+                          "go();\n</script>\n</body></html>\n"),
+        "conf/compose.yaml": "services:\n  web_app:\n    port: 1\n",
+        "load.py": "def cfg(load):\n    return load()[\"web_app\"]\n",
+        "src/Cart.java": "package shop;\nimport java.util.List;\nclass Cart {}\n",
+        "native/util.c": "int util(void) { return 1; }\n",
+    }
+
+    def test_skipped_files_are_not_reread(self):
+        for _ in range(3):
+            self.idx.mark_dirty()
+            self.assertIsNone(self.idx.wait_fresh())
+        self.assertEqual(self.idx.skipped["binary"], 1)
+        with mock.patch.object(ci.ProjectIndex, "_build_entry",
+                               side_effect=AssertionError("re-read")):
+            self.idx.mark_dirty()
+            self.assertIsNone(self.idx.wait_fresh())
+        (self.root / "blob.bin").unlink()
+        self.assertIsNone(self.idx.wait_fresh())
+        self.assertEqual(self.idx.skipped["binary"], 0)
+
+    def test_imports_stay_within_a_language(self):
+        with self.idx._lock:
+            graph = ci._import_graph(self.idx)
+            fam = {self.idx.files[a].path: {self.idx.files[b].path for b in t} for a, t in graph.items()}
+        self.assertNotIn("native/util.c", fam.get("src/Cart.java", set()))
+
+    def test_callers_keep_language_and_class(self):
+        out = self.callers("Cart.total")
+        self.assertIn("function pay", out)
+        self.assertNotIn("web/app.js", out)         # a JavaScript total() is another name
+        self.assertNotIn("function show", out)      # Report.total
+        out = self.callers("Money.add", depth=2)
+        self.assertIn("function pay", out)
+        self.assertNotIn("function show", out)      # level 2 keeps the class too
+
+    def test_js_var_does_not_leak_block_scope_into_a_nested_function(self):
+        self.assertIn("function handler", self.callers("total"))
+
+    def test_callers_of_a_config_key(self):
+        out = self.callers("web_app")
+        self.assertIn("not code", out)
+        self.assertIn("conf/compose.yaml", out)
+        self.assertIn("load.py", out)
+
+    def test_html_scripts_with_lang_alias_and_without_the_identifier_index(self):
+        self.assertIn("function go", self.search("go", lang="js"))
+        with self.idx._cond:
+            self.idx.max_bytes = 1
+            self.idx._enforce_budget()
+        self.assertIn("web/page.html", self.callers("go"))
+
+    def test_text_output_is_capped(self):
+        _write(self.root, "many.txt", "".join(f"needle line {i} " + "x" * 150 + "\n"
+                                              for i in range(300)))
+        out = self.text("needle")
+        self.assertLess(len(out), ci._MAX_TEXT_CHARS + 600)
+        self.assertIn("narrow with path=", out)
+
+    def test_find_symbol_sees_the_indexed_files_and_kind_equivalence(self):
+        _write(self.root, ".gitignore", "gen/\n")
+        _write(self.root, "gen/x.py", "def hidden_one():\n    pass\n")
+        if shutil.which("git"):
+            subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+            self.idx.rebuild()
+        self.assertIsNone(self.idx.wait_fresh())
+        code_nav.set_index_provider(self.idx.provide, self.idx.paths_under)
+        try:
+            if shutil.which("git"):
+                self.assertIn("no definition", code_nav.find_symbol("hidden_one", workdir=self.root))
+            self.assertIn("method Cart.total",
+                          code_nav.find_symbol("total", kind="function", workdir=self.root))
+        finally:
+            code_nav.set_index_provider(None)
+
+    def test_constructor_parameters_are_not_bases(self):
+        self.assertEqual(ci._drop_params("(val item: Circle) : Shape()"), " : Shape()")
+        self.assertEqual(ci._drop_params("(int x, int y) implements P {"), " implements P {")
+        self.assertEqual(ci._drop_params(" extends Shape {"), " extends Shape {")
+
+    def test_module_receivers_are_not_class_callers(self):
+        _write(self.root, "use_mod.py", "from . import shop as shop_mod\n\n\n"
+                                        "def run():\n    return shop_mod.total()\n")
+        self.assertNotIn("use_mod.py", self.callers("Cart.total"))
+        self.assertIn("use_mod.py", self.callers("total"))
+
+    def test_pickle_header_fingerprints_the_extractor(self):
+        self.assertIn("source", ci._header(self.root))
+
+
 class ToolSet(unittest.TestCase):
 
     def test_index_tools_replace_overlapping_code_nav_tools(self):
