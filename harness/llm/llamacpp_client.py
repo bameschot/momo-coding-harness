@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 
-import httpx
-
 from .base import ChatResponse, LLMClient, ToolCall
+from .http import HTTPClient, normalize_base_url
 
 
 class LlamaCppClient(LLMClient):
@@ -28,34 +27,24 @@ class LlamaCppClient(LLMClient):
         super().__init__(host=host, model=model, auth_token=auth_token)
         self._client = self._make_client()
 
-    def _make_client(self) -> httpx.Client:
-        # No global read timeout: generation can take a long time; abort() closes
-        # the client to interrupt an in-flight request instead.
-        return httpx.Client(base_url=self.host.rstrip("/"),
-                            timeout=httpx.Timeout(30.0, read=None))
-
-    def _headers(self) -> dict:
-        if self._auth_token:
-            return {"Authorization": f"Bearer {self._auth_token}"}
-        return {}
+    def _make_client(self) -> HTTPClient:
+        # Streams have no read timeout (generation can take a long time); abort()
+        # closes the client to interrupt an in-flight request instead.
+        headers = {"Authorization": f"Bearer {self._auth_token}"} if self._auth_token else {}
+        return HTTPClient(normalize_base_url(self.host, 8080), headers)
 
     def set_host(self, host: str):
         self.host = host
-        try:
-            self._client.close()
-        except Exception:
-            pass
+        self._client.close()
         self._client = self._make_client()
 
     def set_auth_token(self, token: str | None):
         self._auth_token = token
+        self._client.headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     def abort(self):
         """Close the underlying HTTP client to interrupt any in-flight request."""
-        try:
-            self._client.close()
-        except Exception:
-            pass
+        self._client.close()
         self._client = self._make_client()
 
     @staticmethod
@@ -125,20 +114,15 @@ class LlamaCppClient(LLMClient):
         elif think is True:
             payload["chat_template_kwargs"] = {"enable_thinking": True}
 
+        client = self._client   # abort() swaps in a fresh one; keep reading this one
         if on_delta is None:
-            response = self._client.post("/v1/chat/completions",
-                                         json=payload, headers=self._headers())
-            response.raise_for_status()
-            return self._normalize(response.json())
+            return self._normalize(client.request_json("POST", "/v1/chat/completions",
+                                                       payload, timeout=None))
 
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
-        with self._client.stream("POST", "/v1/chat/completions",
-                                 json=payload, headers=self._headers()) as response:
-            if response.status_code >= 400:
-                response.read()
-                response.raise_for_status()
-            return self._consume_stream(response.iter_lines(), on_delta)
+        return self._consume_stream(client.stream_lines("POST", "/v1/chat/completions", payload),
+                                    on_delta)
 
     @staticmethod
     def _consume_stream(lines, on_delta) -> ChatResponse:
@@ -228,9 +212,7 @@ class LlamaCppClient(LLMClient):
     def context_length(self) -> int | None:
         """Read the server's context window from /props."""
         try:
-            r = self._client.get("/props", headers=self._headers())
-            r.raise_for_status()
-            props = r.json()
+            props = self._client.request_json("GET", "/props")
             gen = props.get("default_generation_settings") or {}
             for source in (gen, props):
                 n = source.get("n_ctx")
@@ -243,9 +225,7 @@ class LlamaCppClient(LLMClient):
     def list_models(self) -> list[str]:
         """Return the loaded model id(s), or an empty list if unreachable."""
         try:
-            r = self._client.get("/v1/models", headers=self._headers())
-            r.raise_for_status()
-            data = r.json().get("data") or []
+            data = self._client.request_json("GET", "/v1/models").get("data") or []
             return sorted(m["id"] for m in data if isinstance(m, dict) and m.get("id"))
         except Exception:
             return []

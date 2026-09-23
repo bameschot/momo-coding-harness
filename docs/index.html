@@ -356,7 +356,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     <div>
       <div class="eyebrow">lightweight · local · AI coding harness</div>
       <h1>A coding assistant that stays <span class="accent">on your machine</span>.</h1>
-      <p class="lede">momo connects to a local <strong>Ollama</strong> or <strong>llama.cpp</strong> server and gives the model tools to read, search, edit and run your project. Use it from a split-pane terminal UI, a browser window, or both at once. It's <strong>lightweight</strong>: four Python dependencies, no build step, and about 60 MB of RAM. A small black cat keeps you company.</p>
+      <p class="lede">momo connects to a local <strong>Ollama</strong> or <strong>llama.cpp</strong> server and gives the model tools to read, search, edit and run your project. Use it from a split-pane terminal UI, a browser window, or both at once. It's <strong>lightweight</strong>: it runs on the Python standard library alone, with no build step, in about 40 MB of RAM. A small black cat keeps you company.</p>
       <div class="hero-actions">
         <a class="btn primary" href="#start">Get started <svg class="icon sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></a>
         <a class="btn" href="#features">Features</a>
@@ -364,8 +364,8 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       </div>
       <div class="hero-chips">
         <span class="chip ok">no cloud API</span>
-        <span class="chip ok">~60 MB RAM</span>
-        <span class="chip ok">~35 MB installed</span>
+        <span class="chip ok">~40 MB RAM</span>
+        <span class="chip ok">no required packages</span>
         <span class="chip ok">no build step</span>
         <span class="chip">Python 3.14</span>
         <span class="chip">curses TUI</span>
@@ -419,7 +419,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     </div>
     <div class="card" style="--c: var(--user)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-feather"/></svg>Lightweight by design</h3>
-      <p>momo is a plain Python program with four dependencies: the Ollama client, httpx for llama.cpp, tree-sitter with its grammars, and optionally pypdf. About 35 MB installed. The terminal UI is <code>curses</code> and the web UI is Python's own HTTP server, so there's no Node, no build step, no database and no background daemon. It uses about <strong>60 MB of RAM</strong> idle, and 105–150 MB with the code index built for projects of 180 to 2,100 files. The model's memory lives in Ollama or llama.cpp, not in momo.</p>
+      <p>momo runs on the Python standard library alone: it talks to Ollama and llama.cpp with Python's own HTTP client. The only packages are optional: tree-sitter with its grammars for code navigation and the index, and pypdf for PDF attachments, about 22 MB together. The terminal UI is <code>curses</code> and the web UI is Python's own HTTP server, so there's no Node, no build step, no database and no background daemon. It uses about <strong>40 MB of RAM</strong> idle, and 90–130 MB with the code index built for projects of 180 to 2,100 files. The model's memory lives in Ollama or llama.cpp, not in momo.</p>
       <a class="more" href="#requirements">Requirements &amp; footprint →</a>
     </div>
   </div>
@@ -577,22 +577,21 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <li><strong>A model server</strong> you can reach: Ollama or llama.cpp, on this machine or another (see <a href="#backends">Backends</a>).</li>
     </ul>
     <h3>Dependencies</h3>
+    <p><strong>None are required.</strong> momo starts and works in a virtualenv with nothing installed; <code>requirements.txt</code> only adds features:</p>
     <div class="table-scroll"><table>
       <tr><th>Package</th><th>Used for</th><th>Needed?</th></tr>
-      <tr><td><code>ollama</code></td><td class="wrap">The Ollama client</td><td>yes</td></tr>
-      <tr><td><code>httpx</code></td><td class="wrap">The HTTP client for the llama.cpp adapter. <code>ollama</code> depends on it too, so it adds nothing to the install.</td><td>yes</td></tr>
       <tr><td><code>tree-sitter</code> + 16 grammars</td><td class="wrap">Code navigation and the code index. The grammar wheels are prebuilt and work offline.</td><td class="wrap">optional: without them, the code-navigation tools aren't offered</td></tr>
       <tr><td><code>pypdf</code></td><td class="wrap">Turning PDF attachments into text in the web UI (pure Python)</td><td class="wrap">optional</td></tr>
     </table></div>
-    <p>Everything else is Python's standard library: <code>curses</code> for the TUI, <code>http.server</code> for the web UI, <code>urllib</code> for <code>fetch_url</code>, and <code>threading</code> for the background work. The optional HTTPS mode (<code>--web-tls auto</code>) uses the <code>openssl</code> command that macOS and Linux already ship. The web UI is hand-written HTML, CSS and JavaScript with no npm, bundler or CDN. On disk, the dependencies take about <strong>35 MB</strong> (18 MB of that is grammars) and the harness itself about 2 MB.</p>
+    <p>Everything else is Python's standard library: <code>curses</code> for the TUI, <code>http.server</code> for the web UI, <code>http.client</code> for Ollama and llama.cpp, <code>urllib</code> for <code>fetch_url</code>, and <code>threading</code> for the background work. The optional HTTPS mode (<code>--web-tls auto</code>) uses the <code>openssl</code> command that macOS and Linux already ship. The web UI is hand-written HTML, CSS and JavaScript with no npm, bundler or CDN. On disk, the optional packages take about <strong>22 MB</strong> (18 MB of that is grammars) and the harness itself about 1 MB.</p>
     <h3 id="memory">Memory while running</h3>
     <p>Measured on 2026-09-23 on an Apple Silicon Mac with Python 3.14.7. Each figure is the resident memory of the momo process run with <code>--headless</code>, after the index had finished building. The model server isn't included.</p>
     <div class="table-scroll"><table>
       <tr><th>Setup</th><th>Files indexed</th><th>Index build</th><th>Index size</th><th>momo process</th></tr>
-      <tr><td>Idle, index off</td><td>—</td><td>—</td><td>—</td><td><strong>61 MB</strong></td></tr>
-      <tr><td>Index on: this repository</td><td>182</td><td>0.5 s</td><td>4 MB</td><td>105 MB</td></tr>
-      <tr><td>Index on: Maestro (Kotlin)</td><td>1,462</td><td>~1 s</td><td>17 MB</td><td>111 MB</td></tr>
-      <tr><td>Index on: mgba (C emulator)</td><td>2,087</td><td>~7.5 s</td><td>42 MB</td><td>149 MB</td></tr>
+      <tr><td>Idle, index off</td><td>—</td><td>—</td><td>—</td><td><strong>42 MB</strong></td></tr>
+      <tr><td>Index on: this repository</td><td>186</td><td>0.5 s</td><td>4 MB</td><td>88 MB</td></tr>
+      <tr><td>Index on: Maestro (Kotlin)</td><td>1,462</td><td>~1 s</td><td>17 MB</td><td>87 MB</td></tr>
+      <tr><td>Index on: mgba (C emulator)</td><td>2,087</td><td>~7.5 s</td><td>42 MB</td><td>129 MB</td></tr>
     </table></div>
     <ul>
       <li>Turning the index on costs about 40 MB before the index itself, for the loaded grammars and parser caches. After that it grows with the project: here, 4 to 42 MB.</li>
@@ -604,23 +603,24 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
 
   <section id="backends" data-voice="backends">
     <h2>Backends</h2>
-    <p>The harness talks to the model through a small adapter layer (<code>harness/llm/</code>), with one adapter per backend. Both adapters return the same response shape, so modes, tools, streaming, thinking, compaction and both UIs work the same whichever backend you pick. Choose one with <code>--provider ollama</code> or <code>--provider llamacpp</code>. The choice is remembered for the next launch and saved with each session.</p>
+    <p>The harness talks to the model through a small adapter layer (<code>harness/llm/</code>), with one adapter per backend. Both speak their backend's HTTP API with Python's own <code>http.client</code>, so no client library is installed. Both adapters return the same response shape, so modes, tools, streaming, thinking, compaction and both UIs work the same whichever backend you pick. Choose one with <code>--provider ollama</code> or <code>--provider llamacpp</code>. The choice is remembered for the next launch and saved with each session.</p>
     <div class="table-scroll"><table>
       <tr><th></th><th>Ollama</th><th>llama.cpp</th></tr>
       <tr><td>Provider</td><td class="wrap"><code>--provider ollama</code> (default)</td><td class="wrap"><code>--provider llamacpp</code></td></tr>
-      <tr><td>API used</td><td class="wrap">Native Ollama API, via the <code>ollama</code> Python library</td><td class="wrap">OpenAI-compatible <code>/v1/chat/completions</code>, via <code>httpx</code></td></tr>
+      <tr><td>API used</td><td class="wrap">Native Ollama API (<code>/api/chat</code>, <code>/api/show</code>, <code>/api/tags</code>)</td><td class="wrap">OpenAI-compatible <code>/v1/chat/completions</code>, <code>/props</code>, <code>/v1/models</code></td></tr>
       <tr><td>Default host</td><td class="wrap"><code>http://localhost:11434</code></td><td class="wrap"><code>http://localhost:8080</code></td></tr>
       <tr><td>Models</td><td class="wrap"><code>/model</code> lists every pulled model and switches between them at runtime</td><td class="wrap">One model, fixed when <code>llama-server</code> starts. <code>/model</code> shows it but can't switch.</td></tr>
       <tr><td>Context window</td><td class="wrap">Read from the model's info. The full window is sent as <code>num_ctx</code> on every request.</td><td class="wrap">Read from <code>/props</code> (<code>n_ctx</code>). Fixed at launch with <code>-c</code>.</td></tr>
       <tr><td>Tool calling</td><td class="wrap">Needs a model with tool support (e.g. <code>qwen3.5:9b</code>, <code>qwen2.5-coder</code>, <code>mistral-nemo</code>)</td><td class="wrap">Needs Jinja chat templates (the default in current builds; <code>--jinja</code> on older ones, never <code>--no-jinja</code>), plus a model whose template supports tools</td></tr>
       <tr><td>Thinking</td><td class="wrap">Toggled with Ollama's <code>think</code> option</td><td class="wrap">Toggled via <code>chat_template_kwargs.enable_thinking</code> (Qwen3-style templates). The server's default <code>--reasoning-format auto</code> returns reasoning as a separate stream. With <code>none</code>, momo recovers it from <code>&lt;think&gt;</code> tags instead.</td></tr>
       <tr><td>Streaming</td><td class="wrap">Yes</td><td class="wrap">Yes (Server-Sent Events)</td></tr>
-      <tr><td>Auth</td><td class="wrap" colspan="2"><code>/token &lt;key&gt;</code> sends <code>Authorization: Bearer &lt;key&gt;</code> to either backend. It's kept in memory only.</td></tr>
+      <tr><td>Auth</td><td class="wrap" colspan="2"><code>/token &lt;key&gt;</code> sends <code>Authorization: Bearer &lt;key&gt;</code> to either backend. It's kept in memory only. For Ollama, an <code>OLLAMA_API_KEY</code> environment variable is used when no token is set.</td></tr>
     </table></div>
     <p>By default the compaction threshold is half the detected window. Change it with <code>/context 75%</code>, or set an absolute number with <code>/context 16384</code> or <code>--context</code>.</p>
     <h3>Local or remote</h3>
     <p>"Remote" just means <code>--host</code> points somewhere other than <code>localhost</code>. It can be another machine on your LAN, a GPU box, or a hosted endpoint behind a reverse proxy. The harness, the tools and your files always stay on the machine where you run momo; only the chat requests go to the model server. Always give the full URL, including the scheme: <code>http://192.168.1.10:11434</code>, not <code>192.168.1.10:11434</code>.</p>
     <p>The host is saved with the session and restored when you start again. The token is not saved and has to be entered again.</p>
+    <p>HTTPS model servers are verified against the system's certificate store. Proxy environment variables (<code>HTTP_PROXY</code> and so on) are not used for the model connection; for a server you can only reach through a proxy or jump host, use an SSH tunnel.</p>
   </section>
 
   <section id="running" data-voice="running">
@@ -1297,7 +1297,7 @@ const SPEECH = {
     "< full url, http:// too!", "< files stay on your machine",
   ],
   requirements: [
-    "< only ~60 MB of ram, purrr", "< four deps, that's it!", "< no node, no npm~",
+    "< only ~40 MB of ram, purrr", "< zero required deps!", "< no node, no npm~",
     "< no build step, ever", "< curses + http.server", "< the model eats the ram",
     "< windows? try wsl", "< python 3.14 please!",
   ],

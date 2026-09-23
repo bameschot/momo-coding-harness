@@ -7,8 +7,8 @@ def make_client(provider: str, host: str, model: str,
                 auth_token: str | None = None) -> LLMClient:
     """Build the LLM client for the named provider.
 
-    Imports are deferred so a backend's optional dependency (e.g. the `ollama`
-    library) is only required when that provider is actually selected."""
+    Both adapters speak their backend's HTTP API through the stdlib client in
+    http.py, so no provider needs a third-party package."""
     provider = (provider or "ollama").lower()
     if provider == "ollama":
         from .ollama_client import OllamaClient

@@ -1,7 +1,7 @@
-ollama>=0.5,<1
-# HTTP client for the llama.cpp adapter (harness/llm/llamacpp_client.py). The
-# ollama package also depends on it, but the harness imports it directly.
-httpx>=0.27,<1
+# momo itself needs no third-party packages: the TUI, the web UI and the
+# Ollama / llama.cpp clients all use the Python standard library.
+# Everything below is optional and only adds features.
+
 # Code navigation (code_outline / find_symbol / read_symbol / find_references /
 # file_dependencies).
 # Per-language grammar wheels are bundled and work offline; the harness still

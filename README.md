@@ -17,16 +17,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` installs four packages; everything else is the Python standard library:
+**No third-party package is required.** The TUI (`curses`), the web UI (`http.server`) and the Ollama and llama.cpp clients (`http.client`) all use the Python standard library, so momo runs in a virtualenv with nothing installed. `requirements.txt` only adds optional features (about 22 MB):
 
-| Package | Used for | Needed? |
+| Package | Adds | Without it |
 |---|---|---|
-| `ollama` | The Ollama client | yes |
-| `httpx` | The HTTP client for the llama.cpp adapter (`ollama` depends on it too) | yes |
-| `tree-sitter` + grammar wheels | Code navigation and the code index | optional — without it those tools are not offered |
-| `pypdf` | PDF attachments in the web UI | optional |
+| `tree-sitter` + grammar wheels | Code navigation tools and the code index | Those tools are not offered |
+| `pypdf` | PDF attachments in the web UI | PDFs are rejected; text files still work |
 
 `--web-tls auto` additionally uses the `openssl` command, which macOS and Linux ship.
+
+Talking to the model server needs no client library either. Both backends are reached over plain HTTP(S): HTTPS servers are verified against the system certificate store, and proxy environment variables are not used for the model connection (use an SSH tunnel for a server behind a proxy or jump host). For Ollama, `OLLAMA_API_KEY` is used as the Bearer token when none is set with `/token`.
 
 ## Running
 

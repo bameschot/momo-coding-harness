@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
-
-import ollama
+import os
 
 from .base import ChatResponse, LLMClient, ToolCall
+from .http import HTTPClient, LLMHTTPError, normalize_base_url
+
+# Message fields Ollama's /api/chat understands (the ollama SDK kept exactly these).
+_MESSAGE_FIELDS = ("role", "content", "thinking", "images", "tool_name", "tool_calls")
 
 
 def _is_qwen(model: str) -> bool:
@@ -53,31 +56,49 @@ def _xml_escape_for_ollama(messages: list[dict]) -> list[dict]:
 
 
 class OllamaClient(LLMClient):
+    """Adapter for Ollama's native REST API: /api/chat, /api/show, /api/tags."""
+
     provider_name = "ollama"
 
     def __init__(self, host: str, model: str, auth_token: str | None = None):
         super().__init__(host=host, model=model, auth_token=auth_token)
         self._client = self._make_client()
 
-    def _make_client(self) -> ollama.Client:
-        headers = {"Authorization": f"Bearer {self._auth_token}"} if self._auth_token else None
-        return ollama.Client(host=self.host, headers=headers)
+    def _headers(self) -> dict:
+        # OLLAMA_API_KEY is the ollama SDK's fallback for a key that was not set.
+        token = self._auth_token or os.environ.get("OLLAMA_API_KEY")
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    def _make_client(self) -> HTTPClient:
+        return HTTPClient(normalize_base_url(self.host, 11434), self._headers())
 
     def set_host(self, host: str):
         self.host = host
+        self._client.close()
         self._client = self._make_client()
 
     def set_auth_token(self, token: str | None):
         self._auth_token = token
-        self._client = self._make_client()
+        self._client.headers = self._headers()
 
     def abort(self):
         """Close the underlying HTTP client to interrupt any in-flight request."""
-        try:
-            self._client.close()
-        except Exception:
-            pass
+        self._client.close()
         self._client = self._make_client()
+
+    @staticmethod
+    def _wire_messages(messages: list[dict]) -> list[dict]:
+        """Keep only the fields /api/chat knows, and drop empty ones — what the
+        ollama SDK did before sending."""
+        out = []
+        for m in messages:
+            w = {k: m[k] for k in _MESSAGE_FIELDS if m.get(k)}
+            if "tool_calls" in w:
+                w["tool_calls"] = [{"function": {"name": (tc.get("function") or {}).get("name", ""),
+                                                 "arguments": (tc.get("function") or {}).get("arguments", {})}}
+                                   for tc in w["tool_calls"]]
+            out.append(w)
+        return out
 
     def chat(self, messages: list[dict], tools: list[dict],
              think: bool | None = None, num_ctx: int | None = None,
@@ -86,16 +107,33 @@ class OllamaClient(LLMClient):
         # copy we send so tool results/args with < > & don't break its parser.
         if _is_qwen(self.model):
             messages = _xml_escape_for_ollama(messages)
-        kwargs: dict = {"model": self.model, "messages": messages}
+        body: dict = {"model": self.model, "messages": self._wire_messages(messages),
+                      "stream": on_delta is not None}
         if tools:
-            kwargs["tools"] = tools
+            body["tools"] = tools
         if num_ctx is not None:
-            kwargs["options"] = {"num_ctx": num_ctx}
+            body["options"] = {"num_ctx": num_ctx}
         if think is not None:
-            kwargs["think"] = think
+            body["think"] = think
+        client = self._client   # abort() swaps in a fresh one; keep reading this one
         if on_delta is None:
-            return self._normalize(self._client.chat(**kwargs))
-        return self._consume_stream(self._client.chat(**kwargs, stream=True), on_delta)
+            return self._normalize(client.request_json("POST", "/api/chat", body, timeout=None))
+        return self._consume_stream(self._json_lines(client.stream_lines("POST", "/api/chat", body)),
+                                    on_delta)
+
+    @staticmethod
+    def _json_lines(lines):
+        """One JSON object per line; an {"error": ...} line ends the stream."""
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                chunk = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(chunk, dict) and chunk.get("error"):
+                raise LLMHTTPError(str(chunk["error"]))
+            yield chunk
 
     @classmethod
     def _consume_stream(cls, chunks, on_delta) -> ChatResponse:
@@ -103,60 +141,58 @@ class OllamaClient(LLMClient):
         content: list[str] = []
         thinking: list[str] = []
         raw_calls: list = []
-        last = None
+        last: dict = {}
         for chunk in chunks:
-            msg = chunk.message
-            if (t := getattr(msg, "thinking", None)):
+            msg = chunk.get("message") or {}
+            if (t := msg.get("thinking")):
                 thinking.append(t)
                 on_delta("thinking", t)
-            if (c := getattr(msg, "content", None)):
+            if (c := msg.get("content")):
                 content.append(c)
                 on_delta("content", c)
-            raw_calls.extend(getattr(msg, "tool_calls", None) or [])
+            raw_calls.extend(msg.get("tool_calls") or [])
             last = chunk
         return ChatResponse(
             content="".join(content),
             thinking="".join(thinking),
             tool_calls=cls._convert_calls(raw_calls),
-            prompt_tokens=getattr(last, "prompt_eval_count", None),
-            eval_tokens=getattr(last, "eval_count", None),
-            done_reason=getattr(last, "done_reason", None),
+            prompt_tokens=last.get("prompt_eval_count"),
+            eval_tokens=last.get("eval_count"),
+            done_reason=last.get("done_reason"),
         )
 
     @staticmethod
     def _convert_calls(raw_calls) -> list[ToolCall]:
         calls: list[ToolCall] = []
         for tc in raw_calls:
-            args = tc.function.arguments or {}
+            fn = (tc or {}).get("function") or {}
+            args = fn.get("arguments") or {}
             # Older Ollama versions return arguments as a raw JSON string.
             if isinstance(args, str):
                 try:
                     args = json.loads(args)
-                except Exception:
+                except ValueError:
                     args = {}
-            calls.append(ToolCall(name=tc.function.name, arguments=args))
+            calls.append(ToolCall(name=fn.get("name", ""), arguments=args if isinstance(args, dict) else {}))
         return calls
 
     @classmethod
-    def _normalize(cls, response) -> ChatResponse:
-        msg = response.message
-        calls = cls._convert_calls(getattr(msg, "tool_calls", None) or [])
+    def _normalize(cls, response: dict) -> ChatResponse:
+        msg = response.get("message") or {}
         return ChatResponse(
-            content=getattr(msg, "content", "") or "",
-            thinking=getattr(msg, "thinking", "") or "",
-            tool_calls=calls,
-            prompt_tokens=getattr(response, "prompt_eval_count", None),
-            eval_tokens=getattr(response, "eval_count", None),
-            done_reason=getattr(response, "done_reason", None),
+            content=msg.get("content") or "",
+            thinking=msg.get("thinking") or "",
+            tool_calls=cls._convert_calls(msg.get("tool_calls") or []),
+            prompt_tokens=response.get("prompt_eval_count"),
+            eval_tokens=response.get("eval_count"),
+            done_reason=response.get("done_reason"),
         )
 
     def context_length(self) -> int | None:
         """Return the model's native context window size, or None if unavailable."""
         try:
-            info = self._client.show(self.model)
-            # SDK exposes the field as 'modelinfo' (no underscore)
-            model_info: dict = getattr(info, "modelinfo", None) or {}
-            for key, value in model_info.items():
+            info = self._client.request_json("POST", "/api/show", {"model": self.model})
+            for key, value in (info.get("model_info") or {}).items():
                 if "context_length" in key and isinstance(value, int):
                     return value
         except Exception:
@@ -168,8 +204,8 @@ class OllamaClient(LLMClient):
         unreachable.  The caller (/model) reports the failure — an error string
         must never leak into the list and be shown as a selectable model."""
         try:
-            result = self._client.list()
-            # result.models is a list of Model objects with a .model attribute
-            return sorted(m.model for m in result.models)
+            models = self._client.request_json("GET", "/api/tags").get("models") or []
+            return sorted(m.get("model") or m.get("name") for m in models
+                          if isinstance(m, dict) and (m.get("model") or m.get("name")))
         except Exception:
             return []
