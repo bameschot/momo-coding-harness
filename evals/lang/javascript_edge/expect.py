@@ -46,11 +46,14 @@ CALLERS = {
     "makeCounter":       {(M, "const { makeCounter } = require", "import"),
                           (M, "const counter = makeCounter(3)", "call")},
     "api.fetchAll":      {(M, "api.fetchAll()", "call")},
+    # The block's `const total` ends with the block; `var total` would not.
+    "total":             {("lib/scope.js", "return total(xs);", "call")},
 }
 
 CHAINS = {"Store.create": set()}
 
-IMPORTS = {S: {M}, L: {M}, M: set()}
+IMPORTS = {S: {M}, L: {M}, M: set(),
+           "vendor/store.js": set()}    # same name, other folder: "./store.js" is not it
 
 FRESH = (S, "\nexport function freshMarker() { return 1; }\n", "freshMarker")
 

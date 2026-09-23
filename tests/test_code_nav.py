@@ -227,9 +227,99 @@ class ScopeRoles(unittest.TestCase):
                 rows = code_nav.references_in(code_nav.parse(f), name)
                 self.assertEqual({t for role, _r, t in rows.values() if role == "call"} - {None}, want)
 
+    def test_python_scoping_matches_symtable(self):
+        """Cases the ast/symtable oracle (evals/oracle_bench.py) found on real code."""
+        src = ("def total(): pass\n"
+               "def a(xs):\n"
+               "    if (total := len(xs)):\n"              # 3 walrus binds
+               "        return total\n"                    # 4
+               "def b(*total): return total\n"             # 5 *args
+               "def c():\n"
+               "    global total\n"
+               "    total = 1\n"                           # 8 global: not local
+               "def d():\n"
+               "    import total\n"                        # 10 function-level import binds
+               "    return total\n"                        # 11
+               "def e(ys):\n"
+               "    f = lambda total: total\n"             # 13 the lambda's own parameter
+               "    return total()\n"                      # 14 not hidden by the lambda
+               "def g():\n"
+               "    total = 1\n"
+               "    def inner():\n"
+               "        return total\n"                    # 18 closure over g's local
+               "    return inner\n"
+               "def h():\n"
+               "    with open(p) as (total, x):\n"         # 21 nested destructuring
+               "        pass\n")
+        r = self.roles("total", src, "scoping.py")
+        self.assertEqual(r[1], "def")
+        for line in (3, 4, 5, 10, 11, 13, 16, 18, 21):
+            with self.subTest(line=line):
+                self.assertIn(r[line], ("local", "import"), r)
+        self.assertEqual(r[14], "call")
+        self.assertNotEqual(r[8], "local")
+
+    def test_js_arrow_parameter_does_not_hide_outer_calls(self):
+        src = "function total() {}\nfunction f(xs) {\n  xs.map((total) => total);\n  return total();\n}\n"
+        r = self.roles("total", src, "arrow.js")
+        self.assertEqual(r[4], "call")
+
     def test_imported_destructure_is_not_local(self):
         src = 'async function f() {\n  const { g } = await import("./m.js");\n  return g();\n}\n'
         self.assertEqual(self.roles("g", src, "dyn.js"), {2: "import", 3: "call"})
+
+
+class OracleFindings(unittest.TestCase):
+    """Extraction cases found by comparing with ast / tags.scm on real code."""
+
+    def parse(self, fname, src):
+        f = SCRATCH / fname
+        f.write_text(src)
+        return code_nav.parse(f)
+
+    def test_python_chained_assignment_and_future_import(self):
+        p = self.parse("chain.py", "from __future__ import annotations\na = b = 2\n")
+        self.assertEqual({s.name for s in p.symbols}, {"a", "b"})
+        self.assertEqual([(i.module, i.names) for i in p.imports], [("__future__", ["annotations"])])
+
+    def test_cpp_reference_returning_functions(self):
+        p = self.parse("ref.hpp", "struct M {\n  M& rotate(float a) { return *this; }\n"
+                                  "  M& operator+=(const M& o) { return *this; }\n};\n")
+        self.assertEqual({s.qualname for s in p.symbols}, {"M", "M.rotate", "M.operator+="})
+
+    def test_minified_definition_and_call_on_one_line(self):
+        # A minified library: the method is defined and called on the same line.
+        f = SCRATCH / "min.js"
+        f.write_text("class A{go(){return 1}run(){return this.go()}}\n")
+        rows = code_nav.references_in(code_nav.parse(f), "go")
+        self.assertEqual(rows[0][0], "call")          # the call is not lost to the def
+
+    def test_js_comma_chain_and_this_assignments(self):
+        p = self.parse("chain.js", "o.cancel = function(){}, Ht.get = function(t){ return t };\n"
+                                   "class C { constructor(){ this.hover = (t) => t; } }\n")
+        quals = {s.qualname for s in p.symbols}
+        self.assertTrue({"o.cancel", "Ht.get", "C.hover"} <= quals, quals)
+
+    def test_inline_script_javascript_is_indexed(self):
+        f = SCRATCH / "app.html"
+        f.write_text("<html><body>\n<div id=\"out\"></div>\n<script>\n"
+                     "function render(items) {\n  return items.map(fmt);\n}\n"
+                     "const fmt = (x) => x.toFixed(2);\n"
+                     "render([1]);\n</script>\n"
+                     "<script src=\"lib.js\"></script>\n</body></html>\n")
+        p = code_nav.parse(f)
+        kinds = {(s.qualname, s.kind, s.start) for s in p.symbols}
+        self.assertIn(("render", "function", 4), kinds)      # real line in the .html
+        self.assertIn(("fmt", "function", 7), kinds)
+        self.assertIn(("out", "id", 2), kinds)               # the HTML symbols stay
+        rows = {r + 1: v[0] for r, v in code_nav.references_in(p, "render").items()}
+        self.assertEqual(rows, {4: "def", 8: "call"})
+        self.assertIn(("fmt", 5), code_nav.identifier_rows(p))
+
+    def test_js_function_assigned_to_a_property(self):
+        p = self.parse("prop.js", "Module.locateFile = (p) => p;\nglobalThis.f0 = function () {};\n"
+                                  "$('#x').onclick = () => 1;\n")
+        self.assertEqual({s.qualname for s in p.symbols}, {"Module.locateFile", "globalThis.f0"})
 
 
 class ConstantDocs(unittest.TestCase):

@@ -58,6 +58,11 @@ CALLERS = {
         (M, "(o.price() for o in orders)",              "call"),
         (M, "return total([o.price() for o in orders])", "call"),   # o from list[Order]
     },
+    "Rush.price": {
+        (M, "return str(order.price())",                "call"),
+        (M, "(o.price() for o in orders)",              "call"),
+        (M, "return total([o.price() for o in orders])", "call"),
+    },
     "scale": {
         (C, "scale(3))",                                "call"),
     },
@@ -69,6 +74,7 @@ CHAINS = {}
 IMPORTS = {
     M: {C},
     C: set(),
+    "other/models.py": set(),       # same file name, other package: `from .models` is not it
 }
 
 FRESH = (C, "\n\ndef fresh_marker():\n    return 1\n", "fresh_marker")

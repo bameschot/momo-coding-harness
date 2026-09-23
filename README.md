@@ -502,6 +502,8 @@ Switch modes with `/design`, `/chat`, `/plan`, `/code`, `/momo`, or `Shift+Tab`.
 
 Syntax-aware tools built on [tree-sitter](https://tree-sitter.github.io/) for Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript (including JSX/TSX). The grammars are installed from `requirements.txt` and work offline. If tree-sitter is not installed, these tools are simply not offered.
 
+JavaScript in an HTML page's inline `<script>` blocks is parsed as JavaScript too, at its real line numbers in the `.html` file, so a single-file web app's functions, classes and callers are found like any other code (`src=` scripts and non-JavaScript `type`s are skipped).
+
 Config, markup and script files are parsed too, and their "definitions" are what you would look them up by: YAML/TOML/JSON **key paths** (`services.web.ports`, `tool.poetry.dependencies`; array items appear as `[]`), HTML element **ids**, custom elements and scripts, CSS **selectors**, `--custom-properties`, `@keyframes` and `@media` blocks, SQL `CREATE TABLE/VIEW/FUNCTION/INDEX/…` with **columns** as members, shell **functions**, and Dockerfile **stages** with their `ARG`/`ENV`. So `read_symbol("docker-compose.yml", "services.web")` returns just that block.
 
 | Tool | Description |

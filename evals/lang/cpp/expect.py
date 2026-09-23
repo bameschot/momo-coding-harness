@@ -52,6 +52,10 @@ CALLERS = {
     "total_area": {
         (M, "total_area(c, 3)",     "call"),
     },
+    # `const geo::Shape& s; s.area()` may be a Circle: virtual dispatch.
+    "Circle.area": {
+        (M, "return s.area() * n;", "call"),
+    },
 }
 
 CHAINS = {

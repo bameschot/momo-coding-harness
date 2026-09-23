@@ -52,6 +52,14 @@ pub(crate) async fn load(name: &str) -> Option<Shape> {
     name.parse::<Shape>().ok()
 }
 
+pub fn tally() {
+    {
+        let load = 1;
+        let _ = load;
+    }
+    let _ = load("circle");
+}
+
 pub fn total(shapes: &[Shape], named: &dyn Named) -> f64 {
     let double = |x: f64| x * 2.0;
     let _ = named.name();

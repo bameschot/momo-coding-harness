@@ -42,6 +42,10 @@ CALLERS = {
     "Pricer.describe": {
         ("src/main.ts",    "new FlatPricer().describe(tea)",       "call"),
     },
+    # this.price(p) in the base class dispatches to the subclass override.
+    "FlatPricer.price": {
+        ("src/pricing.ts", "${this.price(p)}",                       "call"),
+    },
     "Rates.lookup": {
         ("src/pricing.ts", "Rates.lookup(to)",                     "call"),
     },

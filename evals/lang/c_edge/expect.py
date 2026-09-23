@@ -39,6 +39,7 @@ SEARCHES = [
 CALLERS = {
     "list_sum": {
         (S, "return list_empty(NULL) ? s : list_sum(NULL)", "call"),
+        (S, "    return list_sum(NULL);", "call"),        # after the block's local list_sum
     },
     "scaled": {
         (S, "return op->run(scaled(v))", "call"),
@@ -58,6 +59,7 @@ CHAINS = {
 IMPORTS = {
     H: {S},
     S: set(),
+    "sub/list.h": set(),            # `#include "list.h"` in list.c means the one next to it
 }
 
 FRESH = (S, "\nint fresh_marker(void) { return 1; }\n", "fresh_marker")

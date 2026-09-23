@@ -441,6 +441,18 @@ _MAX_GREP_RESULTS  = 200
 _READ_FOOTER_LINES = 200  # show footer when file exceeds this length and no range given
 _MAX_GREP_FILE_BYTES = 2_000_000  # skip files larger than this in recursive grep
 _BINARY_SNIFF_BYTES  = 4096       # bytes inspected for a NUL byte to detect binary files
+_MAX_GREP_LINE_CHARS = 300        # a longer hit line (minified code) is clipped around the match
+
+
+def _clip_hit(line: str, m: re.Match) -> str:
+    """A grep hit line, clipped to a window around the match when it is long."""
+    if len(line) <= _MAX_GREP_LINE_CHARS:
+        return line
+    mid = (m.start() + m.end()) // 2
+    start = max(0, min(mid - _MAX_GREP_LINE_CHARS // 2, len(line) - _MAX_GREP_LINE_CHARS))
+    end = start + _MAX_GREP_LINE_CHARS
+    return (("…" if start else "") + line[start:end] + ("…" if end < len(line) else "")
+            + f" [line is {len(line):,} chars]")
 
 def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
     root = _safe_path(directory, workdir)
@@ -551,8 +563,8 @@ def _grep_file(pattern: str, path: str, *, workdir: Path) -> str:
         return f"ERROR: invalid regex: {e}"
     hits = []
     for i, line in enumerate(text.splitlines(), 1):
-        if rx.search(line):
-            hits.append(f"{i:4}: {line}")
+        if m := rx.search(line):
+            hits.append(f"{i:4}: {_clip_hit(line, m)}")
     return "\n".join(hits) if hits else "(no matches)"
 
 
@@ -611,12 +623,12 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
                 continue
             text = raw.decode("utf-8", errors="replace")
             for i, line in enumerate(text.splitlines(), 1):
-                if rx.search(line):
+                if m := rx.search(line):
                     try:
                         rel = fpath.relative_to(workdir)
                     except ValueError:
                         rel = fpath
-                    results.append(f"{rel}:{i}: {line}")
+                    results.append(f"{rel}:{i}: {_clip_hit(line, m)}")
     # With the code index on, point at the indexed search: it is faster and names
     # the definition each hit sits in.
     tip = ("\n(index_text runs this search from the code index and names the definition "

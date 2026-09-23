@@ -143,7 +143,7 @@ _DEFS: dict[str, dict[str, str]] = {
 # grammar name -> import/include statement node types.  Used by
 # file_dependencies and to tag a reference as role "import".
 _IMPORTS: dict[str, set[str]] = {
-    "python": {"import_statement", "import_from_statement"},
+    "python": {"import_statement", "import_from_statement", "future_import_statement"},
     "java":   {"import_declaration"},
     "c":      {"preproc_include"},
     "cpp":    {"preproc_include"},
@@ -191,6 +191,9 @@ _PARAM_NODES = {"parameters", "formal_parameters", "formal_parameter", "paramete
                 "lambda_parameters", "object_pattern", "array_pattern", "pattern_list",
                 "tuple_pattern", "variable_declaration",
                 "as_pattern_target",            # with ... as x / except E as x
+                "list_splat_pattern", "dictionary_splat_pattern",   # *args, **kwargs
+                "rest_pattern",                 # JS ...rest
+                "list_pattern",                 # Python typ, [data] = ...
                 "type_pattern"}                 # Java `case Square sq ->`
 # parent type -> the field that binds (None: any child identifier)
 _BINDING_FIELDS = {"assignment": "left", "for_statement": "left", "for_in_statement": "left",
@@ -198,7 +201,8 @@ _BINDING_FIELDS = {"assignment": "left", "for_statement": "left", "for_in_statem
                    "let_declaration": "pattern", "declaration": "declarator",
                    "for_in_clause": "left",              # [x for x in xs]
                    "enhanced_for_statement": "name",     # for (Square sq : xs)
-                   "lambda_expression": "parameters"}    # Java q -> q.area()
+                   "lambda_expression": "parameters",    # Java q -> q.area()
+                   "named_expression": "name"}           # Python (n := len(x))
 _IMPORT_ANCESTOR_DEPTH = 6  # an identifier sits close to its import statement
 
 # Kinds whose nested functions are reported as methods.
@@ -283,6 +287,7 @@ class _Parsed:
     tree: object
     symbols: list[Symbol]
     imports: list[Import] = field(default_factory=list)
+    sub: "_Parsed | None" = None   # HTML: the page's inline <script> JavaScript
 
 
 @dataclass
@@ -329,8 +334,9 @@ def _c_declarator_name(node):
     node that names it (identifier, qualified_identifier, destructor_name, ...)."""
     while node is not None:
         inner = node.child_by_field_name("declarator")
-        if inner is None and node.type == "parenthesized_declarator":
-            # `typedef int (*cmp_fn)(...)`: the name sits inside the parentheses.
+        if inner is None and node.type in ("parenthesized_declarator", "reference_declarator"):
+            # `typedef int (*cmp_fn)(...)`: the name sits inside the parentheses;
+            # `mat3_t& rotate(...)`: the reference declarator has no field for it.
             inner = next((c for c in node.named_children), None)
         if inner is None:
             return node
@@ -444,14 +450,19 @@ def _c_decl_name(node):
     return None
 
 
-def _bindings(node, lang: str, parent_kind: str | None) -> list[tuple[str, object, str, object]]:
+def _bindings(node, lang: str, parent_kind: str | None,
+              parent_qual: str = "") -> list[tuple[str, object, str, object]]:
     """(name, name node, kind, span node) for each variable `node` declares at
     module scope (or, for Java/Kotlin, as a class constant)."""
     out = []
     t = node.type
     module = parent_kind is None or (lang == "cpp" and parent_kind == "namespace")
     if lang == "python" and module and t == "expression_statement":
-        for a in node.named_children:
+        chain = [a for a in node.named_children if a.type == "assignment"]
+        while chain and (nxt := chain[-1].child_by_field_name("right")) is not None \
+                and nxt.type == "assignment":
+            chain.append(nxt)                     # a = b = 2
+        for a in chain:
             if a.type == "assignment":
                 left = a.child_by_field_name("left")
                 if left is not None and left.type == "identifier":
@@ -460,8 +471,12 @@ def _bindings(node, lang: str, parent_kind: str | None) -> list[tuple[str, objec
                         else _var_kind(_text(left))
                     out.append((_text(left), left, kind, node))
     elif lang == "python" and parent_kind == "class" and t == "expression_statement":
-        # Class attributes and dataclass fields (`sku: str`, `ATTR = 1`).
-        for a in node.named_children:
+        # Class attributes and dataclass fields (`sku: str`, `ATTR = 1`, x = y = f).
+        chain = [a for a in node.named_children if a.type == "assignment"]
+        while chain and (nxt := chain[-1].child_by_field_name("right")) is not None \
+                and nxt.type == "assignment":
+            chain.append(nxt)
+        for a in chain:
             if a.type == "assignment":
                 left = a.child_by_field_name("left")
                 if left is not None and left.type == "identifier":
@@ -490,20 +505,31 @@ def _bindings(node, lang: str, parent_kind: str | None) -> list[tuple[str, objec
                           for a in (v.child_by_field_name("arguments") or v).named_children)):
                 kind = "function"                   # const Input = forwardRef((p, r) => ...)
             out.append((_text(n), n, kind, node if len(decls) == 1 else d))
-    elif lang in _JS_LANGS and module and t == "expression_statement":
-        # Assignments that define: exports.f = function, module.exports.f = () =>,
-        # Counter.prototype.inc = function (a method of Counter).
-        a = node.named_children[0] if node.named_child_count else None
-        left = a.child_by_field_name("left") if a is not None and a.type == "assignment_expression" else None
-        right = a.child_by_field_name("right") if left is not None else None
+    elif lang in _JS_LANGS and t == "assignment_expression":
+        # Assignments that define — as statements or inside a comma chain
+        # (`o.cancel = function(){}, Ht.get = ...` in minified code):
+        # exports.f = function, module.exports.f = () =>, Counter.prototype.inc =
+        # function (a method of Counter), this.x = () => in a method (a member of
+        # its class), Module.locateFile = ... (a function on that object).
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
         if left is not None and left.type == "member_expression" and right is not None \
                 and right.type in _FUNCTION_VALUES:
             parts = _text(left).split(".")
             prop = left.child_by_field_name("property")
-            if parts[0] in ("exports", "module") and prop is not None:
-                out.append((parts[-1], prop, "function", node, parts[-1]))
-            elif len(parts) == 3 and parts[1] == "prototype" and prop is not None:
+            if prop is None or not all(re.fullmatch(r"[A-Za-z_$][\w$]*", x) for x in parts):
+                pass                                   # a[i] = ..., f().x = ...: not a name
+            elif parts[0] in ("exports", "module"):
+                if module:
+                    out.append((parts[-1], prop, "function", node, parts[-1]))
+            elif len(parts) == 3 and parts[1] == "prototype":
                 out.append((parts[-1], prop, "method", node, f"{parts[0]}.{parts[-1]}"))
+            elif parts[0] == "this" and len(parts) == 2 and parent_kind == "method" and "." in parent_qual:
+                cls = parent_qual.rsplit(".", 1)[0]
+                out.append((parts[-1], prop, "method", node, f"{cls}.{parts[-1]}"))
+            elif parts[0] not in ("this", "self"):
+                # Module.locateFile = (...) => ..., globalThis.f = function ...
+                out.append((parts[-1], prop, "function", node, ".".join(parts)))
     elif lang in ("c", "cpp") and t == "enumerator":
         n = node.child_by_field_name("name")
         if n is not None:
@@ -631,7 +657,7 @@ def _extract(root, lang: str, lines: list[str],
                     q = f"{parent_qual}.{_text(n)}" if parent_qual else _text(n)
                     walk(v, q, "object" if v.type == "object" else "class", depth + 1)
                     continue
-            for vname, vnode, vkind, vspan, *own_qual in _bindings(child, lang, parent_kind):
+            for vname, vnode, vkind, vspan, *own_qual in _bindings(child, lang, parent_kind, parent_qual):
                 vrow = vspan.start_point[0]
                 scope = parent_qual
                 if child.type == "enumerator" and parent_kind == "enum" and not _scoped_enum(
@@ -1066,7 +1092,10 @@ def _py_import(node) -> list[tuple[str, list[str]]]:
                 mods.append((_text(c), []))
         return mods
     mod = node.child_by_field_name("module_name")
-    names = []
+    names = ["*"] if any(c.type == "wildcard_import" for c in node.children) else []
+    if node.type == "future_import_statement":
+        return [("__future__", [_text(c) for i, c in enumerate(node.children)
+                                if node.field_name_for_child(i) == "name"])]
     for i, c in enumerate(node.children):
         if node.field_name_for_child(i) != "name":
             continue
@@ -1171,12 +1200,7 @@ def parse(path: Path) -> _Parsed | None:
     if hit and hit[0] == stamp:
         _cache.move_to_end(key)
         return hit[1]
-    raw = path.read_bytes()
-    tree = _parser(lang).parse(raw)
-    lines = raw.decode("utf-8", errors="replace").splitlines()
-    imp_nodes: list = []
-    symbols = _symbols_for(tree.root_node, lang, lines, imp_nodes)
-    parsed = _Parsed(lang, lines, tree, symbols, _build_imports(imp_nodes, lang, lines))
+    parsed = _parse_bytes(lang, path.read_bytes())
     while len(_cache) >= _MAX_CACHE:
         _cache.popitem(last=False)
     _cache[key] = (stamp, parsed)
@@ -1226,13 +1250,7 @@ def index(path: Path) -> _Index | None:
     if cached and cached[0] == stamp:
         _put_index(key, stamp, cached[1])
         return _index_cache[key][1]
-    raw = path.read_bytes()
-    tree = _parser(lang).parse(raw)
-    lines = raw.decode("utf-8", errors="replace").splitlines()
-    imp_nodes: list = []
-    symbols = _symbols_for(tree.root_node, lang, lines, imp_nodes)
-    idx = _Index(lang, len(lines), symbols, _build_imports(imp_nodes, lang, lines),
-                 tree.root_node.has_error)
+    idx = make_index(_parse_bytes(lang, path.read_bytes()))
     while len(_index_cache) >= _MAX_INDEX_CACHE:
         _index_cache.popitem(last=False)
     _index_cache[key] = (stamp, idx)
@@ -1256,11 +1274,59 @@ def parse_uncached(path: Path, raw: bytes | None = None) -> _Parsed | None:
         return None
     if raw is None:
         raw = path.read_bytes()
+    return _parse_bytes(lang, raw)
+
+
+def _parse_bytes(lang: str, raw: bytes) -> _Parsed:
+    """One parse of a file's bytes: tree, symbols, imports — and, for HTML, the
+    JavaScript of its inline <script> blocks as an embedded parse."""
     tree = _parser(lang).parse(raw)
     lines = raw.decode("utf-8", errors="replace").splitlines()
     imp_nodes: list = []
     symbols = _symbols_for(tree.root_node, lang, lines, imp_nodes)
-    return _Parsed(lang, lines, tree, symbols, _build_imports(imp_nodes, lang, lines))
+    parsed = _Parsed(lang, lines, tree, symbols, _build_imports(imp_nodes, lang, lines))
+    if lang == "html":
+        parsed.sub = _inline_scripts(tree, raw)
+        if parsed.sub is not None:
+            parsed.symbols = symbols + parsed.sub.symbols
+            parsed.imports = parsed.imports + parsed.sub.imports
+    return parsed
+
+
+# ── JavaScript inside HTML ───────────────────────────────────────────────────
+# A single-file web app keeps all its code in <script> blocks.  They are parsed
+# as one JavaScript "mirror" of the page: every script line at its original row
+# and column, everything else blank — so rows and columns in the mirror ARE the
+# HTML file's, and every symbol, occurrence and caller maps straight back.
+
+_JS_SCRIPT_TYPES = ("", "text/javascript", "application/javascript", "module", "text/babel")
+
+
+def _inline_scripts(tree, raw: bytes) -> "_Parsed | None":
+    if not grammar_available("javascript"):
+        return None
+    nrows = raw.count(b"\n") + 1
+    rows = [""] * nrows
+    found = False
+    stack = [tree.root_node]
+    while stack:
+        n = stack.pop()
+        if n.type != "script_element":
+            stack.extend(n.children)
+            continue
+        start = next((c for c in n.named_children if c.type == "start_tag"), None)
+        attrs = _html_attrs(start) if start is not None else {}
+        body = next((c for c in n.named_children if c.type == "raw_text"), None)
+        if body is None or "src" in attrs or attrs.get("type", "").lower() not in _JS_SCRIPT_TYPES:
+            continue
+        row, col = body.start_point
+        for i, text in enumerate(_text(body).split("\n")):
+            if row + i < nrows:
+                rows[row + i] = (" " * col if i == 0 else "") + text
+        found = True
+    if not found:
+        return None
+    return _parse_bytes("javascript", "\n".join(rows).encode("utf-8"))
 
 
 def make_index(parsed: _Parsed) -> _Index:
@@ -1294,6 +1360,8 @@ def _ident_cursor(lang: str):
 
 def identifier_rows(parsed: _Parsed) -> set[tuple[str, int]]:
     """Every (identifier text, 1-based line) in a parsed file, deduplicated."""
+    if parsed.sub is not None:
+        return identifier_rows(parsed.sub)      # HTML: its inline scripts
     cur = _ident_cursor(parsed.lang) if parsed.lang in _DEFS else False
     if not cur:
         return set()
@@ -1312,12 +1380,35 @@ def _in_closing_tag(node) -> bool:
     return False
 
 
+# Fields that hold the NAME of what a node defines, across the grammars.
+_DEF_NAME_FIELDS = {"name", "declarator", "key", "property", "pattern", "left", "type"}
+
+
+def _is_def_name(node) -> bool:
+    """This identifier is where something is defined (its name field), not a
+    use of that name on the same line."""
+    if node.parent is not None and node.parent.type in _MEMBER_NODES \
+            and node.parent.type not in ("qualified_identifier", "scoped_identifier"):
+        return False                  # obj.name / this.name: always a use
+    if node.parent is not None and node.parent.type in ("qualified_identifier", "scoped_identifier",
+                                                        "destructor_name", "operator_name"):
+        node = node.parent
+    field = _field_of(node)
+    if field in _DEF_NAME_FIELDS:
+        return True
+    # grammars that name definitions without a field (Kotlin, some Rust/C++ nodes)
+    return field is None and node.parent is not None and _field_of(node.parent) != "arguments" \
+        and node.parent.type not in _CALL_NODES and node.parent.type not in _MEMBER_NODES
+
+
 def references_in(parsed: _Parsed, bare: str, rows: set[int] | None = None
                   ) -> dict[int, tuple[str, str | None, str | None]]:
     """{0-based row: (role, receiver, receiver's declared type)} for the uses of
     `bare` in one file.  With
     `rows`, only those rows are examined and subtrees outside them are skipped,
     so a lookup driven by the occurrence index touches a few nodes, not all."""
+    if parsed.sub is not None:
+        return references_in(parsed.sub, bare, rows)   # HTML: its inline scripts
     target = bare.encode()
     def_lines = {s.name_line for s in parsed.symbols if s.name == bare}
     out: dict[int, tuple[str, str | None]] = {}
@@ -1335,7 +1426,9 @@ def references_in(parsed: _Parsed, bare: str, rows: set[int] | None = None
                 r = node.start_point[0]
                 if rows is not None and r not in rows:
                     continue
-                got = _classify(node, parsed.lang, r + 1 in def_lines)
+                # A definition is the name node itself, not every use on its line:
+                # minified code puts a whole library — definitions and calls — on one line.
+                got = _classify(node, parsed.lang, r + 1 in def_lines and _is_def_name(node))
                 prev = out.get(r)
                 # "call" is the most informative label for a shared row.
                 if prev is None or (prev[0] != "call" and got[0] == "call"):
@@ -1513,25 +1606,97 @@ def _binds(node) -> bool:
         return False
     if parent.type in ("pointer_declarator", "reference_declarator"):
         return _binds(parent)             # `Shape& s`, `int *p`
+    if parent.type in ("tuple", "list", "parenthesized_expression"):
+        return _binds(parent)             # with ... as (a, b) / (a, b) = ...
     if parent.type in _PARAM_NODES:
         return True
+    field = _field_of(node)
+    if field == "name" and (parent.type in _FUNC_SCOPES or parent.type in _NESTED_CLASSES):
+        return True                       # a nested def / class binds its name
+    if parent.type == "aliased_import":
+        return field == "alias"           # import a as b / from x import y as b
+    if parent.type == "dotted_name" and parent.parent is not None:
+        stmt = parent.parent
+        if stmt.type == "import_statement":      # import a.b binds a
+            return parent.named_children[0].id == node.id
+        if stmt.type == "import_from_statement" and _field_of(parent) == "name":
+            return True                          # from x import y binds y
     want = _BINDING_FIELDS.get(parent.type)
-    return want is not None and _field_of(node) == want
+    return want is not None and field == want
 
 
 _CLASS_BODIES = {"class_body", "enum_body", "declaration_list", "field_declaration_list"}
+# Class definitions nested in a function: their name binds there, their body
+# is a scope of its own (Python class attributes are not the function's locals).
+_NESTED_CLASSES = {"class_definition", "class_declaration", "class"}
 
 
-def _scan_binding(scope, target: bytes, skip_functions: bool):
-    stack = list(scope.children)
+# Nodes that open a block scope in block-scoped languages.  A `const total` in
+# an if-block does not hide a call to total() after the block.
+_BLOCKS = {"statement_block", "block", "compound_statement", "switch_block", "switch_body",
+           "for_statement", "for_in_statement", "enhanced_for_statement", "catch_clause",
+           "if_statement", "while_statement", "control_structure_body"}
+
+
+def _function_scoped(binding) -> bool:
+    """Python bindings and JS `var` belong to the whole function; parameters
+    belong to it everywhere.  Everything else is block-scoped."""
+    if binding.parent is not None and binding.parent.type in _PARAM_NODES \
+            and binding.parent.type not in ("variable_declaration", "object_pattern",
+                                            "array_pattern", "as_pattern_target",
+                                            "pattern_list", "tuple_pattern", "type_pattern"):
+        return True
+    n = binding
+    while n.parent is not None:
+        if n.type == "variable_declaration" and n.parent.type != "property_declaration":
+            return True                               # JS `var`
+        n = n.parent
+    return n.type == "module"                         # Python's root node
+
+
+def _in_scope(binding, use) -> bool:
+    if _function_scoped(binding):
+        return True
+    block = binding.parent
+    while block is not None and block.type not in _BLOCKS and block.type not in _FUNC_SCOPES:
+        block = block.parent
+    return block is None or (block.start_byte <= use.start_byte and use.end_byte <= block.end_byte)
+
+
+def _scan_binding(scope, target: bytes, skip_functions: bool, use=None):
+    """A binding of `target` in this scope.  A nested function or class is a
+    scope of its own: only its NAME binds here, never its parameters or body —
+    `items.map((total) => total)` must not make `total` local to the outer
+    function.  The scope's own name belongs to the scope around it."""
+    stack = [c for i, c in enumerate(scope.children) if scope.field_name_for_child(i) != "name"]
     while stack:
         n = stack.pop()
         if n.child_count == 0:
-            if n.text == target and _is_ident(n.type) and _binds(n) and not _imported_binding(n):
+            if (n.text == target and _is_ident(n.type) and _binds(n) and not _imported_binding(n)
+                    and (use is None or _in_scope(n, use))):
                 return n
-        elif not (skip_functions and n.type in _FUNC_SCOPES):
+        elif n.type in _FUNC_SCOPES or n.type in _NESTED_CLASSES:
+            nm = n.child_by_field_name("name")
+            if nm is not None and nm.text == target and _is_ident(nm.type):
+                return nm
+            if not skip_functions and n.type not in _FUNC_SCOPES and n.type not in _NESTED_CLASSES:
+                stack.extend(n.children)
+        else:
             stack.extend(n.children)
     return None
+
+
+def _declared_global(scope, target: bytes) -> bool:
+    """Python `global x` in this function: x is the module's, not a local."""
+    stack = [scope]
+    while stack:
+        n = stack.pop()
+        if n.type == "global_statement":
+            if any(c.text == target for c in n.named_children):
+                return True
+        elif n is scope or n.type not in _FUNC_SCOPES:
+            stack.extend(n.children)
+    return False
 
 
 def _binding_of(node, fields: bool = False):
@@ -1543,9 +1708,20 @@ def _binding_of(node, fields: bool = False):
         scope = scope.parent
     if scope is None:
         return None
-    found = _scan_binding(scope, node.text, False)
+    innermost = scope
+    found = None
+    while scope is not None:
+        if _declared_global(scope, node.text):
+            return None
+        found = _scan_binding(scope, node.text, False, use=node)
+        if found is not None:
+            break
+        # a closure: the name may be a local of an enclosing function
+        scope = scope.parent
+        while scope is not None and scope.type not in _FUNC_SCOPES:
+            scope = scope.parent
     if found is None and fields:
-        body = scope.parent
+        body = innermost.parent
         while body is not None and body.type not in _CLASS_BODIES:
             body = body.parent
         if body is not None:

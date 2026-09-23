@@ -159,3 +159,34 @@ baseline you intend to reuse.
 
 For the model-free per-language scorecard (definitions, search, callers, imports
 per language, no model), see `evals/lang_bench.py` — it runs in about a second.
+
+## Checking the index against independent oracles (`oracle_bench.py`)
+
+`lang_bench.py` scores fixtures against ground truth written by the same hand
+that wrote the extractor. `oracle_bench.py` compares the index with sources it
+has no say in, on real code:
+
+- **Python:** the interpreter's `ast` (definitions, call sites, imports) and
+  `symtable` (which names are local to each function, closures included).
+- **C, C++, Java, JavaScript, TypeScript:** each grammar's own `tags.scm`
+  (definitions; call references where the query has them — C/C++ have none).
+
+```bash
+python evals/oracle_bench.py                        # default corpora, 200 files per language
+python evals/oracle_bench.py --langs python --limit 500 --show 10
+```
+
+Results on 2026-09-23 (Python: stdlib + this repo + badgeware; C/C++: badgeware;
+Java: a 78-file Quarkus service; JS: badgeware + this web UI):
+
+| | definitions | call sites | other |
+|---|---|---|---|
+| python (496 files) | 100% / 100% | 100% / 100% (2 of 51,760 missed) | imports 100/100, locals 100% recall / 99.7% precision |
+| c (110) | 100% / 99.7% | no oracle | |
+| cpp (82) | 100% / 91.7% | no oracle | extras: operators, destructors, fn-pointer typedefs (tags has no pattern) |
+| java (78) | 100% / 98.1% | 100% / 100% | extras: constructors |
+| javascript (49) | 83.5% / 98.6% | 100% / 100% | misses: `$("#x").onclick = () => ...` handlers — skipped by design |
+
+C/C++ definitions are compared "with a body": tags.scm also tags prototypes and
+forward declarations, which the index deliberately does not. No real Kotlin,
+Rust, TypeScript or TSX code was available locally; those rely on the fixtures.

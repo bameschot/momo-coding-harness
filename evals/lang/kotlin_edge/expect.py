@@ -40,8 +40,16 @@ SEARCHES = [
 
 CALLERS = {
     "describe": {(M, "println(describe(sq)", "call")},
+    "biggest":  {(M, "biggest(items)", "call"),
+                 (S, "    return biggest(xs)", "call")},        # after the block's val biggest
     "second":   {(M, "items.second().area()", "call")},
     "Unit.toCm": {(M, "Unit.CM.toCm(2.0)",   "call")},
+    # s: Shape / it: Shape / the Shape pair / scaled()'s own area(): all may be a Square.
+    "Square.area": {(S, 'is Square -> "square ${s.area()}"', "call"),
+                    (S, "shapes.maxOf { it.area() }",        "call"),
+                    (S, "fun scaled(k: Double) = area() * k", "call"),
+                    (M, "items.second().area()",             "call"),
+                    (M, "sq.apply { println(area()) }",      "call")},
 }
 
 CHAINS = {"describe": set()}

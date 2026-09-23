@@ -1260,13 +1260,15 @@ class Harness:
                 if k not in drop:
                     take(k)
 
-        # Pass 3: still over the limit — trim the largest remaining tool results.
+        # Pass 3: still over the target — trim the largest remaining tool results.
+        # Trimming only to the limit would leave the context a few tokens under
+        # it: every later request then sits at ~100% yet never re-triggers.
         trims: dict[int, str] = {}
-        if total > self.context_limit:
+        if total > target:
             for k in sorted((k for k in range(1, len(msgs))
                              if k not in drop and msgs[k].get("role") == "tool"),
                             key=lambda k: -costs[k]):
-                excess = total - self.context_limit
+                excess = total - target
                 if excess <= 0:
                     break
                 keep = max(costs[k] - excess - 16, _TRIM_FLOOR_TOKENS)  # 16: the marker

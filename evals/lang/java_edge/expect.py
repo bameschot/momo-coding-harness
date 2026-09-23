@@ -18,6 +18,7 @@ DEFINITIONS = [
     ("Square.biggest",   "method",      P + "Square.java", "public static double biggest("),
     ("Report",           "class",       P + "Report.java", "public class Report"),
     ("Report.describe",  "method",      P + "Report.java", "public String describe("),
+    ("Report.viaBase",   "method",      P + "Report.java", "public double viaBase("),
     ("Report.total",     "method",      P + "Report.java", "public double total("),
 ]
 
@@ -42,12 +43,17 @@ CALLERS = {
         (P + "Report.java", 'case Square sq -> "square " + sq.area()', "call"),
         (P + "Report.java", "t += sq.area()",                  "call"),
         (P + "Square.java", "s += shape.area()",               "call"),   # T extends Shape: unknown, kept
+        # Through the base type: a Shape may be a Square (virtual dispatch).
+        (P + "Report.java", "return s.area();",                "call"),
+        # Shape.unit() returns new Square(1.0): this call does reach Square.area.
+        (P + "Report.java", "Shape.unit().area()",             "call"),
     },
     "Shape.doubled": {
         (P + "Report.java", 'default -> "shape " + shape.doubled()', "call"),
     },
     "Square.sum": {
         (P + "Report.java", "Square.sum(squares)",             "call"),
+        (P + "Square.java", "return sum(xs);",                 "call"),   # after the block's local sum
     },
     "Shape.unit": {
         (P + "Report.java", "Shape.unit().area()",             "call"),
@@ -65,7 +71,4 @@ IMPORTS = {
 
 FRESH = (P + "Report.java", "\nclass FreshMarker {}\n", "FreshMarker")
 
-# Not a failure, but it lowers caller precision: in `Shape.unit().area()` the
-# receiver's type is Shape.unit()'s declared return type.  Reading return types
-# across files is not done, so the call stays in Square.area's results.
 KNOWN_GAPS = {}

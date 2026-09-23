@@ -30,6 +30,14 @@ int apply(struct ops *op, int v) {
     return op->run(scaled(v));
 }
 
+int shadow(void) {
+    {
+        int list_sum = 0;
+        (void)list_sum;
+    }
+    return list_sum(NULL);
+}
+
 int sum_all(int count, ...) {
     va_list ap;
     int s = 0;

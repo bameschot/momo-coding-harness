@@ -163,6 +163,19 @@ class Compaction(unittest.TestCase):
         self.assertLess(counted.call_count, 2 * 501)
         self.assertLess(elapsed, 0.5)  # was ~0.1 s at O(n²)
 
+    def test_trimming_leaves_real_headroom(self):
+        # Regression: pass 3 trimmed only down to the limit, leaving the context a
+        # few tokens under it — ~100% full, yet auto-compaction never fired again.
+        self.history(0, current="now")
+        self.h.messages += [
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"function": {"name": "grep_files", "arguments": {"pattern": "x"}}}]},
+            {"role": "tool", "name": "grep_files", "content": "x" * 80000},
+        ]
+        self.h.context_limit = self.fixed() + 12000
+        self.h.compact(summarise=False)
+        self.assertLessEqual(self.h._estimate(), self.fixed() + 12000 // 3 + 64)
+
 
 if __name__ == "__main__":
     unittest.main()

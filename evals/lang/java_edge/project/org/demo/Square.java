@@ -28,6 +28,14 @@ public class Square extends Shape {
         return s;
     }
 
+    static double blocky(List<Square> xs) {
+        if (xs.isEmpty()) {
+            double sum = 0;
+            return sum;
+        }
+        return sum(xs);
+    }
+
     public static double biggest(List<Square> squares) {
         Function<Square, Double> areaOf = sq -> sq.area();
         Runnable r = new Runnable() {

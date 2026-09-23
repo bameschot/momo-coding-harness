@@ -36,6 +36,14 @@ fun describe(s: Shape): String = when (s) {
     else -> "shape"
 }
 
+fun blocky(xs: List<Shape>): Double {
+    if (xs.isEmpty()) {
+        val biggest = 0.0
+        return biggest
+    }
+    return biggest(xs)
+}
+
 fun biggest(shapes: List<Shape>): Double {
     val (first, second) = shapes.take(2)
     return shapes.maxOf { it.area() } + first.area() + second.area()

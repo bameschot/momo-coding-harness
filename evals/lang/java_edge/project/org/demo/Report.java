@@ -10,6 +10,10 @@ public class Report {
         };
     }
 
+    public double viaBase(Shape s) {
+        return s.area();
+    }
+
     public double total(List<Square> squares) {
         double t = 0;
         for (Square sq : squares) {

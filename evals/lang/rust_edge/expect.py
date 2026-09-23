@@ -36,6 +36,7 @@ CALLERS = {
     "Shape.area":   {(L, "double(s.area())", "call")},
     "inner.helper": {(L, "inner::helper() as f64", "call")},
     "Named.name":   {(L, "let _ = named.name();", "call")},
+    "load":         {(L, 'let _ = load("circle");', "call")},   # after the block's `let load`
 }
 
 CHAINS = {"inner.helper": set()}

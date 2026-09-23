@@ -35,7 +35,7 @@ from pathlib import Path
 
 from . import code_nav
 
-FORMAT_VERSION = 5   # 2: Symbol.doc; 3: constants, JS/TS exports; 4: constant docs; 5: package
+FORMAT_VERSION = 6   # 5: package; 6: HTML inline-script JavaScript, scoping/extraction fixes
 DEFAULT_MAX_BYTES = 100 * 1024 * 1024  # default memory budget of the index (/index-max-mem)
 MIN_MAX_BYTES = 1024 * 1024            # smallest budget /index-max-mem accepts
 
@@ -1177,9 +1177,11 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
     if best_whole:
         trailer.append("(the best match's full source is shown above — nothing left to read)")
     else:
+        # Callers make sense for code — including JavaScript inside an HTML page —
+        # not for a config key or a CSS rule: decide by what the definition is.
+        code_like = best.kind in _CALLABLE_KINDS or best.kind in code_nav._CONTAINER_KINDS
         trailer.append(f'(next: read_symbol("{hits[0][3]}", "{best.qualname}") reads the best match'
-                       + (f"; index_callers(\"{best.name}\") shows who uses it)"
-                          if hits[0][6] not in _DATA_LANGS else ")"))
+                       + (f"; index_callers(\"{best.name}\") shows who uses it)" if code_like else ")"))
     return _with_note("\n".join([head + ":"] + out + trailer), index)
 
 
@@ -1331,11 +1333,15 @@ _OPEN_TYPES = {"Any", "any", "object", "Object", "unknown", "dynamic", "Self", "
 
 
 def _other_type(index: ProjectIndex, rtype: str | None, cls: str) -> bool:
-    """The receiver's declared type rules out `cls`: it is a different project
-    class (not a subclass), or an external type (`List`) — which cannot be a
-    class defined here.  Unknown, generic (`T`) and any-typed receivers do not."""
+    """The receiver's declared type rules out `cls`.  Inheritance counts both
+    ways: a `Circle c` is a Shape, and a `Shape s` / `Discount d` may BE the
+    Circle / Half being asked about (virtual dispatch), so neither is dropped.
+    Only an unrelated type rules it out.  Unknown, generic (`T`) and any-typed
+    receivers never do."""
     if not rtype or rtype in _OPEN_TYPES or (len(rtype) <= 2 and rtype.isupper()):
         return False
+    if _is_subtype(index, cls, rtype):
+        return False                    # the receiver's type is a base of cls
     if _is_project_class(index, rtype):
         return not _is_subtype(index, rtype, cls)
     return True
@@ -1435,6 +1441,9 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
             if cls_last and role == "call":
                 if recv and recv.startswith(("self.", "this.")):
                     continue            # an attribute of self is a different object
+                if recv and recv.split("(", 1)[0] in ("super", "super."[:5]) and owner is not None \
+                        and cls_last in owner.qualname.split(".")[:-1]:
+                    continue            # super().m() in C calls C's base, not C.m
                 if _other_type(index, rtype, cls_last):
                     continue            # `Cart cart; cart.add()` is not Money.add
                 if recv is None and owner is not None:
@@ -1644,12 +1653,65 @@ def _import_graph(index: ProjectIndex) -> dict[int, dict[int, int]]:
     for fid in alive:
         e = index.files[fid]
         for imp in e.imports:
-            targets = _resolve_import(imp, e.lang, cands, fqns, index)
+            targets = _relative_import(imp, e, index)
+            if targets is None:
+                targets = _resolve_import(imp, e.lang, cands, fqns, index)
             targets.discard(fid)
             for d in targets:
                 out[fid].setdefault(d, imp.line)
     index._graph_cache = (index.version, out)
     return out
+
+
+_JS_EXTS = ("", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".d.ts",
+            "/index.js", "/index.ts", "/index.tsx", "/index.jsx")
+
+
+def _relative_import(imp, e: "FileEntry", index: ProjectIndex) -> set[int] | None:
+    """Targets of an import written relative to the importing file — Python
+    `from . import x` / `from ..pkg import y`, JS/TS `./x` / `../x`, C/C++
+    `#include "x.h"` — resolved against that file's directory.  None when the
+    import is not relative (or, for C, nothing sits next to the includer), so
+    the textual resolver runs instead."""
+    here = Path(e.path).parent
+    by_path = index._by_path
+
+    def find(*cands: str) -> set[int]:
+        out = set()
+        for c in cands:
+            rel = Path(c).as_posix()
+            parts = []
+            for part in rel.split("/"):
+                if part == "..":
+                    if not parts:
+                        return set()
+                    parts.pop()
+                elif part not in ("", "."):
+                    parts.append(part)
+            fid = by_path.get("/".join(parts))
+            if fid is not None:
+                out.add(fid)
+        return out
+
+    mod = imp.module
+    if e.lang == "python" and mod.startswith("."):
+        dots = len(mod) - len(mod.lstrip("."))
+        base = here
+        for _ in range(dots - 1):
+            base = base.parent
+        rest = mod.lstrip(".").replace(".", "/")
+        if rest:
+            return find(f"{base}/{rest}.py", f"{base}/{rest}/__init__.py")
+        out = set()
+        for n in imp.names:                     # from . import utils, models
+            out |= find(f"{base}/{n}.py", f"{base}/{n}/__init__.py")
+        return out or find(f"{base}/__init__.py")
+    if e.lang in code_nav._JS_LANGS and mod.startswith((".", "/")):
+        return find(*(f"{here}/{mod}{ext}" for ext in _JS_EXTS))
+    if e.lang in ("c", "cpp") and '"' in imp.text:
+        hit = find(f"{here}/{mod}")
+        return hit or None                      # else: an -I include path, matched textually
+    return None
 
 
 def _resolve_import(imp, lang: str | None, cands, fqns, index: ProjectIndex) -> set[int]:
