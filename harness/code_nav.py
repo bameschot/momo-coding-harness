@@ -77,6 +77,8 @@ _JS_DEFS = {
     # `handle = () => ...` — only counted when the value is a function.
     "variable_declarator":            "function",
     "field_definition":               "function",
+    "function_expression":            "function",   # only when named: (function boot() {})()
+    "pair":                           "function",   # { remove: (id) => id }, only function values
 }
 _TS_DEFS = {
     **_JS_DEFS,
@@ -93,7 +95,7 @@ _TS_DEFS = {
 }
 _FUNCTION_VALUES = {"arrow_function", "function_expression", "function",
                     "generator_function"}
-_BINDING_NODES = {"variable_declarator", "field_definition", "public_field_definition"}
+_BINDING_NODES = {"variable_declarator", "field_definition", "public_field_definition", "pair"}
 _DEFS: dict[str, dict[str, str]] = {
     "python": {
         "class_definition":    "class",
@@ -118,6 +120,7 @@ _DEFS: dict[str, dict[str, str]] = {
         "class_declaration":    "class",
         "object_declaration":   "object",
         "function_declaration": "function",
+        "type_alias":           "type",
     },
     "rust": {
         "struct_item":            "struct",
@@ -169,7 +172,33 @@ _TYPE_PARENTS = {"type_identifier", "type_annotation", "generic_type", "type_arg
                  "base_class_clause", "scoped_type_identifier", "qualified_type",
                  "user_type", "extends_interfaces", "nullable_type", "type_constraint",
                  "trait_bounds", "constrained_type_parameter"}
-REFERENCE_ROLES = ("call", "def", "import", "type", "other")
+# decl: a declaration without a body (a C/C++ prototype); local: a parameter or
+# local variable that merely shares the name — neither is a use of the definition.
+REFERENCE_ROLES = ("call", "def", "decl", "import", "type", "local", "other")
+NOT_USES = frozenset({"def", "decl", "local"})
+
+# Scope rules, one small table for every grammar: the nodes that open a function
+# scope, and the positions where an identifier BINDS a name in that scope.
+_FUNC_SCOPES = {"function_definition", "function_declaration", "method_declaration",
+                "method_definition", "constructor_declaration", "function_item",
+                "arrow_function", "function_expression", "lambda", "lambda_literal",
+                "closure_expression", "generator_function_declaration", "anonymous_function",
+                "lambda_expression"}
+_PARAM_NODES = {"parameters", "formal_parameters", "formal_parameter", "parameter_list",
+                "parameter_declaration", "typed_parameter", "default_parameter",
+                "typed_default_parameter", "parameter", "function_value_parameters",
+                "required_parameter", "optional_parameter", "closure_parameters",
+                "lambda_parameters", "object_pattern", "array_pattern", "pattern_list",
+                "tuple_pattern", "variable_declaration",
+                "as_pattern_target",            # with ... as x / except E as x
+                "type_pattern"}                 # Java `case Square sq ->`
+# parent type -> the field that binds (None: any child identifier)
+_BINDING_FIELDS = {"assignment": "left", "for_statement": "left", "for_in_statement": "left",
+                   "variable_declarator": "name", "init_declarator": "declarator",
+                   "let_declaration": "pattern", "declaration": "declarator",
+                   "for_in_clause": "left",              # [x for x in xs]
+                   "enhanced_for_statement": "name",     # for (Square sq : xs)
+                   "lambda_expression": "parameters"}    # Java q -> q.area()
 _IMPORT_ANCESTOR_DEPTH = 6  # an identifier sits close to its import statement
 
 # Kinds whose nested functions are reported as methods.
@@ -290,15 +319,31 @@ def _text(node) -> str:
     return node.text.decode("utf-8", errors="replace")
 
 
+def _is_ident(node_type: str) -> bool:
+    """Identifier-like leaves, including destructuring (`const { a } = ...`)."""
+    return node_type.endswith("identifier") or node_type.endswith("identifier_pattern")
+
+
 def _c_declarator_name(node):
     """Follow the declarator chain of a C/C++ function or typedef down to the
     node that names it (identifier, qualified_identifier, destructor_name, ...)."""
     while node is not None:
         inner = node.child_by_field_name("declarator")
+        if inner is None and node.type == "parenthesized_declarator":
+            # `typedef int (*cmp_fn)(...)`: the name sits inside the parentheses.
+            inner = next((c for c in node.named_children), None)
         if inner is None:
             return node
         node = inner
     return None
+
+
+def _strip_template_args(s: str) -> str:
+    """'Box<T>::Iter::done' -> 'Box::Iter::done' (nested <...> too)."""
+    prev = None
+    while prev != s:
+        prev, s = s, re.sub(r"<[^<>]*>", "", s)
+    return s
 
 
 def _strip_generics(s: str) -> str:
@@ -313,11 +358,13 @@ def _def_name(node, lang: str, kind: str) -> tuple[str, int] | None:
         n = _c_declarator_name(node.child_by_field_name("declarator"))
         if n is None:
             return None
-        # "n::A::f" -> "n.A.f" so dotted lookup works the same in every language
-        return _text(n).replace("::", "."), n.start_point[0]
+        # "n::A::f" -> "n.A.f" so dotted lookup works the same in every language,
+        # and "Box<T>::put" -> "Box.put": template arguments are not part of the name.
+        return _strip_template_args(_text(n)).replace("::", "."), n.start_point[0]
     if node.type in _BINDING_NODES:
         value = node.child_by_field_name("value")
-        n = node.child_by_field_name("name") or node.child_by_field_name("property")
+        n = (node.child_by_field_name("name") or node.child_by_field_name("property")
+             or node.child_by_field_name("key"))
         if (value is None or value.type not in _FUNCTION_VALUES or n is None
                 or n.type not in ("identifier", "property_identifier")):
             return None
@@ -328,8 +375,12 @@ def _def_name(node, lang: str, kind: str) -> tuple[str, int] | None:
             return None
         return _strip_generics(_text(t)), t.start_point[0]
     n = node.child_by_field_name("name")
+    if n is None and node.type == "type_alias":
+        n = node.child_by_field_name("type")     # Kotlin puts the alias name there
     if n is None:
         return None
+    if lang in ("c", "cpp"):
+        return _strip_template_args(_text(n)).replace("::", "."), n.start_point[0]
     return _text(n), n.start_point[0]
 
 
@@ -404,8 +455,26 @@ def _bindings(node, lang: str, parent_kind: str | None) -> list[tuple[str, objec
             if a.type == "assignment":
                 left = a.child_by_field_name("left")
                 if left is not None and left.type == "identifier":
+                    right = a.child_by_field_name("right")
+                    kind = "function" if right is not None and right.type == "lambda" \
+                        else _var_kind(_text(left))
+                    out.append((_text(left), left, kind, node))
+    elif lang == "python" and parent_kind == "class" and t == "expression_statement":
+        # Class attributes and dataclass fields (`sku: str`, `ATTR = 1`).
+        for a in node.named_children:
+            if a.type == "assignment":
+                left = a.child_by_field_name("left")
+                if left is not None and left.type == "identifier":
                     out.append((_text(left), left, _var_kind(_text(left)), node))
-    elif lang in ("javascript", "typescript", "tsx") and module \
+    elif lang in ("javascript", "typescript", "tsx") and parent_kind == "class" \
+            and t in ("field_definition", "public_field_definition") \
+            and any(c.type == "static" or _text(c) == "static" for c in node.children):
+        # Static class fields (`static MAX = 20`); instance fields are state.
+        v = node.child_by_field_name("value")
+        n = node.child_by_field_name("property") or node.child_by_field_name("name")
+        if n is not None and (v is None or v.type not in _FUNCTION_VALUES):
+            out.append((_text(n), n, _var_kind(_text(n)), node))
+    elif lang in ("javascript", "typescript", "tsx") and (module or parent_kind == "namespace") \
             and t in ("lexical_declaration", "variable_declaration"):
         decls = [d for d in node.named_children if d.type == "variable_declarator"]
         for d in decls:
@@ -413,12 +482,45 @@ def _bindings(node, lang: str, parent_kind: str | None) -> list[tuple[str, objec
             v = d.child_by_field_name("value")
             if n is None or n.type != "identifier" or (v is not None and v.type in _FUNCTION_VALUES):
                 continue
-            out.append((_text(n), n, _var_kind(_text(n)), node if len(decls) == 1 else d))
+            kind = _var_kind(_text(n))
+            if v is not None and v.type == "class":
+                kind = "class"                      # const Base = class {...}
+            elif (v is not None and v.type == "call_expression" and _text(n)[:1].isupper()
+                  and any(a.type in _FUNCTION_VALUES
+                          for a in (v.child_by_field_name("arguments") or v).named_children)):
+                kind = "function"                   # const Input = forwardRef((p, r) => ...)
+            out.append((_text(n), n, kind, node if len(decls) == 1 else d))
+    elif lang in _JS_LANGS and module and t == "expression_statement":
+        # Assignments that define: exports.f = function, module.exports.f = () =>,
+        # Counter.prototype.inc = function (a method of Counter).
+        a = node.named_children[0] if node.named_child_count else None
+        left = a.child_by_field_name("left") if a is not None and a.type == "assignment_expression" else None
+        right = a.child_by_field_name("right") if left is not None else None
+        if left is not None and left.type == "member_expression" and right is not None \
+                and right.type in _FUNCTION_VALUES:
+            parts = _text(left).split(".")
+            prop = left.child_by_field_name("property")
+            if parts[0] in ("exports", "module") and prop is not None:
+                out.append((parts[-1], prop, "function", node, parts[-1]))
+            elif len(parts) == 3 and parts[1] == "prototype" and prop is not None:
+                out.append((parts[-1], prop, "method", node, f"{parts[0]}.{parts[-1]}"))
+    elif lang in ("c", "cpp") and t == "enumerator":
+        n = node.child_by_field_name("name")
+        if n is not None:
+            out.append((_text(n), n, "constant", node))
+    elif lang == "kotlin" and t == "enum_entry" and parent_kind == "enum":
+        n = next((c for c in node.named_children if _is_ident(c.type)), None)
+        if n is not None:
+            out.append((_text(n), n, "constant", node))
+    elif lang == "java" and t == "enum_constant" and parent_kind == "enum":
+        n = node.child_by_field_name("name")
+        if n is not None:
+            out.append((_text(n), n, "constant", node))
     elif lang in ("c", "cpp") and module:
-        if t == "preproc_def":
+        if t in ("preproc_def", "preproc_function_def"):
             n = node.child_by_field_name("name")
             if n is not None:
-                out.append((_text(n), n, "constant", node))
+                out.append((_text(n), n, "macro" if t == "preproc_function_def" else "constant", node))
         elif t == "declaration" and not any(c.type == "storage_class_specifier" and _text(c) == "extern"
                                             for c in node.children):
             const = any(c.type == "type_qualifier" and _text(c) in ("const", "constexpr")
@@ -452,6 +554,48 @@ def _bindings(node, lang: str, parent_kind: str | None) -> list[tuple[str, objec
     return out
 
 
+def _const_doc(span) -> str:
+    """A constant's description: the comment trailing it on its last line
+    (`LIMIT = 5  # max retries`), else the comment block directly above it."""
+    nxt = span.next_named_sibling
+    if nxt is not None and "comment" in nxt.type and nxt.start_point[0] == span.end_point[0]:
+        return _clean_doc(_text(nxt))
+    prev = span.prev_named_sibling
+    if prev is not None and "comment" in prev.type:
+        before = prev.prev_named_sibling
+        if before is not None and before.end_point[0] == prev.start_point[0]:
+            return ""       # that comment trails the line above; it describes that line
+    return _doc_line(span, span)
+
+
+_JS_LANGS = ("javascript", "typescript", "tsx")
+
+
+def _scoped_enum(node) -> bool:
+    """C++ `enum class X {...}`: its constants are X::A, not plain A."""
+    return any(c.type in ("class", "struct") for c in node.children)
+
+
+def _is_require_call(node) -> bool:
+    """`require("./m")` or a dynamic `import("./m")` with a literal path."""
+    if node.type != "call_expression":
+        return False
+    fn = node.child_by_field_name("function")
+    if fn is None or not (fn.type == "import" or (fn.type == "identifier" and _text(fn) == "require")):
+        return False
+    args = node.child_by_field_name("arguments")
+    return args is not None and any(c.type in ("string", "template_string") for c in args.named_children)
+
+
+def _require_binding(call):
+    """The variable_declarator a require()/import() call initialises, if any
+    (`const { a } = require("./m")`, `const m = await import("./m")`)."""
+    p = call.parent
+    if p is not None and p.type == "await_expression":
+        p = p.parent
+    return p if p is not None and p.type == "variable_declarator" else None
+
+
 def _is_local_export(node) -> bool:
     """`export function f() {}` / `export const X = 1`: an export_statement that
     declares something here rather than re-exporting from another module
@@ -467,6 +611,7 @@ def _extract(root, lang: str, lines: list[str],
     defs = _DEFS[lang]
     import_types = _IMPORTS.get(lang, frozenset()) if imports_out is not None else frozenset()
     out: list[Symbol] = []
+    namespaces: set[str] = set()
 
     def walk(node, parent_qual: str, parent_kind: str | None, depth: int) -> None:
         for child in node.children:
@@ -474,11 +619,27 @@ def _extract(root, lang: str, lines: list[str],
                 # An import statement holds no definitions, so stop here.
                 imports_out.append(child)
                 continue
-            for vname, vnode, vkind, vspan in _bindings(child, lang, parent_kind):
+            if imports_out is not None and lang in _JS_LANGS and _is_require_call(child):
+                imports_out.append(child)     # require("./m") / import("./m")
+                continue
+            if lang in _JS_LANGS and child.type == "variable_declarator":
+                v, n = child.child_by_field_name("value"), child.child_by_field_name("name")
+                if v is not None and v.type in ("object", "class") and n is not None \
+                        and n.type == "identifier":
+                    # const api = { fetchAll() {} } / const Base = class { hello() {} }:
+                    # the members belong to api / Base.
+                    q = f"{parent_qual}.{_text(n)}" if parent_qual else _text(n)
+                    walk(v, q, "object" if v.type == "object" else "class", depth + 1)
+                    continue
+            for vname, vnode, vkind, vspan, *own_qual in _bindings(child, lang, parent_kind):
                 vrow = vspan.start_point[0]
+                scope = parent_qual
+                if child.type == "enumerator" and parent_kind == "enum" and not _scoped_enum(
+                        node.parent if node.type == "enumerator_list" and node.parent is not None else node):
+                    scope = parent_qual.rsplit(".", 1)[0] if "." in parent_qual else ""
                 out.append(Symbol(
                     name=vname,
-                    qualname=f"{parent_qual}.{vname}" if parent_qual else vname,
+                    qualname=own_qual[0] if own_qual else (f"{scope}.{vname}" if scope else vname),
                     kind=vkind,
                     start=vrow + 1,
                     # A #define ends at column 0 of the next line.
@@ -487,20 +648,34 @@ def _extract(root, lang: str, lines: list[str],
                     name_line=vnode.start_point[0] + 1,
                     signature=lines[vrow].strip()[:_MAX_SIGNATURE] if vrow < len(lines) else "",
                     depth=depth,
+                    doc=_const_doc(vspan),
                 ))
             kind = defs.get(child.type)
             if kind is None:
                 walk(child, parent_qual, parent_kind, depth)
                 continue
             got = _def_name(child, lang, kind)
+            if (got is not None and lang in ("c", "cpp") and kind in ("struct", "union", "enum", "class")
+                    and child.child_by_field_name("body") is None):
+                got = None      # `struct node *next;` names a type, it does not define one
             if got is None:
                 walk(child, parent_qual, parent_kind, depth)
                 continue
             name, name_row = got
             if kind == "function" and parent_kind in _CONTAINER_KINDS:
                 kind = "method"
+            if kind == "namespace":
+                namespaces.add(name.rsplit(".", 1)[-1])
+            if (lang in ("c", "cpp") and kind == "function" and "." in name
+                    and name.rsplit(".", 2)[-2] not in namespaces):
+                # `double Circle::area() const {...}` out of line: a method of
+                # Circle — unless the scope is a namespace declared here.
+                kind = "method"
             if lang == "kotlin" and kind == "class" and any(c.type == "interface" for c in child.children):
                 kind = "interface"
+            if lang == "kotlin" and kind == "class" and any(
+                    c.type == "modifiers" and "enum" in _text(c).split() for c in child.children):
+                kind = "enum"
             span = child.parent if child.parent is not None and child.parent.type in _WRAPPERS else child
             start_row = span.start_point[0]
             qual = f"{parent_qual}.{name}" if parent_qual else name
@@ -520,7 +695,12 @@ def _extract(root, lang: str, lines: list[str],
                 depth=depth,
                 doc=_doc_line(child, span),
             ))
-            walk(child, qual, kind, depth + 1)
+            if kind == "typedef":
+                # `typedef struct node {...} node_t;` defines node beside node_t,
+                # not inside it.
+                walk(child, parent_qual, parent_kind, depth)
+            else:
+                walk(child, qual, kind, depth + 1)
 
     walk(root, "", None, 0)
     return out
@@ -866,7 +1046,7 @@ def _leaf_names(node) -> list[str]:
     while stack:
         n = stack.pop()
         if n.child_count == 0:
-            if n.type.endswith("identifier"):
+            if _is_ident(n.type):
                 out.append(_text(n))
         else:
             stack.extend(reversed(n.children))
@@ -886,8 +1066,14 @@ def _py_import(node) -> list[tuple[str, list[str]]]:
                 mods.append((_text(c), []))
         return mods
     mod = node.child_by_field_name("module_name")
-    names = [_text(c) for i, c in enumerate(node.children)
-             if node.field_name_for_child(i) == "name"]
+    names = []
+    for i, c in enumerate(node.children):
+        if node.field_name_for_child(i) != "name":
+            continue
+        # `from . import net as net_mod` imports `net`; the alias is local.
+        if c.type == "aliased_import":
+            c = c.child_by_field_name("name") or c
+        names.append(_text(c))
     return [(_text(mod) if mod is not None else "", names)]
 
 
@@ -936,6 +1122,8 @@ def _build_imports(found: list, lang: str, lines: list[str]) -> list[Import]:
                            if c.type in ("scoped_identifier", "identifier")), None)
             if scoped is None:
                 pairs = []
+            elif any(c.type == "asterisk" for c in node.children):
+                pairs = [(_text(scoped) + ".*", [])]     # import a.b.*: the whole package
             else:
                 full = _text(scoped)
                 pairs = [(full, [full.rsplit(".", 1)[-1]] if "." in full else [])]
@@ -943,9 +1131,19 @@ def _build_imports(found: list, lang: str, lines: list[str]) -> list[Import]:
             q = next((c for c in node.children if c.type == "qualified_identifier"), None)
             if q is None:
                 pairs = []
+            elif any(_text(c) == "*" for c in node.children):
+                pairs = [(_text(q) + ".*", [])]
             else:
                 full = _text(q)
                 pairs = [(full, [full.rsplit(".", 1)[-1]] if "." in full else [])]
+        elif node.type == "call_expression":   # require("./m") / import("./m")
+            args = node.child_by_field_name("arguments")
+            lit = next((c for c in args.named_children if c.type in ("string", "template_string")), None)
+            decl = _require_binding(node)
+            target = decl.child_by_field_name("name") if decl is not None else None
+            names = ([_text(target)] if target is not None and target.type == "identifier"
+                     else _leaf_names(target) if target is not None else [])
+            pairs = [(_strip_quotes(_text(lit)).strip("`"), names)] if lit is not None else []
         else:  # javascript / typescript / tsx
             src = node.child_by_field_name("source")
             if src is None:  # a plain `export {x}` with no `from` is not an import
@@ -1041,6 +1239,15 @@ def index(path: Path) -> _Index | None:
     return idx  # tree goes out of scope here — that is the point
 
 
+def package_of(parsed: _Parsed) -> str:
+    """The `package a.b.c` a Java/Kotlin file declares, '' for everything else."""
+    for c in parsed.tree.root_node.named_children:
+        if c.type in ("package_declaration", "package_header"):
+            name = next((x for x in c.named_children if "identifier" in x.type), None)
+            return _text(name).replace(" ", "") if name is not None else ""
+    return ""
+
+
 def parse_uncached(path: Path, raw: bytes | None = None) -> _Parsed | None:
     """Parse without touching either cache — for the project indexer, which
     keeps what it needs itself and must not evict the trees read_symbol uses."""
@@ -1076,7 +1283,7 @@ def _ident_cursor(lang: str):
         L = _parser(lang).language
         kinds = sorted({L.node_kind_for_id(i) for i in range(L.node_kind_count)
                         if L.node_kind_is_named(i) and L.node_kind_is_visible(i)
-                        and (L.node_kind_for_id(i) or "").endswith("identifier")})
+                        and _is_ident(L.node_kind_for_id(i) or "")})
         if not kinds:
             _ident_cursors[lang] = False
             return False
@@ -1094,9 +1301,21 @@ def identifier_rows(parsed: _Parsed) -> set[tuple[str, int]]:
     return {(_text(c), c.start_point[0] + 1) for c in caps if c.child_count == 0}
 
 
+def _in_closing_tag(node) -> bool:
+    p = node.parent
+    for _ in range(3):
+        if p is None:
+            return False
+        if p.type == "jsx_closing_element":
+            return True
+        p = p.parent
+    return False
+
+
 def references_in(parsed: _Parsed, bare: str, rows: set[int] | None = None
-                  ) -> dict[int, tuple[str, str | None]]:
-    """{0-based row: (role, receiver)} for the uses of `bare` in one file.  With
+                  ) -> dict[int, tuple[str, str | None, str | None]]:
+    """{0-based row: (role, receiver, receiver's declared type)} for the uses of
+    `bare` in one file.  With
     `rows`, only those rows are examined and subtrees outside them are skipped,
     so a lookup driven by the occurrence index touches a few nodes, not all."""
     target = bare.encode()
@@ -1112,15 +1331,15 @@ def references_in(parsed: _Parsed, bare: str, rows: set[int] | None = None
         if node.child_count == 0:
             # Leaf identifier nodes only: comments and string contents are
             # separate node types, and substrings never match exactly.
-            if node.type.endswith("identifier") and node.text == target:
+            if _is_ident(node.type) and node.text == target and not _in_closing_tag(node):
                 r = node.start_point[0]
                 if rows is not None and r not in rows:
                     continue
-                kind, recv = _classify(node, parsed.lang, r + 1 in def_lines)
+                got = _classify(node, parsed.lang, r + 1 in def_lines)
                 prev = out.get(r)
                 # "call" is the most informative label for a shared row.
-                if prev is None or (prev[0] != "call" and kind == "call"):
-                    out[r] = (kind, recv)
+                if prev is None or (prev[0] != "call" and got[0] == "call"):
+                    out[r] = got
         else:
             stack.extend(node.children)
     return out
@@ -1287,53 +1506,248 @@ def _is_callee(node) -> bool:
     return first is not None and first.id == node.id
 
 
-def _classify(node, lang: str, is_def: bool) -> tuple[str, str | None]:
+def _binds(node) -> bool:
+    """True when this identifier leaf introduces a name (parameter, local)."""
+    parent = node.parent
+    if parent is None:
+        return False
+    if parent.type in ("pointer_declarator", "reference_declarator"):
+        return _binds(parent)             # `Shape& s`, `int *p`
+    if parent.type in _PARAM_NODES:
+        return True
+    want = _BINDING_FIELDS.get(parent.type)
+    return want is not None and _field_of(node) == want
+
+
+_CLASS_BODIES = {"class_body", "enum_body", "declaration_list", "field_declaration_list"}
+
+
+def _scan_binding(scope, target: bytes, skip_functions: bool):
+    stack = list(scope.children)
+    while stack:
+        n = stack.pop()
+        if n.child_count == 0:
+            if n.text == target and _is_ident(n.type) and _binds(n) and not _imported_binding(n):
+                return n
+        elif not (skip_functions and n.type in _FUNC_SCOPES):
+            stack.extend(n.children)
+    return None
+
+
+def _binding_of(node, fields: bool = False):
+    """The parameter / local that binds this identifier's name in the enclosing
+    function, or None (a module-level or outside name).  With `fields`, a field
+    declared in the enclosing class body counts too (`lines` in `lines.add()`)."""
+    scope = node.parent
+    while scope is not None and scope.type not in _FUNC_SCOPES:
+        scope = scope.parent
+    if scope is None:
+        return None
+    found = _scan_binding(scope, node.text, False)
+    if found is None and fields:
+        body = scope.parent
+        while body is not None and body.type not in _CLASS_BODIES:
+            body = body.parent
+        if body is not None:
+            found = _scan_binding(body, node.text, True)
+    return found
+
+
+def _is_local(node) -> bool:
+    """The name is a parameter or local of the enclosing function, so a bare use
+    of it there refers to that, not to a same-named definition elsewhere."""
+    return _binding_of(node) is not None
+
+
+# ── declared types (light typing from syntax) ────────────────────────────────
+# The type a variable's declaration spells out — `Cart cart`, `cart: Cart`,
+# `new Cart()`, `Cart()`, `Cart::new()` — so `cart.add(...)` can be told apart
+# from another class's add.  Nothing is inferred: an unwritten type is None.
+
+_NOT_TYPES = {"var", "val", "let", "auto", "const", "mut", "dyn", "impl", "final",
+              "None", "null", "undefined", "NoneType"}
+# Wrappers whose type argument is the object's real type: Optional[Order] is an Order.
+_WRAPPERS_T = {"Optional", "Option", "Nullable", "Box", "Rc", "Arc", "Ref", "RefCell",
+               "Mutex", "Readonly", "typing"}
+_TYPE_PATH = re.compile(r"[A-Za-z_]\w*(?:(?:::|\.)[A-Za-z_]\w*)*")
+
+
+def _type_name(t) -> str | None:
+    """'Optional[Order]' / 'Cart | null' / '&mut Cart' / 'List<Line>' / 'geo::Shape'
+    -> 'Order' / 'Cart' / 'Cart' / 'List' / 'Shape'."""
+    for path in _TYPE_PATH.findall(_text(t)):
+        last = re.split(r"::|\.", path)[-1]
+        if last not in _NOT_TYPES and last not in _WRAPPERS_T:
+            return last
+    return None
+
+
+def _ctor_type(v) -> str | None:
+    """`new Cart()`, `Cart()`, `Cart::new()`, `Item { .. }` -> 'Cart' / 'Item'."""
+    if v.type == "await_expression" and v.named_child_count:
+        v = v.named_children[0]
+    if v.type in ("new_expression", "object_creation_expression"):
+        t = v.child_by_field_name("constructor") or v.child_by_field_name("type")
+        return _type_name(t) if t is not None else None
+    if v.type == "struct_expression":
+        t = v.child_by_field_name("name")
+        return _type_name(t) if t is not None else None
+    if v.type in ("call", "call_expression"):
+        fn = v.child_by_field_name("function") or (v.named_children[0] if v.named_child_count else None)
+        if fn is None:
+            return None
+        name = _text(fn)
+        if "::" in name:                      # Rust Cart::new()
+            return name.rsplit("::", 2)[-2].split("<")[0]
+        if _is_ident(fn.type) and name[:1].isupper():   # Python/Kotlin Cart()
+            return name
+    return None
+
+
+def declared_type(binding) -> str | None:
+    """The type the declaration of `binding` (a parameter / local name) spells
+    out: a `type` field, a Kotlin type child, or a constructor-call initialiser."""
+    n = binding.parent
+    for _ in range(4):
+        if n is None or n.type in _FUNC_SCOPES:
+            return None
+        t = n.child_by_field_name("type")
+        if t is not None and (name := _type_name(t)):
+            return name
+        t = next((c for c in n.named_children if c.type in ("user_type", "type_identifier")
+                  and c.id != binding.id), None)
+        if t is not None and (name := _type_name(t)):
+            return name
+        v = n.child_by_field_name("value") or n.child_by_field_name("right")
+        if v is None and n.type == "property_declaration" and n.named_child_count:
+            v = n.named_children[-1]
+        if v is not None and (name := _ctor_type(v)):
+            return name
+        n = n.parent
+    return None
+
+
+def _receiver_type(recv_node) -> str | None:
+    if recv_node is None:
+        return None
+    if _is_ident(recv_node.type):
+        b = _binding_of(recv_node, fields=True)
+        return declared_type(b) if b is not None else None
+    return _ctor_type(recv_node)              # new Cart().add(...), Cart().total()
+
+
+def _imported_binding(node) -> bool:
+    """`const { a } = await import("./m")`: `a` is the imported function, not a
+    local of its own."""
+    d, depth = node.parent, 0
+    while d is not None and depth < 4 and d.type != "variable_declarator":
+        d, depth = d.parent, depth + 1
+    if d is None or d.type != "variable_declarator":
+        return False
+    v = d.child_by_field_name("value")
+    if v is not None and v.type == "await_expression" and v.named_child_count:
+        v = v.named_children[0]
+    return v is not None and _is_require_call(v)
+
+
+def _is_prototype(node) -> bool:
+    """C/C++: the name in `int clamp(int v);` — declared, not defined or used."""
+    d = node.parent
+    while d is not None and d.type in ("qualified_identifier", "function_declarator",
+                                       "pointer_declarator", "reference_declarator"):
+        if d.type == "function_declarator":
+            host = d.parent
+            while host is not None and host.type in ("pointer_declarator", "reference_declarator"):
+                host = host.parent
+            return host is not None and host.type in ("declaration", "field_declaration")
+        d = d.parent
+    return False
+
+
+def _classify(node, lang: str, is_def: bool) -> tuple[str, str | None, str | None]:
     """(role, receiver) for an identifier leaf: what the use actually is, and
     what it hangs off when it is a member access.  Purely syntactic — there is
     no scope resolution here, so the receiver is reported rather than resolved."""
+    role, recv, recv_node = _classify_node(node, lang, is_def)
+    return role, recv, _receiver_type(recv_node) if role == "call" and recv_node is not None else None
+
+
+def _classify_node(node, lang: str, is_def: bool):
     if is_def:
-        return "def", None
+        return "def", None, None
     import_types = _IMPORTS.get(lang, ())
     anc, depth = node.parent, 0
     while anc is not None and depth < _IMPORT_ANCESTOR_DEPTH:
         if anc.type in import_types and not _is_local_export(anc):
-            return "import", None
+            return "import", None, None
+        if (lang in _JS_LANGS and anc.type == "variable_declarator"
+                and _field_of(node) != "value"):
+            value = anc.child_by_field_name("value")
+            if value is not None and value.type == "await_expression" and value.named_child_count:
+                value = value.named_children[0]
+            name = anc.child_by_field_name("name")
+            if (value is not None and _is_require_call(value) and name is not None
+                    and name.start_byte <= node.start_byte and node.end_byte <= name.end_byte):
+                return "import", None, None     # const { a } = require("./m")
         anc, depth = anc.parent, depth + 1
 
     parent = node.parent
     if parent is None:
-        return "other", None
+        return "other", None, None
+    if lang in ("c", "cpp") and _is_prototype(node):
+        return "decl", None, None
+    if parent.type not in _MEMBER_NODES and _is_local(node):
+        return "local", None, None
     field = _field_of(node)
-    receiver = None
+    receiver = recv_node = None
     if parent.type in _MEMBER_NODES:
         first = next((ch for ch in parent.children if ch.is_named), None)
         if field in _RECEIVER_FIELDS or (field is None and first is not None
                                          and first.id == node.id):
             # The identifier IS the receiver (`ast` in `ast.parse`) — not a use
-            # of the name we were asked about in any interesting sense.
-            return "other", None
+            # of the name we were asked about in any interesting sense, and a
+            # local of that name (`total.write()`) is not one at all.
+            return ("local" if _is_local(node) else "other"), None, None
         for f in _RECEIVER_FIELDS:
             recv = parent.child_by_field_name(f)
             if recv is not None:
-                receiver = _text(recv)[:40]
+                receiver, recv_node = _text(recv)[:40], recv
                 break
         else:
             # Grammars like Kotlin's navigation_expression name no fields at
             # all; there the receiver is simply what comes first.
             if first is not None and first.id != node.id:
-                receiver = _text(first)[:40]
+                receiver, recv_node = _text(first)[:40], first
         gp = parent.parent
         if gp is not None and gp.type in _CALL_NODES and _is_callee(parent):
-            return "call", receiver
+            return "call", receiver, recv_node
         if node.type == "type_identifier" or parent.type == "scoped_type_identifier":
-            return "type", receiver
-        return "other", receiver
+            return "type", receiver, None
+        return "other", receiver, None
 
     if parent.type in _CALL_NODES and _is_callee(node):
-        return "call", None
+        # Java `cart.add(x)` is one method_invocation node: its receiver is the
+        # `object` field, not a separate member-access node.
+        obj = parent.child_by_field_name("object") if field == "name" else None
+        return "call", (_text(obj)[:40] if obj is not None else None), obj
+    # Calls the grammar does not model as call nodes:
+    if parent.type == "infix_expression" and lang == "kotlin":
+        kids = parent.named_children
+        if len(kids) == 3 and kids[1].id == node.id:
+            return "call", None, None                 # a percentOf b
+    if parent.type == "token_tree":                   # Rust: println!("{}", f(x))
+        nxt = node.next_sibling
+        if nxt is not None and nxt.type == "token_tree" and nxt.child_count \
+                and nxt.children[0].type == "(":
+            prev = node.prev_sibling
+            if prev is not None and prev.type == "::" and prev.prev_sibling is not None:
+                return "call", _text(prev.prev_sibling)[:40], None
+            return "call", None, None
+    if parent.type in ("jsx_opening_element", "jsx_self_closing_element") and field == "name":
+        return "call", None, None                     # <Component ... />
     if node.type == "type_identifier" or parent.type in _TYPE_PARENTS:
-        return "type", None
-    return "other", None
+        return "type", None, None
+    return "other", None, None
 
 
 # ── executors ────────────────────────────────────────────────────────────────
@@ -1528,7 +1942,7 @@ def find_references(name: str, directory: str = ".", role: str | None = None,
         rows = references_in(parsed, bare)
         rel = _rel(f, workdir)
         for r in sorted(rows):
-            kind, recv = rows[r]
+            kind, recv, _rtype = rows[r]
             by_role[kind] = by_role.get(kind, 0) + 1
             if kind == "call":
                 if recv:
@@ -1614,8 +2028,9 @@ def _module_candidates(p: Path, workdir: Path) -> tuple[str, set[str]]:
     # Any suffix of the path: `harness.code_nav` also matches `from .code_nav`.
     for i in range(len(parts)):
         cands.add(".".join(parts[i:]))
-    # A package import names the directory, not __init__.
-    if stem == "__init__" and len(parts) > 1:
+    # A package import names the directory: pkg/__init__.py, a Rust
+    # module's mod.rs, a JS/TS folder's index.js.
+    if stem in ("__init__", "mod", "index") and len(parts) > 1:
         cands.add(".".join(parts[:-1]))
         cands.add(parts[-2])
     return stem, cands

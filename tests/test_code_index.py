@@ -346,11 +346,62 @@ class Tools(Base):
         out = self.search("turn a size string into bytes")
         self.assertIn("function parse_size", out.splitlines()[1])
 
+    def test_short_values_are_inlined_and_results_say_current(self):
+        _write(self.root, "schema.sql", "CREATE TABLE users (\n  id INTEGER,\n  email TEXT\n);\n")
+        _write(self.root, "users.py", "class UserEvent:\n    pass\n")
+        out = self.search("users table")
+        self.assertIn("schema.sql:L1-4  table users", out.splitlines()[1])   # the kind is a word
+        self.assertIn("    3:   email TEXT", out)                          # the source, inline
+        self.assertIn("nothing left to read", out)
+        self.assertIn("re-reading files to double-check is not needed", out)
+        self.assertIn("double-check is not needed", self.text("retry_delay"))
+
+    def test_constant_found_by_its_comment_and_tests_rank_last(self):
+        _write(self.root, "tests/test_budget.py", "class Budget:\n    pass\n")
+        _write(self.root, "limits.py", "DEFAULT_MAX = 100  # default memory budget of the cache\n")
+        out = self.search("budget")
+        lines = out.splitlines()
+        self.assertIn("limits.py", lines[1])
+        self.assertLess(out.index("limits.py"), out.index("tests/test_budget.py"))
+
+    def test_search_expands_abbreviations(self):
+        _write(self.root, "conf/db.yaml", "services:\n  db:\n    image: postgres:16\n")
+        out = self.search("database image")
+        self.assertIn("key services.db.image", out.splitlines()[1])
+
+    def test_kind_miss_shows_other_kinds(self):
+        out = self.search("server", kind="function")
+        self.assertIn("nothing of kind 'function'", out)
+        self.assertIn("table server", out)
+
+    def test_no_hit_points_at_text_or_config_files(self):
+        out = self.search("knob")                  # only in notes.txt prose
+        self.assertIn("The text appears in: notes.txt ×1", out)
+        out = self.search("zzqqxx")
+        self.assertIn("Config files in the index (1): conf/app.yaml", out)
+
     def test_search_finds_files_by_path(self):
         out = self.search("conf/app.yaml")
         self.assertIn("conf/app.yaml  (file, yaml", out)
         self.assertIn('index_file("conf/app.yaml")', out)
         self.assertIn("b.py  (file", self.search("b", kind="file"))
+
+    def test_function_and_method_kinds_find_each_other(self):
+        _write(self.root, "k.py", "class K:\n    def clear(self):\n        pass\n")
+        self.assertIn("method K.clear", self.search("clear", kind="function"))
+        self.assertIn("function mid", self.search("mid", kind="method"))
+        self.assertIn("nothing of kind 'class'", self.search("mid", kind="class"))
+
+    def test_callers_of_a_module_name_point_at_index_file(self):
+        out = self.callers("b")
+        self.assertIn("names a file: b.py", out)
+        self.assertIn('index_file("b.py")', out)
+        self.assertIn("names a file: b.py", self.callers("b.py"))
+
+    def test_callers_summarise_importing_files(self):
+        self.assertIn("Imported in 1 file: b.py", self.callers("leaf"))
+        self.assertIn("Imported in 1 file: c.py", self.callers("mid"))
+        self.assertNotIn("Imported in", self.callers("top"))
 
     def test_search_line_form(self):
         out = self.search("5", path="b.py")
@@ -402,7 +453,8 @@ class Tools(Base):
         self.assertLess(out.index("a.py"), out.index("c.py"))   # a.py is used, c.py is not
         out = ci.index_file("b.py", workdir=self.root, index=self.idx)
         self.assertIn("Imports (1): a (leaf)", out)
-        self.assertIn("Imported by (1): c.py:L1", out)
+        self.assertIn("Imported by (1) — and the definitions each one uses:", out)
+        self.assertIn("  c.py:L1 — uses mid", out)
         self.assertIn("function mid", out)
         self.assertIn("ERROR: path outside", ci.index_file("../x", workdir=self.root, index=self.idx))
 

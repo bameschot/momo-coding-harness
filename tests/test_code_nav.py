@@ -149,13 +149,15 @@ class ModuleConstants(unittest.TestCase):
         "c.py":   ("MAX_SIZE = 10\n_UNITS: dict = {\n  'k': 1,\n}\nx, y = 1, 2\n"
                    "if True:\n    FLAG = 1\nclass A:\n    ATTR = 1\n    def f(self):\n        local = 1\n",
                    {("MAX_SIZE", "constant", 1, 1), ("_UNITS", "constant", 2, 4),
-                    ("FLAG", "constant", 7, 7), ("A", "class", 8, 11)}),
+                    ("FLAG", "constant", 7, 7), ("A", "class", 8, 11),
+                    ("ATTR", "constant", 9, 9)}),          # a class attribute
         "c.js":   ("const MAX = 1;\nlet counter = 0;\nexport const API_URL = 'x';\nconst f = () => 1;\n",
                    {("MAX", "constant", 1, 1), ("counter", "variable", 2, 2),
                     ("API_URL", "constant", 3, 3), ("f", "function", 4, 4)}),
         "c.c":    ('#define MAX_LEN 64\n#define SQ(x) ((x)*(x))\nstatic int counter = 0;\n'
                    'int f(void);\nextern int g;\n',
-                   {("MAX_LEN", "constant", 1, 1), ("counter", "variable", 3, 3)}),
+                   {("MAX_LEN", "constant", 1, 1), ("SQ", "macro", 2, 2),
+                    ("counter", "variable", 3, 3)}),
         "c.rs":   ("const MAX: usize = 3;\nstatic mut COUNT: u32 = 0;\n",
                    {("MAX", "constant", 1, 1), ("COUNT", "constant", 2, 2)}),
         "C.java": ("class C {\n  public static final int MAX = 3;\n  private int count = 0;\n}\n",
@@ -181,6 +183,71 @@ class ModuleConstants(unittest.TestCase):
         self.assertIn("(call)", out)           # was tagged (import) inside an export
         self.assertIn("./m", code_nav.file_dependencies("exp.ts", direction="imports",
                                                          workdir=SCRATCH))
+
+
+class ScopeRoles(unittest.TestCase):
+    """A parameter or local that shares a name is not a use; a C prototype is a
+    declaration, not a use."""
+
+    def roles(self, name, src, fname):
+        f = SCRATCH / fname
+        f.write_text(src)
+        parsed = code_nav.parse(f)
+        return {r + 1: role for r, (role, *_rest) in code_nav.references_in(parsed, name).items()}
+
+    def test_parameter_and_local_shadowing(self):
+        src = ("def total():\n    return 1\n\n\ndef f(total):\n    return total + 1\n\n\n"
+               "def g():\n    total = 2\n    return total\n\n\ndef h():\n    return total()\n")
+        self.assertEqual(self.roles("total", src, "shadow.py"),
+                         {1: "def", 5: "local", 6: "local", 10: "local", 11: "local", 15: "call"})
+
+    def test_kotlin_parameter(self):
+        src = "fun total() = 1\nfun pct(total: Int) = total * 2\nfun g() = total()\n"
+        self.assertEqual(self.roles("total", src, "shadow.kt"), {1: "def", 2: "local", 3: "call"})
+
+    def test_c_prototype_is_a_declaration(self):
+        src = "int clamp(int v);\nint *mk(void);\nint clamp(int v) { return v; }\nint g(void) { return clamp(1); }\n"
+        self.assertEqual(self.roles("clamp", src, "proto.c"), {1: "decl", 3: "def", 4: "call"})
+        self.assertEqual(self.roles("mk", src, "proto.c"), {2: "decl"})
+
+    def test_receiver_declared_type(self):
+        cases = {
+            "t.java": ("class A { void f(Cart cart) { var c = new Cart(); Money m = x;\n"
+                       "cart.add(1);\nc.add(2);\nm.add(3); } }", "add", {"Cart", "Money"}),
+            "t.kt":   ("fun f(cart: Cart) {\n val c = Cart()\n cart.add(1)\n c.add(2)\n}\n", "add", {"Cart"}),
+            "t.py":   ("def f(cart: Cart):\n    c = Cart()\n    cart.add(1)\n    c.add(2)\n", "add", {"Cart"}),
+            "t.ts":   ("function f(cart: Cart) { const c = new Cart();\ncart.add(1);\nc.add(2); }", "add", {"Cart"}),
+            "t.rs":   ("fn f(cart: &Cart) { let c = Cart::new();\ncart.add(1);\nc.add(2); }", "add", {"Cart"}),
+            "t.cpp":  ("void f(const Shape& s) { Circle c(2.0);\ns.area();\nc.area(); }", "area", {"Shape", "Circle"}),
+        }
+        for fname, (src, name, want) in cases.items():
+            with self.subTest(fname):
+                f = SCRATCH / fname
+                f.write_text(src)
+                rows = code_nav.references_in(code_nav.parse(f), name)
+                self.assertEqual({t for role, _r, t in rows.values() if role == "call"} - {None}, want)
+
+    def test_imported_destructure_is_not_local(self):
+        src = 'async function f() {\n  const { g } = await import("./m.js");\n  return g();\n}\n'
+        self.assertEqual(self.roles("g", src, "dyn.js"), {2: "import", 3: "call"})
+
+
+class ConstantDocs(unittest.TestCase):
+
+    def test_trailing_and_leading_comments(self):
+        f = SCRATCH / "cd.py"
+        f.write_text("A = 1  # the a value\nB = 2\n# about c\nC = 3\nD = 4  # d here\nE = 5\n")
+        docs = {s.name: s.doc for s in code_nav.parse(f).symbols}
+        self.assertEqual(docs, {"A": "the a value", "B": "", "C": "about c", "D": "d here", "E": ""})
+
+
+class AliasedImports(unittest.TestCase):
+
+    def test_from_import_alias_records_the_real_name(self):
+        f = SCRATCH / "al.py"
+        f.write_text("from . import net as net_mod\nfrom os import path as p, sep\n")
+        imps = code_nav.parse(f).imports
+        self.assertEqual([i.names for i in imps], [["net"], ["path", "sep"]])
 
 
 class DocLines(unittest.TestCase):
@@ -355,9 +422,10 @@ class FindReferences(unittest.TestCase):
         self.assertIn("recv p", out)
 
     def test_receiver_side_identifier_is_not_a_call(self):
-        # `p` in `p.parse("hi")` is the receiver, not a call of `p`.
+        # `p` in `p.parse("hi")` is the receiver, not a call of `p` — and since
+        # it is run()'s parameter, it is tagged as that local.
         out = code_nav.find_references("p", "sample.kt", workdir=FIXTURES)
-        self.assertIn("(other)", out)
+        self.assertIn("(local)", out)
         self.assertNotIn("(call", out)
 
     def test_qualified_name_filters_by_receiver(self):

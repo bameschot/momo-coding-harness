@@ -135,3 +135,27 @@ Anchor error detection on the `ERROR` prefix, never a bare substring. These task
 read `harness/tools.py`, whose source contains `dispatch`'s own error strings
 ("does not accept argument(s)"), so an unanchored match scores a successful file
 read as a malformed call. That bug inflated the first coding-mode report by 3.
+
+## Reusing runs (`--cache`)
+
+```bash
+python evals/run_evals.py --suite lang --no-think --mode chat --runs 5 --cache evals/.cache/runs.jsonl
+python evals/run_evals.py --suite lang --no-think --mode chat --runs 5 --cache evals/.cache/runs.jsonl --index
+```
+
+Each run is stored under a fingerprint of everything that can change its outcome:
+the task (prompt, expected facts, ideal tools), the files of the project it runs
+in, model / mode / think / index, the rendered system prompt and tool schemas,
+and the harness code behind the tool output (`tools.py`, `code_nav.py`,
+`harness.py`, `net.py`, plus `code_index.py` with `--index`). A matching run is
+reused; any change to those inputs makes the next invocation run it fresh.
+Asking for more runs than are stored tops up (`--runs 5` after 3 cached runs
+runs 2). `--refresh` ignores stored runs. Runs that ended in a transport error
+are not stored. `evals/.cache/` is git-ignored.
+
+Caching freezes noise as well as signal: with sampling unpinned, a 3-run
+baseline keeps its outliers forever. Store at least 5 runs per task for a
+baseline you intend to reuse.
+
+For the model-free per-language scorecard (definitions, search, callers, imports
+per language, no model), see `evals/lang_bench.py` — it runs in about a second.

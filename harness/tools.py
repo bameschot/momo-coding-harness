@@ -130,7 +130,8 @@ CODE_NAV_TOOLS = [
         f"Find every place an identifier is used across the project ({_CODE_NAV_LANGS} files). "
         "Each hit names the function or class it sits in, e.g. '[in Parser.parse]', and tags what "
         "the use IS: '(call)' a call site, '(def)' the definition, '(import)' an import, "
-        "'(type)' a type reference, '(other)' a plain read or assignment. A call on an object also "
+        "'(type)' a type reference, '(other)' a plain read or assignment, '(decl)' a C/C++ prototype, "
+        "'(local)' a parameter or local variable that only shares the name. A call on an object also "
         "shows the receiver, e.g. '(call, recv ast)' for 'ast.parse(...)' — that is how you spot "
         "unrelated same-named methods. Matches whole identifiers only and skips comments and "
         "strings, so it is more exact than grep_files. Use before renaming or changing a "
@@ -138,7 +139,7 @@ CODE_NAV_TOOLS = [
         "Results are capped at 200.",
         {"name":      {"type": "string", "description": "Identifier to find, e.g. 'parse_config'"},
          "directory": {"type": "string", "description": "Directory (or single file) to search (default: .)"},
-         "role":      {"type": "string", "description": "Only uses of this kind: call, def, import, type, other (default: all kinds)"}},
+         "role":      {"type": "string", "description": "Only uses of this kind: call, def, decl, import, type, local, other (default: all kinds)"}},
         ["name"]),
 
     _fn("file_dependencies",
@@ -196,7 +197,7 @@ INDEX_TOOLS = [
         "'Class.method'; a qualifier that is not a class filters by receiver ('JSON.parse').",
         {"name":  {"type": "string", "description": "What to look up, e.g. 'parse_config', 'Harness.send'"},
          "depth": {"type": "integer", "description": "1 = direct uses (default); 2 or 3 = also the users of those functions"},
-         "role":  {"type": "string", "description": "Only direct uses of this kind: call, import, type, other (default: all)"}},
+         "role":  {"type": "string", "description": "Only direct uses of this kind: call, import, type, other (default: all). Parameters/locals that share the name and C prototypes are never counted as uses."}},
         ["name"]),
 
     _fn("index_map",

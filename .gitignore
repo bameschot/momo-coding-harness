@@ -3,3 +3,5 @@
 
 
 .venvpy
+# eval run cache (run_evals.py --cache)
+evals/.cache/
