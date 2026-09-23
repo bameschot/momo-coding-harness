@@ -1132,6 +1132,8 @@ def _is_code_symbol(lang: str | None, sym) -> bool:
 def _file_score(rel: str, q: str) -> int:
     ql, rl = q.lower().lstrip("./"), rel.lower()
     base = rl.rsplit("/", 1)[-1]
+    if code_nav._is_pattern(ql):                 # a glob, like find_files: '*.py', 'test_*'
+        return 100 if fnmatch.fnmatch(base, ql) or fnmatch.fnmatch(rl, ql) else 0
     if rl == ql:
         return 100
     if rl.endswith("/" + ql):
@@ -2142,6 +2144,33 @@ def index_file(path: str, *, workdir: Path, index: ProjectIndex | None = None, c
                    + (f"; index_callers(\"{example.rsplit('.', 1)[-1]}\") shows its users)"
                       if e.lang not in _DATA_LANGS else ")"))
     return _with_note("\n".join(out), index)
+
+
+_MAX_FIND = 100     # same cap as find_files
+
+
+def index_find_files(pattern: str, directory: str | None, *, index: ProjectIndex,
+                     cancel=None) -> str | None:
+    """find_files answered from the index's file list: a bare glob ('*.py',
+    'config*') matched against file names under `directory`.  None when no
+    indexed file matches, so the caller can look on disk (images, git-ignored
+    files); an ERROR string when the wait for the index was cancelled."""
+    if (err := _ready(index, cancel)):
+        return err
+    keep = _path_filter(directory)
+    with index._lock:
+        hits = sorted((e for _, e in index._alive()
+                       if keep(e.path) and fnmatch.fnmatch(e.path.rsplit("/", 1)[-1], pattern)),
+                      key=lambda e: e.path)
+    if not hits:
+        return None
+    lines = [f"{e.path}  ({e.lang or 'text'}, {e.nlines} lines"
+             + (f", {len(e.symbols)} definitions" if e.symbols else "") + ")"
+             for e in hits[:_MAX_FIND]]
+    if len(hits) > _MAX_FIND:
+        lines.append(f"... (first {_MAX_FIND} of {len(hits)} files — use a more specific pattern "
+                     f"or directory)")
+    return "\n".join(lines)
 
 
 def index_status(*, workdir: Path, index: ProjectIndex | None = None, cancel=None) -> str:

@@ -173,7 +173,7 @@ INDEX_TOOLS = [
         "read_symbol reads one. Pass a LINE NUMBER ('1300') with path set to that one file to "
         "learn which definition the line is in.",
         {"query": {"type": "string", "description": "A name or part of one: 'parse_config', 'Harness.send', 'services.web', 'retry delay', a pattern like '*_handler', or a line number like '1300' (then path must be the file)"},
-         "kind":  {"type": "string", "description": "Only this kind: class, function, method, key, table, rule, id, column, stage, ..., or 'file' to find files by path (default: any; a path-like query also finds files)"},
+         "kind":  {"type": "string", "description": "Only this kind: class, function, method, key, table, rule, id, column, stage, ..., or 'file' to find files by name, path or glob like '*.yaml' (default: any; a path-like query also finds files)"},
          "path":  {"type": "string", "description": "Only under this directory or file, or matching a glob like '*.yaml' (default: whole project)"},
          "lang":  {"type": "string", "description": "Only this language: python, typescript, yaml, sql, css, ... (default: any)"}},
         ["query"]),
@@ -226,9 +226,31 @@ INDEX_REPLACES = {"find_references", "file_dependencies"}
 _CODE_NAV_NAMES = {t["function"]["name"] for t in CODE_NAV_TOOLS}
 
 
-def with_index_tools(tools: list[dict]) -> list[dict]:
+# While the index is on, grep_files / find_files are the fallback, and their
+# descriptions say so first — a small model picks tools by their description.
+_FALLBACK_NOTES = {
+    "grep_files": "Do NOT use this for plain text while the code index is on — call index_text "
+                  "(each hit names the definition it is in). Only for a regex, or after index_text "
+                  "found nothing. ",
+    "find_files": "Do NOT use this to find source or config files while the code index is on — "
+                  "call index_search(query, kind=\"file\") (fuzzy name; returns language, size and "
+                  "definitions) or index_map. Only for files the index does not cover: images, "
+                  "binaries, git-ignored paths. ",
+}
+
+
+def _with_fallback_note(tool: dict, route: bool) -> dict:
+    fn = tool["function"]
+    note = _FALLBACK_NOTES.get(fn["name"])
+    if note is None:
+        return tool
+    return {**tool, "function": {**fn, "description": note + fn["description"]}}
+
+
+def with_index_tools(tools: list[dict], route: bool = True) -> list[dict]:
     """The tool list with the index tools in place of the code-nav tools they
-    replace, placed where the code-nav block starts so related tools stay together."""
+    replace, placed where the code-nav block starts so related tools stay
+    together, and grep_files / find_files described as the fallback."""
     out: list[dict] = []
     inserted = False
     for t in tools:
@@ -240,7 +262,7 @@ def with_index_tools(tools: list[dict]) -> list[dict]:
             inserted = True
         if name in INDEX_REPLACES:
             continue
-        out.append(t)
+        out.append(_with_fallback_note(t, route))
     if not inserted:
         out.extend(INDEX_TOOLS)
     return out
@@ -594,6 +616,10 @@ def _grep_extract(pattern: str, path: str, group: int = 0, *, workdir: Path) -> 
     return "\n".join(hits) if hits else "(no matches)"
 
 
+_INDEX_GREP_TIP = ("\n(index_text runs this search from the code index and names the definition "
+                   "each hit is in)")
+
+
 def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
     root = _safe_path(directory, workdir)
     if isinstance(root, str):
@@ -631,8 +657,7 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
                     results.append(f"{rel}:{i}: {_clip_hit(line, m)}")
     # With the code index on, point at the indexed search: it is faster and names
     # the definition each hit sits in.
-    tip = ("\n(index_text runs this search from the code index and names the definition "
-           "each hit is in)") if code_nav._index_provider is not None else ""
+    tip = _INDEX_GREP_TIP if code_nav._index_provider is not None else ""
     if not results:
         return "(no matches)" + tip
     total = len(results)
@@ -1028,14 +1053,146 @@ _CUT_MARKER_RE = re.compile(r"\[… [\d,]+ chars removed by context compaction �
 def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              net_max_bytes: int = net.DEFAULT_MAX_BYTES,
              net_max_chars: int = net.DEFAULT_MAX_CHARS,
-             index: "code_index.ProjectIndex | None" = None, cancel=None) -> str:
+             index: "code_index.ProjectIndex | None" = None, cancel=None,
+             index_route: bool = True) -> str:
+    if index is not None and index_route and name in _ROUTED:
+        routed = _route_to_index(name, args, workdir, index, cancel)
+        if routed is not None:
+            return routed
     result = _dispatch(name, args, workdir, net_access, net_max_bytes, net_max_chars, index, cancel)
+    if index is not None and index_route and name == "grep_files" and not result.startswith("ERROR"):
+        result = _index_note_for_regex(result, index)
+    if index is not None and not result.startswith("ERROR"):
+        result += _index_result_hint(name, args, workdir, index)
     if index is not None:
         if name in _WRITES_PATHS:
             index.invalidate([args.get(k) for k in _WRITES_PATHS[name] if isinstance(args.get(k), str)])
         elif name == "run_command":
             index.mark_dirty()
     return result
+
+
+# ── index-first search (/index-route, on by default) ─────────────────────────
+# With the code index on, the 9B still reached for grep_files / find_files out
+# of habit.  A plain-text grep and a file-name glob are answered from the index
+# instead — the same hits, plus the definition each one sits in — with a first
+# line that says so and names the index tool to call next time.  Regex searches,
+# and anything the index has no answer for (git-ignored, binary, not indexed),
+# still go to the disk.
+
+_ROUTED = {"grep_files", "find_files"}
+_REGEX_ONLY = set("^$*+?{}[]|()")
+
+
+def _literal(pattern: str) -> str | None:
+    r"""The text a grep pattern searches for when it is plain text, else None.
+    `\.` and a dot between words count as a literal dot (`os.path`)."""
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            if i + 1 < len(pattern) and not pattern[i + 1].isalnum():
+                out.append(pattern[i + 1])
+                i += 2
+                continue
+            return None                       # \d, \w, \b ...
+        if c in _REGEX_ONLY:
+            return None
+        if c == "." and (i + 1 < len(pattern) and pattern[i + 1] in "*+?{"):
+            return None
+        out.append(c)
+        i += 1
+    return "".join(out) or None
+
+
+def _route_to_index(name: str, args: dict, workdir: Path, index, cancel) -> str | None:
+    """The index's answer to a grep_files / find_files call, or None to run the
+    real tool (bad arguments, a regex, a pattern with a directory part)."""
+    if not set(args) <= _KNOWN_ARGS.get(name, set()) or not isinstance(args.get("pattern"), str):
+        return None
+    root = _safe_path(str(args.get("directory") or "."), workdir)
+    if isinstance(root, str):
+        return None
+    rel = index._rel(root)
+    if rel is None:
+        return None
+    path = None if rel == "." else rel
+    pattern = args["pattern"]
+    if name == "grep_files":
+        text = _literal(pattern)
+        if text is None:
+            return None
+        out = code_index.index_text(text, path=path, workdir=workdir, index=index, cancel=cancel)
+        if out.startswith("ERROR"):
+            return out if cancel is not None and cancel.is_set() else None
+        if out.startswith("(no matches"):
+            disk = _dispatch(name, args, workdir, "off", 0, 0, index, cancel)
+            return ("(the code index has no match for this text; searched the files on disk "
+                    "directly)\n" + disk.replace(_INDEX_GREP_TIP, ""))
+        return (f"(grep_files is not needed for plain text while the code index is on — this is "
+                f"index_text({json.dumps(text)})'s answer: case-insensitive, each hit with the "
+                f"definition it is in. Call index_text directly next time)\n" + out)
+    glob = pattern[3:] if pattern.startswith("**/") else pattern
+    if "/" in glob or "**" in glob:
+        return None
+    out = code_index.index_find_files(glob, path, index=index, cancel=cancel)
+    if out is None:
+        disk = _dispatch(name, args, workdir, "off", 0, 0, index, cancel)
+        return "(no file in the code index matches; searched the disk)\n" + disk
+    if out.startswith("ERROR"):
+        return out
+    return (f"(find_files is not needed while the code index is on — this is "
+            f"index_search(query={json.dumps(glob)}, kind=\"file\")'s answer; call that directly "
+            f"next time, and index_file to describe one)\n" + out)
+
+
+def _index_note_for_regex(result: str, index) -> str:
+    """A regex grep ran on disk: lead with the index tools when its hits are
+    in indexed files (a trailing tip was being skipped)."""
+    hits = [ln.split(":", 1)[0] for ln in result.splitlines()[:50] if ":" in ln]
+    with index._lock:
+        indexed = any(h in index._by_path for h in hits)
+    body = result.replace(_INDEX_GREP_TIP, "")
+    if not indexed:
+        return body
+    return ("(the code index is on: index_text searches text, index_search finds definitions, "
+            "index_callers finds uses — each in one call)\n" + body)
+
+
+def _index_result_hint(name: str, args: dict, workdir: Path, index) -> str:
+    """A trailing pointer from a file-based tool to the index tool that answers
+    the same question better — the same mechanism as read_file's footer."""
+    if name not in ("list_directory", "code_outline", "grep_file", "find_symbol"):
+        return ""
+    target = args.get("path") if name != "find_symbol" else args.get("directory")
+    p = _safe_path(str(target or "."), workdir)
+    if isinstance(p, str):
+        return ""
+    rel = index._rel(p)
+    if rel is None:
+        return ""
+    arg = "" if rel == "." else f'path="{rel}"'
+    if name in ("list_directory", "code_outline"):
+        if not p.is_dir():
+            return ""
+        prefix = "" if rel == "." else rel + "/"
+        with index._lock:
+            if not any(r.startswith(prefix) for r in index._by_path):
+                return ""
+        return (f"\n(code index: index_map({arg}) lists these files ranked by how much the "
+                f"project uses them, with their main definitions)")
+    if name == "grep_file":
+        with index._lock:
+            if rel not in index._by_path:
+                return ""
+        text = _literal(str(args.get("pattern", ""))) or "<text>"
+        return (f"\n(code index: index_text({json.dumps(text)}, path=\"{rel}\") names the "
+                f"definition each hit is in; index_file(\"{rel}\") shows its outline and users)")
+    query = str(args.get("name", ""))
+    if not query or code_nav.line_query(query) is not None:
+        return ""                     # the line form stays find_symbol's job
+    return (f"\n(code index: index_search({json.dumps(query)}) finds this by approximate name "
+            f"too, and shows short values inline)")
 
 
 def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_bytes: int,

@@ -31,6 +31,7 @@ import json
 import os
 import subprocess
 import queue
+import re
 import statistics
 import sys
 import tempfile
@@ -51,7 +52,10 @@ from harness.harness import (Harness, ChatEvent, DoneEvent, ErrorEvent,  # noqa:
                              ToolCallEvent, ToolResultEvent)
 
 
-def run_once(task, *, host, model, provider, mode, think, timeout, index=False):
+_SHELL_SEARCH = re.compile(r"^\s*(grep|rg|ag|find|fd|ack)\b")
+
+
+def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True):
     """One task, one fresh conversation.  Returns what the model did."""
     h = Harness(host=host, model=model, workdir=REPO / task.workdir, provider=provider)
     h.mode = mode
@@ -62,6 +66,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False):
     # decline — an open-ended reply sent it exploring and its last message then
     # described whatever it found next.
     h._ask_user = lambda q: "No thanks, that's all I needed."
+    h.index_route = route
     if index:
         h.set_index(True)
         h.index.wait_fresh()  # the build is not the model's time
@@ -137,6 +142,18 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False):
         # Harness repairs, counted as model errors rather than successes.
         "repairs": sum(1 for r in results if r.startswith("(note: routed")),
         "shell_calls": sum(1 for n in names if n == "run_command"),
+        # Index-first search: how often the model reached for the index itself,
+        # for grep/find (directly or through the shell), and how many of those
+        # the harness answered from the index anyway (/index-route).
+        "index_calls": sum(1 for n in names if n.startswith("index_")),
+        "file_search_calls": sum(1 for n, a in calls
+                                 if n in ("grep_files", "find_files")
+                                 or (n == "run_command"
+                                     and _SHELL_SEARCH.match(str(a.get("command", ""))))),
+        "routed": sum(1 for r in results if r.startswith(("(answered from the code index",
+                                                          "(the code index has no match",
+                                                          "(no file in the code index"))),
+        "route": route,
         "tool_chars": sum(len(r) for r in results),
         "hits": [m for m in task.must if m.lower() in low],
         "n_must": len(task.must),
@@ -172,12 +189,13 @@ def _project_hash(workdir: Path) -> str:
 _env_cache: dict = {}
 
 
-def fingerprint(task, *, mode, think, index, model, provider, host) -> str:
+def fingerprint(task, *, mode, think, index, model, provider, host, route=True) -> str:
     """Everything that can change a run's outcome, hashed."""
-    key = (task.workdir, mode, index)
+    key = (task.workdir, mode, index, route)
     if key not in _env_cache:
         h = Harness(host=host, model=model, workdir=REPO / task.workdir, provider=provider)
         h.mode = mode
+        h.index_route = route
         if index:
             h.set_index(True)
         prompt = h._build_system_prompt()
@@ -193,7 +211,8 @@ def fingerprint(task, *, mode, think, index, model, provider, host) -> str:
         ]).encode()).hexdigest()
     spec = json.dumps({"id": task.id, "prompt": task.prompt, "must": list(task.must),
                        "ideal": sorted(task.ideal), "max_calls": task.max_calls,
-                       "mode": mode, "think": think, "index": index, "provider": provider},
+                       "mode": mode, "think": think, "index": index, "provider": provider,
+                       **({} if route else {"route": False})},
                       sort_keys=True)
     return hashlib.sha256((spec + _env_cache[key]).encode()).hexdigest()[:24]
 
@@ -247,6 +266,14 @@ def summarise(rows):
         out.append(f"  read_file        {rf:4d}  {rf / tool_total * 100:4.0f}%")
         out.append(f"  run_command      {rc:4d}  {rc / tool_total * 100:4.0f}%")
         out.append(f"  code-nav tools   {nv:4d}  {nv / tool_total * 100:4.0f}%")
+        ix = sum(r.get("index_calls", 0) for r in rows)
+        fs = sum(r.get("file_search_calls", 0) for r in rows)
+        rt = sum(r.get("routed", 0) for r in rows)
+        out.append(f"  index_* tools    {ix:4d}  {ix / tool_total * 100:4.0f}%")
+        out.append(f"  grep/find        {fs:4d}  {fs / tool_total * 100:4.0f}%  "
+                   f"({rt} answered from the index by /index-route)")
+        firsts = [r["first_tool"] for r in rows if r["first_tool"]]
+        out.append(f"  first tool is index_*  {sum(t.startswith('index_') for t in firsts)}/{len(firsts)}")
     out.append(f"  ideal tool used  {sum(r['used_ideal'] for r in rows)}/{total}")
     out.append(f"  over call budget {sum(r['over_budget'] for r in rows)}/{total}")
     out.append(f"  rejected calls   {sum(r['rejected_calls'] for r in rows)}  "
@@ -288,6 +315,9 @@ def main():
                          "all = every task")
     ap.add_argument("--index", action="store_true",
                     help="turn the code index on, so the model gets the index_* tools")
+    ap.add_argument("--no-index-route", dest="route", action="store_false", default=True,
+                    help="with --index: do not answer grep_files / find_files from the index "
+                         "(/index-route off), to compare")
     ap.add_argument("--cache", metavar="PATH",
                     help="JSONL store of past runs: reuse those whose fingerprint matches, "
                          "append new ones (e.g. evals/.cache/runs.jsonl)")
@@ -322,7 +352,8 @@ def main():
             fp = None
             if cache_path:
                 fp = fingerprint(task, mode=mode, think=args.think, index=args.index,
-                                 model=args.model, provider=args.provider, host=args.host)
+                                 model=args.model, provider=args.provider, host=args.host,
+                                 route=args.route)
                 stored = [] if args.refresh else cache.get(fp, [])
             for i in range(args.runs):
                 if i < len(stored):
@@ -331,7 +362,8 @@ def main():
                 else:
                     r = run_once(task, host=args.host, model=args.model,
                                  provider=args.provider, mode=mode,
-                                 think=args.think, timeout=args.timeout, index=args.index)
+                                 think=args.think, timeout=args.timeout, index=args.index,
+                                 route=args.route)
                     source = ""
                     if cache_path and not r.get("err"):
                         with cache_path.open("a") as f:

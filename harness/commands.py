@@ -62,6 +62,8 @@ def _format_index(harness) -> str:
         lines.append(f"Last error: {b['error']}")
     lines.append(f"  (sizes are estimates of the index's own data; save/load to disk: "
                  f"{'on' if b['persist'] else 'off'} — {code_index.pickle_path(harness.workdir)})")
+    lines.append(f"  Route grep/find to the index: {'on' if b.get('route', True) else 'off'} "
+                 f"(/index-route)")
     return "\n".join(lines)
 
 
@@ -563,6 +565,25 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness._emit_status()
         return CommandResult(handled=True, output=f"Code index memory budget: {net_mod.format_size(size)}")
 
+    if cmd == "/index-route":
+        if not arg:
+            return CommandResult(handled=True, output=(
+                f"Answer grep_files / find_files from the code index: "
+                f"{'on' if harness.index_route else 'off'}"))
+        if arg.lower() in ("on", "true", "1", "yes", "off", "false", "0", "no"):
+            harness.index_route = arg.lower() in ("on", "true", "1", "yes")
+            session_mod.save_prefs(index_route=harness.index_route)
+            harness.rebuild_system_prompt()     # the prompt and grep/find descriptions change
+            harness._emit_status()
+            extra = (" — a plain-text grep_files and a file-name find_files are answered by "
+                     "index_text / the index's file list; regex searches and files the index "
+                     "does not cover still go to the disk") if harness.index_route else \
+                " — grep_files / find_files always search the disk"
+            return CommandResult(handled=True, output=(
+                f"Answer grep/find from the code index: {'on' if harness.index_route else 'off'}"
+                f"{extra}"))
+        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+
     if cmd == "/index-persist":
         if not arg:
             state = "on" if harness.index_persist else "off"
@@ -807,6 +828,7 @@ Available commands:
   /index save|load    Write the index to disk now, or load the saved one
   /index-max-mem <n>  Memory budget for the index (default 100mb)
   /index-persist on|off  Load the saved index at start, save it on exit
+  /index-route on|off  Answer plain-text grep_files / find_files from the index (default on)
   /list-skills        List available skills and show which are active
   /load-skill <name>  Append a skill's instructions to the system prompt
   /unload-skill <name> Remove a skill from the system prompt

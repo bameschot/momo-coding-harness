@@ -446,6 +446,7 @@ class StatusEvent:
     index_mem: int = 0            # estimated bytes in use
     index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
     index_persist: bool = False   # /index-persist: load/save a pickle
+    index_route: bool = True      # /index-route: answer grep_files/find_files from the index
     index_degraded: bool = False  # over budget: a component was dropped
 
 @dataclass
@@ -525,6 +526,56 @@ def _planner_prompt(workdir: str) -> str:
 # Appended to the coder prompt while an approved plan is being executed.  The
 # live plan state is rendered after it on every step, so the model always knows
 # which step it is on even after context compaction.
+_INDEX_BANNER = (
+    "**Code index is ON for this project.** Find code, text, files and usages with the index_* "
+    "tools (index_search, index_text, index_callers, index_file, index_map) — not grep_files, "
+    "find_files or run_command. The file tools are only a fallback; see \"Code index: ON\" at "
+    "the end.")
+
+# What to reach for first, per role.
+_INDEX_FIRST = {
+    "coding":    "Start a task with index_map (unfamiliar code) or index_search (a named thing), "
+                 "not list_directory + read_file; before changing a definition, index_callers.",
+    "plan-exec": "Start each step with index_search / index_file for what it touches; before "
+                 "changing a definition, index_callers.",
+    "plan":      "Investigate with index_map, index_search, index_file and index_callers — not "
+                 "list_directory + read_file or grep; read_symbol reads one definition.",
+    "momo":      "Start with index_map (unfamiliar code) or index_search (a named thing), not "
+                 "list_directory + read_file.",
+    "chat":      "Look things up with index_search (definitions, config keys, files) and "
+                 "index_text (any text) before reading files.",
+    "design":    "Look things up with index_search (definitions, config keys, CSS rules, files) "
+                 "and index_text (any text) before reading files.",
+}
+
+
+def _index_rules(role: str) -> str:
+    """The system-prompt section while the code index is on."""
+    first = _INDEX_FIRST.get(role, _INDEX_FIRST["coding"])
+    return f"""## Code index: ON — search with the index first
+
+This project is indexed. For code and config, the index tools answer in one call
+what grep and find need several for, and they are always current. {first}
+
+| Instead of | Use |
+|---|---|
+| grep_files (text in files) | index_text |
+| find_files (a file by name or glob) | index_search(query, kind="file"), or index_map |
+| find_references / grep for usages | index_callers |
+| file_dependencies | index_file |
+| code_outline of a directory | index_map |
+| find_symbol by name | index_search (find_symbol still answers "which definition is line N in") |
+
+Indexed file types: {code_nav.SUPPORTED_EXTENSIONS} (definitions and uses), and every
+other text file for index_text.
+
+Use grep_files, grep_file or find_files only when an index tool found nothing, for a
+regex, for a file type not listed above, or for a file the index does not cover
+(git-ignored, binary, over 2 MB). Never grep or find with run_command.
+Where the role instructions above say grep_files, find_files, find_references or
+file_dependencies, read them as the index tools in this table."""
+
+
 _PLAN_EXECUTION_RULES = """## Executing an approved plan
 
 You are executing a plan the user approved. The harness drives it one step at a
@@ -714,6 +765,7 @@ class Harness:
         self.index_enabled: bool = False
         self.index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
         self.index_persist: bool = False
+        self.index_route: bool = True      # /index-route: grep/find answered from the index
         self.index: code_index.ProjectIndex | None = None
         self._index_saved_version = -1
         self._schema_cache: tuple = (None, 0)
@@ -906,7 +958,7 @@ class Harness:
         if self.net_access != "off":
             tools = tools + NET_TOOLS
         if self.index is not None:
-            tools = with_index_tools(tools)
+            tools = with_index_tools(tools, self.index_route)
         return tools
 
     # ── code index ────────────────────────────────────────────────────────────
@@ -979,8 +1031,10 @@ class Harness:
         """The index's memory composition (/index, web INDEX popover)."""
         idx = self.index
         if idx is None:
-            return {"enabled": False, "limit": self.index_max_bytes, "persist": self.index_persist}
-        return {**code_index.breakdown(idx), "persist": self.index_persist}
+            return {"enabled": False, "limit": self.index_max_bytes, "persist": self.index_persist,
+                    "route": self.index_route}
+        return {**code_index.breakdown(idx), "persist": self.index_persist,
+                "route": self.index_route}
 
     def _save_index_quietly(self, idx) -> None:
         msg = idx.save()
@@ -1004,7 +1058,8 @@ class Harness:
         if err:
             return err
         return dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes,
-                        self._fetch_chars(), index=self.index, cancel=self._cancel)
+                        self._fetch_chars(), index=self.index, cancel=self._cancel,
+                        index_route=self.index_route)
 
     def _build_system_prompt(self) -> str:
         if self._plan_executing():
@@ -1039,6 +1094,13 @@ class Harness:
             p = _SKILLS_DIR / f"{name}.md"
             if p.exists():
                 parts.append(p.read_text(encoding="utf-8").strip())
+        if self.index is not None and any(t["function"]["name"] == "index_text"
+                                          for t in self._current_tools()):
+            # First and last, where a small model weighs it most: the role
+            # texts in between still teach grep_files / find_references.
+            base = _INDEX_BANNER + "\n\n" + base
+            role = "plan-exec" if self._plan_executing() else self.mode
+            parts.append(_index_rules(role))
         if parts:
             return base + "\n\n---\n\n" + "\n\n---\n\n".join(parts)
         return base
@@ -2174,7 +2236,7 @@ class Harness:
     def _index_status_fields(self) -> dict:
         idx = self.index
         base = {"index_enabled": self.index_enabled, "index_max_bytes": self.index_max_bytes,
-                "index_persist": self.index_persist}
+                "index_persist": self.index_persist, "index_route": self.index_route}
         if idx is None:
             return {**base, "index_state": "off"}
         busy = idx.state in ("building", "refreshing") and idx.total

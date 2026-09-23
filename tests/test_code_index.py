@@ -568,6 +568,82 @@ class ReviewFixes(Base):
         self.assertIn("source", ci._header(self.root))
 
 
+class IndexRouting(Base):
+    """/index-route (on by default): plain-text grep_files and file-name
+    find_files are answered from the index; the rest still goes to the disk."""
+
+    files = {**CHAIN, "img/logo.png": "\0PNG" * 8, "gen/.keep": ""}
+
+    def run_tool(self, name, args, route=True):
+        return tools.dispatch(name, args, self.root, index=self.idx, index_route=route)
+
+    def test_literal_grep_is_answered_by_index_text(self):
+        out = self.run_tool("grep_files", {"pattern": "retry_delay"})
+        self.assertTrue(out.startswith("(grep_files is not needed"), out)
+        self.assertIn('index_text("retry_delay")', out.splitlines()[0])
+        self.assertIn("conf/app.yaml", out)
+        self.assertIn("[in server.retry_delay]", out)       # the definition each hit is in
+        self.assertIn("notes.txt", out)                      # plain text files too
+
+    def test_regex_grep_runs_on_disk_with_a_leading_note(self):
+        out = self.run_tool("grep_files", {"pattern": r"def \w+\("})
+        self.assertTrue(out.startswith("(the code index is on:"), out)
+        self.assertIn("a.py:1: def leaf():", out)
+
+    def test_literal_grep_falls_back_to_the_disk(self):
+        _write(self.root, ".gitignore", "gen/\n")
+        _write(self.root, "gen/out.txt", "zebra_marker\n")
+        if shutil.which("git"):
+            subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+            self.idx.rebuild()
+        self.assertIsNone(self.idx.wait_fresh())
+        out = self.run_tool("grep_files", {"pattern": "zebra_marker"})
+        self.assertIn("gen/out.txt", out)
+        if shutil.which("git"):
+            self.assertTrue(out.startswith("(the code index has no match"), out)
+
+    def test_find_files_from_the_index_and_disk_fallback(self):
+        out = self.run_tool("find_files", {"pattern": "*.py"})
+        self.assertTrue(out.startswith("(find_files is not needed"), out)
+        self.assertIn('index_search(query="*.py", kind="file")', out.splitlines()[0])
+        self.assertIn("b.py  (python", out)
+        # ...and that call really answers it
+        out = self.search("*.py", kind="file")
+        self.assertIn("3 files matching", out)
+        out = self.run_tool("find_files", {"pattern": "*.png"})     # binary: not indexed
+        self.assertTrue(out.startswith("(no file in the code index matches"), out)
+        self.assertIn("img/logo.png", out)
+        out = self.run_tool("find_files", {"pattern": "conf/*.yaml"})  # a directory part: disk
+        self.assertEqual(out, "conf/app.yaml")
+
+    def test_route_off_behaves_as_before(self):
+        out = self.run_tool("grep_files", {"pattern": "retry_delay"}, route=False)
+        self.assertIn("conf/app.yaml:3:", out)
+        self.assertFalse(out.startswith("("))
+        self.assertEqual(self.run_tool("find_files", {"pattern": "a.py"}, route=False), "a.py")
+
+    def test_file_tools_point_at_the_index_tools(self):
+        self.assertIn("index_map()", self.run_tool("list_directory", {"path": "."}))
+        self.assertIn('index_map(path="conf")', self.run_tool("code_outline", {"path": "conf"}))
+        out = self.run_tool("grep_file", {"pattern": "leaf", "path": "b.py"})
+        self.assertIn('index_text("leaf", path="b.py")', out)
+        self.assertIn('index_search("mid")', self.run_tool("find_symbol", {"name": "mid"}))
+        self.assertNotIn("index_search", self.run_tool("find_symbol",
+                                                       {"name": "5", "directory": "b.py"}))
+        plain = tools.dispatch("list_directory", {"path": "."}, self.root)     # index off
+        self.assertNotIn("index_map", plain)
+
+    def test_bad_arguments_still_get_the_normal_error(self):
+        out = self.run_tool("grep_files", {"pattern": "x", "path": "a.py"})
+        self.assertIn("does not accept", out)
+
+    def test_literal_detection(self):
+        self.assertEqual(tools._literal("os.path"), "os.path")
+        self.assertEqual(tools._literal(r"foo\.bar"), "foo.bar")
+        for rx in (r"\bword", "a|b", "def .*x", "(x)", "x+"):
+            self.assertIsNone(tools._literal(rx), rx)
+
+
 class ToolSet(unittest.TestCase):
 
     def test_index_tools_replace_overlapping_code_nav_tools(self):
@@ -662,6 +738,37 @@ class HarnessIndex(unittest.TestCase):
         self.assertIn("find_references", self.tool_names())
         self.assertIsNone(code_nav._index_provider)
         self.assertEqual(json.loads((Path(self.home.name) / "prefs.json").read_text())["index"], False)
+
+    def test_prompt_and_descriptions_put_the_index_first(self):
+        self.assertNotIn("Code index: ON", self.h.messages[0]["content"])
+        self.cmd("/index on")
+        for mode in ("coding", "plan", "chat", "design", "momo"):
+            self.h.set_mode(mode)
+            prompt = self.h.messages[0]["content"]
+            self.assertTrue(prompt.startswith("**Code index is ON"), mode)
+            self.assertIn("## Code index: ON", prompt[-4000:], mode)
+            self.assertIn(hmod._INDEX_FIRST[mode], prompt, mode)
+        for name in ("grep_files", "find_files"):
+            t = next(t for t in self.h._current_tools() if t["function"]["name"] == name)
+            self.assertTrue(t["function"]["description"].startswith("Do NOT use this"), name)
+            self.assertNotIn("anyway", t["function"]["description"])
+        self.cmd("/index off")
+        self.assertNotIn("Code index is ON", self.h.messages[0]["content"])
+
+    def test_route_toggle(self):
+        self.cmd("/index on")
+        self.assertIsNone(self.h.index.wait_fresh())
+        self.assertTrue(self.h._dispatch("grep_files", {"pattern": "leaf"}).startswith("(grep_files is"))
+        self.assertIn("off", self.cmd("/index-route off"))
+        self.assertFalse(self.h.index_route)
+        self.assertEqual(json.loads((Path(self.home.name) / "prefs.json").read_text())["index_route"],
+                         False)
+        self.assertFalse(self.h.status_event().index_route)
+        self.assertFalse(self.h._dispatch("grep_files", {"pattern": "leaf"}).startswith("(grep_files is"))
+        self.assertIn("Code index is ON", self.h.messages[0]["content"])   # the bias stays
+        self.assertIn("Route grep/find to the index: off", self.cmd("/index"))
+        self.cmd("/index-route on")
+        self.assertTrue(self.h.index_route)
 
     def test_workdir_change_reindexes(self):
         self.cmd("/index on")
