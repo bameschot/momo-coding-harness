@@ -12,6 +12,7 @@ from . import session as session_mod
 from .controller import Controller
 from .harness import Harness, ChatEvent
 from .tui import run_tui
+from .web import tls as tls_mod
 from .web.server import is_loopback, start_web_server
 
 
@@ -89,11 +90,37 @@ def main():
                         help="Port for the web UI")
     parser.add_argument("--web-token", default=None, metavar="TOKEN",
                         help="Access token for the web UI (default: generated when --web-host is not loopback)")
+    parser.add_argument("--web-tls", choices=("off", "auto"), default="off",
+                        help="Serve the web UI over HTTPS: 'auto' creates momo's own local CA and a "
+                             "certificate for this machine (needs the openssl command)")
+    parser.add_argument("--web-cert", default=None, metavar="PEM",
+                        help="Serve the web UI over HTTPS with this certificate")
+    parser.add_argument("--web-key", default=None, metavar="PEM",
+                        help="Private key for --web-cert (if not inside the certificate file)")
+    parser.add_argument("--web-tls-name", action="append", default=[], metavar="NAME",
+                        help="Extra DNS name or IP for the --web-tls auto certificate (repeatable)")
+    parser.add_argument("--web-insecure", action="store_true", default=False,
+                        help="Plain HTTP without an access token, even off loopback. "
+                             "Anyone who can reach the address can run commands as you")
+    parser.add_argument("--web-allow-host", action="append", default=[], metavar="NAME",
+                        help="Extra name accepted in the Host header with --web-insecure (repeatable)")
     parser.add_argument("--headless", action="store_true", default=False,
                         help="Run only the web UI (no terminal UI)")
     args = parser.parse_args()
     if args.headless and not args.web:
         parser.error("--headless needs the web UI; drop --no-web")
+    if args.web_tls == "auto" and args.web_cert:
+        parser.error("--web-tls auto makes its own certificate; drop --web-cert or --web-tls auto")
+    if args.web_key and not args.web_cert:
+        parser.error("--web-key needs --web-cert")
+    if args.web_tls_name and args.web_tls != "auto":
+        parser.error("--web-tls-name only applies to --web-tls auto")
+    if args.web_insecure and (args.web_token or args.web_cert or args.web_tls == "auto"):
+        parser.error("--web-insecure is plain HTTP without a token; "
+                     "it can't be combined with --web-token, --web-cert or --web-tls auto")
+    if args.web_allow_host and not args.web_insecure:
+        parser.error("--web-allow-host only applies to --web-insecure "
+                     "(with a token, the Host header is not restricted)")
 
     workdir = Path(args.workdir).expanduser().resolve()
     if not workdir.is_dir():
@@ -167,12 +194,38 @@ def main():
         harness.event_queue.put(ChatEvent("system", guides_note))
 
     web = None
+    web_notes: list[str] = []
     if args.web:
-        token = args.web_token or (None if is_loopback(args.web_host) else secrets.token_urlsafe(24))
+        if args.web_insecure:
+            token = None
+        else:
+            token = args.web_token or (None if is_loopback(args.web_host) else secrets.token_urlsafe(24))
         try:
-            web = start_web_server(controller, args.web_host, args.web_port, token)
+            cert = key = ca = None
+            auto = None
+            if args.web_tls == "auto":
+                auto = tls_mod.ensure(args.web_host, args.web_tls_name)
+                cert, key, ca = auto.cert, auto.key, auto.ca
+            elif args.web_cert:
+                cert, key = args.web_cert, args.web_key
+            extra_hosts = ()
+            if args.web_insecure and not is_loopback(args.web_host):
+                extra_hosts = tls_mod.local_names(args.web_host, args.web_allow_host)
+            web = start_web_server(controller, args.web_host, args.web_port, token,
+                                   cert=cert, key=key, ca_pem=ca, extra_hosts=extra_hosts)
             controller.web_url = web.url
-            harness.event_queue.put(ChatEvent("system", f"Web UI: {web.url}"))
+            line = f"Web UI: {web.url}"
+            if args.web_insecure and not is_loopback(args.web_host):
+                line += (" — no access token: anyone who can reach this address can read "
+                         "the conversation and run commands as you.")
+            web_notes.append(line)
+            if auto is not None:
+                web_notes.append(
+                    f"HTTPS: trust momo's local CA once per device — {auto.ca} "
+                    f"(also at {web.url.split('?')[0]}momo-ca.pem), "
+                    f"SHA-256 {auto.ca_fingerprint}")
+            for note in web_notes:
+                harness.event_queue.put(ChatEvent("system", note))
         except OSError as e:
             msg = f"Web UI failed to start on {args.web_host}:{args.web_port}: {e}"
             if args.headless:
@@ -186,7 +239,8 @@ def main():
             def _on_term(signum, frame):
                 raise KeyboardInterrupt
             signal.signal(signal.SIGTERM, _on_term)
-            print(f"momo web UI: {web.url}\nPress Ctrl+C to stop.", flush=True)
+            print(f"momo {web_notes[0]}", *web_notes[1:], "Press Ctrl+C to stop.",
+                  sep="\n", flush=True)
             while True:
                 time.sleep(3600)
         else:

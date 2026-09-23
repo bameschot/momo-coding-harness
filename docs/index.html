@@ -356,7 +356,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     <div>
       <div class="eyebrow">lightweight · local · AI coding harness</div>
       <h1>A coding assistant that stays <span class="accent">on your machine</span>.</h1>
-      <p class="lede">momo connects to a local <strong>Ollama</strong> or <strong>llama.cpp</strong> server and gives the model tools to read, search, edit and run your project. Use it from a split-pane terminal UI, a browser window, or both at once. It's <strong>lightweight</strong>: three Python dependencies, no build step, and about 60 MB of RAM. A small black cat keeps you company.</p>
+      <p class="lede">momo connects to a local <strong>Ollama</strong> or <strong>llama.cpp</strong> server and gives the model tools to read, search, edit and run your project. Use it from a split-pane terminal UI, a browser window, or both at once. It's <strong>lightweight</strong>: four Python dependencies, no build step, and about 60 MB of RAM. A small black cat keeps you company.</p>
       <div class="hero-actions">
         <a class="btn primary" href="#start">Get started <svg class="icon sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></a>
         <a class="btn" href="#features">Features</a>
@@ -419,7 +419,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     </div>
     <div class="card" style="--c: var(--user)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-feather"/></svg>Lightweight by design</h3>
-      <p>momo is a plain Python program with three dependencies: the Ollama client, tree-sitter with its grammars, and optionally pypdf. About 35 MB installed. The terminal UI is <code>curses</code> and the web UI is Python's own HTTP server, so there's no Node, no build step, no database and no background daemon. It uses about <strong>60 MB of RAM</strong> idle, and 105–150 MB with the code index built for projects of 180 to 2,100 files. The model's memory lives in Ollama or llama.cpp, not in momo.</p>
+      <p>momo is a plain Python program with four dependencies: the Ollama client, httpx for llama.cpp, tree-sitter with its grammars, and optionally pypdf. About 35 MB installed. The terminal UI is <code>curses</code> and the web UI is Python's own HTTP server, so there's no Node, no build step, no database and no background daemon. It uses about <strong>60 MB of RAM</strong> idle, and 105–150 MB with the code index built for projects of 180 to 2,100 files. The model's memory lives in Ollama or llama.cpp, not in momo.</p>
       <a class="more" href="#requirements">Requirements &amp; footprint →</a>
     </div>
   </div>
@@ -551,6 +551,9 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <tr><td><code>--web-host</code></td><td><code>127.0.0.1</code></td><td class="wrap">Interface to bind. Any non-loopback host requires a token.</td></tr>
       <tr><td><code>--web-port</code></td><td><code>8765</code></td><td class="wrap">Port for the web UI</td></tr>
       <tr><td><code>--web-token</code></td><td>generated</td><td class="wrap">A fixed access token instead of a random one</td></tr>
+      <tr><td><code>--web-tls auto</code></td><td>off</td><td class="wrap">Serve the web UI over HTTPS with momo's own local CA (needs <code>openssl</code>). <code>--web-tls-name</code> adds names. See <a href="#https">HTTPS</a>.</td></tr>
+      <tr><td><code>--web-cert</code> / <code>--web-key</code></td><td>—</td><td class="wrap">Serve HTTPS with your own certificate</td></tr>
+      <tr><td><code>--web-insecure</code></td><td>off</td><td class="wrap">Plain HTTP with <strong>no</strong> token, even off loopback. Trusted networks only.</td></tr>
       <tr><td><code>--headless</code></td><td>off</td><td class="wrap">Web UI only, with no terminal UI</td></tr>
       <tr><td><code>--no-index</code></td><td>index on</td><td class="wrap">Start with the code index off. <code>--index-max-mem</code> and <code>--index-persist</code> set its budget and persistence.</td></tr>
       <tr><td><code>--net</code></td><td><code>off</code></td><td class="wrap"><code>off</code>, <code>on</code> or <code>local</code> at startup (<code>--net-confirm</code>, <code>--net-max-bytes</code> and <code>--net-max-chars</code> go with it)</td></tr>
@@ -576,11 +579,12 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
     <h3>Dependencies</h3>
     <div class="table-scroll"><table>
       <tr><th>Package</th><th>Used for</th><th>Needed?</th></tr>
-      <tr><td><code>ollama</code></td><td class="wrap">The Ollama client. It brings <code>httpx</code>, which the llama.cpp adapter also uses.</td><td>yes</td></tr>
+      <tr><td><code>ollama</code></td><td class="wrap">The Ollama client</td><td>yes</td></tr>
+      <tr><td><code>httpx</code></td><td class="wrap">The HTTP client for the llama.cpp adapter. <code>ollama</code> depends on it too, so it adds nothing to the install.</td><td>yes</td></tr>
       <tr><td><code>tree-sitter</code> + 16 grammars</td><td class="wrap">Code navigation and the code index. The grammar wheels are prebuilt and work offline.</td><td class="wrap">optional: without them, the code-navigation tools aren't offered</td></tr>
       <tr><td><code>pypdf</code></td><td class="wrap">Turning PDF attachments into text in the web UI (pure Python)</td><td class="wrap">optional</td></tr>
     </table></div>
-    <p>Everything else is Python's standard library: <code>curses</code> for the TUI, <code>http.server</code> for the web UI, <code>urllib</code> for <code>fetch_url</code>, and <code>threading</code> for the background work. The web UI is hand-written HTML, CSS and JavaScript with no npm, bundler or CDN. On disk, the dependencies take about <strong>35 MB</strong> (18 MB of that is grammars) and the harness itself about 2 MB.</p>
+    <p>Everything else is Python's standard library: <code>curses</code> for the TUI, <code>http.server</code> for the web UI, <code>urllib</code> for <code>fetch_url</code>, and <code>threading</code> for the background work. The optional HTTPS mode (<code>--web-tls auto</code>) uses the <code>openssl</code> command that macOS and Linux already ship. The web UI is hand-written HTML, CSS and JavaScript with no npm, bundler or CDN. On disk, the dependencies take about <strong>35 MB</strong> (18 MB of that is grammars) and the harness itself about 2 MB.</p>
     <h3 id="memory">Memory while running</h3>
     <p>Measured on 2026-09-23 on an Apple Silicon Mac with Python 3.14.7. Each figure is the resident memory of the momo process run with <code>--headless</code>, after the index had finished building. The model server isn't included.</p>
     <div class="table-scroll"><table>
@@ -864,72 +868,14 @@ ollama serve</code></pre></div>
     <h3>Starting and stopping</h3>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Result</th></tr>
-      <tr><td><code>momo-coding-harness.py</code></td><td class="wrap">TUI <em>and</em> web UI</td></tr>
+      <tr><td><code>python momo-coding-harness.py</code></td><td class="wrap">TUI <em>and</em> web UI at <code>http://127.0.0.1:8765</code>, reachable from this machine only</td></tr>
       <tr><td><code>… --no-web</code></td><td class="wrap">TUI only</td></tr>
       <tr><td><code>… --headless</code></td><td class="wrap">Web UI only. <kbd>Ctrl+C</kbd> saves the session and stops.</td></tr>
-      <tr><td><code>… --web-host 0.0.0.0</code></td><td class="wrap">Reachable from other machines, with an access token (see <a href="#remote-access">below</a>)</td></tr>
+      <tr><td><code>… --web-port 9000</code></td><td class="wrap">Another port</td></tr>
     </table></div>
-    <h3 id="security">Security</h3>
-    <ul>
-      <li><strong>Loopback only by default.</strong> A <code>Host</code> header that isn't a loopback name is rejected, which blocks DNS rebinding.</li>
-      <li><strong>Same-origin writes.</strong> Requests that change anything must be JSON and come from the page itself.</li>
-      <li><strong>Token off-loopback.</strong> Binding to anything other than loopback requires a token. See <a href="#remote-access">Opening the web UI from another machine</a>.</li>
-      <li>Traffic is plain HTTP. For remote use, prefer an SSH tunnel: <code>ssh -L 8765:127.0.0.1:8765 host</code>.</li>
-    </ul>
-    <h3 id="remote-access">Opening the web UI from another machine</h3>
-    <p>With <code>--web-host</code> set to anything other than loopback, every request needs an access token. There's no login form: the token travels inside the URL that momo prints, and your browser swaps it for a cookie the first time you open that URL.</p>
-
-    <h4>1. Start momo on a reachable address</h4>
-<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --web-host 0.0.0.0
-
-<span class="com"># or pick your own token, so it survives restarts</span>
-python momo-coding-harness.py --web-host 0.0.0.0 --web-token "$(openssl rand -hex 16)"</code></pre></div>
-    <p>Without <code>--web-token</code>, momo generates a random token (<code>secrets.token_urlsafe(24)</code>, about 32 characters) at every start. It's never written to disk.</p>
-
-    <h4>2. Fetch the token</h4>
-    <p>The token appears in only one place: the web UI URL momo prints at startup. With <code>0.0.0.0</code>, the address is replaced by the machine's hostname.</p>
-    <div class="table-scroll"><table>
-      <tr><th>Running as</th><th>Where the URL appears</th></tr>
-      <tr><td>TUI (default)</td><td class="wrap">A <code>[system]</code> line near the top of the chat pane: <code>Web UI: http://my-mac.local:8765/?token=Xq3…</code></td></tr>
-      <tr><td><code>--headless</code></td><td class="wrap">The terminal it was started from: <code>momo web UI: http://my-mac.local:8765/?token=Xq3…</code></td></tr>
-    </table></div>
-    <p>The token is everything after <code>?token=</code>. No command shows it again later. If it has scrolled away, scroll the chat pane back up, restart momo, or use <code>--web-token</code> so you already know it.</p>
-
-    <h4>3. Use it in a browser</h4>
-    <ol>
-      <li>On the other machine, open the <strong>full URL</strong>, token included.</li>
-      <li>momo checks the token and replies with a redirect to <code>/</code> that sets a cookie: <code>momo_token</code>, HttpOnly and SameSite=Strict. The token disappears from the address bar and history, and page scripts can't read it.</li>
-      <li>From then on the cookie authorises every request, so bookmark plain <code>http://my-mac.local:8765/</code>.</li>
-    </ol>
-    <p class="note">If the hostname doesn't resolve on the other machine (it relies on <code>.local</code> / mDNS or your DNS), replace it with the machine's IP address and keep the token: <code>http://192.168.1.20:8765/?token=Xq3…</code>.</p>
-
-    <h4>4. Use it from scripts</h4>
-    <p>Scripts don't need the cookie: send the token as a Bearer header on every request.</p>
-<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>TOKEN=Xq3…      <span class="com"># the part after ?token=</span>
-curl -s -H "Authorization: Bearer $TOKEN" http://my-mac.local:8765/api/state | jq .status
-curl -s -X POST http://my-mac.local:8765/api/submit \
-     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-     -d '{"text": "/context"}'</code></pre></div>
-
-    <h4>5. When it stops working</h4>
-    <div class="table-scroll"><table>
-      <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
-      <tr><td><code>401 Unauthorized</code> after restarting momo</td><td class="wrap">A new token was generated, so the old cookie no longer matches</td><td class="wrap">Open the newly printed URL, or start with a fixed <code>--web-token</code></td></tr>
-      <tr><td><code>401</code> after reopening the browser</td><td class="wrap">The cookie only lasts for the browser session</td><td class="wrap">Open the URL with <code>?token=…</code> again</td></tr>
-      <tr><td><code>401</code> on first visit</td><td class="wrap">The token is missing or mistyped</td><td class="wrap">Copy the whole URL from momo's output</td></tr>
-      <tr><td>Page doesn't load</td><td class="wrap">The hostname doesn't resolve, or a firewall blocks the port</td><td class="wrap">Use the IP address, and allow port 8765 (or your <code>--web-port</code>)</td></tr>
-    </table></div>
-
-    <h4>6. Keep it secret</h4>
-    <ul>
-      <li>Anyone with the token controls momo, which includes editing files and running commands in your workspace. Treat it like a password, and remember it sits in your terminal scrollback.</li>
-      <li>Traffic is plain HTTP, so the token and cookie are visible to anyone on the network path. Only use this on a network you trust, or put a TLS reverse proxy in front.</li>
-      <li><strong>Simpler and safer:</strong> leave momo on loopback and tunnel to it. No token is needed, because momo never leaves <code>127.0.0.1</code>:
-        <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>ssh -L 8765:127.0.0.1:8765 my-mac      <span class="com"># then open http://localhost:8765</span></code></pre></div></li>
-    </ul>
-
+    <p>To open the web UI from another machine, over HTTPS or behind a proxy, see <a href="#security">Access &amp; security</a>.</p>
     <h3>HTTP API</h3>
-    <p>The page talks to the harness through a small JSON API that you can script too:</p>
+    <p>The page talks to the harness through a small JSON API that you can script too. From another machine, add the token as <code>Authorization: Bearer …</code> (see <a href="#remote-access">the access token</a>).</p>
     <div class="table-scroll"><table>
       <tr><th>Endpoint</th><th>Description</th></tr>
       <tr><td><code>GET /api/state</code></td><td class="wrap">Snapshot of status, busy/waiting flags, modes, commands, skills and plan</td></tr>
@@ -943,6 +889,125 @@ curl -s -X POST http://my-mac.local:8765/api/submit \
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>curl -s localhost:8765/api/state | jq .status
 curl -s -X POST localhost:8765/api/submit -H 'Content-Type: application/json' -d '{"text": "/context"}'
 curl -sN localhost:8765/api/events</code></pre></div>
+  </section>
+
+  <section id="security" data-voice="security">
+    <h2>Access &amp; security</h2>
+    <p>The web UI can do everything momo can, including editing files and running commands in your workspace. So the question is who can reach it. By default the answer is <strong>only this computer</strong>, and every other setup is something you opt into at startup.</p>
+
+    <h3 id="access-modes">Choose how to start</h3>
+    <p>Pick the first row that fits what you need.</p>
+    <div class="table-scroll"><table>
+      <tr><th>You want</th><th>Start with</th><th>Token</th><th>Encrypted</th></tr>
+      <tr><td class="wrap">Only this computer <em>(default)</em></td><td class="wrap"><code>python momo-coding-harness.py</code></td><td>no</td><td class="wrap">never leaves the machine</td></tr>
+      <tr><td class="wrap">Your laptop reaching momo on another box</td><td class="wrap">momo as default on the box; on the laptop <code>ssh -L 8765:127.0.0.1:8765 box</code>, then open <code>http://localhost:8765</code></td><td>no</td><td class="wrap">yes (SSH)</td></tr>
+      <tr><td class="wrap">Other devices on your LAN, over HTTPS</td><td class="wrap"><code>--web-host 0.0.0.0 --web-tls auto</code></td><td>yes</td><td class="wrap">yes (momo's own certificate)</td></tr>
+      <tr><td class="wrap">The same, with a certificate you have</td><td class="wrap"><code>--web-host 0.0.0.0 --web-cert c.pem --web-key k.pem</code></td><td>yes</td><td>yes</td></tr>
+      <tr><td class="wrap">A public domain name</td><td class="wrap"><code>--web-host 127.0.0.1 --web-token …</code> behind Caddy or nginx</td><td>yes</td><td class="wrap">yes (the proxy)</td></tr>
+      <tr><td class="wrap">Other devices on your LAN, plain HTTP</td><td class="wrap"><code>--web-host 0.0.0.0</code></td><td>yes</td><td class="wrap"><strong>no</strong>: the token is visible on the network</td></tr>
+      <tr><td class="wrap">A fully trusted network, no login</td><td class="wrap"><code>--web-host 0.0.0.0 --web-insecure</code></td><td><strong>none</strong></td><td class="wrap"><strong>no</strong>: anyone who can reach it controls momo</td></tr>
+    </table></div>
+    <p>Add <code>--headless</code> to any row to run without the terminal UI, and <code>--web-port</code> to change the port. <code>--web-token</code> fixes the token so it survives restarts; otherwise a new one is generated at each start.</p>
+
+    <h3 id="protections">What protects it</h3>
+    <ul>
+      <li><strong>Loopback by default.</strong> momo binds to <code>127.0.0.1</code> and rejects any request whose <code>Host</code> header isn't a loopback name. That stops a website you visit from reaching it by pointing its own domain at your machine (DNS rebinding).</li>
+      <li><strong>Same-origin writes.</strong> Anything that changes state must be a JSON request from the page itself. Requests from other websites are refused.</li>
+      <li><strong>A token off loopback.</strong> On any other address, every request needs the access token. It's generated fresh at each start and never written to disk.</li>
+      <li><strong>Optional HTTPS.</strong> This encrypts the token, cookie and conversation. It never replaces the token.</li>
+      <li><strong>No-token mode keeps the Host check.</strong> With <code>--web-insecure</code>, only this machine's own names and addresses are accepted, so DNS rebinding stays blocked.</li>
+    </ul>
+
+    <h3 id="remote-access">The access token</h3>
+    <p>There's no login form. The token travels inside the URL momo prints, and your browser swaps it for a cookie the first time you open that URL.</p>
+    <h4>Where to find it</h4>
+    <p>The token appears in only one place: the web UI URL momo prints at startup. With <code>0.0.0.0</code>, the address is replaced by the machine's hostname.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Running as</th><th>Where the URL appears</th></tr>
+      <tr><td>TUI (default)</td><td class="wrap">A <code>[system]</code> line near the top of the chat pane: <code>Web UI: http://my-mac.local:8765/?token=Xq3…</code></td></tr>
+      <tr><td><code>--headless</code></td><td class="wrap">The terminal it was started from: <code>momo Web UI: http://my-mac.local:8765/?token=Xq3…</code></td></tr>
+    </table></div>
+    <p>The token is everything after <code>?token=</code>. No command shows it again later. If it has scrolled away, scroll the chat pane back up, restart momo, or use <code>--web-token</code> so you already know it.</p>
+
+    <h4>In a browser</h4>
+    <ol>
+      <li>On the other machine, open the <strong>full URL</strong>, token included.</li>
+      <li>momo checks the token and replies with a redirect to <code>/</code> that sets a cookie: <code>momo_token</code>, HttpOnly and SameSite=Strict. The token disappears from the address bar and history, and page scripts can't read it.</li>
+      <li>From then on the cookie authorises every request, so bookmark plain <code>http://my-mac.local:8765/</code> (<code>https://</code> when <a href="#https">HTTPS</a> is on).</li>
+    </ol>
+    <p class="note">If the hostname doesn't resolve on the other machine (it relies on <code>.local</code> / mDNS or your DNS), replace it with the machine's IP address and keep the token: <code>http://192.168.1.20:8765/?token=Xq3…</code>.</p>
+
+    <h4>From scripts</h4>
+    <p>Scripts don't need the cookie: send the token as a Bearer header on every request.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>TOKEN=Xq3…      <span class="com"># the part after ?token=</span>
+curl -s -H "Authorization: Bearer $TOKEN" http://my-mac.local:8765/api/state | jq .status
+curl -s -X POST http://my-mac.local:8765/api/submit \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"text": "/context"}'</code></pre></div>
+
+    <h4>When it stops working</h4>
+    <div class="table-scroll"><table>
+      <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+      <tr><td><code>401 Unauthorized</code> after restarting momo</td><td class="wrap">A new token was generated, so the old cookie no longer matches</td><td class="wrap">Open the newly printed URL, or start with a fixed <code>--web-token</code></td></tr>
+      <tr><td><code>401</code> after reopening the browser</td><td class="wrap">The cookie only lasts for the browser session</td><td class="wrap">Open the URL with <code>?token=…</code> again</td></tr>
+      <tr><td><code>401</code> on first visit</td><td class="wrap">The token is missing or mistyped</td><td class="wrap">Copy the whole URL from momo's output</td></tr>
+      <tr><td>Page doesn't load</td><td class="wrap">The hostname doesn't resolve, or a firewall blocks the port</td><td class="wrap">Use the IP address, and allow port 8765 (or your <code>--web-port</code>)</td></tr>
+    </table></div>
+
+
+    <h3 id="https">HTTPS</h3>
+    <p>With a certificate the device trusts, the page counts as a secure context on other devices too, so <strong>desktop notifications and the copy buttons' clipboard access work over the LAN</strong>. Browsers block both on plain-HTTP LAN addresses.</p>
+    <h4>momo's own certificate: <code>--web-tls auto</code></h4>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --web-host 0.0.0.0 --web-tls auto</code></pre></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">output</span></div><pre><code>Web UI: https://my-mac.local:8765/?token=Xq3…
+HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
+       (also at https://my-mac.local:8765/momo-ca.pem), SHA-256 97:9A:56:…</code></pre></div>
+    <ol>
+      <li><strong>First start:</strong> momo creates a small certificate authority and a server certificate for <code>localhost</code>, your hostname, <code>&lt;hostname&gt;.local</code> and this machine's LAN addresses. They're stored in <code>~/.momo-harness/tls/</code>, readable only by you. It needs just the <code>openssl</code> command; macOS's built-in one works. Add extra names or a VPN address with <code>--web-tls-name</code>.</li>
+      <li><strong>Trust the CA once per device.</strong> Download <code>/momo-ca.pem</code> from the running server (no token needed; a CA certificate is public), check that its SHA-256 fingerprint matches the one momo printed, and install it:
+        <div class="table-scroll"><table>
+          <tr><th>Device</th><th>How</th></tr>
+          <tr><td>macOS</td><td class="wrap">Open it in Keychain Access, then set <em>When using this certificate</em> to <em>Always Trust</em></td></tr>
+          <tr><td>iOS / iPadOS</td><td class="wrap">Install the downloaded profile, then enable it under Settings → General → About → Certificate Trust Settings</td></tr>
+          <tr><td>Android</td><td class="wrap">Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate</td></tr>
+          <tr><td>Linux</td><td class="wrap">Copy it to <code>/usr/local/share/ca-certificates/momo-ca.crt</code> and run <code>sudo update-ca-certificates</code>. Firefox has its own store: Settings → Certificates → Import.</td></tr>
+          <tr><td>Windows</td><td class="wrap">Open it and install it into <em>Trusted Root Certification Authorities</em></td></tr>
+        </table></div></li>
+      <li><strong>Open the printed URL</strong> and use the token as usual. If you skip step 2, the connection is still encrypted, but the browser shows a certificate warning.</li>
+    </ol>
+    <p>Later starts reuse the certificate. When your IP address or hostname changes, momo issues a new server certificate by itself, and devices that already trust the CA don't need to do anything.</p>
+    <p class="note">The CA can only vouch for <code>localhost</code>, <code>*.local</code>, your hostname, loopback and private addresses (including Tailscale's <code>100.64.0.0/10</code>), and names given when it was created. This is enforced with X.509 name constraints. A device that trusts it can't be tricked into accepting a certificate for a public site, even if <code>momo-ca.key</code> leaks. Keep that key private anyway.</p>
+
+    <h4>Your own certificate</h4>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --web-host 0.0.0.0 --web-cert my-mac.pem --web-key my-mac-key.pem</code></pre></div>
+    <p>If the certificate or key can't be loaded, momo says so at startup: <code>Web UI failed to start …</code>, and <code>--headless</code> exits with an error.</p>
+
+    <h4>Behind a reverse proxy</h4>
+    <p>Keep momo on loopback, but give it a fixed token. That switches on token mode, which lets the proxy pass its own <code>Host</code> header:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --web-host 127.0.0.1 --web-token "$(openssl rand -hex 16)"</code></pre></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">Caddyfile</span></div><pre><code>momo.example.com {
+    reverse_proxy 127.0.0.1:8765
+}</code></pre></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">nginx</span></div><pre><code>location / {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_set_header Host $host;   <span class="com"># the Origin check compares against it</span>
+    proxy_buffering off;           <span class="com"># /api/events is Server-Sent Events</span>
+    proxy_read_timeout 1h;
+}</code></pre></div>
+    <p>Then open <code>https://momo.example.com/?token=&lt;token&gt;</code> once. Never let the proxy strip the <code>Origin</code> header: a missing Origin passes the same-origin check, so any website could then send commands to momo.</p>
+
+
+    <h3 id="no-token">No token: <code>--web-insecure</code></h3>
+    <p><code>--web-host 0.0.0.0 --web-insecure</code> serves plain HTTP without generating or asking for a token. momo prints a warning with the URL, because <strong>anyone who can reach the address can read the conversation and run commands as you</strong>. Use it only on a network where you trust every device. The Host check stays on: only this machine's own names and addresses are accepted, plus any you add with <code>--web-allow-host</code>. So a website you visit still can't drive momo.</p>
+
+    <h3 id="safety">Keep it safe</h3>
+    <ul>
+      <li>Treat the token like a password. Anyone with it controls momo, and it sits in your terminal scrollback.</li>
+      <li>Prefer the SSH tunnel for your own machines: nothing is exposed, and no token is needed.</li>
+      <li>Over plain HTTP the token and cookie are visible on the network. Use HTTPS on anything but a network you trust.</li>
+      <li>Keep <code>~/.momo-harness/tls/momo-ca.key</code> private. It's limited to local names by design, but it's still a key your devices trust.</li>
+      <li>Turn on <code>/run-confirm on</code> when others can reach the UI, or when browsing with <code>/net on</code>, so no shell command runs unseen.</li>
+    </ul>
   </section>
 
   <section id="tui" data-voice="tui">
@@ -1232,7 +1297,7 @@ const SPEECH = {
     "< full url, http:// too!", "< files stay on your machine",
   ],
   requirements: [
-    "< only ~60 MB of ram, purrr", "< three deps, that's it!", "< no node, no npm~",
+    "< only ~60 MB of ram, purrr", "< four deps, that's it!", "< no node, no npm~",
     "< no build step, ever", "< curses + http.server", "< the model eats the ram",
     "< windows? try wsl", "< python 3.14 please!",
   ],
@@ -1274,7 +1339,11 @@ const SPEECH = {
     "< one session, two windows", "< no cdn, no build step", "< @ for paths, / for cmds",
     "< a mew rises for questions", "< loopback only by default", "< ssh -L for remote~",
     "< retry or edit, your call", "< drag a pdf in!",
-    "< the token hides in the url", "< ?token= once, cookie after", "< bearer token for curl~",
+  ],
+  security: [
+    "< only this computer by default", "< ssh -L beats open ports", "< the token hides in the url",
+    "< ?token= once, cookie after", "< --web-tls auto for https~", "< trust momo's ca once, purrr",
+    "< bearer token for curl~", "< --web-insecure? trust all!", "< /run-confirm on, pls",
   ],
   tui: [
     "< ctrl+j for a newline", "< tab switches focus", "< shift+c interrupts",

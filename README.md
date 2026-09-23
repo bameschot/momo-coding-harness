@@ -17,6 +17,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+`requirements.txt` installs four packages; everything else is the Python standard library:
+
+| Package | Used for | Needed? |
+|---|---|---|
+| `ollama` | The Ollama client | yes |
+| `httpx` | The HTTP client for the llama.cpp adapter (`ollama` depends on it too) | yes |
+| `tree-sitter` + grammar wheels | Code navigation and the code index | optional — without it those tools are not offered |
+| `pypdf` | PDF attachments in the web UI | optional |
+
+`--web-tls auto` additionally uses the `openssl` command, which macOS and Linux ship.
+
 ## Running
 
 ```bash
@@ -40,6 +51,9 @@ Options:
 | `--web-host` | `127.0.0.1` | Interface for the web UI (a non-loopback host requires an access token) |
 | `--web-port` | `8765` | Port for the web UI |
 | `--web-token` | generated off-loopback | Access token for the web UI |
+| `--web-tls` | `off` | `auto`: serve the web UI over HTTPS with momo's own local CA (needs the `openssl` command, see [HTTPS](#https)) |
+| `--web-cert` / `--web-key` | — | Serve the web UI over HTTPS with your own certificate |
+| `--web-insecure` | off | Plain HTTP **without** an access token, even off loopback (trusted networks only) |
 | `--headless` | off | Run only the web UI, without the terminal UI |
 
 The chosen provider is saved and reused on the next launch (and restored per session). The status bar shows the active backend as `VIA: <provider>`.
@@ -97,6 +111,9 @@ The web UI has **no external dependencies**. It is plain HTML/CSS/JavaScript ser
 | `--web-host` | `127.0.0.1` | Interface to bind. Any non-loopback host requires an access token |
 | `--web-port` | `8765` | Port to listen on |
 | `--web-token` | generated when needed | Use a fixed access token instead of a random one |
+| `--web-tls auto` | off | HTTPS with momo's own local CA; `--web-tls-name NAME` adds a name or IP to the certificate |
+| `--web-cert PEM` / `--web-key PEM` | — | HTTPS with your own certificate (the key may be inside the certificate file) |
+| `--web-insecure` | off | Plain HTTP without a token; `--web-allow-host NAME` adds a name the Host check accepts |
 | `--headless` | off | Run the web UI without the terminal UI |
 
 If the port is already in use, the TUI still starts and shows `Web UI failed to start on …` in the chat pane. In `--headless` mode the harness exits with an error.
@@ -228,7 +245,7 @@ They differ in *when* they apply, which is the part worth knowing:
 
 Even with both switches off, the window title shows **(•)** while there is unseen activity in an away window, and clears when you come back.
 
-The browser asks permission the first time you tick **Desktop notification**. Desktop notifications need a secure origin, which `http://127.0.0.1` and `http://localhost` are — but a LAN address served over plain HTTP (`--web-host 0.0.0.0`) is not, and the browser withholds the API entirely there. An SSH tunnel keeps the origin `localhost` and so keeps notifications working. The sound has no such restriction and works over any origin.
+The browser asks permission the first time you tick **Desktop notification**. Desktop notifications need a secure origin, which `http://127.0.0.1` and `http://localhost` are — but a LAN address served over plain HTTP (`--web-host 0.0.0.0`) is not, and the browser withholds the API entirely there. An SSH tunnel keeps the origin `localhost` and so keeps notifications working, and so does [HTTPS](#https) with a certificate the device trusts. The sound has no such restriction and works over any origin.
 
 ### View options
 
@@ -280,7 +297,62 @@ The web UI can do anything the harness can, including editing files and running 
 - **Loopback only by default.** The server binds to `127.0.0.1`, so only your own machine can reach it. Requests whose `Host` header isn't a loopback name are rejected. This stops malicious web pages that point a domain at `127.0.0.1` (DNS rebinding).
 - **Same-origin requests only.** Requests that change anything must be JSON and must come from the page itself. Cross-site requests from other pages open in your browser are rejected.
 - **Access token off-loopback.** With `--web-host` set to anything else (e.g. `0.0.0.0` or a LAN address), a random token is generated and the URL printed by the harness includes `?token=…`. Opening that URL once swaps the token for an HttpOnly, SameSite=Strict cookie and removes it from the address bar. Requests without it get `401 Unauthorized`. Use `--web-token` to choose a fixed token. Scripts can send it as `Authorization: Bearer <token>`.
-- Traffic is plain HTTP. Exposing the harness beyond a trusted network needs a TLS-terminating reverse proxy or an SSH tunnel (`ssh -L 8765:127.0.0.1:8765 host`), which is also the simplest way to reach a remote harness without opening it up.
+- Traffic is plain HTTP unless you turn on [HTTPS](#https). An SSH tunnel (`ssh -L 8765:127.0.0.1:8765 host`) is the simplest way to reach a remote harness without opening it up.
+- **`--web-insecure`** serves plain HTTP with **no token** on a non-loopback address. Anyone who can reach it can read the conversation and run commands as you, so use it only on a network you fully trust. The Host check stays on and accepts only this machine's own names and addresses (plus `--web-allow-host`), so a web page you visit still can't reach it through DNS rebinding.
+
+### HTTPS
+
+| Option | What you do | Best for |
+|---|---|---|
+| SSH tunnel | `ssh -L 8765:127.0.0.1:8765 host`, open `http://localhost:8765` | Reaching your own machine; SSH encrypts, `localhost` counts as secure |
+| `--web-tls auto` | momo makes its own local CA and certificate | Other devices on your LAN, nothing else to install |
+| `--web-cert` / `--web-key` | Bring a certificate (mkcert, Let's Encrypt, `tailscale cert`, …) | You already have one |
+| Reverse proxy | Caddy or nginx in front of momo | A public domain name with automatic certificates |
+
+HTTPS never replaces the token: off loopback it is still required.
+
+**`--web-tls auto`** works like a small mkcert and needs only the `openssl` command (macOS's built-in LibreSSL works):
+
+```bash
+python momo-coding-harness.py --web-host 0.0.0.0 --web-tls auto
+# Web UI: https://my-mac.local:8765/?token=…
+# HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
+#        (also at https://my-mac.local:8765/momo-ca.pem), SHA-256 97:9A:…
+```
+
+1. On first use momo creates a root CA in `~/.momo-harness/tls/` (directory `0700`, keys `0600`) and a server certificate for `localhost`, the hostname, `<hostname>.local` and this machine's LAN addresses. Later starts reuse them; the server certificate is re-issued automatically when those names change or it nears expiry, without a new trust step.
+2. Trust the CA **once per device**. Download it from `/momo-ca.pem` (no token needed, a CA certificate is public) and compare the SHA-256 fingerprint with the one momo printed:
+   - macOS: open it in Keychain Access, then set *When using this certificate* to *Always Trust*
+   - iOS / iPadOS: install the profile, then enable it under Settings → General → About → Certificate Trust Settings
+   - Android: Settings → Security → Encryption & credentials → Install a certificate → CA certificate
+   - Linux: copy to `/usr/local/share/ca-certificates/momo-ca.crt` and run `sudo update-ca-certificates` (Firefox keeps its own store: Settings → Certificates → Import)
+   - Windows: open it and install into *Trusted Root Certification Authorities*
+3. Open the printed URL. Without step 2 the connection is still encrypted, but each browser shows a certificate warning.
+
+The CA carries X.509 **name constraints**: it can only vouch for `localhost`, `*.local`, this host's name, loopback and private addresses (including Tailscale's `100.64.0.0/10`), and names passed with `--web-tls-name` when it was created. A device that trusts it can't be tricked into accepting a certificate for a public site, even if `momo-ca.key` leaks. Still keep that key private. A name outside the constraints later is refused with instructions: delete `momo-ca.pem`/`momo-ca.key` to make a new CA (every device must trust it again), or use your own certificate.
+
+**Reverse proxy.** Keep momo on loopback but give it a fixed token, which turns on token mode and so lets the proxy pass its own `Host` header:
+
+```bash
+python momo-coding-harness.py --web-host 127.0.0.1 --web-token "$(openssl rand -hex 16)"
+```
+
+```
+momo.example.com {                 # Caddy: certificates and SSE streaming handled
+    reverse_proxy 127.0.0.1:8765
+}
+```
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_set_header Host $host;   # the Origin check compares against it
+    proxy_buffering off;           # /api/events is Server-Sent Events
+    proxy_read_timeout 1h;
+}
+```
+
+Then open `https://momo.example.com/?token=<token>` once. Never make the proxy strip the `Origin` header: a missing Origin passes the same-origin check, so every website could then post to momo.
 - `/token` values typed in the browser are masked in both windows and never added to the history, exactly as in the TUI.
 
 ### HTTP API

@@ -23,6 +23,13 @@ Routes
 Security: bound to loopback by default, with Host-header checks against DNS
 rebinding.  On a non-loopback bind an access token is required (``?token=`` once,
 then an HttpOnly SameSite=Strict cookie).  POSTs must be JSON and same-origin.
+``--web-insecure`` drops the token on purpose; the Host check then admits only this
+machine's own names, so DNS rebinding stays blocked.
+
+HTTPS: given a certificate (``--web-cert`` or momo's own CA, see tls.py) the
+listening socket is wrapped with TLS 1.2+, the token cookie is marked Secure, and
+in auto mode the CA certificate — public by nature — is served at /momo-ca.pem
+without a token so other devices can download and trust it.
 
 Nothing here may write to stdout/stderr while the curses TUI owns the terminal,
 so request logging and error tracebacks are silenced.
@@ -35,6 +42,7 @@ import json
 import queue
 import socket
 import os
+import ssl
 import threading
 from dataclasses import asdict
 from http import HTTPStatus
@@ -67,6 +75,16 @@ _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
 _KEEPALIVE_S = 15.0
 _COOKIE = "momo_token"
 _MAX_PREVIEW_BYTES = 5_000_000
+
+
+def _host_form(host: str) -> str:
+    """A name as it appears in a Host header (without port): lowercase, IPv6 bracketed."""
+    h = host.strip().lower()
+    try:
+        ip = ipaddress.ip_address(h.strip("[]"))
+    except ValueError:
+        return h
+    return f"[{ip}]" if ip.version == 6 else str(ip)
 
 
 def is_loopback(host: str) -> bool:
@@ -167,20 +185,36 @@ class _Server(ThreadingHTTPServer):
 
 
 class WebServer:
-    def __init__(self, controller: Controller, host: str, port: int, token: str | None):
+    def __init__(self, controller: Controller, host: str, port: int, token: str | None,
+                 *, cert: str | Path | None = None, key: str | Path | None = None,
+                 ca_pem: str | Path | None = None, extra_hosts=()):
         self.controller = controller
         self.host = host
         self.token = token
+        self.tls = cert is not None
+        self.ca_pem = Path(ca_pem) if ca_pem else None
+        self.extra_hosts = {_host_form(h) for h in extra_hosts}
+        context = None
+        if cert is not None:
+            # Load before binding, so a bad certificate fails without holding the port.
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(cert, key)
         self._stopping = threading.Event()
         server_cls = _Server
         if ":" in host.strip("[]"):
             server_cls = type("_Server6", (_Server,), {"address_family": socket.AF_INET6})
         self._httpd = server_cls((host.strip("[]"), port), self._make_handler())
+        if context is not None:
+            # The handshake runs on the first read, in the request's own thread, so a
+            # client that stalls mid-handshake cannot block accept() for everyone else.
+            self._httpd.socket = context.wrap_socket(
+                self._httpd.socket, server_side=True, do_handshake_on_connect=False)
         self.port = self._httpd.server_address[1]
         url_host = f"[{host.strip('[]')}]" if ":" in host else host
         if url_host in ("0.0.0.0", "[::]"):
             url_host = socket.gethostname()
-        self.url = f"http://{url_host}:{self.port}/"
+        self.url = f"{'https' if self.tls else 'http'}://{url_host}:{self.port}/"
         if token:
             self.url += f"?token={token}"
         self._thread = threading.Thread(target=self._httpd.serve_forever,
@@ -222,7 +256,8 @@ class WebServer:
         if not self.token:
             # Loopback bind: only accept requests addressed to a loopback name,
             # which defeats DNS-rebinding pages that resolve to 127.0.0.1.
-            allowed_hosts = {"localhost", "127.0.0.1", "[::1]", self.host}
+            # With --web-insecure off loopback, also this machine's own names.
+            allowed_hosts = {"localhost", "127.0.0.1", "[::1]", _host_form(self.host)} | self.extra_hosts
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "momo-web"
@@ -280,13 +315,26 @@ class WebServer:
                 parts = urlsplit(self.path)
                 path = parts.path
 
+                if path == "/momo-ca.pem" and web.ca_pem is not None:
+                    # A CA certificate is public; devices need it before they can log in.
+                    try:
+                        body = web.ca_pem.read_bytes()
+                    except OSError:
+                        self._send(HTTPStatus.NOT_FOUND, b"Not found\n")
+                        return
+                    # The x509-ca-cert type and a .crt name make phones offer to install it.
+                    self._send(HTTPStatus.OK, body, "application/x-x509-ca-cert", headers={
+                        "Content-Disposition": 'attachment; filename="momo-ca.crt"'})
+                    return
+
                 if path == "/" and web.token:
                     qs_token = (parse_qs(parts.query).get("token") or [""])[0]
                     if qs_token and hmac.compare_digest(qs_token.encode(), web.token.encode()):
                         # Trade the URL token for a cookie and drop it from the address bar.
                         self._send(HTTPStatus.SEE_OTHER, headers={
                             "Location": "/",
-                            "Set-Cookie": f"{_COOKIE}={web.token}; HttpOnly; SameSite=Strict; Path=/",
+                            "Set-Cookie": f"{_COOKIE}={web.token}; HttpOnly; SameSite=Strict; Path=/"
+                                          + ("; Secure" if web.tls else ""),
                         })
                         return
 
@@ -502,8 +550,11 @@ class WebServer:
 
 
 def start_web_server(controller: Controller, host: str, port: int,
-                     token: str | None) -> WebServer:
-    """Bind and start serving in a daemon thread. Raises OSError if the port is taken."""
-    server = WebServer(controller, host, port, token)
+                     token: str | None, *, cert=None, key=None, ca_pem=None,
+                     extra_hosts=()) -> WebServer:
+    """Bind and start serving in a daemon thread. Raises OSError if the port is
+    taken or the certificate cannot be loaded (ssl.SSLError is an OSError)."""
+    server = WebServer(controller, host, port, token, cert=cert, key=key,
+                       ca_pem=ca_pem, extra_hosts=extra_hosts)
     server.start()
     return server
