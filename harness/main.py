@@ -71,7 +71,7 @@ def main():
                              "(default: last /guides setting, else off)")
     parser.add_argument("--index", action=argparse.BooleanOptionalAction, default=None,
                         help="Index the workdir in memory and give the model the index_* search "
-                             "tools (default: last /index setting, else off)")
+                             "tools (default: last /index setting, else on)")
     parser.add_argument("--index-max-mem", default=None, metavar="SIZE",
                         help="Memory budget for the code index: 100mb, 512kb, 1gb (default: last "
                              "/index-max-mem setting, else 100mb)")
@@ -133,7 +133,7 @@ def main():
         harness.index_max_bytes = prefs["index_max_mem"]
     harness.index_persist = bool(args.index_persist if args.index_persist is not None
                                  else prefs.get("index_persist", False))
-    index_on = bool(args.index if args.index is not None else prefs.get("index", False))
+    index_on = bool(args.index if args.index is not None else prefs.get("index", True))
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 
     # Restore last session unless --fresh

@@ -514,9 +514,9 @@ Config, markup and script files are parsed too, and their "definitions" are what
 
 `find_symbol` and `find_references` say so when a file in the scanned tree could not be parsed or was skipped for size, so an empty result is never mistaken for proof of absence.
 
-### Code index (all modes, off by default)
+### Code index (all modes, on by default)
 
-Offered only while the [code index](#code-index) is on (`/index on`). They **replace** `find_references` and `file_dependencies`, so the model never has to choose between two tools that answer the same question. `code_outline`, `read_symbol` and `find_symbol` stay and read from the index too; `find_symbol` stays because its line form answers "which definition is line N in?" in one line, where `read_symbol` returns the whole body.
+Offered while the [code index](#code-index) is on, which it is unless you turn it off (`/index off`, `--no-index`). They **replace** `find_references` and `file_dependencies`, so the model never has to choose between two tools that answer the same question. `code_outline`, `read_symbol` and `find_symbol` stay and read from the index too; `find_symbol` stays because its line form answers "which definition is line N in?" in one line, where `read_symbol` returns the whole body.
 
 | Tool | Description |
 |---|---|
@@ -569,7 +569,7 @@ All file operations are sandboxed to the working directory. Paths that attempt t
 /index-persist on   # load the saved index at start, save it on exit
 ```
 
-`--index`, `--index-max-mem` and `--index-persist` set these at startup; all three are remembered in `prefs.json`. In the web UI they are under View → Code index, and the `INDEX` badge shows the state.
+The index is **on by default**; `/index off` or `--no-index` turns it off, and the choice is remembered. `--index`, `--index-max-mem` and `--index-persist` set these at startup; all three are remembered in `prefs.json`. In the web UI they are under View → Code index, and the `INDEX` badge shows the state.
 
 **What is indexed.** In a git repository, `git ls-files -co --exclude-standard`: tracked and untracked files, with `.gitignore` respected. Outside a repository, every file not in the usual noise directories (`.git`, `node_modules`, `.venv`, …) or hidden ones. Binary files and files over 2 MB are skipped, and at most 100,000 files are indexed. For each file the index holds:
 
