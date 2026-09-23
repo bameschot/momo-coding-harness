@@ -569,7 +569,7 @@ class ReviewFixes(Base):
 
 
 class IndexRouting(Base):
-    """/index-route (on by default): plain-text grep_files and file-name
+    """/index-route (off by default): plain-text grep_files and file-name
     find_files are answered from the index; the rest still goes to the disk."""
 
     files = {**CHAIN, "img/logo.png": "\0PNG" * 8, "gen/.keep": ""}
@@ -616,11 +616,14 @@ class IndexRouting(Base):
         out = self.run_tool("find_files", {"pattern": "conf/*.yaml"})  # a directory part: disk
         self.assertEqual(out, "conf/app.yaml")
 
-    def test_route_off_behaves_as_before(self):
+    def test_route_off_searches_the_disk_but_still_points_at_the_index(self):
         out = self.run_tool("grep_files", {"pattern": "retry_delay"}, route=False)
-        self.assertIn("conf/app.yaml:3:", out)
-        self.assertFalse(out.startswith("("))
+        self.assertIn("conf/app.yaml:3:", out)                      # the real grep
+        self.assertTrue(out.startswith("(the code index is on:"), out)
+        self.assertNotIn(tools._INDEX_GREP_TIP.strip(), out)        # led, not trailed
         self.assertEqual(self.run_tool("find_files", {"pattern": "a.py"}, route=False), "a.py")
+        self.assertEqual(tools.dispatch("grep_files", {"pattern": "zzz_none"}, self.root,
+                                        index=self.idx), "(no matches)")
 
     def test_file_tools_point_at_the_index_tools(self):
         self.assertIn("index_map()", self.run_tool("list_directory", {"path": "."}))
@@ -756,8 +759,13 @@ class HarnessIndex(unittest.TestCase):
         self.assertNotIn("Code index is ON", self.h.messages[0]["content"])
 
     def test_route_toggle(self):
+        self.assertFalse(self.h.index_route)                       # off by default
+        self.assertFalse(self.h.status_event().index_route)
         self.cmd("/index on")
         self.assertIsNone(self.h.index.wait_fresh())
+        out = self.h._dispatch("grep_files", {"pattern": "leaf"})
+        self.assertTrue(out.startswith("(the code index is on:"), out)
+        self.assertIn("on", self.cmd("/index-route on"))
         self.assertTrue(self.h._dispatch("grep_files", {"pattern": "leaf"}).startswith("(grep_files is"))
         self.assertIn("off", self.cmd("/index-route off"))
         self.assertFalse(self.h.index_route)

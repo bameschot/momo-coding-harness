@@ -446,7 +446,7 @@ class StatusEvent:
     index_mem: int = 0            # estimated bytes in use
     index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
     index_persist: bool = False   # /index-persist: load/save a pickle
-    index_route: bool = True      # /index-route: answer grep_files/find_files from the index
+    index_route: bool = False     # /index-route: answer grep_files/find_files from the index
     index_degraded: bool = False  # over budget: a component was dropped
 
 @dataclass
@@ -765,7 +765,7 @@ class Harness:
         self.index_enabled: bool = False
         self.index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
         self.index_persist: bool = False
-        self.index_route: bool = True      # /index-route: grep/find answered from the index
+        self.index_route: bool = False     # /index-route: grep/find answered from the index
         self.index: code_index.ProjectIndex | None = None
         self._index_saved_version = -1
         self._schema_cache: tuple = (None, 0)

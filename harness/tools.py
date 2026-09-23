@@ -247,7 +247,7 @@ def _with_fallback_note(tool: dict, route: bool) -> dict:
     return {**tool, "function": {**fn, "description": note + fn["description"]}}
 
 
-def with_index_tools(tools: list[dict], route: bool = True) -> list[dict]:
+def with_index_tools(tools: list[dict], route: bool = False) -> list[dict]:
     """The tool list with the index tools in place of the code-nav tools they
     replace, placed where the code-nav block starts so related tools stay
     together, and grep_files / find_files described as the fallback."""
@@ -1054,14 +1054,14 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              net_max_bytes: int = net.DEFAULT_MAX_BYTES,
              net_max_chars: int = net.DEFAULT_MAX_CHARS,
              index: "code_index.ProjectIndex | None" = None, cancel=None,
-             index_route: bool = True) -> str:
+             index_route: bool = False) -> str:
     if index is not None and index_route and name in _ROUTED:
         routed = _route_to_index(name, args, workdir, index, cancel)
         if routed is not None:
             return routed
     result = _dispatch(name, args, workdir, net_access, net_max_bytes, net_max_chars, index, cancel)
-    if index is not None and index_route and name == "grep_files" and not result.startswith("ERROR"):
-        result = _index_note_for_regex(result, index)
+    if index is not None and name == "grep_files" and not result.startswith("ERROR"):
+        result = _index_note_for_grep(result, index)     # a hint, routing or not
     if index is not None and not result.startswith("ERROR"):
         result += _index_result_hint(name, args, workdir, index)
     if index is not None:
@@ -1072,7 +1072,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
     return result
 
 
-# ── index-first search (/index-route, on by default) ─────────────────────────
+# ── index-first search (/index-route, off by default) ────────────────────────
 # With the code index on, the 9B still reached for grep_files / find_files out
 # of habit.  A plain-text grep and a file-name glob are answered from the index
 # instead — the same hits, plus the definition each one sits in — with a first
@@ -1146,9 +1146,10 @@ def _route_to_index(name: str, args: dict, workdir: Path, index, cancel) -> str 
             f"next time, and index_file to describe one)\n" + out)
 
 
-def _index_note_for_regex(result: str, index) -> str:
-    """A regex grep ran on disk: lead with the index tools when its hits are
-    in indexed files (a trailing tip was being skipped)."""
+def _index_note_for_grep(result: str, index) -> str:
+    """A grep ran on disk (a regex, or any grep with /index-route off): lead
+    with the index tools when its hits are in indexed files (a trailing tip
+    was being skipped)."""
     hits = [ln.split(":", 1)[0] for ln in result.splitlines()[:50] if ":" in ln]
     with index._lock:
         indexed = any(h in index._by_path for h in hits)
