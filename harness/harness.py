@@ -21,7 +21,7 @@ from .tools import (DESIGN_TOOLS, ALL_TOOLS, CHAT_TOOLS, NET_TOOLS,
                     PLAN_INVESTIGATE_TOOLS, PLAN_EXECUTE_TOOLS,
                     dispatch, render_tool_reference, with_index_tools)
 from . import net as net_mod
-from . import code_index, code_nav
+from . import code_index, code_nav, ignore_rules
 
 # Tools that mutate a file on disk — the harness snapshots the target before and
 # after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
@@ -445,7 +445,9 @@ class StatusEvent:
     index_files: int = 0
     index_mem: int = 0            # estimated bytes in use
     index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
-    index_persist: bool = False   # /index-persist: load/save a pickle
+    index_max_files: int = code_index.DEFAULT_MAX_FILES
+    index_workers: int = 0        # /index-workers: 0 = auto
+    index_persist: bool = True    # /index-persist: load/save a pickle
     index_route: bool = True      # /index-route: answer grep_files/find_files from the index
     index_degraded: bool = False  # over budget: a component was dropped
 
@@ -709,6 +711,11 @@ _RECAP_MAX_TURNS = 4      # ... never looks back further than this many user tur
 _MOMO_LINES_MAX = 30      # remembered recap lines per session
 
 
+def _has_model(available: list[str], name: str) -> bool:
+    """Ollama lists an untagged name with its implicit :latest tag."""
+    return name in available or f"{name}:latest" in available
+
+
 class Harness:
     def __init__(self, host: str, model: str, workdir: Path, provider: str = "ollama"):
         self.workdir = workdir.resolve()
@@ -748,6 +755,9 @@ class Harness:
         self._turn_count: int = 0         # user turns sent; monotonic (compaction can drop messages)
         self.model_max_ctx: int | None = None  # model's real reported context window; used as num_ctx
         self.context_pct: int | None = None  # user-set % of model max; None = use default 50%
+        # An absolute limit the user set (/context <n>, --context): kept across
+        # sessions.  Otherwise the limit follows the model's window.
+        self.context_fixed: bool = False
         # Plan mode state: phase is "investigating" → "awaiting_approval" (plan kept
         # for later) → "executing" (approved; paused if not currently running).
         self.plan: Plan | None = None
@@ -761,10 +771,13 @@ class Harness:
         self._guides_text = ""                     # the rendered prompt block
         # Code index: when on, a ProjectIndex for the workdir is kept current in
         # the background and the index_* tools replace find_references /
-        # file_dependencies.  /index, /index-max-mem, /index-persist
+        # file_dependencies.  /index, /index-max-mem, /index-max-files, /index-workers,
+        # /index-persist
         self.index_enabled: bool = False
         self.index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
-        self.index_persist: bool = False
+        self.index_max_files: int = code_index.DEFAULT_MAX_FILES
+        self.index_workers: int = 0            # 0 = auto (code_index.auto_workers)
+        self.index_persist: bool = True
         self.index_route: bool = True      # /index-route: grep/find answered from the index
         self.index: code_index.ProjectIndex | None = None
         self._index_saved_version = -1
@@ -777,11 +790,13 @@ class Harness:
         self._stream_chars = 0      # chars of the reply currently streaming in
         self._measured_tokens: int | None = None  # last prompt+eval the server reported
         self._cancel = threading.Event()
+        # What the saved prefs / session asked for; check_backend reports how the
+        # server's answer differs from it.
+        self._expected_backend: tuple[str, int | None] = (self.client.model, None)
         # For a fixed-model backend, adopt the server's actually-loaded model before
-        # reading its context window, so the label and ctx message reflect reality
-        # rather than a stale saved name.
+        # reading its context window.  check_backend() reports the result at startup.
         self._reconcile_fixed_model()
-        self._sync_context_limit(emit=True)
+        self._sync_context_limit(emit=False)
 
     # ── public properties ─────────────────────────────────────────────────────
 
@@ -914,9 +929,64 @@ class Harness:
         if loaded and loaded[0] != self.client.model:
             self.client.set_model(loaded[0])
 
+    def check_backend(self) -> str:
+        """Startup check against the server: which model it serves (or has) and
+        its real context window, since the saved session and prefs may be stale.
+        Adopts what it finds and returns the notice to show."""
+        c = self.client
+        want_model, want_limit = self._expected_backend
+        where = f"{c.provider_name} at {c.host}"
+        available = c.list_models()
+        if not available:
+            return (f"Model: {c.model} — {where} is not reachable, so the model and its "
+                    f"context size are unchecked (compaction at {self.context_limit:,} tokens). "
+                    f"/model lists the server's models once it is up.")
+        changes = []
+        if not c.can_switch_model:
+            self._reconcile_fixed_model()
+        elif not _has_model(available, c.model):
+            loaded = [m for m in c.loaded_models() if _has_model(available, m)]
+            if loaded:
+                c.set_model(loaded[0])
+            else:
+                changes.append(f"WARNING: {c.model} is not on the server — pick one with /model "
+                               f"({len(available)} available)")
+        if c.model != want_model:
+            why = ("the server's loaded model" if not c.can_switch_model
+                   else f"{want_model} is not on the server; {c.model} is loaded")
+            changes.append(f"model {want_model} → {c.model} ({why})")
+        reported = c.context_length()
+        if self.context_fixed:
+            self.model_max_ctx = reported
+            if reported and self.context_limit > reported:
+                changes.append(f"your {self.context_limit:,}-token context limit is over the "
+                               f"model's {reported:,}-token window; now its default half")
+                self.context_fixed = False
+                self._sync_context_limit(emit=False)
+        else:
+            self._sync_context_limit(emit=False)
+        if want_limit is not None and want_limit != self.context_limit:
+            changes.append(f"context limit {want_limit:,} → {self.context_limit:,} tokens")
+        if reported:
+            how = ("set by you" if self.context_fixed
+                   else f"{self.context_pct if self.context_pct is not None else 50}%")
+            ctx = (f"context window {reported:,} tokens, compaction at "
+                   f"{self.context_limit:,} ({how})")
+        else:
+            ctx = (f"context window not reported, compaction at {self.context_limit:,} tokens "
+                   f"({'set by you' if self.context_fixed else 'default'})")
+        if c.model != want_model:
+            session_mod.save_prefs(model=c.model, provider=self.provider)
+        self._emit_status()
+        msg = f"Model: {c.model} ({where}) — {ctx}."
+        if changes:
+            msg += "\nUpdated from the saved settings: " + "; ".join(changes) + "."
+        return msg
+
     def switch_backend(self, provider: str, host: str, model: str):
         """Point the harness at a backend, rebuilding the client when the provider
         changes, then re-read the served model and its context window."""
+        self._expected_backend = (model, None)     # asked for now, not the saved one
         if provider != self.provider:
             self.client = make_client(provider, host=host, model=model,
                                       auth_token=self.client._auth_token)
@@ -925,7 +995,7 @@ class Harness:
             self.client.set_host(host)
             self.client.set_model(model)
         self._reconcile_fixed_model()
-        if self.context_pct is not None:
+        if not self.context_fixed:
             self._sync_context_limit(emit=False)
         else:
             self.model_max_ctx = self.client.context_length()
@@ -981,7 +1051,9 @@ class Harness:
 
     def _start_index(self) -> None:
         idx = code_index.ProjectIndex(self.workdir, self.index_max_bytes,
-                                      on_change=self._on_index_change)
+                                      on_change=self._on_index_change,
+                                      max_files=self.index_max_files,
+                                      workers=self.index_workers)
         self.index = idx
         self._index_saved_version = -1
         code_nav.set_index_provider(idx.provide, idx.paths_under)
@@ -1027,11 +1099,35 @@ class Harness:
             threading.Thread(target=self._save_index_quietly, args=(idx,), daemon=True).start()
         self._emit_status()
 
+    def index_filter(self) -> tuple[str, str]:
+        """(filter text, its path).  Reading it seeds it when it doesn't exist yet."""
+        text = self.index.filter_text if self.index is not None \
+            else code_index.load_filter(self.workdir)[0]
+        return text, str(code_index.filter_path(self.workdir))
+
+    def set_index_filter(self, text: str) -> str:
+        """Save the index filter and apply it to a running index.  Returns a notice."""
+        err = code_index.save_filter(self.workdir, text)
+        if err:
+            return err
+        n = len(ignore_rules.Rules.parse(text))
+        if self.index is not None:
+            self.index.set_filter(text)
+            return f"Code index filter saved: {n} rules; re-listing files."
+        return f"Code index filter saved: {n} rules (applies when the index is on)."
+
+    def reset_index_filter(self) -> str:
+        """Re-seed the filter from the project's current .gitignore files."""
+        return self.set_index_filter(ignore_rules.seed_text(self.workdir))
+
     def index_breakdown(self) -> dict:
         """The index's memory composition (/index, web INDEX popover)."""
         idx = self.index
         if idx is None:
-            return {"enabled": False, "limit": self.index_max_bytes, "persist": self.index_persist,
+            return {"enabled": False, "limit": self.index_max_bytes,
+                    "max_files": self.index_max_files, "workers": self.index_workers,
+                    "workers_used": self.index_workers or code_index.auto_workers(),
+                    "persist": self.index_persist,
                     "route": self.index_route}
         return {**code_index.breakdown(idx), "persist": self.index_persist,
                 "route": self.index_route}
@@ -2236,6 +2332,7 @@ class Harness:
     def _index_status_fields(self) -> dict:
         idx = self.index
         base = {"index_enabled": self.index_enabled, "index_max_bytes": self.index_max_bytes,
+                "index_max_files": self.index_max_files, "index_workers": self.index_workers,
                 "index_persist": self.index_persist, "index_route": self.index_route}
         if idx is None:
             return {**base, "index_state": "off"}
@@ -2278,6 +2375,7 @@ class Harness:
             self.active_skills,
             self.input_history,
             context_pct=self.context_pct,
+            context_fixed=self.context_fixed,
             host=self.client.host,
             provider=self.provider,
             plan=self.plan.to_dict() if self.plan is not None else None,
@@ -2297,12 +2395,16 @@ class Harness:
         self.mode = mode if mode in _MODE_TOOLS else "design"
         self.workdir = Path(data.get("workdir", str(self.workdir)))
         self.context_pct = data.get("context_pct", None)
+        # Sessions from before context_fixed saved every limit, derived or not:
+        # they now follow the model's window.
+        self.context_fixed = bool(data.get("context_fixed", False)) and self.context_pct is None
         # Restore the provider first: if it changed, rebuild the client so the
         # right adapter (and its default transport) is used.  The saved host is
         # provider-specific, so it must be applied against the matching adapter.
         saved_provider = data.get("provider")
         saved_host = data.get("host")
         saved_model = data.get("model", self.client.model)
+        self._expected_backend = (saved_model, data.get("context_limit"))
         new_client = None
         if saved_provider and saved_provider != self.provider:
             try:
@@ -2333,7 +2435,7 @@ class Harness:
         # A fixed-model backend may now be serving a different model than the one
         # saved in this session; trust the server over the saved label.
         self._reconcile_fixed_model()
-        if self.context_pct is not None:
+        if not self.context_fixed:
             self._sync_context_limit(emit=False)
         else:
             self.context_limit = data.get("context_limit", self.context_limit)

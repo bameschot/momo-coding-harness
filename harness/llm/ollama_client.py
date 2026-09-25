@@ -199,6 +199,15 @@ class OllamaClient(LLMClient):
             pass
         return None
 
+    def loaded_models(self) -> list[str]:
+        """The models Ollama holds in memory (/api/ps)."""
+        try:
+            models = self._client.request_json("GET", "/api/ps").get("models") or []
+            return [m.get("model") or m.get("name") for m in models
+                    if isinstance(m, dict) and (m.get("model") or m.get("name"))]
+        except Exception:
+            return []
+
     def list_models(self) -> list[str]:
         """Return the available model names, or an empty list if the host is
         unreachable.  The caller (/model) reports the failure — an error string

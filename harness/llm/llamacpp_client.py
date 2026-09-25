@@ -222,6 +222,9 @@ class LlamaCppClient(LLMClient):
             pass
         return None
 
+    def loaded_models(self) -> list[str]:
+        return self.list_models()        # a llama.cpp server holds exactly what it serves
+
     def list_models(self) -> list[str]:
         """Return the loaded model id(s), or an empty list if unreachable."""
         try:

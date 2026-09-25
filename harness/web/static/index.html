@@ -95,9 +95,12 @@
     <label><input type="checkbox" id="index-persist"> Save/load to disk <kbd>/index-persist</kbd></label>
     <label><input type="checkbox" id="index-route"> Answer grep/find from the index <kbd>/index-route</kbd></label>
     <label class="menu-num">Memory budget <input type="text" id="index-max-mem" size="7" placeholder="100mb"></label>
+    <label class="menu-num">Max files <input type="text" id="index-max-files" size="7" placeholder="100000"></label>
+    <label class="menu-num">Build workers <input type="text" id="index-workers" size="7" placeholder="auto"></label>
     <div class="menu-row">
       <button type="button" id="index-save" class="menu-link">Save now</button>
       <button type="button" id="index-load" class="menu-link">Load</button>
+      <button type="button" id="index-filter-open" class="menu-link">Filter…</button>
     </div>
     <div class="menu-sub">Model</div>
     <label><input type="checkbox" id="think-mode"> Thinking mode <kbd>/think</kbd></label>
@@ -142,6 +145,7 @@
     <button class="icon-btn drawer-close" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
   <div id="files-tree" class="drawer-body tree"></div>
+  <div class="drawer-resize" role="separator" aria-orientation="vertical" aria-label="Resize workspace drawer" title="Drag to resize · double-click to reset"></div>
   <div id="file-preview" class="file-preview" hidden>
     <div class="preview-head">
       <button id="preview-back" class="icon-btn" type="button" title="Back to files" aria-label="Back to files"><svg class="icon" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
@@ -151,9 +155,28 @@
       <button id="preview-attach" type="button" class="primary small with-icon"><svg class="icon sm" aria-hidden="true"><use href="#i-paperclip"/></svg> Attach</button>
       <button id="preview-insert" type="button" class="small">Insert path</button>
       <button id="preview-copy" type="button" class="small">Copy</button>
+      <button id="preview-render" type="button" class="small" hidden>Plain</button>
       <span id="preview-meta" class="muted small"></span>
     </div>
     <div class="preview-scroll"><pre class="preview-gutter" aria-hidden="true"></pre><pre class="preview-code"><code></code></pre></div>
+    <div class="preview-md md" hidden></div>
+  </div>
+</aside>
+
+<aside id="filter-drawer" class="side-drawer" aria-label="Code index filter" hidden>
+  <div class="drawer-head">
+    <strong>Index filter</strong>
+    <span id="filter-rules" class="chip"></span>
+    <span class="spacer"></span>
+    <button id="filter-close" class="icon-btn" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <p class="filter-hint muted small">gitignore syntax: one pattern per line, the last matching line wins, <code>!pattern</code> re-includes, a trailing <code>/</code> matches folders. Index only <code>src/</code>: <code>/*</code> then <code>!/src/</code>. <span id="filter-path" class="mono"></span></p>
+  <textarea id="filter-text" spellcheck="false" autocomplete="off" aria-label="Filter rules"></textarea>
+  <p id="filter-msg" class="filter-hint small" role="status"></p>
+  <div class="drawer-actions">
+    <button type="button" id="filter-save" class="primary">Save</button>
+    <button type="button" id="filter-cancel">Cancel</button>
+    <button type="button" id="filter-reset" title="Replace the filter with one built from the current .gitignore files">Reset from .gitignore</button>
   </div>
 </aside>
 

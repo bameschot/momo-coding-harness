@@ -262,7 +262,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
-| Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, and Save now / Load. Shared with the TUI |
+| Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index-max-files`, `/index-workers`, `/index-filter`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, the file limit, build workers, Save now / Load, and Filter… (edit which files are indexed). Shared with the TUI |
 | Play a sound | — | An audible cue (a synthesised kitten mew), focused or not, see [Notifications](#notifications) |
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
 | Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
@@ -643,12 +643,29 @@ All file operations are sandboxed to the working directory. Paths that attempt t
 /index rebuild      # forget everything and index again
 /index save|load    # write the index to disk now, or load the saved one
 /index-max-mem 200mb
-/index-persist on   # load the saved index at start, save it on exit
+/index-max-files 200000
+/index-workers auto # processes for a first build or rebuild; 1 = one process
+/index-persist on   # load the saved index at start, save it on exit (default on)
+/index-filter       # which files are indexed (gitignore syntax); add|remove <pattern>, edit, reset
 ```
 
-The index is **on by default**; `/index off` or `--no-index` turns it off, and the choice is remembered. `--index`, `--index-max-mem` and `--index-persist` set these at startup; all three are remembered in `prefs.json`. In the web UI they are under View → Code index, and the `INDEX` badge shows the state.
+The index is **on by default**; `/index off` or `--no-index` turns it off, and the choice is remembered. `--index`, `--index-max-mem`, `--index-max-files`, `--index-workers` and `--index-persist` set these at startup; all five are remembered in `prefs.json`. In the web UI they are under View → Code index, and the `INDEX` badge shows the state.
 
-**What is indexed.** In a git repository, `git ls-files -co --exclude-standard`: tracked and untracked files, with `.gitignore` respected. Outside a repository, every file not in the usual noise directories (`.git`, `node_modules`, `.venv`, …) or hidden ones. Binary files and files over 2 MB are skipped, and at most 100,000 files are indexed. For each file the index holds:
+**What is indexed.** Every file the project's **index filter** lets in. The filter uses gitignore syntax: the last matching line wins, `!pattern` re-includes, and a trailing `/` matches folders only. To index only `src/`, write `/*` and then `!/src/`. It lives next to the saved index in `~/.momo-harness/index/<hash of the workdir>.filter` (mode `0600`), not in your repo. The first time the index starts for a project, the filter is created from:
+
+- the usual noise folders (`node_modules/`, `.venv/`, `__pycache__/`, …);
+- every `.gitignore` in the tree, with nested ones rewritten to their folder;
+- `.git/info/exclude`.
+
+Outside a git repository it also excludes hidden files. After that **only the filter decides**, and later `.gitignore` edits are not picked up. `/index-filter reset` re-seeds it. `.git/` is always excluded. Edit the filter with:
+
+- `/index-filter add|remove <pattern>`;
+- `/index-filter edit`, which opens `$VISUAL`/`$EDITOR` in the TUI;
+- View → Code index → Filter… in the web UI.
+
+**Build speed.** A first build, `/index rebuild` or a branch switch reads and parses files in worker processes: `/index-workers`, default `auto` = one less than the CPU count, at most 8. Threads would not help, because tree-sitter holds Python's GIL while it parses. On a 1,100-file C project the build went from 7.6 s to 3.3 s, and on a Kotlin project from 1.0 s to 0.3 s. Smaller updates, and batches under 200 files, are built in the indexer thread. The worker processes exit when the build is done.
+
+Changes apply at once: files now excluded leave the index, and files now let in are indexed. Binary files and files over 2 MB are skipped, and at most 100,000 files are indexed (`/index-max-files`, at least 100; lowering it drops the files past the new limit, in path order). For each file the index holds:
 
 - its symbols and imports, the same ones `code_outline` shows;
 - every identifier and the lines it appears on, packed into 8 bytes per occurrence, so `index_callers` only parses the files that actually use a name;
@@ -666,7 +683,7 @@ This repository indexes in about 0.2 s; a 325-file C++/Python tree with a 17,000
 
 Raising the budget rebuilds whatever was dropped. The estimate counts the index's own data structures (it matches a deep `sys.getsizeof` walk within a few percent), not the Python interpreter or the tree-sitter grammars.
 
-**Saving to disk.** `/index save` writes `~/.momo-harness/index/<hash of the workdir>.pickle` (mode `0600`). With `/index-persist on` it is loaded when the index starts and saved after the first build, on a workdir change and on exit. After a load, only files that changed since the save are re-indexed. The file starts with a header (format version, workdir, Python version, tree-sitter and grammar versions); if any of these differ it is discarded and the index rebuilt. Loading a pickle can run code, so the loader only accepts this module's own classes, `array` and builtin sets. A tampered file fails to load instead. It also refuses a file that is not owned by you or is writable by others.
+**Saving to disk.** `/index save` writes `~/.momo-harness/index/<hash of the workdir>.pickle` (mode `0600`). With `/index-persist on` (the default) it is loaded when the index starts and saved after the first build, on a workdir change and on exit. After a load, only files that changed since the save are re-indexed. The file starts with a header (format version, workdir, Python version, tree-sitter and grammar versions); if any of these differ it is discarded and the index rebuilt. Loading a pickle can run code, so the loader only accepts this module's own classes, `array` and builtin sets. A tampered file fails to load instead. It also refuses a file that is not owned by you or is writable by others.
 
 ## Internet access
 
@@ -918,7 +935,13 @@ Type any command in the input bar:
 | `/index rebuild` | Forget the index and build it again |
 | `/index save\|load` | Write the index to `~/.momo-harness/index/` now, or load the saved one |
 | `/index-max-mem <size>` | Memory budget for the index (default `100mb`) |
-| `/index-persist on\|off` | Load the saved index when it starts, save it on exit |
+| `/index-max-files <n>` | Most files the index covers (default `100000`) |
+| `/index-workers auto\|<n>` | Processes for a first build or rebuild (default `auto`; `1` = one process) |
+| `/index-persist on\|off` | Load the saved index when it starts, save it on exit (default on) |
+| `/index-filter` | Show the index filter: which files are indexed, in gitignore syntax |
+| `/index-filter add\|remove <pattern>` | Add or remove one filter line (`!pattern` re-includes) |
+| `/index-filter edit` | Edit the filter in `$VISUAL`/`$EDITOR` (TUI; in the web UI: View → Code index → Filter…) |
+| `/index-filter reset` | Re-create the filter from the project's current `.gitignore` files |
 | `/tool-output on\|off` | Show or hide the tool calls pane |
 | `/think-output on\|off` | Show or hide model thinking/reasoning blocks (also `Shift+T`) |
 | `/markdown on\|off` | Enable or disable markdown rendering for assistant output (also `Shift+M`) |
@@ -928,7 +951,7 @@ Type any command in the input bar:
 | `/load-skill <name>` | Append a skill's instructions to the system prompt |
 | `/unload-skill <name>` | Remove a skill from the system prompt |
 | `/context` | Show context limit and current token usage |
-| `/context <n>` | Set an absolute context token limit (e.g. `/context 16384`); minimum 256; clears any percentage scale |
+| `/context <n>` | Set an absolute context token limit (e.g. `/context 16384`); minimum 256; clears any percentage scale; kept across restarts unless larger than the model's window |
 | `/context <n>%` | Set the context limit as a percentage of the model's native maximum (e.g. `/context 75%`); saved in session and reapplied on model switch |
 | `/tool-result` | Show the current tool result character cap |
 | `/tool-result <n>` | Set the cap (e.g. `/tool-result 8000`); `0` = unlimited |
@@ -952,7 +975,13 @@ Type any command in the input bar:
 
 ## Context Management
 
-The harness automatically detects the model's native context window on startup and uses half of it as the working limit (e.g. a 262,144-token model gets a 131,072-token limit). The startup message confirms what was detected. Use `--context N` or `/context N` to override.
+The harness automatically detects the model's native context window on startup and uses half of it as the working limit (e.g. a 262,144-token model gets a 131,072-token limit). Use `--context N` or `/context N` to override.
+
+At startup the harness checks the server before the first turn, because a restored session and the prefs can be stale:
+
+- **Model.** A llama.cpp server serves one model, so the harness adopts whatever it has loaded. With Ollama, if the saved model is no longer installed, the harness switches to a model Ollama has in memory. If none is in memory, it warns you to pick one with `/model`.
+- **Context size.** The limit follows the model's current window. A limit you set yourself (`/context N`, `--context N`) is kept, unless it is larger than the window. Sessions saved before this check existed restore every limit as the model's default.
+- **Report.** One startup line shows the model, the window and the compaction point, and lists anything that changed from the saved settings. If the server is unreachable, nothing is changed.
 
 Token usage is estimated as `sum(len(content) // 4)` across all messages (a fast approximation). Tool call argument content is not counted, so real usage in tool-heavy sessions can be higher than the displayed percentage.
 
@@ -1009,6 +1038,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 │   ├── <timestamp>.json     # one conversation
 │   └── <timestamp>.log      # its request/tool log (NDJSON)
 ├── index/<hash>.pickle      # saved code index per workdir (/index save, /index-persist)
+├── index/<hash>.filter      # which files that workdir's index covers (/index-filter)
 └── tls/                     # only with --web-tls auto (folder 0700, keys 0600)
     ├── momo-ca.pem          # the CA certificate you trust on your devices
     ├── momo-ca.key          # the CA's private key — never share

@@ -300,7 +300,7 @@ details.think .think-body { white-space: pre-wrap; opacity: .8; border-left: 2px
 .md a { color: var(--focus); }
 
 /* ── plan drawer ────────────────────────────────────────────────────────── */
-#plan-drawer {
+#plan-drawer, .side-drawer {
   position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100%);
   background: var(--surface); border-left: 1px solid var(--border); box-shadow: var(--shadow);
   display: flex; flex-direction: column; z-index: 20;
@@ -308,6 +308,16 @@ details.think .think-body { white-space: pre-wrap; opacity: .8; border-left: 2px
 .drawer-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
 #plan-body { flex: 1; overflow-y: auto; padding: 12px 16px; font-size: 14px; }
 .drawer-actions { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.side-drawer { width: min(560px, 100%); }
+.filter-hint { margin: 0; padding: 8px 16px; }
+#filter-path { display: block; margin-top: 4px; word-break: break-all; }
+#filter-msg:empty { display: none; }
+#filter-msg.error { color: var(--danger); }
+#filter-text {
+  flex: 1; margin: 0 16px; min-height: 12em; resize: none; padding: 8px 10px;
+  font: 13px/1.45 var(--mono); color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px; white-space: pre; overflow: auto;
+}
 
 /* ── composer ───────────────────────────────────────────────────────────── */
 #composer { position: relative; background: var(--surface); border-top: 1px solid var(--border); padding: 0 16px 10px; }
@@ -495,6 +505,12 @@ button.small { padding: 3px 10px; font-size: 12px; }
   background: var(--surface); border-right: 1px solid var(--border); box-shadow: var(--shadow);
   display: flex; flex-direction: column;
 }
+/* Workspace drawer widens by dragging its right edge; 420px is the floor. */
+#files-drawer { width: min(max(420px, var(--files-w, 420px)), 100%); }
+.drawer-resize {
+  position: absolute; top: 0; right: -4px; bottom: 0; width: 8px; cursor: ew-resize; z-index: 1; touch-action: none;
+}
+.drawer-resize:hover, .drawer-resize.dragging { background: color-mix(in srgb, var(--focus) 35%, transparent); }
 .drawer.left .drawer-head label { display: inline-flex; align-items: center; gap: 4px; }
 .drawer-body { flex: 1; overflow-y: auto; padding: 8px; }
 .session-row {
@@ -547,6 +563,8 @@ button.small { padding: 3px 10px; font-size: 12px; }
 .preview-scroll pre { margin: 0; padding: 10px 8px; font: 12px/1.5 var(--mono); }
 .preview-gutter { color: var(--muted); text-align: right; user-select: none; border-right: 1px solid var(--border); position: sticky; left: 0; background: var(--code-bg); }
 .preview-code { flex: 1; }
+.preview-scroll[hidden], .preview-md[hidden] { display: none; }
+.preview-md { flex: 1; overflow: auto; padding: 12px 16px; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
 
 /* ── streaming preview ──────────────────────────────────────────────────── */
 .msg.streaming::after {

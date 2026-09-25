@@ -76,9 +76,16 @@ def main():
     parser.add_argument("--index-max-mem", default=None, metavar="SIZE",
                         help="Memory budget for the code index: 100mb, 512kb, 1gb (default: last "
                              "/index-max-mem setting, else 100mb)")
+    parser.add_argument("--index-max-files", type=int, default=None, metavar="N",
+                        help="Most files the code index covers (default: last /index-max-files "
+                             "setting, else 100000)")
+    parser.add_argument("--index-workers", default=None, metavar="N",
+                        help="Processes the code index builds in: auto or 1-"
+                             f"{code_index.MAX_WORKERS} (default: last /index-workers setting, "
+                             "else auto)")
     parser.add_argument("--index-persist", action=argparse.BooleanOptionalAction, default=None,
                         help="Load the saved code index at start and save it on exit, in "
-                             "~/.momo-harness/index/ (default: last /index-persist setting, else off)")
+                             "~/.momo-harness/index/ (default: last /index-persist setting, else on)")
     parser.add_argument("--index-route", action=argparse.BooleanOptionalAction, default=None,
                         help="With the code index on, answer plain-text grep_files and file-name "
                              "find_files from the index (default: last /index-route setting, else on)")
@@ -132,8 +139,8 @@ def main():
     host = args.host or _DEFAULT_HOSTS.get(provider, _DEFAULT_HOSTS["ollama"])
     model = args.model or prefs.get("model") or "qwen3.5:9b"
     harness = Harness(host=host, model=model, workdir=workdir, provider=provider)
-    if args.context is not None:
-        harness.context_limit = args.context
+    if args.context is not None and args.context < 256:
+        parser.error("--context: expected at least 256")
     harness.max_tool_result = args.max_tool_result
     if args.no_think:
         harness.think = False
@@ -161,8 +168,26 @@ def main():
         harness.index_max_bytes = size
     elif isinstance(prefs.get("index_max_mem"), int) and prefs["index_max_mem"] >= code_index.MIN_MAX_BYTES:
         harness.index_max_bytes = prefs["index_max_mem"]
+    if args.index_max_files is not None:
+        if args.index_max_files < code_index.MIN_MAX_FILES:
+            parser.error(f"--index-max-files: expected at least {code_index.MIN_MAX_FILES}")
+        harness.index_max_files = args.index_max_files
+    elif (isinstance(prefs.get("index_max_files"), int)
+          and prefs["index_max_files"] >= code_index.MIN_MAX_FILES):
+        harness.index_max_files = prefs["index_max_files"]
+    if args.index_workers is not None:
+        w = args.index_workers.strip().lower()
+        if w == "auto":
+            harness.index_workers = 0
+        elif w.isdigit() and 1 <= int(w) <= code_index.MAX_WORKERS:
+            harness.index_workers = int(w)
+        else:
+            parser.error(f"--index-workers: expected auto or 1-{code_index.MAX_WORKERS}")
+    elif (isinstance(prefs.get("index_workers"), int)
+          and 0 <= prefs["index_workers"] <= code_index.MAX_WORKERS):
+        harness.index_workers = prefs["index_workers"]
     harness.index_persist = bool(args.index_persist if args.index_persist is not None
-                                 else prefs.get("index_persist", False))
+                                 else prefs.get("index_persist", True))
     harness.index_route = bool(args.index_route if args.index_route is not None
                                else prefs.get("index_route", True))
     index_on = bool(args.index if args.index is not None else prefs.get("index", True))
@@ -183,6 +208,13 @@ def main():
                 model=args.model or (model if switched else harness.client.model))
     else:
         harness.set_mode(args.mode)
+    if args.context is not None:      # after the restore, which would overwrite it
+        harness.context_pct = None
+        harness.context_fixed = True
+        harness.context_limit = args.context
+    # The saved model and context size may be stale: the server was relaunched
+    # with another model or context, or the model was removed.
+    harness.event_queue.put(ChatEvent("system", harness.check_backend()))
 
     # Start the index only now, so a restored session's workdir is the one indexed.
     if index_on:

@@ -54,6 +54,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import attachments as attach_mod
 from .. import companion
+from .. import ignore_rules
 from ..file_search import fuzzy_search, workspace_files
 from .. import session as session_mod
 from ..tools import _SKIP_DIRS, _safe_path
@@ -373,6 +374,10 @@ class WebServer:
                     self._json(h.context_breakdown())
                 elif path == "/api/index":
                     self._json(h.index_breakdown())
+                elif path == "/api/index-filter":
+                    text, fpath = h.index_filter()
+                    self._json({"path": fpath, "text": text,
+                                "rules": len(ignore_rules.Rules.parse(text))})
                 elif path == "/api/last-user":
                     self._json(web.controller.last_user_message() or {})
                 elif path == "/api/export":
@@ -525,6 +530,17 @@ class WebServer:
                     self._json({"deleted": deleted, "skipped": skipped})
                 elif path == "/api/retry":
                     self._json({"ok": c.retry_last()})
+                elif path == "/api/index-filter":
+                    text = data.get("text")
+                    if not isinstance(text, str):
+                        self._send(HTTPStatus.BAD_REQUEST, b"Expected {text}\n")
+                        return
+                    msg = c.harness.set_index_filter(text)
+                    if msg.startswith("ERROR"):
+                        self._json({"ok": False, "message": msg}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                        return
+                    c._system(msg)      # the change shows in every frontend's transcript
+                    self._json({"ok": True, "message": msg})
                 elif path == "/api/edit":
                     text = data.get("text")
                     if not isinstance(text, str):

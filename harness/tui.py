@@ -6,7 +6,10 @@ import os
 import queue
 import random
 import re
+import shlex
+import subprocess
 import sys
+import tempfile
 import time
 import textwrap
 from pathlib import Path
@@ -1248,6 +1251,10 @@ class TUI:
         if outcome.exit_app:
             raise SystemExit(0)
         v = outcome.view
+        if "edit_index_filter" in v:
+            self._drain_events()  # the echoed command first
+            self._edit_index_filter()
+            return
         if "tool_output" in v:
             self._tools_expanded = v["tool_output"]
         if "think_output" in v:
@@ -1264,6 +1271,37 @@ class TUI:
             self._rebuild_chat_buf()
         self._drain_events()  # show the echoed input / command output right away
         self._redraw()
+
+    def _edit_index_filter(self):
+        """/index-filter edit: suspend curses, open $VISUAL/$EDITOR on a private
+        copy of the filter, and apply it when it changed."""
+        text, _ = self.harness.index_filter()
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        fd, tmp = tempfile.mkstemp(prefix="momo-index-filter-", suffix=".gitignore")
+        new, note = None, ""
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            curses.def_prog_mode()
+            curses.endwin()
+            try:
+                subprocess.run(shlex.split(editor) + [tmp])
+                with open(tmp, encoding="utf-8", errors="replace") as f:
+                    new = f.read()
+            except (OSError, ValueError) as e:
+                note = f"ERROR: could not run the editor {editor!r}: {e}"
+            finally:
+                curses.reset_prog_mode()
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        if new is not None:
+            note = (self.harness.set_index_filter(new) if new != text
+                    else "Code index filter unchanged.")
+        self._add_chat("system", note)
+        self._rebuild()
 
     # ── main loop ─────────────────────────────────────────────────────────────
 

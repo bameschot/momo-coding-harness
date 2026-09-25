@@ -11,6 +11,15 @@ Memory is budgeted (/index-max-mem, default 100 MB).  Over budget the index
 degrades in a fixed order — trigram signatures, then the occurrence index, then
 it stops adding files — and says so in every affected result.
 
+Which files it covers is decided by a gitignore-syntax filter
+(ignore_rules, /index-filter) kept next to the pickle in ~/.momo-harness/index/.
+It is seeded once from the project's .gitignore files; after that only the
+filter decides.
+
+Bulk work (the first build, a rebuild, a branch switch) is read and parsed in
+worker processes (/index-workers): tree-sitter holds the GIL, so threads would
+not run in parallel.  Results are still applied by the one indexer thread.
+
 The index can be saved to and loaded from a pickle in ~/.momo-harness/index/.
 Loading goes through a restricted unpickler that only admits this module's
 classes, so a tampered file fails to load instead of running code.
@@ -24,20 +33,25 @@ import os
 import pickle
 import re
 import stat as stat_mod
-import subprocess
 import sys
+import signal
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from . import code_nav
+from . import code_nav, ignore_rules
 
 FORMAT_VERSION = 7   # 6: HTML inline-script JavaScript; 7: skipped files, source fingerprint
 DEFAULT_MAX_BYTES = 100 * 1024 * 1024  # default memory budget of the index (/index-max-mem)
 MIN_MAX_BYTES = 1024 * 1024            # smallest budget /index-max-mem accepts
+DEFAULT_MAX_FILES = 100_000            # a workdir of $HOME must not index the whole disk (/index-max-files)
+MIN_MAX_FILES = 100                    # smallest file limit /index-max-files accepts
+MAX_WORKERS = 64                       # largest worker count /index-workers accepts
 
 # Every query re-checks the disk (a stat-diff: ~20 ms for 1,500 files).  Only a
 # tree whose stat-diff is slow is throttled, to 10x what the last one took.
@@ -48,9 +62,16 @@ _WAIT_POLL_S = 0.25         # wait_fresh re-checks the cancel flag this often
 _PROGRESS_EVERY_S = 0.25    # on_change is called at most this often while building
 _MAX_FILE_BYTES = 2_000_000 # same limit as grep_files
 _BINARY_SNIFF_BYTES = 4096
-_MAX_FILES = 100_000        # a workdir of $HOME must not index the whole disk
 _COMPACT_AFTER = 500        # dead files before the occurrence index is compacted mid-drain
 _UNPARTIAL_AT = 0.8         # budget share below which files left out are indexed again
+_PARALLEL_MIN = 200         # queued files before worker processes pay for their start-up
+_PARALLEL_CHUNK = 16        # files per worker task
+_AUTO_WORKERS_CAP = 8       # measured: no gain past 8 (a few big files dominate)
+
+
+def auto_workers() -> int:
+    """The worker count /index-workers auto picks: a core left for the UI."""
+    return max(1, min((os.cpu_count() or 1) - 1, _AUTO_WORKERS_CAP))
 
 # Estimated bytes per stored object, measured with a deep getsizeof walk and
 # tracemalloc on this repo and a 325-file C++/Python tree (imgui), then rounded
@@ -233,6 +254,69 @@ def pickle_path(root: Path) -> Path:
     return index_dir() / f"{digest}.pickle"
 
 
+def filter_path(root: Path) -> Path:
+    return pickle_path(root).with_suffix(".filter")
+
+
+def _private_write(path: Path, data: bytes) -> None:
+    """Write atomically, 0600 in a 0700 folder, like the saved index."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    tmp = path.with_suffix(f".tmp{os.getpid()}.{threading.get_ident()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+def _untrusted_reason(path: Path, st) -> str:
+    if not stat_mod.S_ISREG(st.st_mode):
+        return f"{path} is not a regular file"
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return f"{path} is not owned by you"
+    if st.st_mode & 0o022:
+        return f"{path} is writable by other users (chmod 600 it, or delete it)"
+    return ""
+
+
+def load_filter(root: Path) -> tuple[str, str]:
+    """The project's index filter text, and a notice ('' when there is nothing
+    to say).  A missing filter is seeded from the .gitignore files and saved;
+    an untrusted or unreadable one is replaced by the seed for this run."""
+    path = filter_path(root)
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        text = ignore_rules.seed_text(root)
+        try:
+            _private_write(path, text.encode())
+        except OSError as e:
+            return text, f"Code index filter could not be saved ({e}); using the .gitignore defaults."
+        n = len(ignore_rules.Rules.parse(text))
+        return text, (f"Code index filter created from .gitignore ({n} rules): {path} — "
+                      f"/index-filter to view or edit it.")
+    except OSError as e:
+        return ignore_rules.seed_text(root), f"Code index filter not read ({e}); using the .gitignore defaults."
+    why = _untrusted_reason(path, st)
+    if why:
+        return ignore_rules.seed_text(root), f"Code index filter not used: {why}. Using the .gitignore defaults."
+    try:
+        return path.read_text(encoding="utf-8", errors="replace"), ""
+    except OSError as e:
+        return ignore_rules.seed_text(root), f"Code index filter not read ({e}); using the .gitignore defaults."
+
+
+def save_filter(root: Path, text: str) -> str:
+    """Write the filter; returns '' or an ERROR string."""
+    if not text.endswith("\n"):
+        text += "\n"
+    try:
+        _private_write(filter_path(root), text.encode())
+    except OSError as e:
+        return f"ERROR: could not save the code index filter: {e}"
+    return ""
+
+
 def _grammar_versions() -> dict[str, str]:
     from importlib.metadata import PackageNotFoundError, version
     names = {"tree-sitter"} | {f"tree-sitter-{'typescript' if g == 'tsx' else g}"
@@ -274,9 +358,16 @@ def _fmt_size(n: int) -> str:
 class ProjectIndex:
     """See the module docstring.  All public methods are thread-safe."""
 
-    def __init__(self, root: Path, max_bytes: int = DEFAULT_MAX_BYTES, on_change=None):
+    def __init__(self, root: Path, max_bytes: int = DEFAULT_MAX_BYTES, on_change=None,
+                 max_files: int = DEFAULT_MAX_FILES, filter_text: str | None = None,
+                 workers: int = 0):
+        """filter_text None: load (or seed and save) the project's filter file.
+        workers 0: auto_workers(); 1: build in the indexer thread only."""
         self.root = root.resolve()
         self.max_bytes = max(MIN_MAX_BYTES, int(max_bytes))
+        self.max_files = max(MIN_MAX_FILES, int(max_files))
+        self.workers = max(0, min(MAX_WORKERS, int(workers)))
+        self._pool_broken = False               # worker processes failed: build serially
         self.on_change = on_change              # callable(index), throttled
         self._lock = threading.RLock()
         self._cond = threading.Condition(self._lock)
@@ -305,6 +396,12 @@ class ProjectIndex:
         # Files left out, with the stat they were judged at: an unchanged one is
         # not re-read at every stat-diff.  rel -> (reason, mtime_ns, size)
         self._skipped: dict[str, tuple[str, int, int]] = {}
+        self._beyond: frozenset[str] = frozenset()   # listed past max_files: kept out
+        filter_note = ""
+        if filter_text is None:
+            filter_text, filter_note = load_filter(self.root)
+        self.filter_text = filter_text
+        self._rules = ignore_rules.Rules.parse(filter_text)
         self._diff_cost = 0.0
         self.version = 0
         self._notices: list[str] = []
@@ -312,6 +409,8 @@ class ProjectIndex:
         self._graph_cache: tuple | None = None
         self.last_error = ""
         self._thread: threading.Thread | None = None
+        if filter_note:
+            self._notices.append(filter_note)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -368,13 +467,13 @@ class ProjectIndex:
 
     def invalidate(self, paths) -> None:
         """Queue files the harness itself just wrote, moved or deleted."""
-        from .tools import _SKIP_DIRS
         with self._cond:
             for p in paths:
                 if not p:
                     continue
                 rel = self._rel(Path(p) if os.path.isabs(str(p)) else self.root / str(p))
-                if rel is not None and not any(part in _SKIP_DIRS for part in rel.split("/")[:-1]):
+                # A filtered-out file is only queued to drop it (the worker skips it).
+                if rel is not None and (rel in self._by_path or not self._rules.excluded(rel)):
                     self._queue[rel] = None
             self._cond.notify_all()
 
@@ -427,28 +526,20 @@ class ProjectIndex:
         return rel.as_posix()
 
     def _list_files(self) -> list[str]:
-        from .tools import _SKIP_DIRS
+        """Every file the filter lets in, pruning excluded folders.  Stops one
+        past max_files (a workdir of $HOME must not walk the whole disk)."""
+        rules = self._rules
         out: list[str] = []
-        try:
-            r = subprocess.run(["git", "-C", str(self.root), "ls-files", "-co",
-                                "--exclude-standard", "-z"],
-                               capture_output=True, timeout=30)
-            if r.returncode == 0:
-                for rel in r.stdout.decode("utf-8", "replace").split("\0"):
-                    if rel and not any(part in _SKIP_DIRS for part in rel.split("/")[:-1]):
-                        out.append(rel)
-                return sorted(set(out))
-        except (OSError, subprocess.SubprocessError):
-            pass
         for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = sorted(d for d in dirnames
-                                 if d not in _SKIP_DIRS and not d.startswith("."))
-            rel_dir = os.path.relpath(dirpath, self.root)
+            rel_dir = os.path.relpath(dirpath, self.root).replace(os.sep, "/")
+            prefix = "" if rel_dir == "." else rel_dir + "/"
+            dirnames[:] = sorted(d for d in dirnames if not rules.dir_excluded(prefix + d))
             for f in sorted(filenames):
-                if f.startswith("."):
+                rel = prefix + f
+                if rules.file_excluded(rel):
                     continue
-                out.append(f if rel_dir == "." else f"{rel_dir}/{f}".replace(os.sep, "/"))
-                if len(out) > _MAX_FILES:
+                out.append(rel)
+                if len(out) > self.max_files:
                     return out
         return out
 
@@ -457,9 +548,11 @@ class ProjectIndex:
         self._dirty = False
         t0 = time.monotonic()
         listed = self._list_files()
-        over = len(listed) - _MAX_FILES
+        limit = self.max_files
+        over = len(listed) - limit
+        beyond = set(listed[limit:])
         if over > 0:
-            listed = listed[:_MAX_FILES]
+            listed = listed[:limit]
         with self._lock:
             known = {rel: (self.files[fid].mtime_ns, self.files[fid].size)
                      for rel, fid in self._by_path.items()}
@@ -478,9 +571,13 @@ class ProjectIndex:
                 continue
             if known.get(rel) != (st.st_mtime_ns, st.st_size):
                 changed.append(rel)
-        changed.extend(rel for rel in known if rel not in seen)
+        gone = [rel for rel in known if rel not in seen]
+        changed.extend(gone)
+        if over > 0:
+            beyond.update(gone)     # the os.walk fallback stops listing at the limit
         with self._cond:
             self.skipped["limit"] = max(0, over)
+            self._beyond = frozenset(beyond)
             for rel in changed:
                 self._queue[rel] = None
             self._last_diff = time.monotonic()
@@ -545,6 +642,26 @@ class ProjectIndex:
                 if self.state == "idle":
                     self.state = "refreshing" if self._built else "building"
                     self.done = 0
+                nworkers = self.worker_count()
+                if nworkers > 1 and len(self._queue) >= _PARALLEL_MIN and not self._pool_broken:
+                    batch = list(self._queue)
+                    self._queue.clear()
+                    self._busy = True
+                    self.total = self.done + len(batch)
+                    want = (self.components["idents"], self.components["trigrams"])
+                    batch = self._take_local(batch)
+                else:
+                    batch = None
+            if batch is not None:
+                try:
+                    self._drain_parallel(batch, nworkers, *want)
+                finally:
+                    with self._cond:
+                        self._busy = False
+                        self._cond.notify_all()
+                self._changed()
+                continue
+            with self._cond:
                 rel = next(iter(self._queue))
                 del self._queue[rel]
                 self._busy = True
@@ -553,8 +670,11 @@ class ProjectIndex:
                 want_sig = self.components["trigrams"]
                 known = rel in self._by_path
                 blocked = self.partial and not known
+                beyond = rel in self._beyond or self._rules.excluded(rel)
             try:
-                if blocked:
+                if beyond:
+                    entry, rows, skip = None, None, None    # filtered out: as if gone
+                elif blocked:
                     entry, rows, skip = None, None, self._skip_stat(rel, "budget")
                 else:
                     entry, rows, skip = self._build_entry(rel, want_idents, want_sig)
@@ -570,6 +690,117 @@ class ProjectIndex:
                 self._cond.notify_all()
             self._changed()
 
+    def worker_count(self) -> int:
+        return self.workers or auto_workers()
+
+    def _take_local(self, batch: list[str]) -> list[str]:
+        """Settle, under the lock, the batch files no worker needs to read
+        (filtered out, or new while the budget is reached); return the rest."""
+        rest = []
+        for rel in batch:
+            if rel in self._beyond or self._rules.excluded(rel):
+                self._apply(rel, None, None)
+            elif self.partial and rel not in self._by_path:
+                self._apply(rel, None, None, self._skip_stat(rel, "budget"))
+            else:
+                rest.append(rel)
+                continue
+            self.done += 1
+        return rest
+
+    def _drain_parallel(self, rels: list[str], nworkers: int, want_idents: bool,
+                        want_sig: bool) -> None:
+        """Build rels in worker processes and apply each chunk's results under
+        the lock as it arrives.  On stop or rescan the files not yet reached go
+        back to the queue; if the pool breaks, they are built serially."""
+        chunks = [rels[i:i + _PARALLEL_CHUNK] for i in range(0, len(rels), _PARALLEL_CHUNK)]
+        todo = iter(chunks)
+        pending: dict = {}
+        pool = None
+        try:
+            pool = ProcessPoolExecutor(nworkers, initializer=_worker_init,
+                                       mp_context=_mp_context())
+            while True:
+                while len(pending) < nworkers * 2 and not (self._stop or self._rescan):
+                    chunk = next(todo, None)
+                    if chunk is None:
+                        break
+                    fut = pool.submit(_build_many, str(self.root), chunk, want_idents, want_sig)
+                    pending[fut] = chunk
+                if not pending:
+                    return
+                done, _ = wait(pending, timeout=_WAIT_POLL_S, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    chunk = pending.pop(fut)
+                    try:
+                        results = fut.result()
+                    except BrokenProcessPool:
+                        pending[fut] = chunk        # re-queued below
+                        raise
+                    except Exception:
+                        results = [None] * len(chunk)
+                    self._apply_built(chunk, results)
+                self._changed()
+        except (BrokenProcessPool, OSError) as e:   # a worker died, or none could start
+            with self._cond:
+                self._pool_broken = True
+                self._notices.append(f"Code index: worker processes failed ({type(e).__name__}); "
+                                     f"indexing continues in one process.")
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=True, cancel_futures=True)
+            left = [rel for c in pending.values() for rel in c] + [rel for c in todo for rel in c]
+            if left:
+                with self._cond:
+                    for rel in left:
+                        self._queue.setdefault(rel, None)
+                    self.total = self.done + len(self._queue)
+                    self._cond.notify_all()
+
+    def _apply_built(self, rels: list[str], results: list) -> None:
+        """Apply one worker chunk; a None result is a file whose build raised."""
+        with self._cond:
+            for rel, res in zip(rels, results):
+                if self._stop:
+                    break
+                self.done += 1
+                if rel in self._beyond or self._rules.excluded(rel):
+                    entry, rows, skip = None, None, None
+                elif self.partial and rel not in self._by_path:
+                    entry, rows, skip = None, None, self._skip_stat(rel, "budget")
+                elif res is None:
+                    entry, rows, skip = None, None, self._skip_stat(rel, "error")
+                else:
+                    entry, rows, skip = res
+                self._apply(rel, entry, rows, skip)
+                if rel in self._queue and self._built_current(rel, entry, skip):
+                    del self._queue[rel]    # a query's stat-diff saw it in flight
+                if len(self._dead) >= _COMPACT_AFTER:
+                    self._compact()
+            self.total = max(self.total, self.done + len(self._queue))
+            self._cond.notify_all()
+
+    def _built_current(self, rel: str, entry, skip) -> bool:
+        """Whether what was just applied for rel still matches the disk."""
+        if entry is not None:
+            built = (entry.mtime_ns, entry.size)
+        elif skip is not None:
+            built = skip[1:]
+        else:
+            built = None
+        try:
+            st = (self.root / rel).stat()
+        except OSError:
+            return built is None
+        return built == (st.st_mtime_ns, st.st_size)
+
+    def set_workers(self, n: int) -> None:
+        """0 = auto.  Takes effect at the next bulk batch."""
+        with self._cond:
+            self.workers = max(0, min(MAX_WORKERS, int(n)))
+            self._pool_broken = False
+        self._changed(force=True)
+
     def _skip_stat(self, rel: str, reason: str):
         try:
             st = (self.root / rel).stat()
@@ -578,54 +809,7 @@ class ProjectIndex:
         return reason, st.st_mtime_ns, st.st_size
 
     def _build_entry(self, rel: str, want_idents: bool, want_sig: bool):
-        """Read and index one file outside the lock.  Returns (entry, rows, skip):
-        entry None and skip None = the file is gone; skip = (reason, mtime, size)
-        of a file that is left out."""
-        full = self.root / rel
-        try:
-            st = full.stat()
-        except OSError:
-            return None, None, None
-        if not stat_mod.S_ISREG(st.st_mode):
-            return None, None, None
-        stamp = (st.st_mtime_ns, st.st_size)
-        if st.st_size > _MAX_FILE_BYTES:
-            return None, None, ("too_big",) + stamp
-        try:
-            with open(full, "rb") as f:
-                head = f.read(_BINARY_SNIFF_BYTES)
-                if b"\x00" in head:
-                    return None, None, ("binary",) + stamp     # never read the rest
-                raw = head + f.read()
-        except OSError:
-            return None, None, None
-        lang = code_nav.language_for(full)
-        symbols: list = []
-        imports: list = []
-        has_error = False
-        rows = None
-        package = ""
-        nlines = raw.count(b"\n") + (0 if raw.endswith(b"\n") or not raw else 1)
-        if lang is not None:
-            try:
-                parsed = code_nav.parse_uncached(full, raw)
-            except Exception:
-                parsed = None
-                has_error = True
-            if parsed is not None:
-                symbols, imports = parsed.symbols, parsed.imports
-                package = code_nav.package_of(parsed) if lang in _DECL_IMPORT_LANGS else ""
-                has_error = parsed.tree.root_node.has_error
-                nlines = len(parsed.lines)
-                if want_idents:
-                    rows = code_nav.identifier_rows(parsed)
-                del parsed
-        entry = FileEntry(path=rel, mtime_ns=st.st_mtime_ns, size=st.st_size, lang=lang,
-                          nlines=nlines, has_error=has_error, symbols=symbols, imports=imports,
-                          package=package)
-        if want_sig:
-            entry.sig, entry.sig_bits = _signature(raw.lower())
-        return entry, rows, None
+        return _build_entry(self.root, rel, want_idents, want_sig)
 
     # ── mutation (lock held) ─────────────────────────────────────────────────
 
@@ -775,6 +959,29 @@ class ProjectIndex:
             self.version += 1
             self._cond.notify_all()
         self._changed(force=True)
+
+    def set_max_files(self, n: int) -> None:
+        """Change the file limit; the worker re-lists the project, indexing
+        files now within it and dropping those now beyond it."""
+        with self._cond:
+            self.max_files = max(MIN_MAX_FILES, int(n))
+            self._rescan = True
+            self._cond.notify_all()
+        self._changed(force=True)
+
+    def set_filter(self, text: str) -> None:
+        """Swap the filter rules; the worker re-lists the project, dropping the
+        files now excluded and indexing the ones now let in."""
+        rules = ignore_rules.Rules.parse(text)
+        with self._cond:
+            self.filter_text = text
+            self._rules = rules
+            self._rescan = True
+            self._cond.notify_all()
+        self._changed(force=True)
+
+    def filter_rule_count(self) -> int:
+        return len(self._rules)
 
     def _built_rebuild(self) -> None:
         for rel in list(self._by_path):
@@ -986,7 +1193,8 @@ def _degraded_note(index: ProjectIndex, component: str | None = None) -> str:
                       "idents": "the identifier index was dropped for memory, so files were re-parsed"
                       }[component])
     if index.skipped.get("limit"):
-        parts.append(f"{index.skipped['limit']} files beyond the {_MAX_FILES:,}-file limit are not indexed")
+        parts.append(f"{index.skipped['limit']} files beyond the {index.max_files:,}-file limit "
+                     f"are not indexed (/index-max-files)")
     return f"(note: {'; '.join(parts)})" if parts else ""
 
 
@@ -1143,6 +1351,86 @@ def _file_score(rel: str, q: str) -> int:
     if len(ql) >= 3 and ql in rl:
         return 60
     return 0
+
+
+# ── per-file build (indexer thread or worker process) ────────────────────────
+
+def _build_entry(root: Path, rel: str, want_idents: bool, want_sig: bool):
+    """Read and index one file outside the lock.  Returns (entry, rows, skip):
+    entry None and skip None = the file is gone; skip = (reason, mtime, size)
+    of a file that is left out."""
+    full = root / rel
+    try:
+        st = full.stat()
+    except OSError:
+        return None, None, None
+    if not stat_mod.S_ISREG(st.st_mode):
+        return None, None, None
+    stamp = (st.st_mtime_ns, st.st_size)
+    if st.st_size > _MAX_FILE_BYTES:
+        return None, None, ("too_big",) + stamp
+    try:
+        with open(full, "rb") as f:
+            head = f.read(_BINARY_SNIFF_BYTES)
+            if b"\x00" in head:
+                return None, None, ("binary",) + stamp     # never read the rest
+            raw = head + f.read()
+    except OSError:
+        return None, None, None
+    lang = code_nav.language_for(full)
+    symbols: list = []
+    imports: list = []
+    has_error = False
+    rows = None
+    package = ""
+    nlines = raw.count(b"\n") + (0 if raw.endswith(b"\n") or not raw else 1)
+    if lang is not None:
+        try:
+            parsed = code_nav.parse_uncached(full, raw)
+        except Exception:
+            parsed = None
+            has_error = True
+        if parsed is not None:
+            symbols, imports = parsed.symbols, parsed.imports
+            package = code_nav.package_of(parsed) if lang in _DECL_IMPORT_LANGS else ""
+            has_error = parsed.tree.root_node.has_error
+            nlines = len(parsed.lines)
+            if want_idents:
+                rows = code_nav.identifier_rows(parsed)
+            del parsed
+    entry = FileEntry(path=rel, mtime_ns=st.st_mtime_ns, size=st.st_size, lang=lang,
+                      nlines=nlines, has_error=has_error, symbols=symbols, imports=imports,
+                      package=package)
+    if want_sig:
+        entry.sig, entry.sig_bits = _signature(raw.lower())
+    return entry, rows, None
+
+
+def _build_many(root: str, rels: list[str], want_idents: bool, want_sig: bool) -> list:
+    """Worker process: _build_entry for each path, None where it raised."""
+    out = []
+    for rel in rels:
+        try:
+            out.append(_build_entry(Path(root), rel, want_idents, want_sig))
+        except Exception:
+            out.append(None)
+    return out
+
+
+def _worker_init() -> None:
+    # Ctrl-C belongs to the harness, and a worker's stray output (a grammar's
+    # warning) must not land on the TUI's curses screen.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    fd = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    os.close(fd)
+
+
+def _mp_context():
+    # spawn, not fork: forking a process that runs threads can deadlock the child.
+    import multiprocessing
+    return multiprocessing.get_context("spawn")
 
 
 # ── executors ────────────────────────────────────────────────────────────────
@@ -2222,6 +2510,10 @@ def breakdown(index: ProjectIndex) -> dict:
             "files": n,
             "used": used,
             "limit": index.max_bytes,
+            "max_files": index.max_files,
+            "workers": index.workers,
+            "workers_used": index.worker_count(),
+            "filter": {"path": str(filter_path(index.root)), "rules": index.filter_rule_count()},
             "pct": min(100, round(used / index.max_bytes * 100)) if index.max_bytes else 0,
             "partial": index.partial,
             "degraded": index.degraded(),
@@ -2235,6 +2527,10 @@ def breakdown(index: ProjectIndex) -> dict:
             "skipped": {k: v for k, v in index.skipped.items() if v},
             "error": index.last_error,
         }
+
+
+def workers_label(workers: int) -> str:
+    return f"auto ({auto_workers()})" if workers == 0 else str(workers)
 
 
 def status_text(index: ProjectIndex) -> str:
@@ -2257,6 +2553,8 @@ def status_text(index: ProjectIndex) -> str:
             f"(files {_fmt_size(index.mem['files'])}, identifiers {_fmt_size(index.mem['idents'])}, "
             f"text signatures {_fmt_size(index.mem['trigrams'])}; estimated)",
             f"Components: {comp}" + ("; PARTIAL (budget reached)" if index.partial else ""),
+            f"Workers: {workers_label(index.workers)}"
+            + ("; worker processes failed, building in one process" if index._pool_broken else ""),
         ]
         sk = {k: v for k, v in index.skipped.items() if v}
         if sk:

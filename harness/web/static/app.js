@@ -538,6 +538,10 @@ function applyIndexStatus(s) {
   $("#index-route").checked = s.index_route !== false;
   const im = $("#index-max-mem");
   if (document.activeElement !== im) im.value = formatSize(s.index_max_bytes);
+  const imf = $("#index-max-files");
+  if (document.activeElement !== imf && s.index_max_files) imf.value = String(s.index_max_files);
+  const iw = $("#index-workers");
+  if (document.activeElement !== iw) iw.value = s.index_workers ? String(s.index_workers) : "auto";
   $("#index-save").disabled = !on;
   $("#index-load").disabled = !on;
 }
@@ -1298,7 +1302,69 @@ $("#index-max-mem").onchange = (e) => {
   const v = e.target.value.trim();
   if (v) send(`/index-max-mem ${v}`);
 };
+$("#index-max-files").onchange = (e) => {
+  const v = e.target.value.trim();
+  if (v) send(`/index-max-files ${v}`);
+};
+$("#index-workers").onchange = (e) => {
+  const v = e.target.value.trim();
+  if (v) send(`/index-workers ${v}`);
+};
 $("#index-save").onclick = () => send("/index save");
+
+// ── index filter drawer ───────────────────────────────────────────────────────
+let filterLoaded = "";
+function filterMsg(text, error = false) {
+  const m = $("#filter-msg");
+  m.textContent = text;
+  m.classList.toggle("error", error);
+}
+async function loadFilter() {
+  filterMsg("");
+  try {
+    const f = await (await fetch("api/index-filter")).json();
+    filterLoaded = f.text;
+    $("#filter-text").value = f.text;
+    $("#filter-rules").textContent = `${f.rules} rules`;
+    $("#filter-path").textContent = f.path;
+  } catch (err) {
+    filterMsg(`Could not load the filter: ${err.message}`, true);
+  }
+}
+function closeFilter() {
+  const dirty = $("#filter-text").value !== filterLoaded;
+  if (dirty && !confirm("Discard your changes to the index filter?")) return;
+  $("#filter-drawer").hidden = true;
+}
+function openFilter() {
+  closeMenu();
+  $("#filter-drawer").hidden = false;
+  loadFilter().then(() => $("#filter-text").focus());
+}
+$("#index-filter-open").onclick = openFilter;
+$("#filter-close").onclick = closeFilter;
+$("#filter-cancel").onclick = closeFilter;
+$("#filter-save").onclick = async () => {
+  const text = $("#filter-text").value;
+  try {
+    const r = await post("api/index-filter", { text });
+    filterLoaded = text;
+    filterMsg(r.message);
+    await loadFilter();
+    filterMsg(r.message);
+  } catch (err) {
+    filterMsg(err.message, true);
+  }
+};
+$("#filter-reset").onclick = async () => {
+  if (!confirm("Replace the filter with one built from the project's current .gitignore files?")) return;
+  await send("/index-filter reset");
+  await loadFilter();
+};
+$("#filter-text").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); closeFilter(); }
+  else if (e.key === "s" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#filter-save").click(); }
+});
 $("#index-load").onclick = () => send("/index load");
 $("#net-max-bytes").onchange = (e) => {
   const v = e.target.value.trim();
@@ -1315,7 +1381,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!$("#view-menu").hidden || !$("#model-menu").hidden || !$("#ctx-menu").hidden
         || !$("#index-menu").hidden) return closeMenu();
-    for (const d of ["#plan-drawer", "#sessions-drawer", "#files-drawer"]) {
+    for (const d of ["#filter-drawer", "#plan-drawer", "#sessions-drawer", "#files-drawer"]) {
       if (!$(d).hidden) return ($(d).hidden = true);
     }
     if (busy && !waiting) post("api/cancel").catch(() => {});
@@ -1560,7 +1626,11 @@ function renderIndexMenu(menu, b) {
     btn.onclick = () => send(cmd);
     return btn;
   };
-  actions.append(act("Rebuild", "/index rebuild"), act("Save now", "/index save"), act("Turn off", "/index off"));
+  const filterBtn = el("button", "menu-link", "Filter…");
+  filterBtn.type = "button";
+  filterBtn.title = "Choose which files are indexed (gitignore syntax)";
+  filterBtn.onclick = openFilter;
+  actions.append(filterBtn, act("Rebuild", "/index rebuild"), act("Save now", "/index save"), act("Turn off", "/index off"));
 
   const notes = [];
   if (b.partial) notes.push("Partial: the budget was reached, so further files are not indexed.");
@@ -1575,7 +1645,9 @@ function renderIndexMenu(menu, b) {
     el("div", "menu-sub", "Made of"), stack, rows,
     el("div", "menu-sub", "By language"), langs,
     ...notes.map((n) => el("div", "muted small", n)),
-    el("div", "muted small", `Sizes are estimates of the index's own data. Save/load to disk: ${b.persist ? "on" : "off"}. `
+    el("div", "muted small", `Sizes are estimates of the index's own data. `
+      + (b.filter ? `Filter: ${b.filter.rules} rules. ` : "")
+      + `Save/load to disk: ${b.persist ? "on" : "off"}. `
       + `grep/find answered from the index: ${b.route === false ? "off" : "on"}.`),
     actions);
 }
@@ -1772,6 +1844,30 @@ $("#files-btn").onclick = () => {
 };
 $("#files-hidden").onchange = () => loadDir("", $("#files-tree"));
 
+// Drag the right edge to widen the workspace drawer (CSS clamps to 420px min).
+{
+  const drawer = $("#files-drawer"), grip = drawer.querySelector(".drawer-resize");
+  const setW = (w) => drawer.style.setProperty("--files-w", `${Math.round(w)}px`);
+  const saved = loadJSON("momo.filesWidth", 0);
+  if (saved) setW(saved);
+  grip.onpointerdown = (e) => {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    grip.classList.add("dragging");
+    grip.onpointermove = (m) => setW(Math.max(420, Math.min(m.clientX, innerWidth)));
+    grip.onpointerup = () => {
+      grip.onpointermove = grip.onpointerup = null;
+      grip.classList.remove("dragging");
+      const w = drawer.getBoundingClientRect().width;
+      try { localStorage.setItem("momo.filesWidth", JSON.stringify(Math.round(w))); } catch { /* private mode */ }
+    };
+  };
+  grip.ondblclick = () => {
+    drawer.style.removeProperty("--files-w");
+    try { localStorage.removeItem("momo.filesWidth"); } catch { /* private mode */ }
+  };
+}
+
 let previewFile = null;
 async function openPreview(rel) {
   let f;
@@ -1790,7 +1886,30 @@ async function openPreview(rel) {
   $(".preview-gutter").textContent = Array.from({ length: lines }, (_, i) => i + 1).join("\n");
   $(".preview-code code").innerHTML = f.kind === "pdf" ? esc(f.text) : highlight(f.text, langFromPath(rel) || "none");
   $(".preview-scroll").scrollTop = 0;
+  const isMd = f.kind !== "pdf" && /\.(md|markdown|mdx)$/i.test(rel);
+  $("#preview-render").hidden = !isMd;
+  const md = $(".preview-md");
+  md.replaceChildren();
+  if (isMd) {
+    md.innerHTML = renderMarkdown(f.text);
+    addCopyButtons(md);
+  }
+  setPreviewRendered(isMd && loadJSON("momo.previewRendered", true));
 }
+// Markdown files open rendered by default; the toggle choice is remembered.
+function setPreviewRendered(on) {
+  $(".preview-md").hidden = !on;
+  $(".preview-scroll").hidden = on;
+  $(".preview-md").scrollTop = 0;
+  const b = $("#preview-render");
+  b.textContent = on ? "Plain" : "Rendered";
+  b.title = on ? "Show plain text" : "Show rendered Markdown";
+}
+$("#preview-render").onclick = () => {
+  const on = $(".preview-md").hidden;
+  setPreviewRendered(on);
+  try { localStorage.setItem("momo.previewRendered", JSON.stringify(on)); } catch { /* private mode */ }
+};
 $("#preview-back").onclick = () => { $("#file-preview").hidden = true; $("#files-tree").hidden = false; };
 $("#preview-attach").onclick = () => {
   const f = previewFile;

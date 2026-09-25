@@ -555,7 +555,7 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <tr><td><code>--web-cert</code> / <code>--web-key</code></td><td>—</td><td class="wrap">Serve HTTPS with your own certificate</td></tr>
       <tr><td><code>--web-insecure</code></td><td>off</td><td class="wrap">Plain HTTP with <strong>no</strong> token, even off loopback. Trusted networks only.</td></tr>
       <tr><td><code>--headless</code></td><td>off</td><td class="wrap">Web UI only, with no terminal UI</td></tr>
-      <tr><td><code>--no-index</code></td><td>index on</td><td class="wrap">Start with the code index off. <code>--index-max-mem</code> and <code>--index-persist</code> set its budget and persistence.</td></tr>
+      <tr><td><code>--no-index</code></td><td>index on</td><td class="wrap">Start with the code index off. <code>--index-max-mem</code>, <code>--index-max-files</code>, <code>--index-workers</code> and <code>--index-persist</code> set its budget, file limit, build processes and persistence.</td></tr>
       <tr><td><code>--net</code></td><td><code>off</code></td><td class="wrap"><code>off</code>, <code>on</code> or <code>local</code> at startup (<code>--net-confirm</code>, <code>--net-max-bytes</code> and <code>--net-max-chars</code> go with it)</td></tr>
       <tr><td><code>--guides</code></td><td>off</td><td class="wrap">Load the project's guide files into the system prompt</td></tr>
       <tr><td><code>--companion-idle-recap</code></td><td>off</td><td class="wrap">Let momo recap recent turns when you're idle (<code>--companion-idle-recap-secs</code>)</td></tr>
@@ -776,10 +776,13 @@ ollama serve</code></pre></div>
 /index rebuild
 /index save|load      <span class="com"># ~/.momo-harness/index/&lt;hash&gt;.pickle, mode 0600</span>
 /index-max-mem 200mb
-/index-persist on     <span class="com"># load at start, save on exit</span>
+/index-max-files 200000
+/index-workers auto   <span class="com"># processes for a first build or rebuild; 1 = one process</span>
+/index-persist on     <span class="com"># load at start, save on exit (default on)</span>
+/index-filter         <span class="com"># which files are indexed; add|remove &lt;pattern&gt;, edit, reset</span>
 /index-route on|off</code></pre></div>
     <ul>
-      <li><strong>What is indexed:</strong> <code>git ls-files -co --exclude-standard</code> in a repo, which respects <code>.gitignore</code>. Binary files and files over 2 MB are skipped.</li>
+      <li><strong>What is indexed:</strong> whatever the index filter lets in. It's gitignore syntax, <code>!pattern</code> re-includes, and it's created once from the project's <code>.gitignore</code> files. Binary files and files over 2 MB are skipped.</li>
       <li><strong>Always current:</strong> before answering, the index compares mtimes and sizes and <em>waits</em> for any changes to be indexed. It never answers from a stale index. Edits made by the harness are re-indexed immediately.</li>
       <li><strong>Memory budget</strong> (default 100 MB): when it's over budget, the index drops the text signatures first, then the identifier index, then stops adding files. It says so in every affected result.</li>
       <li><strong>Safe loading:</strong> the pickle loader only accepts the index's own classes, and refuses files that aren't yours or are writable by others.</li>
@@ -791,7 +794,7 @@ ollama serve</code></pre></div>
     <p>The index is built once in a background thread when you start momo, or when you run <code>/index on</code>. After that it's kept current file by file. Every <code>index_*</code> tool reads from memory; nothing is re-parsed per question except the handful of files a caller search needs.</p>
     <div class="pipeline"><span class="step">list files</span><span class="arrow">→</span><span class="step">skip binary &amp; large</span><span class="arrow">→</span><span class="step">parse (tree-sitter)</span><span class="arrow">→</span><span class="step">definitions &amp; imports</span><span class="arrow">→</span><span class="step">identifier occurrences</span><span class="arrow">→</span><span class="step">text signature</span><span class="arrow">→</span><span class="step">keep fresh</span></div>
     <ol>
-      <li><strong>List.</strong> In a git repository: <code>git ls-files -co --exclude-standard</code>, meaning tracked plus untracked files, with <code>.gitignore</code> respected. That's why a repo with a virtualenv indexes hundreds of files, not thousands. Outside git, it walks the tree and skips <code>.git</code>, <code>node_modules</code>, <code>.venv</code>, other build folders and hidden entries. The cap is 100,000 files.</li>
+      <li><strong>List.</strong> It walks the tree and keeps what the <em>index filter</em> lets in: <code>~/.momo-harness/index/&lt;hash&gt;.filter</code>, in gitignore syntax, where the last matching line wins and <code>!pattern</code> re-includes. The first start creates it from the noise folders (<code>node_modules/</code>, <code>.venv/</code>, …), every <code>.gitignore</code> in the tree and <code>.git/info/exclude</code>. Outside git, hidden files are excluded too. That's why a repo with a virtualenv indexes hundreds of files, not thousands. After that only the filter decides, and <code>.gitignore</code> edits are ignored until <code>/index-filter reset</code>. Edit the filter with <code>/index-filter add|remove</code>, <code>/index-filter edit</code> ($EDITOR, in the TUI) or View → Code index → Filter…; changes apply immediately. <code>.git/</code> is always excluded. The cap is 100,000 files by default; change it with <code>/index-max-files</code>, <code>--index-max-files</code> or View → Code index → Max files. A first build or rebuild parses files in worker processes (<code>/index-workers</code>, default one less than the CPU count, at most 8), because tree-sitter holds Python's GIL and threads would not run in parallel.</li>
       <li><strong>Skip.</strong> The first 4 KB of each file are checked for binary content, and files over 2 MB are left out. Skipped files are remembered by size and modification time, so they aren't read again on every query.</li>
       <li><strong>Parse.</strong> The file extension picks a tree-sitter grammar, and each file is parsed once. Inline <code>&lt;script&gt;</code> blocks in HTML are parsed as JavaScript at their real line numbers. A file with syntax errors is still indexed, but marked incomplete in results, so a missing hit there isn't taken as proof.</li>
       <li><strong>Definitions &amp; imports.</strong> The same extractor as <code>code_outline</code> records each definition's kind, qualified name (<code>Class.method</code>), line range, signature and the first line of its docstring or doc comment. It also records the file's imports.</li>
@@ -1113,7 +1116,8 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
 │   ├── 2026-09-23T18-04-11.json   <span class="com"># one conversation</span>
 │   └── 2026-09-23T18-04-11.log    <span class="com"># its request/tool log (NDJSON)</span>
 ├── index/
-│   └── 3f2a9c…e1.pickle  <span class="com"># saved code index, one per workdir (only with /index-persist)</span>
+│   ├── 3f2a9c…e1.pickle  <span class="com"># saved code index, one per workdir (/index-persist, on by default)</span>
+│   └── 3f2a9c…e1.filter  <span class="com"># which files that index covers (/index-filter)</span>
 └── tls/                  <span class="com"># only with --web-tls auto</span>
     ├── momo-ca.pem       <span class="com"># the CA certificate you trust on your devices</span>
     ├── momo-ca.key       <span class="com"># the CA's private key: never share</span>
@@ -1126,7 +1130,8 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, code index settings, guides, companion idle recap</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools</code>, <code>/run-confirm</code>) are never saved and reset at every start.</td></tr>
       <tr><td><code>sessions/*.json</code></td><td class="wrap">Each conversation: messages, mode, model, host, workdir, context settings, active skills, plan, input history</td><td class="wrap">Saved after every reply. <code>/sessions</code> lists them and <code>/session &lt;name&gt;</code> loads one. The auth token is never stored. Delete them from the session drawer in the web UI.</td></tr>
       <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line</td><td class="wrap">For auditing what the model did. Secret request headers are masked.</td></tr>
-      <tr><td><code>index/*.pickle</code></td><td class="wrap">The code index, named by a hash of the workdir</td><td class="wrap">Written by <code>/index save</code> or <code>/index-persist on</code>. Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
+      <tr><td><code>index/*.pickle</code></td><td class="wrap">The code index, named by a hash of the workdir</td><td class="wrap">Written by <code>/index save</code>, and automatically with <code>/index-persist</code> (on by default). Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
+      <tr><td><code>index/*.filter</code></td><td class="wrap">Which files that workdir's index covers, in gitignore syntax</td><td class="wrap">Created from the project's <code>.gitignore</code> files the first time the index starts. Edit it with <code>/index-filter</code> or View → Code index → Filter…. Mode 0600.</td></tr>
       <tr><td><code>tls/</code></td><td class="wrap">momo's local CA and HTTPS certificate</td><td class="wrap">Folder 0700, keys 0600. Deleting it makes a new CA on the next <code>--web-tls auto</code> start, and every device must then trust the new one.</td></tr>
     </table></div>
     <h3>Elsewhere</h3>
@@ -1337,7 +1342,7 @@ const SPEECH = {
     "< windows? try wsl", "< python 3.14 please!",
   ],
   "index-parsing": [
-    "< git ls-files, then parse", "< one parse per file", "< 8 bytes per occurrence!",
+    "< filter the tree, then parse", "< one parse per file", "< 8 bytes per occurrence!",
     "< trigrams find the text", "< never a stale answer", "< yaml keys count too",
     "< css selectors? indexed!", "< markdown: text search", "< syntax, not types",
   ],

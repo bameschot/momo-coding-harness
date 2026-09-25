@@ -6,6 +6,7 @@ Run with HOME pointed at a scratch dir — the pickle tests write to
 """
 import http.client
 import json
+import multiprocessing
 import os
 import pickle
 import shutil
@@ -118,15 +119,48 @@ class Refresh(Base):
         self.assertNotIn("c.py:", out)
         self.assertIn("no matches", self.text("knob"))
 
-    def test_git_ignored_files_are_excluded(self):
-        if shutil.which("git") is None:
-            self.skipTest("git not installed")
-        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+    def test_gitignore_seeds_the_filter_once(self):
+        self.idx.stop()
+        ci.filter_path(self.root).unlink()
         _write(self.root, ".gitignore", "generated/\n")
         _write(self.root, "generated/big.py", "def ignored_thing():\n    pass\n")
-        self.idx.rebuild()
-        self.assertIsNone(self.idx.wait_fresh())
+        _write(self.root, "later/x.py", "def later_thing():\n    pass\n")
+        self.idx = self.make_index()
+        self.assertTrue(ci.filter_path(self.root).exists())
+        self.assertTrue(any("created from .gitignore" in n for n in self.idx.pop_notices()))
         self.assertIn("no definition", self.search("ignored_thing"))
+        self.assertIn("function leaf", self.search("leaf"))
+        # Only the first creation reads .gitignore; the saved filter decides after that.
+        _write(self.root, ".gitignore", "generated/\nlater/\n")
+        self.idx.stop()
+        self.idx = self.make_index()
+        self.assertIn("function later_thing", self.search("later_thing"))
+        self.assertEqual(self.idx.pop_notices(), [])
+
+    def test_filter_changes_apply_live(self):
+        _write(self.root, "vendor/lib.py", "def vendored():\n    pass\n")
+        _write(self.root, "vendor/keep.py", "def kept():\n    pass\n")
+        self.assertIn("function vendored", self.search("vendored"))
+        self.idx.set_filter(self.idx.filter_text + "vendor/*\n!vendor/keep.py\n")
+        self.assertIsNone(self.idx.wait_fresh())
+        self.assertIn("no definition", self.search("vendored"))
+        self.assertIn("function kept", self.search("kept"))
+        # The harness writing an excluded file does not index it.
+        _write(self.root, "vendor/new.py", "def fresh_vendor():\n    pass\n")
+        self.idx.invalidate([str(self.root / "vendor/new.py")])
+        self.assertIn("no definition", self.search("fresh_vendor"))
+        self.idx.set_filter("")
+        self.assertIsNone(self.idx.wait_fresh())
+        self.assertIn("function vendored", self.search("vendored"))
+
+    def test_saved_index_drops_files_the_filter_now_excludes(self):
+        _write(self.root, "gen/out.py", "def generated_fn():\n    pass\n")
+        self.assertIn("function generated_fn", self.search("generated_fn"))
+        self.assertIn("saved", self.idx.save())
+        self.idx.stop()
+        self.assertEqual(ci.save_filter(self.root, "gen/\n"), "")
+        self.idx = self.make_index(load_pickle=True)
+        self.assertIn("no definition", self.search("generated_fn"))
         self.assertIn("function leaf", self.search("leaf"))
 
     def test_harness_write_visible_without_stat_diff(self):
@@ -207,6 +241,18 @@ class Blocking(Base):
 
 class Budget(Base):
 
+    def test_file_limit_can_change_live(self):
+        with mock.patch.object(ci, "MIN_MAX_FILES", 1):
+            self.idx.set_max_files(2)
+            self.assertIsNone(self.idx.wait_fresh())
+            self.assertEqual(self.idx.live_count(), 2)
+            self.assertTrue(self.idx.skipped["limit"])
+            self.assertIn("2-file limit", ci._degraded_note(self.idx))
+            self.idx.set_max_files(1000)
+            self.assertIsNone(self.idx.wait_fresh())
+            self.assertEqual(self.idx.live_count(), len(CHAIN))
+            self.assertFalse(self.idx.skipped["limit"])
+
     def test_degrade_order_and_recovery(self):
         m = dict(self.idx.mem)
         self.assertTrue(all(v > 0 for v in m.values()), m)
@@ -261,6 +307,101 @@ class Budget(Base):
         (self.root / "big.py").unlink()
         self.assertIsNone(self.idx.wait_fresh())
         self.assertLess(abs(self.idx.mem_used() - before), 2000)
+
+
+class Parallel(Base):
+    """Bulk builds in worker processes give the same index as a serial build."""
+
+    files = {**CHAIN, **{f"pkg/m{i}.py": f"from a import leaf\n\n\ndef f{i}(x):\n"
+                                         f"    return leaf() + x  # note{i}\n"
+                         for i in range(40)}}
+
+    def setUp(self):
+        super().setUp()
+        for p in (mock.patch.object(ci, "_PARALLEL_MIN", 5),
+                  mock.patch.object(ci, "_PARALLEL_CHUNK", 4)):
+            p.start()
+            self._patches.append(p)
+
+    @staticmethod
+    def snapshot(idx):
+        with idx._lock:
+            by_path = {e.path: (e.symbols, e.imports, e.sig, e.sig_bits, e.names and sorted(e.names))
+                       for _, e in idx._alive()}
+            occ = {name: sorted((idx.files[v >> ci._LINE_BITS].path, v & ci._LINE_MASK)
+                                for v in arr) for name, arr in idx._idents.items()}
+            return by_path, occ, dict(idx.mem)
+
+    def test_parallel_matches_serial(self):
+        serial = self.make_index(workers=1)
+        spy = mock.patch.object(ci.ProjectIndex, "_drain_parallel", autospec=True,
+                                side_effect=ci.ProjectIndex._drain_parallel)
+        with spy as dp:
+            par = self.make_index(workers=2)
+        try:
+            self.assertTrue(dp.called)
+            self.assertFalse(par._pool_broken)
+            self.assertEqual(par.live_count(), len(self.files))
+            self.assertEqual(self.snapshot(par), self.snapshot(serial))
+            self.assertEqual(multiprocessing.active_children(), [])   # pool shut down when idle
+        finally:
+            for idx in (serial, par):
+                idx.stop()
+                idx.join(5)
+
+    def test_stop_mid_build_leaves_no_processes(self):
+        idx = ci.ProjectIndex(self.root, workers=2)
+        idx.start()
+        time.sleep(0.05)
+        idx.stop()
+        idx.join(30)
+        self.assertFalse(idx._thread.is_alive())
+        self.assertEqual(multiprocessing.active_children(), [])
+
+    def test_pool_failure_falls_back_to_serial(self):
+        with mock.patch.object(ci, "ProcessPoolExecutor", side_effect=OSError("no processes")):
+            idx = self.make_index(workers=2)
+        try:
+            self.assertTrue(idx._pool_broken)
+            self.assertEqual(idx.live_count(), len(self.files))
+            self.assertIn("worker processes failed", " ".join(idx.pop_notices()))
+            self.assertIn("building in one process", ci.status_text(idx))
+        finally:
+            idx.stop()
+            idx.join(5)
+
+    def test_budget_reached_during_batch(self):
+        with mock.patch.object(ci, "MIN_MAX_BYTES", 1):
+            idx = self.make_index(workers=2, max_bytes=20_000)
+        try:
+            self.assertTrue(idx.partial)
+            self.assertGreater(idx.skipped["budget"], 0)
+            self.assertEqual(idx.live_count() + idx.skipped["budget"], len(self.files))
+        finally:
+            idx.stop()
+            idx.join(5)
+
+    def test_worker_error_is_an_error_skip(self):
+        with mock.patch.object(ci, "_build_entry", side_effect=RecursionError):
+            self.assertEqual(ci._build_many(str(self.root), ["a.py", "b.py"], True, True),
+                             [None, None])
+        self.idx._apply_built(["a.py"], [None])
+        self.assertEqual(self.idx.skipped["error"], 1)
+        self.assertNotIn("a.py", self.idx._by_path)
+
+    def test_in_flight_file_requeued_by_a_diff_is_not_built_twice(self):
+        built = ci._build_entry(self.root, "b.py", True, True)
+        with self.idx._cond:
+            self.idx._queue["b.py"] = None      # a query's stat-diff saw it in flight
+        self.idx._apply_built(["b.py"], [built])
+        self.assertNotIn("b.py", self.idx._queue)
+        _write(self.root, "c.py", "def changed():\n    pass\n")
+        stale = ci._build_entry(self.root, "a.py", True, True)
+        with self.idx._cond:
+            self.idx._queue["a.py"] = None
+        _write(self.root, "a.py", "def leaf2():\n    return 2\n")   # changed after the build
+        self.idx._apply_built(["a.py"], [stale])
+        self.assertIn("a.py", self.idx._queue)
 
 
 class Pickle(Base):
@@ -538,16 +679,12 @@ class ReviewFixes(Base):
         self.assertIn("narrow with path=", out)
 
     def test_find_symbol_sees_the_indexed_files_and_kind_equivalence(self):
-        _write(self.root, ".gitignore", "gen/\n")
         _write(self.root, "gen/x.py", "def hidden_one():\n    pass\n")
-        if shutil.which("git"):
-            subprocess.run(["git", "init", "-q", str(self.root)], check=True)
-            self.idx.rebuild()
+        self.idx.set_filter("gen/\n")
         self.assertIsNone(self.idx.wait_fresh())
         code_nav.set_index_provider(self.idx.provide, self.idx.paths_under)
         try:
-            if shutil.which("git"):
-                self.assertIn("no definition", code_nav.find_symbol("hidden_one", workdir=self.root))
+            self.assertIn("no definition", code_nav.find_symbol("hidden_one", workdir=self.root))
             self.assertIn("method Cart.total",
                           code_nav.find_symbol("total", kind="function", workdir=self.root))
         finally:
@@ -591,15 +728,12 @@ class IndexRouting(Base):
         self.assertIn("a.py:1: def leaf():", out)
 
     def test_literal_grep_falls_back_to_the_disk(self):
-        _write(self.root, ".gitignore", "gen/\n")
         _write(self.root, "gen/out.txt", "zebra_marker\n")
-        if shutil.which("git"):
-            subprocess.run(["git", "init", "-q", str(self.root)], check=True)
-            self.idx.rebuild()
+        self.idx.set_filter("gen/\n")
         self.assertIsNone(self.idx.wait_fresh())
         out = self.run_tool("grep_files", {"pattern": "zebra_marker"})
         self.assertIn("gen/out.txt", out)
-        if shutil.which("git"):
+        if True:
             self.assertTrue(out.startswith("(the code index has no match"), out)
 
     def test_find_files_from_the_index_and_disk_fallback(self):
@@ -792,7 +926,7 @@ class HarnessIndex(unittest.TestCase):
         self.cmd("/index on")
         self.h.index.wait_fresh()
         out = self.cmd("/index")
-        for want in ("Budget", "Made of:", "Definitions", "Identifiers", "By language:",
+        for want in ("Budget", "Made of:", "Definitions", "Identifiers", "By language:", "/index-filter",
                      "python", "█"):
             self.assertIn(want, out)
 
@@ -806,6 +940,48 @@ class HarnessIndex(unittest.TestCase):
         self.assertEqual(self.h.status_event().index_max_bytes, 50 * 1024 * 1024)
         self.assertEqual(self.h.index.max_bytes, 50 * 1024 * 1024)
         self.assertIn("ERROR", self.cmd("/index-max-mem lots"))
+        self.assertIn("250,000", self.cmd("/index-max-files 250000"))
+        self.assertEqual(self.h.status_event().index_max_files, 250_000)
+        self.assertEqual(self.h.index.max_files, 250_000)
+        self.assertIn("ERROR", self.cmd("/index-max-files 5"))
+        self.assertIn("ERROR", self.cmd("/index-max-files many"))
+        self.assertIn("3", self.cmd("/index-workers 3"))
+        self.assertEqual(self.h.status_event().index_workers, 3)
+        self.assertEqual(self.h.index.workers, 3)
+        self.assertIn("Workers", self.cmd("/index"))
+        self.assertIn("auto", self.cmd("/index-workers auto"))
+        self.assertEqual(self.h.index.workers, 0)
+        self.assertIn("ERROR", self.cmd("/index-workers 0"))
+        self.assertIn("ERROR", self.cmd("/index-workers lots"))
+
+    def test_persist_is_on_by_default(self):
+        self.assertTrue(self.h.index_persist)
+
+    def test_index_filter_commands(self):
+        self.cmd("/index on")
+        self.h.index.wait_fresh()
+        out = self.cmd("/index-filter")
+        self.assertIn(str(ci.filter_path(self.wd)), out)
+        self.assertIn("node_modules/", out)
+        self.assertIn("rules; re-listing", self.cmd("/index-filter add conf/"))
+        self.h.index.wait_fresh()
+        self.assertEqual(self.h.index.live_count(), len(CHAIN) - 1)
+        self.assertIn("conf/", ci.filter_path(self.wd).read_text())
+        self.assertIn("ERROR", self.cmd("/index-filter remove nope/"))
+        self.cmd("/index-filter remove conf/")
+        self.h.index.wait_fresh()
+        self.assertEqual(self.h.index.live_count(), len(CHAIN))
+        _write(self.wd, ".gitignore", "conf/\n")
+        self.cmd("/index-filter reset")
+        self.h.index.wait_fresh()
+        self.assertEqual(self.h.index.live_count(), len(CHAIN) - 1)
+        self.assertIn("ERROR", self.cmd("/index-filter bogus"))
+
+    def test_index_filter_edit_opens_the_editor_in_the_tui_only(self):
+        controller = Controller(self.h)
+        tui = controller.submit("/index-filter edit", source="tui")
+        self.assertEqual(tui.view, {"edit_index_filter": str(ci.filter_path(self.wd))})
+        self.assertEqual(controller.submit("/index-filter edit", source="web").view, {})
 
     def test_persist_saves_on_shutdown_and_loads_on_start(self):
         self.cmd("/index-persist on")
@@ -864,6 +1040,15 @@ class HarnessIndex(unittest.TestCase):
             self.assertEqual(b["limit"], 50 * 1024 * 1024)
             self.assertEqual([x["key"] for x in b["categories"]],
                              ["files", "symbols", "imports", "idents", "trigrams"])
+            c = http.client.HTTPConnection("127.0.0.1", web.port, timeout=5)
+            c.request("GET", "/api/index-filter")
+            f = json.loads(c.getresponse().read())
+            self.assertEqual(f["path"], str(ci.filter_path(self.wd)))
+            self.assertIn("node_modules/", f["text"])
+            self.assertEqual(post("/api/index-filter", {"text": f["text"] + "conf/\n"}), 200)
+            self.h.index.wait_fresh()
+            self.assertEqual(state()["index_files"], len(CHAIN) - 1)
+            self.assertEqual(post("/api/index-filter", {"text": 5}), 400)
         finally:
             web.close()
 

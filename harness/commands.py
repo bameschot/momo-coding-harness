@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import code_index
+from . import code_index, ignore_rules
 from . import net as net_mod
 from . import session as session_mod
 from .harness import Harness, ChatEvent
@@ -34,6 +34,10 @@ def _format_index(harness) -> str:
              + (" | PARTIAL: budget reached" if b["partial"] else ""),
              f"  {'Budget':<16}{fmt(b['used']):>9}  {b['pct']:>3}%  {bar(b['used'] / (b['limit'] or 1))}"
              f"  of {fmt(b['limit'])} (/index-max-mem)",
+             f"  {'File limit':<16}{b['max_files']:>9,}  files (/index-max-files)",
+             f"  {'Workers':<16}{b['workers_used']:>9}  processes for bulk builds "
+             f"({'auto' if not b['workers'] else 'set'}, /index-workers)",
+             f"  {'Filter':<16}{b['filter']['rules']:>9,}  rules (/index-filter)",
              "Made of:"]
 
     def share_row(label: str, n: int, detail: str) -> str:
@@ -85,7 +89,42 @@ class CommandResult:
     compact_summarise: bool = True          # passed to compact_threaded()
     run_plan: bool = False                  # TUI runs execute_plan_threaded() on a worker thread
     retry: bool = False                     # controller re-sends the last user message
+    edit_index_filter: str | None = None    # TUI opens $EDITOR on this filter file
 
+
+
+def _index_filter(harness, arg: str) -> CommandResult:
+    """/index-filter [add|remove <pattern> | edit | reset]."""
+    sub, _, rest = arg.partition(" ")
+    sub, rest = sub.lower(), rest.strip()
+    text, path = harness.index_filter()
+    if not sub:
+        n = len(ignore_rules.Rules.parse(text))
+        return CommandResult(handled=True, output=(
+            f"Code index filter: {path} ({n} rules — gitignore syntax, the last matching line "
+            f"wins, `!` re-includes)\n\n{text.rstrip()}\n\n"
+            f"Change it with /index-filter add|remove <pattern>, /index-filter edit, or "
+            f"/index-filter reset to re-seed it from .gitignore."))
+    if sub == "add":
+        if not rest:
+            return CommandResult(handled=True, output="ERROR: usage: /index-filter add <pattern>")
+        if ignore_rules.parse_line(rest) is None:
+            return CommandResult(handled=True, output=f"ERROR: not a filter pattern: {rest}")
+        return CommandResult(handled=True, output=harness.set_index_filter(
+            text.rstrip("\n") + "\n" + rest + "\n"))
+    if sub == "remove":
+        lines = text.splitlines()
+        if rest not in lines:
+            return CommandResult(handled=True, output=(
+                f"ERROR: no filter line {rest!r} — /index-filter lists them"))
+        lines.remove(rest)
+        return CommandResult(handled=True, output=harness.set_index_filter("\n".join(lines) + "\n"))
+    if sub == "reset":
+        return CommandResult(handled=True, output=harness.reset_index_filter())
+    if sub == "edit":
+        return CommandResult(handled=True, edit_index_filter=path)
+    return CommandResult(handled=True, output=(
+        f"ERROR: expected add, remove, edit or reset, got: {sub}"))
 
 
 def _format_context(harness) -> str:
@@ -317,6 +356,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 return CommandResult(handled=True,
                                      output="ERROR: model did not report a context size — use /context <n> to set an absolute limit")
             harness.context_pct = n
+            harness.context_fixed = False
             harness._sync_context_limit(emit=False)
             harness._emit_status()
             return CommandResult(handled=True,
@@ -326,6 +366,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             if n < 256:
                 return CommandResult(handled=True, output="ERROR: context limit must be >= 256")
             harness.context_pct = None
+            harness.context_fixed = True
             harness.context_limit = n
             harness._emit_status()
             return CommandResult(handled=True, output=f"Context limit set to: {n}")
@@ -565,6 +606,51 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness._emit_status()
         return CommandResult(handled=True, output=f"Code index memory budget: {net_mod.format_size(size)}")
 
+    if cmd == "/index-max-files":
+        if not arg:
+            return CommandResult(handled=True, output=(
+                f"Code index file limit: {harness.index_max_files:,}\nSet it with a number, "
+                f"e.g. /index-max-files 200000. Files beyond it (in path order) are not indexed."))
+        try:
+            n = int(arg.replace(",", "").replace("_", ""))
+        except ValueError:
+            return CommandResult(handled=True, output=f"ERROR: not a number: {arg}")
+        if n < code_index.MIN_MAX_FILES:
+            return CommandResult(handled=True, output=(
+                f"ERROR: the minimum is {code_index.MIN_MAX_FILES:,} files"))
+        harness.index_max_files = n
+        session_mod.save_prefs(index_max_files=n)
+        if harness.index is not None:
+            harness.index.set_max_files(n)
+        harness._emit_status()
+        return CommandResult(handled=True, output=f"Code index file limit: {n:,} files")
+
+    if cmd == "/index-workers":
+        if not arg:
+            cur = harness.index_workers
+            return CommandResult(handled=True, output=(
+                f"Code index workers: {code_index.workers_label(cur)}\n"
+                f"Set it with /index-workers auto or a number from 1 to {code_index.MAX_WORKERS}. "
+                f"A first build or rebuild reads and parses files in that many processes; "
+                f"1 builds in one process."))
+        if arg.lower() == "auto":
+            n = 0
+        else:
+            try:
+                n = int(arg)
+            except ValueError:
+                return CommandResult(handled=True, output=f"ERROR: not a number or auto: {arg}")
+            if not 1 <= n <= code_index.MAX_WORKERS:
+                return CommandResult(handled=True, output=(
+                    f"ERROR: expected auto or 1 to {code_index.MAX_WORKERS}"))
+        harness.index_workers = n
+        session_mod.save_prefs(index_workers=n)
+        if harness.index is not None:
+            harness.index.set_workers(n)
+        harness._emit_status()
+        return CommandResult(handled=True, output=(
+            f"Code index workers: {code_index.workers_label(n)}"))
+
     if cmd == "/index-route":
         if not arg:
             return CommandResult(handled=True, output=(
@@ -583,6 +669,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"Answer grep/find from the code index: {'on' if harness.index_route else 'off'}"
                 f"{extra}"))
         return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+
+    if cmd == "/index-filter":
+        return _index_filter(harness, arg)
 
     if cmd == "/index-persist":
         if not arg:
@@ -827,7 +916,13 @@ Available commands:
   /index rebuild      Forget the index and build it again
   /index save|load    Write the index to disk now, or load the saved one
   /index-max-mem <n>  Memory budget for the index (default 100mb)
-  /index-persist on|off  Load the saved index at start, save it on exit
+  /index-max-files <n>  Most files the index covers (default 100000)
+  /index-workers auto|<n>  Processes for a first build or rebuild (default auto)
+  /index-persist on|off  Load the saved index at start, save it on exit (default on)
+  /index-filter       Show which files the index covers (gitignore syntax, `!` re-includes)
+  /index-filter add|remove <pattern>  Add or remove one filter line
+  /index-filter edit  Edit the filter in $EDITOR (web: View → Code index → Filter…)
+  /index-filter reset Re-seed the filter from the project's .gitignore files
   /index-route on|off  Answer plain-text grep_files / find_files from the index (default on)
   /list-skills        List available skills and show which are active
   /load-skill <name>  Append a skill's instructions to the system prompt

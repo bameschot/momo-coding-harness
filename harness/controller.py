@@ -392,6 +392,12 @@ class Controller:
 
         if cmd == "/companion-idle-recap":
             self._emit_companion()  # push the new settings to every frontend's controls
+        if result.edit_index_filter:
+            if source == "web":
+                self._system("Edit the filter under View → Code index → Filter…, or use "
+                             "/index-filter add|remove <pattern>.")
+                return SubmitOutcome()
+            return SubmitOutcome(view={"edit_index_filter": result.edit_index_filter})
         view = {f: getattr(result, f) for f in VIEW_FIELDS if getattr(result, f) is not None}
         if view:
             return SubmitOutcome(view=view)

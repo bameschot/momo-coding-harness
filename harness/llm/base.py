@@ -67,6 +67,11 @@ class LLMClient(ABC):
         unreachable.  Must never leak an error string into the list."""
         ...
 
+    def loaded_models(self) -> list[str]:
+        """Models the server holds in memory right now, most recent first; []
+        when it can't say.  Used at startup when the saved model is gone."""
+        return []
+
     @abstractmethod
     def abort(self):
         """Interrupt any in-flight request."""
