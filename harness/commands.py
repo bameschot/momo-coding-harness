@@ -828,7 +828,7 @@ Available commands:
   /companion-idle-recap         Show whether momo recaps recent turns when you're idle
   /companion-idle-recap on|off  momo recaps the last turns in its bubble after you've been idle
   /companion-idle-recap <secs>  Set how long you must be idle first (default 90)
-  Shift+C               Interrupt a running LLM response
+  Esc                   Interrupt a running LLM response (also Shift+C in the chat pane)
   /compact            Compact context with LLM summary of dropped history
   /fast-compact       Compact context without LLM summarisation (instant)
   /context            Show context limit and current usage

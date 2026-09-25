@@ -11,23 +11,45 @@ from .paths import walk_files
 _SEARCH_MAX_FILES = 20_000
 _SEARCH_TTL_S = 10.0
 
-_search_cache: dict = {"root": None, "ts": 0.0, "files": []}
-_search_lock = threading.Lock()  # the TUI and web server threads share the cache
+# (root, monotonic time, files), replaced whole so a lock-free read never sees a
+# new root with old files.
+_search_cache: tuple = (None, 0.0, [])
+_search_lock = threading.Lock()  # one walk at a time; the TUI and web threads share it
+_refreshing: set = set()         # roots with a background walk running
 
 
 def workspace_files(root: Path) -> list[str]:
     """All non-hidden workspace files as relative paths, cached for a few seconds."""
+    global _search_cache
     with _search_lock:
-        now = time.monotonic()
-        if _search_cache["root"] == root and now - _search_cache["ts"] < _SEARCH_TTL_S:
-            return _search_cache["files"]
-        files: list[str] = []
+        c_root, ts, files = _search_cache
+        if c_root == root and time.monotonic() - ts < _SEARCH_TTL_S:
+            return files
+        files = []
         for f in walk_files(root, skip_hidden=True):
             files.append(os.path.relpath(f, root))
             if len(files) >= _SEARCH_MAX_FILES:
                 break
-        _search_cache.update(root=root, ts=now, files=files)
+        _search_cache = (root, time.monotonic(), files)
         return files
+
+
+def workspace_files_nowait(root: Path) -> list[str] | None:
+    """The cached list for root without waiting: a stale one is returned while a
+    background walk refreshes it; None only while the first walk runs.  For the
+    TUI, whose key loop must not stall on a large tree."""
+    c_root, ts, files = _search_cache
+    cached = files if c_root == root else None
+    if (cached is None or time.monotonic() - ts >= _SEARCH_TTL_S) and root not in _refreshing:
+        _refreshing.add(root)
+
+        def walk():
+            try:
+                workspace_files(root)
+            finally:
+                _refreshing.discard(root)
+        threading.Thread(target=walk, name="momo-file-search", daemon=True).start()
+    return cached
 
 
 def fuzzy_search(files: list[str], q: str, limit: int = 30) -> list[str]:

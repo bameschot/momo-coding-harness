@@ -62,6 +62,7 @@ from ..paths import SKIP_DIRS, safe_path
 from ..commands import help_commands, render_markdown
 from ..controller import Controller
 from ..events import ErrorEvent, event_to_json
+from ..prompts import MODES
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _STATIC_FILES = {
@@ -72,7 +73,7 @@ _STATIC_FILES = {
     "/markdown.js":  ("markdown.js",  "text/javascript; charset=utf-8"),
     "/highlight.js": ("highlight.js", "text/javascript; charset=utf-8"),
 }
-_MODES = ["design", "chat", "plan", "coding", "momo"]
+_MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
 _KEEPALIVE_S = 15.0
 _COOKIE = "momo_token"

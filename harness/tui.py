@@ -12,17 +12,17 @@ import sys
 import tempfile
 import time
 import textwrap
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass, field
 
 from . import md_render
 from .commands import help_commands
-from .file_search import fuzzy_search, workspace_files
+from .file_search import fuzzy_search, workspace_files_nowait
 from .controller import Controller
-from .events import (AskUserEvent, BusyEvent, ChatEvent, CompanionEvent, DeltaEvent, DiffEvent,
+from .events import (AskUserEvent, ChatEvent, CompanionEvent, DeltaEvent, DiffEvent,
                      DoneEvent, ErrorEvent, ResetEvent, StatusEvent, StreamEndEvent, ThinkEvent,
                      ToolCallEvent, ToolResultEvent, UserEvent)
 from .harness import Harness
+from .prompts import MODES
 
 
 # ── color pair ids ────────────────────────────────────────────────────────────
@@ -55,14 +55,23 @@ _C_DIFF_META = 24  # diff file header line
 
 _COLOR_ORANGE     = 16   # custom color slot for orange  (requires COLORS > 16)
 _COLOR_PURPLE     = 17   # custom color slot for purple  (requires COLORS > 17)
-_KEY_SHIFT_ENTER  = 601  # custom curses keycode bound to Shift+Enter escape sequences
+
+# Key codes of our own, above curses' KEY_MAX range: define_key() binds escape
+# sequences to them, and _next_key() returns them for sequences it decodes itself.
+_KEY_SHIFT_ENTER  = 601  # Shift+Enter / Option+Enter — insert a newline
 _KEY_CTRL_LEFT    = 602  # Ctrl+Left  — word jump left
 _KEY_CTRL_RIGHT   = 603  # Ctrl+Right — word jump right
-_MODE_CYCLE = ["design", "chat", "plan", "coding", "momo"]
+_KEY_PASTE_START  = 604  # bracketed paste: ESC [ 200 ~
+_KEY_PASTE_END    = 605  # bracketed paste: ESC [ 201 ~
+_KEY_ESC          = 606  # a lone Esc (not the start of a sequence)
+_KEY_IGNORED      = 607  # an escape sequence we don't bind, swallowed whole
+
 # Suggestions, as in the web UI: "@query" right before the caret opens workspace
 # path suggestions; a leading "/" opens slash-command suggestions.
 _AT_RX = re.compile(r"(?:^|\s)@([\w./~+-]*)$")
 _SUGGEST_MAX_ROWS = 8
+_ARG_MAX = 60           # tool-call argument values are cut to this, as in the web UI
+_PASTE_IDLE_S = 1.0     # a bracketed paste whose end marker never comes is closed after this
 
 
 def _init_colors():
@@ -117,16 +126,137 @@ from .companion import (  # noqa: E402  (shared with the web UI)
     CAT_W, bubble_dir, bubble_room, walk_max_x,
 )
 
-_CAT_W = CAT_W  # visible width of every frame line (shared with the web UI)
+
+@dataclass
+class _Companion:
+    """The walking cat in the companion bar: its animation state, and a cache of
+    what was last painted so an unchanged tick skips the redraw."""
+    x: int = 4
+    dir: int = 1
+    state: str = "walk"          # "walk" | "sit"
+    sit_ticks: int = 0
+    step: int = 0                # walk leg frame, 0/1
+    frame: list = field(default_factory=lambda: _MOMO_SIT[0])
+    blink_ticks: int = 0
+    mew_ticks: int = 0
+    mew_text: str = ""
+    ts: float = 0.0              # last animation tick
+    # Idle recap: while the user is idle momo speaks model-written recap lines
+    # (newest first, then random recent ones) instead of the canned pool.
+    idle: bool = False
+    recaps: RecapPicker = field(default_factory=RecapPicker)
+    drawn: tuple | None = None   # (x, frame id, mew shown, mew text) last painted
+
+    def advance(self, cols: int, speech_key: tuple[str, bool]):
+        max_x = walk_max_x(cols)   # keeps room for a full speech bubble on the right
+        if self.state == "walk":
+            self.step ^= 1
+            self.x = max(0, min(self.x + self.dir, max_x))
+            if self.x == 0 or self.x == max_x or random.random() < 0.02:
+                self._sit_down(cols, speech_key)
+            if self.blink_ticks > 0:
+                self.blink_ticks -= 1
+                self.frame = _MOMO_WR_BLINK if self.dir > 0 else _MOMO_WL_BLINK
+            else:
+                self.frame = (_MOMO_WR if self.dir > 0 else _MOMO_WL)[self.step]
+                if random.random() < 0.03:
+                    self.blink_ticks = 2
+            return
+        self.sit_ticks -= 1
+        if self.sit_ticks <= 0:
+            # Choose the walk direction before leaving sit so the first step goes that way.
+            self.dir = 1 if self.x <= 2 else -1 if self.x >= max_x - 2 else random.choice([-1, 1])
+            self.state = "walk"
+            self.mew_ticks = 0     # the bubble doesn't walk along
+        sit_frames = _MOMO_SIT_L if self.dir < 0 else _MOMO_SIT
+        self.frame = sit_frames[1 if random.random() < 0.08 else 0]   # [1] = blink
+        if self.mew_ticks > 0:
+            self.mew_ticks -= 1
+
+    def _sit_down(self, cols: int, speech_key: tuple[str, bool]):
+        self.state = "sit"
+        self.sit_ticks = random.randint(50, 100)
+        self.blink_ticks = 0
+        # Only lines that fit beside momo here; it turns to face its bubble.
+        room = bubble_room(self.x, cols)
+        recap = self.recaps.pick(time.monotonic(), room) if self.idle else None
+        text = recap
+        if not text and random.random() < 0.75:
+            pool = [t for t in _SPEECH_TEXTS.get(speech_key, _SPEECH_TEXTS_DEFAULT) if len(t) <= room]
+            text = random.choice(pool) if pool else None
+        if text:
+            self.mew_text = text
+            # Longer lines stay up longer; recaps a little longer still.
+            self.mew_ticks = random.randint(18, 32) + len(text) // 2 + (10 if recap else 0)
+            self.sit_ticks = max(self.sit_ticks, self.mew_ticks + 10)
+            self.dir = bubble_dir(self.x, cols, self.dir, len(text)) or self.dir
+
+    def draw(self, win, cols: int):
+        mew_visible = self.mew_ticks > 0
+        key = (self.x, id(self.frame), mew_visible, self.mew_text)
+        if key == self.drawn:
+            return                 # nothing visible changed since the last paint
+        attr = curses.color_pair(_C_COMPANION)
+        win.erase()
+        x = 1 + self.x
+        for i, line in enumerate(self.frame):
+            _put(win, i, x, line, cols - x - 1, attr)
+        if mew_visible:
+            if self.dir < 0:
+                t = self.mew_text
+                display = (t[2:] + " >") if t.startswith("< ") else t
+                mew_x = x - len(display) - 1
+                if mew_x >= 0:
+                    _put(win, 1, mew_x, display, len(display), attr)
+            else:
+                mew_x = x + CAT_W + 1
+                if mew_x + len(self.mew_text) < cols - 1:
+                    _put(win, 1, mew_x, self.mew_text, cols - mew_x - 1, attr)
+        self.drawn = key
+        win.noutrefresh()
 
 
-# ── extended key support ─────────────────────────────────────────────────────
+# ── drawing helpers ───────────────────────────────────────────────────────────
+
+def _put(win, y: int, x: int, text: str, n: int, attr: int = 0):
+    """addnstr that ignores curses' error for the last cell of a window."""
+    try:
+        win.addnstr(y, x, text, n, attr)
+    except curses.error:
+        pass
+
+
+def _draw_vbar(win, x: int, h: int, total: int, first: int, color: int):
+    """A vertical scrollbar in column x over h rows: a thumb when `total` rows
+    don't fit, `first` being the first one shown; a plain rule otherwise."""
+    thumb_top, thumb_h = 0, 0
+    if total > h:
+        thumb_h = max(1, round(h * h / total))
+        thumb_top = round(first / max(1, total - h) * (h - thumb_h))
+    for r in range(h):
+        try:
+            win.addch(r, x, "█" if thumb_top <= r < thumb_top + thumb_h else "│",
+                      curses.color_pair(color))
+        except curses.error:
+            pass
+
+
+def _brief_args(args) -> str:
+    """Tool-call arguments for the transcript, each value cut to _ARG_MAX chars
+    (the web UI's argsBrief): a write_file body is in the diff, not here."""
+    def cut(v) -> str:
+        s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+        return s if len(s) <= _ARG_MAX else s[:_ARG_MAX - 3] + "…"
+    if not isinstance(args, dict):
+        return json.dumps(cut(args), ensure_ascii=False)
+    return ", ".join(f"{k}={json.dumps(cut(v), ensure_ascii=False)}" for k, v in args.items())
 
 
 # ── scrollable line buffer ────────────────────────────────────────────────────
 
 class _LineBuffer:
-    """Holds wrapped display lines and scroll offsets (vertical + horizontal)."""
+    """Holds wrapped display lines and scroll offsets (vertical + horizontal).
+    Appending never moves the view: the TUI decides whether to follow new output."""
 
     def __init__(self):
         self._lines: list[tuple[str, int, int]] = []  # (text, color_pair, attrs)
@@ -134,14 +264,19 @@ class _LineBuffer:
         self._hscroll = 0   # horizontal: columns scrolled from the left
         self._max_line_w: int = 0  # running maximum of len(text) across all lines
 
+    def __len__(self) -> int:
+        return len(self._lines)
+
     def append(self, text: str, color: int, attrs: int = 0):
         self._lines.append((text, color, attrs))
         if len(text) > self._max_line_w:
             self._max_line_w = len(text)
-        # Always track the latest line so the view follows new output by default.
-        # _drain_events overrides this after a batch to anchor the *top* of the
-        # new message, so callers should not rely on _scroll staying at the tail.
-        self._scroll = max(0, len(self._lines) - 1)
+
+    def truncate(self, n: int):
+        del self._lines[n:]
+
+    def at_bottom(self) -> bool:
+        return self._scroll >= len(self._lines) - 1
 
     def scroll_up(self, n: int = 3):
         self._scroll = max(0, self._scroll - n)
@@ -152,6 +287,9 @@ class _LineBuffer:
     def scroll_to_bottom(self):
         self._scroll = max(0, len(self._lines) - 1)
 
+    def scroll_to(self, line_idx: int):
+        self._scroll = max(0, min(line_idx, len(self._lines) - 1))
+
     def scroll_to_top_of(self, line_idx: int, height: int):
         """Place line_idx at the top of a viewport of `height` rows."""
         self._scroll = min(line_idx + height - 1, max(0, len(self._lines) - 1))
@@ -160,12 +298,8 @@ class _LineBuffer:
         self._hscroll = max(0, self._hscroll - n)
 
     def scroll_right(self, n: int = 8, display_w: int = 0):
-        max_w = self._max_line_w
-        # Cap at max_w - display_w: scrolling further would show only blank space.
-        # Also prevents hscroll going positive when content fits (max_w <= display_w),
-        # which would shift content without triggering the scrollbar (has_hscroll uses
-        # strict >, so content exactly equal to display_w shows no bar).
-        max_hscroll = max(0, max_w - display_w) if display_w > 0 else max(0, max_w - 1)
+        # Never past the widest line: further would show only blank space.
+        max_hscroll = max(0, self._max_line_w - display_w) if display_w > 0 else max(0, self._max_line_w - 1)
         self._hscroll = min(max_hscroll, self._hscroll + n)
 
     def render(self, win, height: int, width: int, edge_color: int = _C_BORDER):
@@ -173,68 +307,54 @@ class _LineBuffer:
         total = len(self._lines)
         display_w = width - 2   # rightmost column reserved for vertical scrollbar
         content_h = height - 1  # bottom row always reserved for horizontal scrollbar
-
-        # thumb is only shown when content is wider than the display area
-        max_w    = self._max_line_w
-        has_hscroll = max_w > display_w
-
-        # text region
-        if total:
-            if total <= content_h:
-                visible = self._lines
-            else:
-                start = max(0, self._scroll + 1 - content_h)
-                visible = self._lines[start:start + content_h]
-            for row, (text, color, attrs) in enumerate(visible):
-                if row >= content_h:
-                    break
-                display = text[self._hscroll : self._hscroll + display_w]
-                try:
-                    win.addnstr(row, 0, display, display_w, curses.color_pair(color) | attrs)
-                except curses.error:
-                    pass
-
-        # right-column vertical scrollbar
-        sx = width - 1
-        if total > content_h:
-            thumb_h = max(1, round(content_h * content_h / total))
-            scroll_start = max(0, self._scroll + 1 - content_h)
-            ratio = scroll_start / max(1, total - content_h)
-            thumb_top = round(ratio * (content_h - thumb_h))
-            for r in range(content_h):
-                ch = "█" if thumb_top <= r < thumb_top + thumb_h else "│"
-                try:
-                    win.addch(r, sx, ch, curses.color_pair(edge_color))
-                except curses.error:
-                    pass
-        else:
-            for r in range(content_h):
-                try:
-                    win.addch(r, sx, "│", curses.color_pair(edge_color))
-                except curses.error:
-                    pass
+        max_w = self._max_line_w
+        first = 0 if total <= content_h else max(0, self._scroll + 1 - content_h)
+        for row, (text, color, attrs) in enumerate(self._lines[first:first + content_h]):
+            _put(win, row, 0, text[self._hscroll:self._hscroll + display_w], display_w,
+                 curses.color_pair(color) | attrs)
+        _draw_vbar(win, width - 1, content_h, total, first, edge_color)
 
         # horizontal scrollbar — always drawn; thumb only when content overflows
         bar_w = max(2, width - 4)
-        if has_hscroll:
-            scrollable = max(1, max_w - display_w)
-            ratio_h    = self._hscroll / scrollable
-            thumb_w    = max(1, round(display_w / max_w * bar_w))
-            thumb_pos  = max(0, min(round(ratio_h * (bar_w - thumb_w)), bar_w - thumb_w))
+        if max_w > display_w:
+            ratio_h   = self._hscroll / max(1, max_w - display_w)
+            thumb_w   = max(1, round(display_w / max_w * bar_w))
+            thumb_pos = max(0, min(round(ratio_h * (bar_w - thumb_w)), bar_w - thumb_w))
             hbar = "─" * thumb_pos + "█" * thumb_w + "─" * (bar_w - thumb_pos - thumb_w)
         else:
-            hbar = "─" * bar_w  # track only, no thumb
-        try:
-            win.addnstr(height - 1, 0, "◀" + hbar + "▶", width - 1,
-                        curses.color_pair(edge_color))
-        except curses.error:
-            pass
-
-        # noutrefresh (not refresh) so the caller can batch multiple window
-        # updates before the single curses.doupdate() that pushes them all to
-        # the terminal simultaneously.  Calling win.refresh() here would do an
-        # immediate screen update for every rendered window, causing visible flicker.
+            hbar = "─" * bar_w
+        _put(win, height - 1, 0, "◀" + hbar + "▶", width - 1, curses.color_pair(edge_color))
+        # noutrefresh, not refresh: the caller batches every window into one doupdate().
         win.noutrefresh()
+
+
+class _StreamPart:
+    """One streamed block (the reasoning or the reply), wrapped as it grows:
+    finished source lines are wrapped once, only the unfinished last line again
+    on each delta — re-wrapping the whole reply every poll was quadratic."""
+
+    def __init__(self, width: int, first: str, indent: str):
+        self.width, self.first, self.indent = max(10, width), first, indent
+        self.text = ""
+        self._done = 0                  # text[:_done] is wrapped into _lines
+        self._lines: list[str] = []
+
+    def add(self, delta: str):
+        self.text += delta
+        nl = self.text.rfind("\n")
+        if nl >= self._done:
+            for src in self.text[self._done:nl].split("\n"):
+                self._lines.extend(self._wrap(src, bool(self._lines)))
+            self._done = nl + 1
+
+    def _wrap(self, src: str, started: bool) -> list[str]:
+        out = []
+        for wl in textwrap.wrap(src, width=self.width) or [""]:
+            out.append((self.indent if (started or out) else self.first) + wl)
+        return out
+
+    def lines(self, cursor: str = "") -> list[str]:
+        return self._lines + self._wrap(self.text[self._done:] + cursor, bool(self._lines))
 
 
 # ── layout ────────────────────────────────────────────────────────────────────
@@ -254,13 +374,8 @@ _INPUT_H  = 5  # fixed height of the multi-line input area
 _STATUS_H = 3  # top border + text + bottom border
 
 def _compute_layout(rows: int, cols: int, companion_h: int = 0) -> dict:
-    # chat_h absorbs all slack; clamped to 4 so there is always some chat area.
-    # HAZARD: when the terminal is very short (rows < _STATUS_H + _INPUT_H +
-    # companion_h + 4) the clamp forces chat_h = 4 regardless, which pushes
-    # status_y and input_y past `rows`.  curses.newwin will then raise an
-    # uncaught exception in _build_windows.  A defensive lower-bound on rows
-    # (e.g. max(rows, _STATUS_H + _INPUT_H + companion_h + 4)) before computing
-    # would make the layout safe at any terminal size.
+    # chat_h absorbs all slack.  A terminal too short for the fixed regions is
+    # caught by _build_windows, which shows a placeholder instead.
     chat_h      = max(4, rows - _STATUS_H - _INPUT_H - companion_h)
     companion_y = chat_h
     status_y    = chat_h + companion_h
@@ -274,6 +389,13 @@ def _compute_layout(rows: int, cols: int, companion_h: int = 0) -> dict:
     }
 
 
+# View options, keyed like the CommandResult fields that set them.
+_VIEW_DEFAULTS = {"tool_output": True, "think_output": True, "md_render": True,
+                  "diff_output": True, "diff_style": "compact", "companion": True}
+# Shift+letter shortcuts (chat focus): the view option each one toggles.
+_VIEW_KEYS = {"T": "think_output", "M": "md_render", "D": "diff_output", "Q": "companion"}
+
+
 # ── main TUI ──────────────────────────────────────────────────────────────────
 
 class TUI:
@@ -285,25 +407,28 @@ class TUI:
         # Streaming preview: lines from _stream_start on are a live render of the
         # reply being generated; they are replaced when the final events arrive.
         self._stream_start: int | None = None
-        self._stream_text = {"thinking": "", "content": ""}
+        self._stream: dict[str, _StreamPart] = {}   # "thinking" / "content"
         self._chat_buf    = _LineBuffer()
         self._chat_events: list[tuple] = []  # raw events for toggle rebuild
-        self._tools_expanded: bool = True    # True = full tool output; False = abbreviated
-        self._think_expanded: bool = True    # toggle with /toggle-think-output or Shift+T
-        self._md_expanded: bool = True       # markdown rendering; toggle with /toggle-markdown or Shift+M
-        self._diff_expanded: bool = True     # show edit diffs; toggle with /diff or Shift+D
-        self._diff_style: str = "compact"    # "compact" | "git"; set with /diff-style
+        self._view = dict(_VIEW_DEFAULTS)
+        # Follow new output only while the user hasn't scrolled away from it;
+        # otherwise the status line says there is more below.
+        self._follow = True
+        self._new_below = False
         self._input: str = ""
         self._cursor: int = 0           # insertion point within _input
+        self._input_dirty = False       # typed keys not drawn yet (coalesced while keys arrive)
+        self._pending_keys: list = []   # keys read ahead and put back
         self._history = harness.input_history  # submitted entries, oldest first; shared with harness for persistence
         self._history_idx: int = -1     # -1 = not browsing
         self._history_stash: str = ""   # saves live input while browsing
         self._focus: str = "input"      # "input" | "chat"
         # @-path / slash-command suggestions, drawn over the bottom of the chat pane.
-        # Each item is {"path": p} or a help_commands() entry {cmd, usage, desc}.
+        # Each item is {"path": p}, {"note": text}, or a help_commands() entry {cmd, usage, desc}.
         self._sugg: list[dict] = []
         self._sugg_idx: int = -1        # -1 = nothing highlighted (Enter still submits)
         self._sugg_query: tuple | None = None  # query the list was computed for
+        self._sugg_waiting = False      # the file list is still being walked
         self._commands = help_commands()
         # Status bar components — assembled (with DIR shortening) in _draw_status.
         self._st_mode  = harness.mode
@@ -317,50 +442,36 @@ class TUI:
         self._too_small = False   # set when the terminal is too small to host the layout
         self._spinner_frame = 0
         self._spinner_ts    = 0.0
-        self._companion_visible:       bool       = True
-        self._companion_x:             int        = 4
-        self._companion_dir:           int        = 1
-        self._companion_state:         str        = "walk"
-        self._companion_sit_ticks:     int        = 0
-        self._companion_walk_step:     int        = 0
-        self._companion_current_frame: list[str]  = _MOMO_SIT[0]
-        self._companion_blink_ticks:   int        = 0
-        self._companion_mew_ticks:     int        = 0
-        self._companion_mew_text:      str        = ""
-        self._companion_ts:            float      = 0.0
-        # Idle recap: while the user is idle momo speaks model-written recap lines
-        # (newest first, then random recent ones) instead of the canned pool.
-        self._companion_idle:          bool       = False
-        self._companion_recaps                    = RecapPicker()
-        # Cache for _draw_companion: skip the full erase+redraw when nothing
-        # visible has changed since the last paint.
-        self._companion_drawn_x:        int        = -1
-        self._companion_drawn_frame:    int        = -1   # id() of last frame list
-        self._companion_drawn_mew:      bool       = False
-        self._companion_drawn_mew_text: str        = ""
+        self._companion = _Companion()
+        workspace_files_nowait(harness.workdir)   # warm the @-search list in the background
 
         _init_colors()
         curses.curs_set(1)
+        # A lone Esc is a key here (interrupt, close suggestions): don't wait the
+        # default second for an escape sequence to follow it.
+        try:
+            curses.set_escdelay(25)
+        except (AttributeError, curses.error):
+            pass
         # Disable CR→NL translation so Enter (\r, 13) and Ctrl+J (\n, 10) stay
         # distinct.  Without this, ncurses maps \r → \n on input and the two codes
         # collide, making Ctrl+J indistinguishable from Enter.
         curses.nonl()
-        # Also try escape-sequence bindings for terminals that support them.
+        # Escape-sequence bindings for terminals that send them:
         # \x1b\r / \x1b\n — Option+Enter (macOS iTerm2 with "+Esc" Option key setting).
         # \x1b[13;2u     — Shift+Enter (kitty/wezterm or iTerm2 with CSI-u mode).
-        for _seq in ("\x1b\r", "\x1b\n", "\x1b[13;2u"):
-            try:
-                curses.define_key(_seq, _KEY_SHIFT_ENTER)
-            except Exception:
-                pass
-        # Ctrl+Left / Ctrl+Right word-jump sequences (xterm/iTerm2 variants).
-        for _seq in ("\x1b[1;5D", "\x1b[5D"):
-            try: curses.define_key(_seq, _KEY_CTRL_LEFT)
-            except Exception: pass
-        for _seq in ("\x1b[1;5C", "\x1b[5C"):
-            try: curses.define_key(_seq, _KEY_CTRL_RIGHT)
-            except Exception: pass
-        self.stdscr.nodelay(True)  # non-blocking getch — keys processed immediately
+        # \x1b[200~ / \x1b[201~ — bracketed paste start / end (enabled in run()).
+        for seqs, code in ((("\x1b\r", "\x1b\n", "\x1b[13;2u"), _KEY_SHIFT_ENTER),
+                           (("\x1b[1;5D", "\x1b[5D"), _KEY_CTRL_LEFT),
+                           (("\x1b[1;5C", "\x1b[5C"), _KEY_CTRL_RIGHT),
+                           (("\x1b[200~",), _KEY_PASTE_START),
+                           (("\x1b[201~",), _KEY_PASTE_END)):
+            for seq in seqs:
+                try:
+                    curses.define_key(seq, code)
+                except Exception:
+                    pass
+        self.stdscr.nodelay(True)  # non-blocking reads — keys processed immediately
 
         rows, cols = stdscr.getmaxyx()
         self._layout = _compute_layout(rows, cols, companion_h=_COMPANION_H)
@@ -376,24 +487,18 @@ class TUI:
     def _waiting_for_input(self) -> bool:
         return self.controller.waiting
 
+    def _prefix(self) -> str:
+        """The input prompt: ? answering momo, ⊘ busy, › ready."""
+        return "? " if self._waiting_for_input else "⊘ " if self._busy else "› "
+
     def _build_windows(self):
-        # Called on startup and on every resize / companion toggle.  Previous
-        # window objects are simply abandoned — curses cleans up the C-level
-        # WINDOW structs when the Python objects are GC'd.  There is no
-        # explicit delwin() call here, which is safe as long as no background
-        # thread holds a reference to the old windows.
-        # Invalidate the companion draw cache so the first _draw_companion call
-        # after a rebuild always paints the new window from scratch.
-        self._companion_drawn_x        = -1
-        self._companion_drawn_frame    = -1
-        self._companion_drawn_mew      = False
-        self._companion_drawn_mew_text = ""
+        # Called on startup and on every resize / companion toggle.  Old window
+        # objects are dropped; curses frees them when they are collected.
+        self._companion.drawn = None   # the new companion window starts blank
         L = self._layout
         cols = L["cols"]
-        # Guard against a terminal too small to fit the fixed regions: newwin
-        # raises if a window would extend past the screen. Detect it up front,
-        # flag it, and let _redraw paint a "too small" placeholder instead of
-        # building (and then drawing into) windows that don't fit.
+        # A terminal too small for the fixed regions makes newwin raise: flag it
+        # and let _redraw paint a "too small" placeholder instead.
         rows, _ = self.stdscr.getmaxyx()
         if cols < 20 or L["chat_h"] < 1 or L["input_y"] + L["input_h"] > rows:
             self._too_small = True
@@ -404,12 +509,9 @@ class TUI:
         self._chat_win   = curses.newwin(L["chat_h"],  cols, L["chat_y"],   0)
         self._status_win = curses.newwin(_STATUS_H,    cols, L["status_y"], 0)
         self._input_win  = curses.newwin(L["input_h"], cols, L["input_y"],  0)
-        # leaveok(True) tells curses it does NOT need to park the hardware
-        # cursor in this window after refreshing it.  Without this,
-        # curses.doupdate() would move the terminal cursor to wherever the last
-        # addstr landed in the chat or status window, fighting the explicit
-        # win.move() call in _draw_input.  Only _input_win is left with
-        # leaveok=False (the default) so doupdate always parks the cursor there.
+        # leaveok(True): doupdate need not park the hardware cursor in these
+        # windows.  Only _input_win keeps leaveok=False, so the cursor always
+        # ends up in the input box.
         self._chat_win.leaveok(True)
         self._status_win.leaveok(True)
         if L["companion_h"] > 0:
@@ -419,25 +521,22 @@ class TUI:
             self._companion_win = None
 
     def _rebuild(self):
+        """New terminal size (or companion shown/hidden): new windows, and the
+        transcript re-wrapped to the new width."""
         rows, cols = self.stdscr.getmaxyx()
         self._layout = _compute_layout(
-            rows, cols,
-            companion_h=_COMPANION_H if self._companion_visible else 0,
-        )
+            rows, cols, companion_h=_COMPANION_H if self._view["companion"] else 0)
         self._build_windows()
+        self._rebuild_chat_buf()
         self.stdscr.clear()
         self.stdscr.noutrefresh()
         self._redraw()
 
     def _redraw(self):
-        # Each draw method calls win.noutrefresh() to mark its backing buffer as
-        # dirty without touching the physical screen.  The single curses.doupdate()
-        # at the end flushes all dirty buffers to the terminal in one pass.
-        # This noutrefresh/doupdate split is why partial redraws (e.g. spinner,
-        # animation) can update individual windows without flickering the rest.
-        # _draw_input() MUST be called last so its noutrefresh() is the final
-        # one recorded — doupdate() parks the cursor at the last leaveok=False
-        # window's noutrefresh position, which must be the input window.
+        # Each draw method calls win.noutrefresh(); the single doupdate() at the
+        # end flushes them in one pass.  _draw_input() MUST be last: doupdate()
+        # parks the cursor at the last leaveok=False window refreshed.
+        self._input_dirty = False
         if self._too_small:
             self._draw_too_small()
             return
@@ -446,7 +545,8 @@ class TUI:
         self._chat_buf.render(self._chat_win, L["chat_h"], L["cols"], edge_color=chat_edge)
         self._update_suggest()
         self._draw_suggest()
-        self._draw_companion()
+        if self._companion_win is not None:
+            self._companion.draw(self._companion_win, L["cols"])
         self._draw_status()
         self._draw_input()
         curses.doupdate()
@@ -457,11 +557,7 @@ class TUI:
         self.stdscr.erase()
         rows, cols = self.stdscr.getmaxyx()
         msg = "Terminal too small — please enlarge"
-        try:
-            self.stdscr.addnstr(max(0, rows // 2), max(0, (cols - len(msg)) // 2),
-                                msg, max(1, cols - 1))
-        except curses.error:
-            pass
+        _put(self.stdscr, max(0, rows // 2), max(0, (cols - len(msg)) // 2), msg, max(1, cols - 1))
         self.stdscr.noutrefresh()
         curses.doupdate()
 
@@ -486,43 +582,22 @@ class TUI:
         avail = max(0, cols - 1 - len(prefix))
         line = prefix + self._compose_status(avail)
         line = line[:cols - 1].ljust(cols - 1)
-
-        # When called from a spinner tick, only the middle text row (row 1)
-        # needs to be repainted — the top and bottom rule rows are static
-        # between events, so erasing and redrawing them on every 10 Hz tick
-        # is pure waste.
+        # A spinner tick repaints only the text row; the rules are static.
         if not spinner_only:
             win.erase()
             rule = "─" * (cols - 1)
-            # All three addnstr calls are wrapped because curses raises an error
-            # when writing to the last cell of a window (bottom-right corner
-            # causes an automatic scroll attempt).  Silently swallowing here is
-            # intentional — the status bar degrades gracefully on very narrow
-            # terminals.
-            # HAZARD: a programming error (e.g. wrong row index) would also be
-            # swallowed invisibly.  If the status bar ever disappears
-            # unexpectedly, temporarily replace `pass` with a raise to expose
-            # the real error.
-            try:
-                win.addnstr(0, 0, rule, cols - 1, curses.color_pair(top_color))
-            except curses.error:
-                pass
-            try:
-                win.addnstr(2, 0, rule, cols - 1, curses.color_pair(bottom_color))
-            except curses.error:
-                pass
-        try:
-            win.addnstr(1, 0, line, cols - 1, line_attr)
-        except curses.error:
-            pass
+            _put(win, 0, 0, rule, cols - 1, curses.color_pair(top_color))
+            _put(win, 2, 0, rule, cols - 1, curses.color_pair(bottom_color))
+        _put(win, 1, 0, line, cols - 1, line_attr)
         win.noutrefresh()
 
     def _compose_status(self, avail: int) -> str:
         """Build the status text, shortening DIR from the front to fit `avail` cols."""
         head = (f"MODE: {self._st_mode} | VIA: {self._st_provider} | MODEL: {self._st_model} | "
                 f"HOST: {self._st_host} | CTX: {self._st_ctx}% | DIR: ")
-        budget = avail - len(head) - len(self._st_extra)
-        return head + _shorten_path_left(self._st_dir, budget) + self._st_extra
+        tail = self._st_extra + (" | ▼ NEW (PgDn)" if self._new_below else "")
+        budget = avail - len(head) - len(tail)
+        return head + _shorten_path_left(self._st_dir, budget) + tail
 
     def _build_screen_state(self) -> tuple[list[str], list[int], int, int]:
         """Return (screen_lines, line_starts_raw, cursor_screen_line, cursor_screen_col).
@@ -533,10 +608,9 @@ class TUI:
         """
         cols = self._layout["cols"]
         w    = max(1, cols - 2)  # rightmost column reserved for scrollbar
-        prefix = "? " if self._waiting_for_input else "⊘ " if self._busy else "› "
-        plen   = len(prefix)
+        prefix = self._prefix()
         raw_full      = prefix + self._input
-        cursor_in_raw = plen + self._cursor
+        cursor_in_raw = len(prefix) + self._cursor
 
         screen_lines:    list[str] = []
         line_starts_raw: list[int] = []
@@ -558,7 +632,9 @@ class TUI:
                 line_buf = []; line_start = i + 1
                 sc_line += 1; sc_col = 0
             else:
-                line_buf.append(ch); sc_col += 1
+                # A pasted tab stays a tab in the message but takes one cell here,
+                # so the caret arithmetic (one char = one column) holds.
+                line_buf.append(" " if ch == "\t" else ch); sc_col += 1
                 if sc_col >= w:
                     screen_lines.append("".join(line_buf))
                     line_starts_raw.append(line_start)
@@ -576,7 +652,7 @@ class TUI:
             i -= 1
         while i > 0 and self._input[i - 1] not in " \t\n":
             i -= 1
-        return i
+        return max(0, i)
 
     def _word_end_right(self) -> int:
         """Return the index in _input for the end of the next word."""
@@ -591,14 +667,11 @@ class TUI:
     def _cursor_move_vertical(self, direction: int) -> bool:
         """Move caret up (-1) or down (+1) by one screen line.
         Returns True if moved; False at the boundary (caller falls back to history nav)."""
-        prefix = "? " if self._waiting_for_input else "⊘ " if self._busy else "› "
-        plen   = len(prefix)
+        plen = len(self._prefix())
         screen_lines, line_starts_raw, csl, csc = self._build_screen_state()
-
         target = csl + direction
         if target < 0 or target >= len(screen_lines):
             return False
-
         target_col   = min(csc, len(screen_lines[target]))
         self._cursor = max(0, line_starts_raw[target] + target_col - plen)
         return True
@@ -609,9 +682,7 @@ class TUI:
         cols = self._layout["cols"]
         h    = self._layout["input_h"]
         focused = self._focus == "input"
-
-        prefix = "? " if self._waiting_for_input else "⊘ " if self._busy else "› "
-        plen   = len(prefix)
+        plen = len(self._prefix())
         screen_lines, _starts, cursor_screen_line, cursor_screen_col = self._build_screen_state()
 
         # Scroll so the cursor row is always visible.
@@ -620,47 +691,18 @@ class TUI:
         cursor_row = cursor_screen_line - first_visible
 
         prefix_attr = curses.color_pair(_C_FOCUS) if focused else curses.color_pair(0)
-        is_cmd   = self._input.startswith("/")
-        cmd_attr = curses.color_pair(_C_CMD) if is_cmd else curses.color_pair(0)
-
+        cmd_attr = curses.color_pair(_C_CMD) if self._input.startswith("/") else curses.color_pair(0)
         text_w = cols - 2  # rightmost column belongs to the scrollbar
         for row, text in enumerate(visible):
-            if row >= h:
-                break
-            try:
-                if first_visible + row == 0:
-                    # First screen line — render prefix in its own colour.
-                    head = text[:plen]
-                    tail = text[plen:]
-                    win.addnstr(row, 0, head, len(head), prefix_attr)
-                    if tail:
-                        win.addnstr(row, plen, tail, text_w - plen, cmd_attr)
-                else:
-                    win.addnstr(row, 0, text, text_w, cmd_attr)
-            except curses.error:
-                pass
-
-        # Scrollbar — mirrors _LineBuffer.render() logic.
-        total  = len(screen_lines)
-        sx     = cols - 1
-        edge_color = _C_FOCUS if focused else _C_BORDER
-        if total > h:
-            thumb_h   = max(1, round(h * h / total))
-            ratio     = first_visible / max(1, total - h)
-            thumb_top = round(ratio * (h - thumb_h))
-            for r in range(h):
-                ch = "█" if thumb_top <= r < thumb_top + thumb_h else "│"
-                try:
-                    win.addch(r, sx, ch, curses.color_pair(edge_color))
-                except curses.error:
-                    pass
-        else:
-            for r in range(h):
-                try:
-                    win.addch(r, sx, "│", curses.color_pair(edge_color))
-                except curses.error:
-                    pass
-
+            if first_visible + row == 0:
+                # First screen line — render prefix in its own colour.
+                _put(win, row, 0, text[:plen], plen, prefix_attr)
+                if text[plen:]:
+                    _put(win, row, plen, text[plen:], text_w - plen, cmd_attr)
+            else:
+                _put(win, row, 0, text, text_w, cmd_attr)
+        _draw_vbar(win, cols - 1, h, len(screen_lines), first_visible,
+                   _C_FOCUS if focused else _C_BORDER)
         try:
             if focused:
                 curses.curs_set(1)
@@ -672,6 +714,7 @@ class TUI:
         win.noutrefresh()
 
     def _redraw_input_only(self):
+        self._input_dirty = False
         if self._too_small:
             self._draw_too_small()
             return
@@ -699,11 +742,18 @@ class TUI:
             return  # unchanged (also keeps an Esc-dismissed list closed)
         self._sugg_query = query
         self._sugg_idx = -1
+        self._sugg_waiting = False
         if query is None:
             self._sugg = []
         elif query[0] == "@":
-            self._sugg = [{"path": p} for p in
-                          fuzzy_search(workspace_files(self.harness.workdir), query[1])]
+            # Never walk the tree on the key loop: until the background walk has a
+            # list, say so, and the idle tick recomputes when it arrives.
+            files = workspace_files_nowait(self.harness.workdir)
+            if files is None:
+                self._sugg_waiting = True
+                self._sugg = [{"note": "searching the workspace…"}]
+            else:
+                self._sugg = [{"path": p} for p in fuzzy_search(files, query[1])]
         else:
             v = query[1]
             word = v.split()[0].lower()
@@ -715,9 +765,12 @@ class TUI:
     def _close_suggest(self):
         self._sugg = []
         self._sugg_idx = -1
+        self._sugg_waiting = False
 
     def _pick_suggest(self, i: int):
         item = self._sugg[i]
+        if "note" in item:
+            return
         if "path" in item:
             # Replace the pending "@query" with `path`, like the web UI.
             path = item["path"]
@@ -745,80 +798,89 @@ class TUI:
             return
         # Scroll the visible slice so the highlighted row stays in view.
         first = min(max(0, self._sugg_idx - n + 1), len(self._sugg) - n)
-        is_path = "path" in self._sugg[0]
-        if is_path:
+        kind = "path" if "path" in self._sugg[0] else "note" if "note" in self._sugg[0] else "cmd"
+        if kind == "path":
             width = min(cols - 2, max(len(c["path"]) for c in self._sugg) + 4)
+        elif kind == "note":
+            width = min(cols - 2, len(self._sugg[0]["note"]) + 4)
         else:
             usage_w = max(len(c["usage"]) for c in self._sugg)
             width = min(cols - 2, usage_w + max(len(c["desc"]) for c in self._sugg) + 4)
         for row, i in enumerate(range(first, first + n)):
             item = self._sugg[i]
-            if is_path:
+            if kind == "path":
                 label = "@ " + _shorten_path_left(item["path"], width - 3)
+            elif kind == "note":
+                label = item["note"]
             else:
                 label = f"{item['usage'].ljust(usage_w)}  {item['desc']}"
             attr = (curses.A_REVERSE | curses.color_pair(_C_FOCUS) if i == self._sugg_idx
                     else curses.color_pair(_C_CMD))
-            try:
-                win.addnstr(content_h - n + row, 0, (" " + label).ljust(width), width, attr)
-            except curses.error:
-                pass
+            _put(win, content_h - n + row, 0, (" " + label).ljust(width), width, attr)
         win.noutrefresh()
 
     # ── adding lines to chat buffer ───────────────────────────────────────────
 
-    def _add_chat(self, role: str, text: str):
-        self._chat_events.append(("chat", role, text))
-        self._render_chat(role, text)
+    def _add(self, *ev):
+        """Record a transcript event (for re-rendering on view changes) and render
+        it — above the live preview while a reply streams, so it doesn't cut it."""
+        self._chat_events.append(ev)
+        if self._stream_start is None:
+            self._render_event(ev)
+            return
+        self._chat_buf.truncate(self._stream_start)
+        self._render_event(ev)
+        self._stream_start = len(self._chat_buf)
+        self._render_stream_preview()
+
+    def _render_event(self, ev: tuple):
+        kind = ev[0]
+        if kind == "chat":
+            self._render_chat(ev[1], ev[2])
+        elif kind == "tool_call":
+            self._render_tool_call(ev[1], ev[2])
+        elif kind == "tool_result":
+            self._render_tool_result(ev[1], ev[2])
+        elif kind == "think":
+            self._render_think(ev[1])
+        elif kind == "diff":
+            self._render_diff(ev[1])
+
+    _ROLE_LABELS = {
+        "user": ("[user]", _C_USER),
+        "assistant": ("[assistant]", _C_ASSISTANT),
+        "system": ("[system]", _C_SYSTEM),
+        "ask": ("[momo asks]", _C_WARN),   # ask_user: momo waits for your answer
+    }
 
     def _render_chat(self, role: str, text: str):
         cols = max(20, self._layout["cols"] - 2)
-        label_map = {
-            "user": ("[user]", _C_USER),
-            "assistant": ("[assistant]", _C_ASSISTANT),
-            "system": ("[system]", _C_SYSTEM),
-        }
-        label, color = label_map.get(role, (f"[{role}]", _C_SYSTEM))
-        if self._md_expanded and role == "assistant":
+        label, color = self._ROLE_LABELS.get(role, (f"[{role}]", _C_SYSTEM))
+        if self._view["md_render"] and role == "assistant":
             self._chat_buf.append(label, color)
             for (line_text, line_color, line_attrs) in md_render.process(text, cols):
                 self._chat_buf.append(line_text, line_color, line_attrs)
             self._chat_buf.append("", 0)
             return
         indent = " " * (len(label) + 1)
-        source_lines = text.splitlines() or [""]
         first = True
-        for src in source_lines:
-            wrapped = textwrap.wrap(src, width=cols - len(label) - 1) or [""]
-            for wl in wrapped:
-                if first:
-                    self._chat_buf.append(f"{label} {wl}", color)
-                    first = False
-                else:
-                    self._chat_buf.append(f"{indent}{wl}", color)
+        for src in text.splitlines() or [""]:
+            for wl in textwrap.wrap(src, width=cols - len(label) - 1) or [""]:
+                self._chat_buf.append(f"{label} {wl}" if first else f"{indent}{wl}", color)
+                first = False
         self._chat_buf.append("", 0)
-
-    def _add_tool_call(self, name: str, args: dict):
-        self._chat_events.append(("tool_call", name, args))
-        self._render_tool_call(name, args)
 
     def _render_tool_call(self, name: str, args: dict):
         cols = max(20, self._layout["cols"] - 2)
-        args_str = json.dumps(args, separators=(",", ":"))
-        full = f"▶ {name}({args_str})"
-        if self._tools_expanded:
+        full = f"▶ {name}({_brief_args(args)})"
+        if self._view["tool_output"]:
             for line in textwrap.wrap(full, width=cols) or [full]:
                 self._chat_buf.append(line, _C_TOOL_NAME)
         else:
-            abbrev = (full[:50] + "…") if len(full) > 50 else full
-            self._chat_buf.append(abbrev, _C_TOOL_NAME)
-
-    def _add_tool_result(self, name: str, result: str):
-        self._chat_events.append(("tool_result", name, result))
-        self._render_tool_result(name, result)
+            self._chat_buf.append((full[:50] + "…") if len(full) > 50 else full, _C_TOOL_NAME)
 
     def _render_tool_result(self, name: str, result: str):
-        if not self._tools_expanded:
+        if not self._view["tool_output"]:
             return
         cols = max(20, self._layout["cols"] - 4)
         prefix = "  → "
@@ -831,12 +893,8 @@ class TUI:
                 self._chat_buf.append(wrapped, _C_TOOL_RES)
         self._chat_buf.append("", 0)
 
-    def _add_think(self, text: str):
-        self._chat_events.append(("think", text))
-        self._render_think(text)
-
     def _render_think(self, text: str):
-        if not self._think_expanded:
+        if not self._view["think_output"]:
             return
         cols = max(20, self._layout["cols"] - 4)
         self._chat_buf.append("[thinking]", _C_THINK)
@@ -844,10 +902,6 @@ class TUI:
             for line in textwrap.wrap(src, width=cols - 2) or [src]:
                 self._chat_buf.append("  " + line, _C_THINK)
         self._chat_buf.append("", 0)
-
-    def _add_diff(self, ev: DiffEvent):
-        self._chat_events.append(("diff", ev))
-        self._render_diff(ev)
 
     _DIFF_KIND_COLOR = {
         "add":  _C_DIFF_ADD,
@@ -858,7 +912,7 @@ class TUI:
     _DIFF_MAX_LINES = 40  # cap body lines shown per diff, like tool results
 
     def _render_diff(self, ev: DiffEvent):
-        if not self._diff_expanded:
+        if not self._view["diff_output"]:
             return
 
         # Header line(s) — presentation differs by style; the body is identical.
@@ -868,7 +922,7 @@ class TUI:
             self._chat_buf.append("", 0)
             return
 
-        if self._diff_style == "git":
+        if self._view["diff_style"] == "git":
             self._chat_buf.append(f"diff --git a/{ev.path} b/{ev.path}", _C_DIFF_META,
                                   curses.A_BOLD)
             self._chat_buf.append(f"--- {'/dev/null' if ev.is_new else 'a/' + ev.path}",
@@ -902,320 +956,194 @@ class TUI:
         self._chat_buf.append("", 0)
 
     def _rebuild_chat_buf(self):
-        # Re-render all events from scratch. Called when display options change
-        # (e.g. tool expand/collapse toggle) so the layout is consistent.
+        """Re-render every event from scratch: display options or the width
+        changed.  Keeps the reading position unless following new output."""
+        old_scroll = self._chat_buf._scroll
         self._chat_buf = _LineBuffer()
-        streaming = self._stream_start is not None
         for ev in self._chat_events:
-            if ev[0] == "chat":
-                self._render_chat(ev[1], ev[2])
-            elif ev[0] == "tool_call":
-                self._render_tool_call(ev[1], ev[2])
-            elif ev[0] == "tool_result":
-                self._render_tool_result(ev[1], ev[2])
-            elif ev[0] == "think":
-                self._render_think(ev[1])
-            elif ev[0] == "diff":
-                self._render_diff(ev[1])
-        if streaming:  # keep the live preview below the rebuilt transcript
-            self._stream_start = len(self._chat_buf._lines)
+            self._render_event(ev)
+        if self._stream_start is not None:  # keep the live preview below the rebuilt transcript
+            self._stream_start = len(self._chat_buf)
+            # The parts were wrapped for the old width: wrap their text again.
+            self._stream = {kind: self._new_stream_part(kind, p.text) for kind, p in self._stream.items()}
             self._render_stream_preview()
+        if self._follow:
+            self._chat_buf.scroll_to_bottom()
+        else:
+            self._chat_buf.scroll_to(old_scroll)
 
     # ── event processing ──────────────────────────────────────────────────────
 
     def _drain_events(self):
-        # Drain the entire queue before redrawing — one redraw per poll cycle
-        # is sufficient and avoids screen flicker from partial updates.
-        # Thread safety: the subscription is a queue.Queue; get_nowait() is
-        # thread-safe.  All other state (_chat_buf, etc.) is only mutated
-        # here and in the key-handler path, both of which run on the main thread,
-        # so no additional locking is required.
+        """Apply every queued harness event; returns whether anything changed.
+        The subscription is a thread-safe queue, and all TUI state is touched
+        only on this (the main) thread."""
         changed = False
         stream_dirty = False
-        # Buffer index just before the last ChatEvent rendered this cycle.
-        # Used below to scroll the start of the new message into view.
+        lines_before = len(self._chat_buf)
+        # Buffer index just before the last message rendered this cycle, so the
+        # start of a new message (not its end) is what comes into view.
         last_chat_start: int | None = None
         try:
             while True:
                 ev = self._events.get_nowait()
-                if isinstance(ev, ChatEvent):
-                    last_chat_start = len(self._chat_buf._lines)
-                    self._add_chat(ev.role, ev.text)
-                    changed = True
-                elif isinstance(ev, UserEvent):
-                    last_chat_start = len(self._chat_buf._lines)
-                    self._add_chat("user", ev.text)
-                    changed = True
+                if isinstance(ev, CompanionEvent):   # animation state only, no redraw
+                    self._companion.idle = ev.idle
+                    self._companion.recaps.update(ev.lines)
+                    continue
+                changed = True
+                if isinstance(ev, (ChatEvent, UserEvent, ErrorEvent, AskUserEvent)):
+                    last_chat_start = len(self._chat_buf)
+                    if isinstance(ev, ChatEvent):
+                        self._add("chat", ev.role, ev.text)
+                    elif isinstance(ev, UserEvent):
+                        self._add("chat", "user", ev.text)
+                    elif isinstance(ev, AskUserEvent):
+                        self._add("chat", "ask", ev.question)
+                    else:
+                        self._add("chat", "system", f"ERROR: {ev.text}")
                 elif isinstance(ev, ResetEvent):
                     self._chat_events = []
                     self._chat_buf = _LineBuffer()
                     self._end_stream_preview()
                     last_chat_start = None
-                    changed = True
+                    lines_before = 0
+                    self._follow, self._new_below = True, False
                 elif isinstance(ev, DeltaEvent):
                     if self._stream_start is None:
-                        self._stream_start = len(self._chat_buf._lines)
-                    self._stream_text[ev.kind] = self._stream_text.get(ev.kind, "") + ev.text
+                        self._stream_start = len(self._chat_buf)
+                    part = self._stream.get(ev.kind)
+                    if part is None:
+                        part = self._stream[ev.kind] = self._new_stream_part(ev.kind)
+                    part.add(ev.text)
                     stream_dirty = True
-                    changed = True
                 elif isinstance(ev, StreamEndEvent):
                     self._end_stream_preview()
                     stream_dirty = False
-                    changed = True
-                elif isinstance(ev, BusyEvent):
-                    changed = True
-                elif isinstance(ev, CompanionEvent):
-                    self._companion_idle = ev.idle
-                    self._companion_recaps.update(ev.lines)
                 elif isinstance(ev, ToolCallEvent):
-                    self._add_tool_call(ev.name, ev.args)
-                    changed = True
+                    self._add("tool_call", ev.name, ev.args)
                 elif isinstance(ev, ToolResultEvent):
-                    self._add_tool_result(ev.name, ev.result)
-                    changed = True
-                elif isinstance(ev, StatusEvent):
-                    ctx_map = {"normal": _C_STATUS, "yellow": _C_WARN, "red": _C_DANGER}
-                    self._ctx_color = ctx_map.get(ev.ctx_color, _C_STATUS)
-                    tools_str = "" if ev.tools_enabled else " | TOOLS: off"
-                    run_str = " | RUN: confirm" if ev.run_confirm else ""
-                    net_str = ""
-                    if ev.net_access != "off":
-                        net_str = f" | NET: {ev.net_access}"
-                        if not ev.net_confirm:
-                            net_str += " (writes: auto)"
-                    self._st_mode  = f"{ev.mode} [{ev.plan_progress}]" if ev.plan_progress else ev.mode
-                    self._st_model = ev.model
-                    self._st_host  = ev.host
-                    self._st_provider = ev.provider or self._st_provider
-                    self._st_ctx   = ev.ctx_pct
-                    self._st_dir   = ev.workdir
-                    guides_str = " | GUIDES" if ev.guides else ""
-                    idx_str = ""
-                    if ev.index_enabled:
-                        idx_str = " | IDX"
-                        if ev.index_progress:
-                            idx_str += f" {ev.index_progress}"
-                        elif ev.index_state == "stopped":
-                            idx_str += " stopped"
-                        if ev.index_degraded:
-                            idx_str += " (degraded)"
-                    self._st_extra = f"{tools_str}{run_str}{net_str}{idx_str}{guides_str}"
-                    changed = True
+                    self._add("tool_result", ev.name, ev.result)
                 elif isinstance(ev, ThinkEvent):
-                    self._add_think(ev.text)
-                    changed = True
+                    self._add("think", ev.text)
                 elif isinstance(ev, DiffEvent):
-                    self._add_diff(ev)
-                    changed = True
-                elif isinstance(ev, AskUserEvent):
-                    self._add_chat("assistant", ev.question)
-                    changed = True
+                    self._add("diff", ev)
+                elif isinstance(ev, StatusEvent):
+                    self._apply_status(ev)
                 elif isinstance(ev, DoneEvent):
                     self._spinner_frame = 0
-                    changed = True
-                elif isinstance(ev, ErrorEvent):
-                    last_chat_start = len(self._chat_buf._lines)
-                    self._add_chat("system", f"ERROR: {ev.text}")
-                    changed = True
+                # BusyEvent: nothing to store, the redraw shows the new state.
         except queue.Empty:
             pass
 
         if stream_dirty:
             self._render_stream_preview()
-
-        # Place the start of the new message at the top of the viewport so the
-        # beginning is always visible rather than the end.
-        if last_chat_start is not None:
-            self._chat_buf.scroll_to_top_of(last_chat_start, self._layout["chat_h"])
-
+        if len(self._chat_buf) != lines_before or stream_dirty:
+            if not self._follow:
+                self._new_below = True       # keep the reading position, flag the news
+            elif last_chat_start is not None and not stream_dirty:
+                self._chat_buf.scroll_to_top_of(last_chat_start, self._layout["chat_h"])
+            else:
+                self._chat_buf.scroll_to_bottom()
         return changed
 
+    def _apply_status(self, ev: StatusEvent):
+        ctx_map = {"normal": _C_STATUS, "yellow": _C_WARN, "red": _C_DANGER}
+        self._ctx_color = ctx_map.get(ev.ctx_color, _C_STATUS)
+        parts = []
+        if not ev.tools_enabled:
+            parts.append("TOOLS: off")
+        if ev.run_confirm:
+            parts.append("RUN: confirm")
+        if ev.net_access != "off":
+            parts.append(f"NET: {ev.net_access}" + ("" if ev.net_confirm else " (writes: auto)"))
+        if ev.index_enabled:
+            idx = "IDX"
+            if ev.index_progress:
+                idx += f" {ev.index_progress}"
+            elif ev.index_state == "stopped":
+                idx += " stopped"
+            if ev.index_degraded:
+                idx += " (degraded)"
+            parts.append(idx)
+        if ev.guides:
+            parts.append("GUIDES")
+        self._st_extra = "".join(f" | {p}" for p in parts)
+        self._st_mode  = f"{ev.mode} [{ev.plan_progress}]" if ev.plan_progress else ev.mode
+        self._st_model = ev.model
+        self._st_host  = ev.host
+        self._st_provider = ev.provider or self._st_provider
+        self._st_ctx   = ev.ctx_pct
+        if ev.workdir != self._st_dir:
+            workspace_files_nowait(self.harness.workdir)   # warm the new tree's @-search list
+        self._st_dir   = ev.workdir
+
+    def _new_stream_part(self, kind: str, text: str = "") -> _StreamPart:
+        cols = self._layout["cols"]
+        if kind == "thinking":
+            part = _StreamPart(max(20, cols - 4) - 2, "  ", "  ")
+        else:
+            label = self._ROLE_LABELS["assistant"][0]
+            part = _StreamPart(max(20, cols - 2) - len(label) - 1, label + " ", " " * (len(label) + 1))
+        if text:
+            part.add(text)
+        return part
+
     def _render_stream_preview(self):
-        """Redraw the in-progress reply below the final transcript lines."""
-        del self._chat_buf._lines[self._stream_start:]
-        if self._stream_text.get("thinking"):
-            self._render_think(self._stream_text["thinking"])
-        if self._stream_text.get("content"):
-            self._render_chat("assistant", self._stream_text["content"] + " ▍")
-        self._chat_buf.scroll_to_bottom()
+        """Redraw the in-progress reply below the final transcript lines, as plain
+        text (the final message renders the Markdown)."""
+        self._chat_buf.truncate(self._stream_start)
+        think = self._stream.get("thinking")
+        if think is not None and self._view["think_output"]:
+            self._chat_buf.append("[thinking]", _C_THINK)
+            for line in think.lines():
+                self._chat_buf.append(line, _C_THINK)
+            self._chat_buf.append("", 0)
+        content = self._stream.get("content")
+        if content is not None:
+            for line in content.lines(" ▍"):
+                self._chat_buf.append(line, _C_ASSISTANT)
+            self._chat_buf.append("", 0)
 
     def _end_stream_preview(self):
         if self._stream_start is not None:
-            del self._chat_buf._lines[self._stream_start:]
-            self._chat_buf.scroll_to_bottom()
+            self._chat_buf.truncate(self._stream_start)
         self._stream_start = None
-        self._stream_text = {"thinking": "", "content": ""}
+        self._stream = {}
 
-    # ── input handling ────────────────────────────────────────────────────────
+    # ── scrolling ─────────────────────────────────────────────────────────────
 
-    def _toggle_tools(self):
-        self._tools_expanded = not self._tools_expanded
-        self._rebuild_chat_buf()
-        self._redraw()
+    def _scrolled(self):
+        """After the user scrolled the chat: follow new output again only once
+        they are back at the bottom."""
+        self._follow = self._chat_buf.at_bottom()
+        if self._follow:
+            self._new_below = False
 
-    def _toggle_think(self):
-        self._think_expanded = not self._think_expanded
-        self._rebuild_chat_buf()
-        self._redraw()
+    def _follow_bottom(self):
+        self._chat_buf.scroll_to_bottom()
+        self._follow, self._new_below = True, False
 
-    def _toggle_md(self):
-        self._md_expanded = not self._md_expanded
-        self._rebuild_chat_buf()
-        self._redraw()
+    # ── view options ──────────────────────────────────────────────────────────
 
-    def _toggle_diff(self):
-        self._diff_expanded = not self._diff_expanded
-        self._rebuild_chat_buf()
-        self._redraw()
-
-    def _set_diff_style(self, style: str):
-        self._diff_style = style
-        self._rebuild_chat_buf()
-        self._redraw()
+    def _set_view(self, changes: dict):
+        """Apply view options (a CommandResult's view fields or a Shift+key)."""
+        changes = {k: v for k, v in changes.items() if k in self._view and self._view[k] != v}
+        if not changes:
+            return
+        self._view.update(changes)
+        if "companion" in changes:
+            self._rebuild()          # a new layout, which re-renders and redraws too
+        else:
+            self._rebuild_chat_buf()
+            self._redraw()
 
     def _toggle_run_confirm(self):
         self.controller.toggle_run_confirm()
         self._drain_events()  # consume the StatusEvent so the bar updates now
         self._redraw()
 
-    def _advance_companion(self):
-        cols  = self._layout["cols"]
-        max_x = walk_max_x(cols)   # keeps room for a full speech bubble on the right
-
-        if self._companion_state == "walk":
-            self._companion_walk_step ^= 1
-            self._companion_x = max(0, min(self._companion_x + self._companion_dir, max_x))
-
-            if self._companion_x == 0 or self._companion_x == max_x or random.random() < 0.02:
-                self._companion_state       = "sit"
-                self._companion_sit_ticks   = random.randint(50, 100)
-                self._companion_blink_ticks = 0
-                # Only lines that fit beside momo here; it turns to face its bubble.
-                room  = bubble_room(self._companion_x, cols)
-                recap = (self._companion_recaps.pick(time.monotonic(), room)
-                         if self._companion_idle else None)
-                text  = recap
-                if not text and random.random() < 0.75:
-                    key  = (self.harness.mode, self._busy and not self._waiting_for_input)
-                    pool = [t for t in _SPEECH_TEXTS.get(key, _SPEECH_TEXTS_DEFAULT) if len(t) <= room]
-                    text = random.choice(pool) if pool else None
-                if text:
-                    self._companion_mew_text  = text
-                    # Longer lines stay up longer; recaps a little longer still.
-                    self._companion_mew_ticks = (random.randint(18, 32) + len(text) // 2
-                                                 + (10 if recap else 0))
-                    self._companion_sit_ticks = max(self._companion_sit_ticks,
-                                                    self._companion_mew_ticks + 10)
-                    self._companion_dir = bubble_dir(
-                        self._companion_x, cols, self._companion_dir, len(text)
-                    ) or self._companion_dir
-
-            if self._companion_blink_ticks > 0:
-                self._companion_blink_ticks -= 1
-                self._companion_current_frame = (
-                    _MOMO_WR_BLINK if self._companion_dir > 0 else _MOMO_WL_BLINK
-                )
-            else:
-                frames = _MOMO_WR if self._companion_dir > 0 else _MOMO_WL
-                self._companion_current_frame = frames[self._companion_walk_step]
-                if random.random() < 0.03:
-                    self._companion_blink_ticks = 2
-
-        else:  # sit
-            self._companion_sit_ticks -= 1
-            if self._companion_sit_ticks <= 0:
-                # Choose a new walk direction before leaving sit so the first
-                # walk tick moves in the right direction.
-                if self._companion_x <= 2:
-                    self._companion_dir = 1
-                elif self._companion_x >= max_x - 2:
-                    self._companion_dir = -1
-                else:
-                    self._companion_dir = random.choice([-1, 1])
-                self._companion_state = "walk"
-                # Clear mew on sit→walk so the speech bubble doesn't persist
-                # into the walking animation (mew is only drawn in _draw_companion
-                # when mew_ticks > 0, so the effect is purely visual).
-                # NOTE: mew_ticks is NOT cleared on walk→sit (there is no
-                # equivalent reset there), but mew is never triggered during
-                # walking so a counter started during sit would simply expire.
-                self._companion_mew_ticks = 0
-
-            # Sit blink is probabilistic each tick, independent of blink_ticks.
-            # This is intentionally simpler than the walk blink (which uses a
-            # multi-tick counter to hold the blink frame open).
-            sit_frames = _MOMO_SIT_L if self._companion_dir < 0 else _MOMO_SIT
-            if random.random() < 0.08:
-                self._companion_current_frame = sit_frames[1]   # blink
-            else:
-                self._companion_current_frame = sit_frames[0]   # normal
-
-            if self._companion_mew_ticks > 0:
-                self._companion_mew_ticks -= 1
-
-    def _draw_companion(self):
-        win = self._companion_win
-        if win is None:
-            return
-
-        # Skip a full erase+redraw when the visible state is identical to the
-        # last paint — position, frame, and mew visibility are all unchanged.
-        mew_visible = self._companion_mew_ticks > 0
-        frame_id    = id(self._companion_current_frame)
-        if (
-            self._companion_x        == self._companion_drawn_x
-            and frame_id             == self._companion_drawn_frame
-            and mew_visible          == self._companion_drawn_mew
-            and self._companion_mew_text == self._companion_drawn_mew_text
-        ):
-            return
-
-        cols  = self._layout["cols"]
-        attr  = curses.color_pair(_C_COMPANION)
-        win.erase()
-        x = 1 + self._companion_x
-        for i, line in enumerate(self._companion_current_frame):
-            try:
-                win.addnstr(i, x, line, cols - x - 1, attr)
-            except curses.error:
-                pass
-        if mew_visible:
-            mew_txt = self._companion_mew_text
-            if self._companion_dir < 0:
-                display = (mew_txt[2:] + " >") if mew_txt.startswith("< ") else mew_txt
-                mew_x = x - len(display) - 1
-                if mew_x >= 0:
-                    try:
-                        win.addnstr(1, mew_x, display, len(display), attr)
-                    except curses.error:
-                        pass
-            else:
-                mew_x = x + _CAT_W + 1
-                if mew_x + len(mew_txt) < cols - 1:
-                    try:
-                        win.addnstr(1, mew_x, mew_txt, cols - mew_x - 1, attr)
-                    except curses.error:
-                        pass
-
-        # Update cache so subsequent identical ticks are skipped.
-        self._companion_drawn_x        = self._companion_x
-        self._companion_drawn_frame    = frame_id
-        self._companion_drawn_mew      = mew_visible
-        self._companion_drawn_mew_text = self._companion_mew_text
-        win.noutrefresh()
-
-    def _toggle_companion(self):
-        self._companion_visible = not self._companion_visible
-        rows, cols = self.stdscr.getmaxyx()
-        self._layout = _compute_layout(
-            rows, cols,
-            companion_h=_COMPANION_H if self._companion_visible else 0,
-        )
-        self._build_windows()
-        self.stdscr.clear()
-        self.stdscr.noutrefresh()
-        self._rebuild_chat_buf()
-        self._redraw()
+    # ── history ───────────────────────────────────────────────────────────────
 
     def _history_prev(self):
         if not self._history:
@@ -1226,7 +1154,7 @@ class TUI:
         elif self._history_idx > 0:
             self._history_idx -= 1
         self._input = self._history[self._history_idx]
-        self._cursor = len(self._input)
+        self._cursor = 0   # at the top, so the next ↑ keeps walking back (as in the web UI)
 
     def _history_next(self):
         if self._history_idx == -1:
@@ -1246,6 +1174,7 @@ class TUI:
         self._close_suggest()
         self._history_idx = -1
         self._history_stash = ""
+        self._follow_bottom()     # your own message: show it and what follows
         outcome = self.controller.submit(text, source="tui")
         if outcome.exit_app:
             raise SystemExit(0)
@@ -1254,20 +1183,7 @@ class TUI:
             self._drain_events()  # the echoed command first
             self._edit_index_filter()
             return
-        if "tool_output" in v:
-            self._tools_expanded = v["tool_output"]
-        if "think_output" in v:
-            self._think_expanded = v["think_output"]
-        if "md_render" in v:
-            self._md_expanded = v["md_render"]
-        if "diff_output" in v:
-            self._diff_expanded = v["diff_output"]
-        if "diff_style" in v:
-            self._diff_style = v["diff_style"]
-        if "companion" in v and v["companion"] != self._companion_visible:
-            self._toggle_companion()  # rebuilds and redraws
-        elif v:
-            self._rebuild_chat_buf()
+        self._set_view(v)
         self._drain_events()  # show the echoed input / command output right away
         self._redraw()
 
@@ -1300,325 +1216,315 @@ class TUI:
             note = (self.harness.set_index_filter(new) if new != text
                     else f"Code index filter unchanged. (If {editor!r} returned before you "
                          f"saved, it does not wait: set $VISUAL to e.g. 'code -w'.)")
-        self._add_chat("system", note)
+        self._add("chat", "system", note)
         self._rebuild()
+
+    # ── key input ─────────────────────────────────────────────────────────────
+
+    def _read_key(self):
+        """One key without waiting: a str for text, an int for a control or
+        special key, None when nothing is buffered.  get_wch, unlike getch,
+        returns a whole character, so é or → is one str, not two bytes."""
+        if self._pending_keys:
+            return self._pending_keys.pop(0)
+        try:
+            k = self.stdscr.get_wch()
+        except curses.error:
+            return None
+        if isinstance(k, str) and (ord(k) < 32 or ord(k) == 127):
+            return ord(k)      # control characters dispatch like keys
+        return k
+
+    def _read_key_soon(self, wait: float = 0.03):
+        """The next key of a sequence that may not have arrived yet."""
+        end = time.monotonic() + wait
+        while True:
+            k = self._read_key()
+            if k is not None or time.monotonic() >= end:
+                return k
+            time.sleep(0.002)
+
+    def _next_key(self):
+        """The next key, with escape sequences decoded: returns _KEY_ESC for a
+        lone Esc, _KEY_IGNORED for an unbound sequence (swallowed whole — pushing
+        it back would type "[1;2A" into the input), and a pasted block as one str."""
+        k = self._read_key()
+        if k == _KEY_PASTE_START:
+            return self._read_paste()
+        if k != 27:
+            return k
+        nxt = self._read_key_soon()
+        if nxt is None:
+            return _KEY_ESC
+        if nxt in (10, 13):
+            return _KEY_SHIFT_ENTER            # Option+Enter
+        if nxt == "b":
+            return _KEY_CTRL_LEFT              # Option+Left / Meta+b
+        if nxt == "f":
+            return _KEY_CTRL_RIGHT             # Option+Right / Meta+f
+        if nxt in ("[", "O"):
+            seq = nxt + self._read_sequence(nxt)
+            return self._read_paste() if seq == "[200~" else _KEY_IGNORED
+        if nxt == 27:
+            self._pending_keys.insert(0, 27)   # Esc Esc: two Escs
+            return _KEY_ESC
+        return nxt                             # Alt+key: the key itself
+
+    def _read_sequence(self, intro: str) -> str:
+        """The rest of an escape sequence: CSI ends at a byte in @..~, SS3 after one char."""
+        out = ""
+        while len(out) < 32:
+            k = self._read_key_soon()
+            if not isinstance(k, str):
+                break
+            out += k
+            if intro == "O" or "@" <= k <= "~":
+                break
+        return out
+
+    def _read_paste(self) -> str:
+        """Everything up to the bracketed-paste end marker, as literal text:
+        newlines and tabs kept, no key dispatch (a tab would switch focus, a
+        capital T toggle a view), and never submitted."""
+        buf: list[str] = []
+        idle_since = time.monotonic()
+        while True:
+            k = self._read_key()
+            if k is None:
+                if time.monotonic() - idle_since > _PASTE_IDLE_S:
+                    break              # the end marker never came
+                time.sleep(0.002)
+                continue
+            idle_since = time.monotonic()
+            if k == _KEY_PASTE_END:
+                break
+            if k == 27:
+                if self._read_key_soon() == "[" and self._read_sequence("[") == "201~":
+                    break
+                continue
+            if isinstance(k, str):
+                buf.append(k)
+            elif k == 13:
+                buf.append("\n")
+            elif k == 10:
+                if not (buf and buf[-1] == "\n" and self._last_paste_cr):
+                    buf.append("\n")
+            elif k == 9:
+                buf.append("\t")
+            self._last_paste_cr = k == 13
+        self._last_paste_cr = False
+        return "".join(buf)
+
+    _last_paste_cr = False   # the previous pasted key was CR (a CRLF pair is one newline)
+
+    def _insert(self, text: str):
+        self._input = self._input[:self._cursor] + text + self._input[self._cursor:]
+        self._cursor += len(text)
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
     def run(self):
-        # Clear stdscr before the first draw so leftover terminal content
-        # doesn't bleed through behind the sub-windows.  _rebuild() already
-        # does this on every resize; the startup path must do the same.
+        # Bracketed paste: the terminal marks pasted text so it is inserted, not typed.
+        sys.stdout.write("\x1b[?2004h")
+        sys.stdout.flush()
+        try:
+            self._run()
+        finally:
+            sys.stdout.write("\x1b[?2004l")
+            sys.stdout.flush()
+
+    def _run(self):
+        # Clear stdscr so leftover terminal content doesn't bleed through.
         self.stdscr.clear()
         self.stdscr.noutrefresh()
-        # emit initial status; a pre-loaded session was already pushed onto the
-        # bus by the Controller and arrives here through the backlog replay.
+        # A pre-loaded session was pushed onto the bus by the Controller and
+        # arrives here through the backlog replay.
         self.harness.emit_status()
         self._drain_events()
-        self._chat_buf.scroll_to_bottom()
+        self._follow_bottom()
         self._redraw()
 
-        _pushed_ch: int | None = None  # character pushed back after paste peek
-
         while True:
-            if _pushed_ch is not None:
-                ch = _pushed_ch
-                _pushed_ch = None
-            else:
-                ch = self.stdscr.getch()
-
-            if ch == curses.KEY_RESIZE:
+            key = self._next_key()
+            if key == curses.KEY_RESIZE:
                 self._rebuild()
                 continue
-
-            # `changed` means the harness queue produced at least one event this
-            # cycle.  It is checked *after* key dispatch so that event-driven
-            # and key-driven changes are both coalesced into a single redraw.
-            # Keys that perform their own redraw (via _redraw or _redraw_input_only)
-            # before reaching the bottom of the loop should `continue` to skip the
-            # redundant redraw triggered by `changed`.
             changed = self._drain_events()
-
-            if ch == curses.ERR:
-                if changed:
-                    self._redraw()
-                elif self._too_small:
-                    # No windows to animate; the placeholder is static until resize.
-                    pass
-                else:
-                    _any = False
-                    if self._busy and not self._waiting_for_input:
-                        now = time.time()
-                        if now - self._spinner_ts >= _SPINNER_INTERVAL:
-                            self._spinner_frame += 1
-                            self._spinner_ts = now
-                            self._draw_status(spinner_only=True)
-                            _any = True
-                    if self._companion_visible:
-                        now = time.time()
-                        if now - self._companion_ts >= _COMPANION_INTERVAL:
-                            self._companion_ts = now
-                            self._advance_companion()
-                            self._draw_companion()
-                            _any = True
-                    if _any:
-                        # _input_win.noutrefresh() MUST be the last noutrefresh
-                        # call before doupdate.  curses.doupdate() parks the
-                        # hardware cursor at the position recorded by the most
-                        # recent noutrefresh on a window with leaveok=False.
-                        # _input_win is the only such window (chat/status/companion
-                        # all have leaveok=True), so refreshing it last guarantees
-                        # the cursor stays in the input box even during animation
-                        # ticks that only repaint the companion or status.
-                        self._input_win.noutrefresh()
-                        curses.doupdate()
-                time.sleep(0.02)  # idle — avoids CPU spin without adding key lag
+            if key is None:
+                self._idle(changed)
                 continue
-
-            # Open suggestion list: ↑/↓ move, Tab picks (first by default), Enter
-            # picks only a highlighted row, Esc (below) dismisses.
-            if self._sugg and self._focus == "input":
-                n = len(self._sugg)
-                if ch in (curses.KEY_UP, curses.KEY_DOWN):
-                    if ch == curses.KEY_DOWN:
-                        self._sugg_idx = (self._sugg_idx + 1) % n
-                    else:
-                        self._sugg_idx = self._sugg_idx - 1 if self._sugg_idx > 0 else n - 1
-                    self._redraw()
-                    continue
-                if ch == 9 or (ch in (13, curses.KEY_ENTER) and self._sugg_idx >= 0):
-                    self._pick_suggest(max(0, self._sugg_idx))
-                    self._redraw()
-                    continue
-
-            # Shift+Tab cycles through all four modes
-            if ch == curses.KEY_BTAB:
-                idx = _MODE_CYCLE.index(self.harness.mode) if self.harness.mode in _MODE_CYCLE else 0
-                new_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
-                self.controller.set_mode(new_mode)
-                self._drain_events()  # consume the StatusEvent set_mode just enqueued
+            drawn = self._handle_key(key)
+            if changed or drawn == "full":
                 self._redraw()
-                continue
+            elif drawn == "input":
+                # Draw once the keys stop coming: a fast typist or an unbracketed
+                # paste would otherwise redraw the whole input per character.
+                self._input_dirty = True
 
-            # Tab toggles focus between chat and input
-            if ch == 9:
-                self._focus = "input" if self._focus == "chat" else "chat"
-                self._redraw()
-                continue
+    def _idle(self, changed: bool):
+        """No key waiting: catch up on drawing, then animate."""
+        if self._sugg_waiting and workspace_files_nowait(self.harness.workdir) is not None:
+            self._sugg_query = None      # the file list arrived: recompute the @ list
+            changed = True
+        if changed:
+            self._redraw()
+        elif self._input_dirty:
+            self._redraw_input_only()
+        elif not self._too_small:
+            self._animate()
+        time.sleep(0.02)  # idle — avoids CPU spin without adding key lag
 
-            # PgUp/PgDn scroll the chat pane
-            if ch == curses.KEY_PPAGE:
-                self._chat_buf.scroll_up(self._layout["chat_h"] - 1)
-                self._redraw()
-                continue
-            if ch == curses.KEY_NPAGE:
-                self._chat_buf.scroll_down(self._layout["chat_h"] - 1)
-                self._redraw()
-                continue
+    def _animate(self):
+        drew = False
+        now = time.time()
+        if self._busy and not self._waiting_for_input and now - self._spinner_ts >= _SPINNER_INTERVAL:
+            self._spinner_frame += 1
+            self._spinner_ts = now
+            self._draw_status(spinner_only=True)
+            drew = True
+        c = self._companion
+        if self._companion_win is not None and now - c.ts >= _COMPANION_INTERVAL:
+            c.ts = now
+            c.advance(self._layout["cols"], (self.harness.mode, self._busy and not self._waiting_for_input))
+            c.draw(self._companion_win, self._layout["cols"])
+            drew = True
+        if drew:
+            # The input window must be refreshed last so doupdate parks the cursor there.
+            self._input_win.noutrefresh()
+            curses.doupdate()
 
-            # Shift+↑/↓ — explicit history navigation regardless of caret position.
-            if ch == curses.KEY_SR:
-                if self._focus == "input":
-                    self._history_prev()
-                else:
-                    self._chat_buf.scroll_up()
-                self._redraw()
-                continue
-            if ch == curses.KEY_SF:
-                if self._focus == "input":
-                    self._history_next()
-                else:
-                    self._chat_buf.scroll_down()
-                self._redraw()
-                continue
+    def _handle_key(self, key) -> str | None:
+        """Act on one key.  Returns "full" when the whole screen needs a redraw,
+        "input" when only the input box changed, None when nothing is to draw."""
+        chat = self._focus == "chat"
 
-            # ↑/↓ — caret movement in multi-line input; fall back to history at the boundary.
-            if ch == curses.KEY_UP:
-                if self._focus == "chat":
-                    self._chat_buf.scroll_up()
-                elif not self._cursor_move_vertical(-1):
-                    self._history_prev()
-                self._redraw()
-                continue
-            if ch == curses.KEY_DOWN:
-                if self._focus == "chat":
-                    self._chat_buf.scroll_down()
-                elif not self._cursor_move_vertical(1):
-                    self._history_next()
-                self._redraw()
-                continue
-
-            # cursor movement in input / horizontal scroll in chat
-            if ch == curses.KEY_LEFT:
-                if self._focus == "chat":
-                    self._chat_buf.scroll_left()
-                    self._redraw()
-                elif self._cursor > 0:
-                    self._cursor -= 1
-                    self._redraw_input_only()
-                continue
-            if ch == curses.KEY_RIGHT:
-                if self._focus == "chat":
-                    self._chat_buf.scroll_right(display_w=self._layout["cols"] - 2)
-                    self._redraw()
-                elif self._cursor < len(self._input):
-                    self._cursor += 1
-                    self._redraw_input_only()
-                continue
-            if ch == curses.KEY_HOME:
-                self._cursor = 0
-                self._redraw_input_only()
-                continue
-            if ch == curses.KEY_END:
-                self._cursor = len(self._input)
-                self._redraw_input_only()
-                continue
-
-            # Ctrl+Left / Ctrl+Right — word jump (define_key sequences or manual ESC handler)
-            if ch == _KEY_CTRL_LEFT:
-                self._cursor = self._word_start_left()
-                self._redraw_input_only()
-                continue
-            if ch == _KEY_CTRL_RIGHT:
-                self._cursor = self._word_end_right()
-                self._redraw_input_only()
-                continue
-
-            # Ctrl+A / Ctrl+E — start / end of current logical line
-            if ch == 1:  # Ctrl+A
-                i = self._input.rfind('\n', 0, self._cursor)
-                self._cursor = i + 1  # 0 when no \n found (rfind returns -1)
-                self._redraw_input_only()
-                continue
-            if ch == 5:  # Ctrl+E
-                i = self._input.find('\n', self._cursor)
-                self._cursor = i if i >= 0 else len(self._input)
-                self._redraw_input_only()
-                continue
-
-            # Shift+T/M/Q/C are gated on chat focus so that typing an uppercase
-            # letter in the input field is never swallowed as a command.  The
-            # trade-off is that these shortcuts are unavailable while composing
-            # text — the user must Tab to chat focus first.
-            # NOTE: because curses.getch() in nodelay mode returns the raw ASCII
-            # value, ord('T') == 84 which is indistinguishable from a shifted 't'
-            # regardless of which modifier the terminal reports.  The _focus guard
-            # is the only disambiguation.
-
-            # Shift+T toggles thinking output (only when chat pane has focus,
-            # so typing 'T' in the input field still works normally)
-            if ch == ord('T') and self._focus == "chat":
-                self._toggle_think()
-                continue
-
-            # Shift+M toggles markdown rendering (chat focus only)
-            if ch == ord('M') and self._focus == "chat":
-                self._toggle_md()
-                continue
-
-            # Shift+D toggles edit-diff rendering (chat focus only)
-            if ch == ord('D') and self._focus == "chat":
-                self._toggle_diff()
-                continue
-
-            # Shift+Q toggles the momo companion bar (chat focus only)
-            if ch == ord('Q') and self._focus == "chat":
-                self._toggle_companion()
-                continue
-
-            # Shift+C interrupts the running LLM (chat focus only)
-            if ch == ord('C') and self._focus == "chat":
+        # A pasted block (bracketed paste) or a typed character.
+        if isinstance(key, str):
+            if len(key) > 1:
+                self._insert(key.replace("\r\n", "\n").replace("\r", "\n"))
+                return "input"
+            if chat and key in _VIEW_KEYS:           # Shift+T/M/D/Q — chat focus only,
+                opt = _VIEW_KEYS[key]                 # so typing capitals still works
+                self._set_view({opt: not self._view[opt]})
+                return None
+            if chat and key == "C":
                 self.controller.cancel()
-                continue
-
-            # Shift+P toggles run_command confirmation (chat focus only)
-            if ch == ord('P') and self._focus == "chat":
+                return None
+            if chat and key == "P":
                 self._toggle_run_confirm()
-                continue
+                return None
+            if key.isprintable():
+                self._insert(key)
+                return "input"
+            return None
 
-            # ESC (27) — manual check for Option+Enter (ESC + CR/LF).
-            # curses.define_key registers the sequence but in nodelay mode curses
-            # often returns raw ESC before the following \r is buffered, so the
-            # assembled keycode never fires.  Peek immediately instead.
-            if ch == 27:
-                peek = self.stdscr.getch()
-                if peek in (10, 13):
-                    # Option+Enter — insert newline
-                    self._input = self._input[:self._cursor] + "\n" + self._input[self._cursor:]
-                    self._cursor += 1
-                    self._redraw_input_only()
-                elif peek == ord('b'):
-                    # Option+Left / Meta+b — word jump left
-                    self._cursor = self._word_start_left()
-                    self._redraw_input_only()
-                elif peek == ord('f'):
-                    # Option+Right / Meta+f — word jump right
-                    self._cursor = self._word_end_right()
-                    self._redraw_input_only()
-                elif peek != curses.ERR:
-                    _pushed_ch = peek
-                elif self._sugg:
-                    # Plain Esc — dismiss the suggestion list until the query changes.
-                    self._close_suggest()
-                    self._redraw()
-                continue
+        # Open suggestion list: ↑/↓ move, Tab picks (first by default), Enter
+        # picks only a highlighted row, Esc dismisses.
+        if self._sugg and not chat:
+            n = len(self._sugg)
+            if key in (curses.KEY_UP, curses.KEY_DOWN):
+                self._sugg_idx = ((self._sugg_idx + 1) % n if key == curses.KEY_DOWN
+                                  else self._sugg_idx - 1 if self._sugg_idx > 0 else n - 1)
+                return "full"
+            if key == 9 or (key in (13, curses.KEY_ENTER) and self._sugg_idx >= 0):
+                self._pick_suggest(max(0, self._sugg_idx))
+                return "full"
 
-            # input editing always works regardless of focus
-            input_changed = False
-            if ch in (curses.KEY_BACKSPACE, 127, 8):
-                if self._cursor > 0:
-                    self._input = self._input[:self._cursor - 1] + self._input[self._cursor:]
-                    self._cursor -= 1
-                    input_changed = True
-            elif ch in (10, _KEY_SHIFT_ENTER):
-                # LF (10) = Ctrl+J  — always insert a newline.
-                # curses.nonl() keeps Enter as \r (13) so these two never collide.
-                # _KEY_SHIFT_ENTER covers escape-sequence bindings (Option+Enter,
-                # Shift+Enter on terminals that send a distinct sequence).
-                self._input = self._input[:self._cursor] + "\n" + self._input[self._cursor:]
-                self._cursor += 1
-                input_changed = True
-            elif ch in (13, curses.KEY_ENTER):
-                # CR (13) = Enter.  Peek ahead: if more characters are buffered this
-                # is a paste — insert a newline and continue.  Otherwise submit.
-                next_ch = self.stdscr.getch()
-                if next_ch != curses.ERR:
-                    self._input = self._input[:self._cursor] + "\n" + self._input[self._cursor:]
-                    self._cursor += 1
-                    input_changed = True
-                    if next_ch != 10:  # skip the LF half of a CRLF pair
-                        _pushed_ch = next_ch
-                else:
-                    self._submit()
-                # _submit() handles all its own redraws
-            elif ch == 11:  # Ctrl+K — kill to end of line
-                i = self._input.find('\n', self._cursor)
-                if i < 0:
-                    end = len(self._input)
-                elif i == self._cursor:
-                    end = self._cursor + 1  # cursor is right before \n — kill the newline
-                else:
-                    end = i                 # kill up to but not including \n
-                if end > self._cursor:
-                    self._input = self._input[:self._cursor] + self._input[end:]
-                    input_changed = True
-            elif ch == 21:  # Ctrl+U — kill from start of line to cursor
-                i = self._input.rfind('\n', 0, self._cursor)
-                start = i + 1  # 0 when no \n (rfind returns -1)
-                if start < self._cursor:
-                    self._input = self._input[:start] + self._input[self._cursor:]
-                    self._cursor = start
-                    input_changed = True
-            elif 32 <= ch <= 126:
-                char = chr(ch)
-                self._input = self._input[:self._cursor] + char + self._input[self._cursor:]
-                self._cursor += 1
-                input_changed = True
+        if key == _KEY_ESC:
+            # Close the suggestions, else interrupt a running turn (as in the web UI).
+            if self._sugg:
+                self._close_suggest()
+            elif self._busy and not self._waiting_for_input:
+                self.controller.cancel()
+            return "full"
+        if key == curses.KEY_BTAB:                   # Shift+Tab cycles the modes
+            mode = self.harness.mode
+            self.controller.set_mode(MODES[(MODES.index(mode) + 1) % len(MODES)]
+                                     if mode in MODES else MODES[0])
+            self._drain_events()
+            return "full"
+        if key == 9:                                 # Tab: focus chat ↔ input
+            self._focus = "input" if chat else "chat"
+            return "full"
 
-            if changed:
-                self._redraw()
-            elif input_changed:
-                self._redraw_input_only()
+        # Chat scrolling: PgUp/PgDn always; ↑/↓, Shift+↑/↓ and ←/→ with chat focus.
+        page = self._layout["chat_h"] - 1
+        scroll = {curses.KEY_PPAGE: lambda: self._chat_buf.scroll_up(page),
+                  curses.KEY_NPAGE: lambda: self._chat_buf.scroll_down(page)}
+        if chat:
+            scroll.update({curses.KEY_UP: self._chat_buf.scroll_up,
+                           curses.KEY_SR: self._chat_buf.scroll_up,
+                           curses.KEY_DOWN: self._chat_buf.scroll_down,
+                           curses.KEY_SF: self._chat_buf.scroll_down,
+                           curses.KEY_LEFT: self._chat_buf.scroll_left,
+                           curses.KEY_RIGHT: lambda: self._chat_buf.scroll_right(
+                               display_w=self._layout["cols"] - 2)})
+        if key in scroll:
+            scroll[key]()
+            self._scrolled()
+            return "full"
+
+        # Input box: history, caret movement and editing (whatever the focus).
+        if key == curses.KEY_SR:                     # Shift+↑/↓: history regardless of caret
+            self._history_prev()
+            return "full"
+        if key == curses.KEY_SF:
+            self._history_next()
+            return "full"
+        if key == curses.KEY_UP:                     # caret up; history at the first line
+            if not self._cursor_move_vertical(-1):
+                self._history_prev()
+            return "full"
+        if key == curses.KEY_DOWN:
+            if not self._cursor_move_vertical(1):
+                self._history_next()
+            return "full"
+        moves = {
+            curses.KEY_LEFT: lambda: max(0, self._cursor - 1),
+            curses.KEY_RIGHT: lambda: min(len(self._input), self._cursor + 1),
+            curses.KEY_HOME: lambda: 0,
+            curses.KEY_END: lambda: len(self._input),
+            _KEY_CTRL_LEFT: self._word_start_left,
+            _KEY_CTRL_RIGHT: self._word_end_right,
+            1: lambda: self._input.rfind("\n", 0, self._cursor) + 1,          # Ctrl+A: line start
+            5: lambda: (i if (i := self._input.find("\n", self._cursor)) >= 0  # Ctrl+E: line end
+                        else len(self._input)),
+        }
+        if key in moves:
+            self._cursor = moves[key]()
+            return "input"
+
+        if key in (curses.KEY_BACKSPACE, 127, 8):
+            if self._cursor > 0:
+                self._input = self._input[:self._cursor - 1] + self._input[self._cursor:]
+                self._cursor -= 1
+            return "input"
+        if key in (10, _KEY_SHIFT_ENTER):
+            # Ctrl+J (LF; nonl() keeps Enter as CR 13) or Shift/Option+Enter: a newline.
+            self._insert("\n")
+            return "input"
+        if key in (13, curses.KEY_ENTER):
+            # A terminal without bracketed paste sends a pasted newline as Enter:
+            # more input already buffered means a paste, so insert a newline.
+            nxt = self._read_key()
+            if nxt is None:
+                self._submit()   # draws itself
+                return None
+            self._insert("\n")
+            if nxt != 10:        # the LF half of a CRLF pair
+                self._pending_keys.insert(0, nxt)
+            return "input"
+        if key == 11:  # Ctrl+K — kill to end of line (the newline itself when right before it)
+            i = self._input.find("\n", self._cursor)
+            end = len(self._input) if i < 0 else self._cursor + 1 if i == self._cursor else i
+            self._input = self._input[:self._cursor] + self._input[end:]
+            return "input"
+        if key == 21:  # Ctrl+U — kill from start of line to cursor
+            start = self._input.rfind("\n", 0, self._cursor) + 1
+            self._input = self._input[:start] + self._input[self._cursor:]
+            self._cursor = start
+            return "input"
+        return None      # _KEY_IGNORED and anything unbound
 
 
 def run_tui(stdscr, harness: Harness, controller: Controller):

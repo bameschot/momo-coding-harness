@@ -149,3 +149,7 @@ _MODE_TOOLS = {
     "momo":    ALL_TOOLS,
     "plan":    PLAN_INVESTIGATE_TOOLS,
 }
+
+# The modes in the order the frontends list and cycle them (Shift+Tab, the web picker).
+MODES = ("design", "chat", "plan", "coding", "momo")
+assert set(MODES) == set(_MODE_TOOLS), "MODES and _MODE_TOOLS must name the same modes"

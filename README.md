@@ -279,7 +279,7 @@ Typing the TUI command in the browser (e.g. `/think-output off`) has the same ef
 | ↑ / ↓ | input box, cursor at start / end | Previous / next entry in the input history (shared with the TUI) |
 | / | input box | Open command autocomplete (↑/↓ select, Tab or Enter insert, Esc close) |
 | @ | input box | Open workspace path autocomplete |
-| Esc | anywhere | Interrupt the running response (like Shift+C in the TUI). Also closes menus and drawers, and cancels editing a message |
+| Esc | anywhere | Interrupt the running response (as Esc does in the TUI). Also closes menus and drawers, and cancels editing a message |
 | Shift+Tab | anywhere | Cycle mode |
 | Shift+T / M / D / Q | outside the input box | Toggle thinking / markdown / diffs / companion |
 | Shift+P | outside the input box | Toggle `run_command` confirmation |
@@ -426,7 +426,8 @@ curl -sN localhost:8765/api/events          # watch the live event stream
   - **Ctrl+J** — insert a newline at the cursor without submitting (works in every terminal).
   - **Option+Enter** — also inserts a newline on iTerm2 when Left Option Key is set to "+Esc" (Profiles → Keys), or on Terminal.app with "Use Option as Meta key" enabled.
   - **Shift+Enter** — inserts a newline on terminals with CSI-u mode enabled (iTerm2 → Profiles → Keys → "Report modifiers using CSI u").
-  - Multi-line text can always be **pasted** regardless of terminal settings.
+  - Multi-line text can always be **pasted** regardless of terminal settings. On terminals with bracketed paste (iTerm2, Terminal.app, kitty, WezTerm, most modern ones) a paste is inserted as-is — tabs, non-ASCII text and a trailing newline included — and never sent until you press Enter.
+  - **Esc** — interrupt the running response (also `Shift+C` with the chat pane focused); with a suggestion list open, Esc closes it first.
   - **↑/↓** — move the cursor between lines in multi-line input; at the top or bottom edge, navigates command history.
   - **Shift+↑ / Shift+↓** — navigate command history regardless of cursor position.
   - **Ctrl+Left / Ctrl+Right** — move cursor one word left or right (requires xterm-compatible terminal; also available as **Option+b / Option+f** on macOS with "+Esc" Option key).
@@ -437,9 +438,9 @@ curl -sN localhost:8765/api/events          # watch the live event stream
   - **@ path autocomplete**: typing `@` followed by part of a file name opens a fuzzy workspace search above the input, the same search the web UI uses. `↑`/`↓` select, `Tab` inserts the first (or highlighted) path, `Enter` inserts a highlighted path (with nothing highlighted it still submits), and `Esc` closes the list. The pick replaces `@query` with `` `path/to/file` ``. While the list is open, `Tab` inserts instead of switching focus.
   - **/ command autocomplete**: typing `/` at the start of the input lists the matching slash commands with their usage and description. It uses the same keys as `@`. A picked command that takes an argument gets a trailing space so you can type the argument.
   - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
-- **Chat pane scrolling** — `↑`/`↓`, `PgUp`/`PgDn`. When a table or other wide content is present, `←`/`→` scrolls horizontally (chat focus required).
+- **Chat pane scrolling** — `↑`/`↓`, `PgUp`/`PgDn`. When a table or other wide content is present, `←`/`→` scrolls horizontally (chat focus required). While you are scrolled up, new output does not pull the view down; the status line shows `▼ NEW (PgDn)` until you are back at the bottom. Resizing the terminal re-wraps the transcript to the new width.
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green.
-- **Tool call visibility** — `/tool-output on|off` switches between full tool output and abbreviated mode (first 50 chars + `…`).
+- **Tool call visibility** — `/tool-output on|off` switches between full tool output and abbreviated mode (first 50 chars + `…`). Argument values are cut to 60 characters either way, as in the web UI; a written file's content shows in the diff.
 - **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/think-output on|off` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.
 - **Markdown rendering** — assistant responses are rendered as formatted markdown by default. Headings use box-drawing decorations, lists use `•`/numbered prefixes, code blocks are prefixed with `│`, tables render with full box-drawing characters. Toggle with `/markdown on|off` or `Shift+M` (when chat focused). When a table is wider than the terminal, a horizontal scrollbar appears at the bottom of the chat pane; scroll it with `←`/`→` while the chat pane is focused.
 - **Edit diffs** — whenever the model changes a file (`edit_file`, `append_to_file`, `write_file`, `delete_file`, `move_file`), the chat pane shows a colored diff of exactly what changed on disk instead of a terse `OK` line. Added lines are green, removed lines red, hunk headers cyan. Each line has a two-column line-number gutter (old | new): context lines show both numbers, removed lines only the old, added lines only the new — so every change is anchored to its position in the file. `write_file` to a new path shows as a new file, `delete_file` shows every line removed, and `move_file` shows a rename notice. Shown by default; toggle with `/diff on|off` or `Shift+D` (when chat focused). Choose the presentation with `/diff-style compact` (default — a `± path (+N -M)` header with hunks) or `/diff-style git` (full `git diff` layout with `diff --git`/`---`/`+++` headers). Diffs are display-only and reconstructed from disk at edit time, so a reloaded session shows the plain tool result rather than the diff.
@@ -524,7 +525,7 @@ When the last step is done, the harness reports *Plan complete* and **deletes `.
 
 #### Pausing and resuming
 
-If a step is interrupted (`Shift+C`), hits a backend error, or runs out of iterations, execution **pauses** at that step. The plan and its progress stay in `.momo-plan.md` and in the saved session. To continue:
+If a step is interrupted (Esc or `Shift+C`), hits a backend error, or runs out of iterations, execution **pauses** at that step. The plan and its progress stay in `.momo-plan.md` and in the saved session. To continue:
 
 - `/plan resume` picks up at the paused step, or
 - type any message: it is passed to the model as extra context for the resumed step (e.g. *"the test runner is `make test`"*).
