@@ -80,30 +80,30 @@
       <label><input type="radio" name="diff-style" value="git"> git</label>
     </div>
     <div class="menu-sub">Companion</div>
-    <label><input type="checkbox" id="idle-recap"> Recap when I'm idle <kbd>/companion-idle-recap</kbd></label>
+    <label><input type="checkbox" id="idle-recap" data-cmd="/companion-idle-recap"> Recap when I'm idle <kbd>/companion-idle-recap</kbd></label>
     <label class="menu-num">Idle for <input type="number" id="idle-recap-secs" min="10" step="10" value="90"> seconds</label>
     <div class="menu-sub">Context</div>
-    <label><input type="checkbox" id="guides"> Load AGENTS.md / CLAUDE.md <kbd>/guides</kbd></label>
+    <label><input type="checkbox" id="guides" data-cmd="/guides"> Load AGENTS.md / CLAUDE.md <kbd>/guides</kbd></label>
     <div class="menu-sub">Network</div>
     <label><input type="checkbox" id="net-on"> Internet access <kbd>/net</kbd></label>
     <label><input type="checkbox" id="net-local"> Allow localhost and LAN <kbd>/net local</kbd></label>
-    <label><input type="checkbox" id="net-confirm"> Confirm POST/PUT/DELETE <kbd>/net-confirm</kbd></label>
-    <label class="menu-num">Max download <input type="text" id="net-max-bytes" size="7" placeholder="2mb"></label>
-    <label class="menu-num">Text per fetch <input type="text" id="net-max-chars" size="7" placeholder="24000"></label>
+    <label><input type="checkbox" id="net-confirm" data-cmd="/net-confirm"> Confirm POST/PUT/DELETE <kbd>/net-confirm</kbd></label>
+    <label class="menu-num">Max download <input type="text" id="net-max-bytes" data-cmd="/net-max-bytes" size="7" placeholder="2mb"></label>
+    <label class="menu-num">Text per fetch <input type="text" id="net-max-chars" data-cmd="/net-max-chars" size="7" placeholder="24000"></label>
     <div class="menu-sub">Code index</div>
-    <label><input type="checkbox" id="index-on"> Code index <kbd>/index</kbd></label>
-    <label><input type="checkbox" id="index-persist"> Save/load to disk <kbd>/index-persist</kbd></label>
-    <label><input type="checkbox" id="index-route"> Answer grep/find from the index <kbd>/index-route</kbd></label>
-    <label class="menu-num">Memory budget <input type="text" id="index-max-mem" size="7" placeholder="100mb"></label>
-    <label class="menu-num">Max files <input type="text" id="index-max-files" size="7" placeholder="100000"></label>
-    <label class="menu-num">Build workers <input type="text" id="index-workers" size="7" placeholder="auto"></label>
+    <label><input type="checkbox" id="index-on" data-cmd="/index"> Code index <kbd>/index</kbd></label>
+    <label><input type="checkbox" id="index-persist" data-cmd="/index-persist"> Save/load to disk <kbd>/index-persist</kbd></label>
+    <label><input type="checkbox" id="index-route" data-cmd="/index-route"> Answer grep/find from the index <kbd>/index-route</kbd></label>
+    <label class="menu-num">Memory budget <input type="text" id="index-max-mem" data-cmd="/index-max-mem" size="7" placeholder="100mb"></label>
+    <label class="menu-num">Max files <input type="text" id="index-max-files" data-cmd="/index-max-files" size="7" placeholder="100000"></label>
+    <label class="menu-num">Build workers <input type="text" id="index-workers" data-cmd="/index-workers" size="7" placeholder="auto"></label>
     <div class="menu-row">
       <button type="button" id="index-save" class="menu-link">Save now</button>
       <button type="button" id="index-load" class="menu-link">Load</button>
       <button type="button" id="index-filter-open" class="menu-link">Filter…</button>
     </div>
     <div class="menu-sub">Model</div>
-    <label><input type="checkbox" id="think-mode"> Thinking mode <kbd>/think</kbd></label>
+    <label><input type="checkbox" id="think-mode" data-cmd="/think"> Thinking mode <kbd>/think</kbd></label>
     <div class="menu-sub">Skills</div>
     <div id="skills-list" class="skills-list"><span class="muted">No skills found.</span></div>
     <div class="menu-sub">Notifications</div>
@@ -156,6 +156,7 @@
       <button id="preview-insert" type="button" class="small">Insert path</button>
       <button id="preview-copy" type="button" class="small">Copy</button>
       <button id="preview-render" type="button" class="small" hidden>Plain</button>
+      <button id="preview-all" type="button" class="small" hidden>Show all</button>
       <span id="preview-meta" class="muted small"></span>
     </div>
     <div class="preview-scroll"><pre class="preview-gutter" aria-hidden="true"></pre><pre class="preview-code"><code></code></pre></div>

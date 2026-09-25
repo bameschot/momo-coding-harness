@@ -81,7 +81,13 @@ async function post(path, body = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) {
+    // JSON errors carry {error}; the rest are plain text.
+    const body = await r.text();
+    let msg = body;
+    try { msg = JSON.parse(body).error || body; } catch { /* plain text */ }
+    throw new Error(`${r.status} ${msg}`.trim());
+  }
   return r.json();
 }
 
@@ -833,7 +839,6 @@ function handleEvents(evs) {
         break;
       default: {
         events.push(ev);
-        if (ev.type === "user") pushHistory(ev.text);
         if (ev.type === "ask_user") signal("ask", "momo has a question", ev.question);
         else if (ev.type === "chat" && isConfirmPrompt(ev.role, ev.text)) {
           signal("ask", "momo needs a confirmation", ev.text);
@@ -848,13 +853,15 @@ function handleEvents(evs) {
 
 // ── streaming preview ─────────────────────────────────────────────────────────
 // Deltas render into a live block that is not part of events[]; when the stream
-// ends it is removed and the final think/chat events render as usual.
+// ends it is removed and the final think/chat events render as usual.  Each part
+// grows one Text node with appendData: `textContent +=` re-serialises the whole
+// reply on every delta, which is quadratic on a long reasoning stream.
 let live$ = null;
 
 function streamDelta(ev) {
   const pinned = nearBottom();
   if (!live$) {
-    live$ = { box: el("div", "live-stream"), think: null, content: null };
+    live$ = { box: el("div", "live-stream"), think: null, thinkText: null, content: null, contentText: null };
     transcript.append(live$.box);
   }
   if (ev.kind === "thinking") {
@@ -862,17 +869,22 @@ function streamDelta(ev) {
     if (!live$.think) {
       live$.think = el("details", "think live");
       live$.think.open = true;
-      live$.think.append(el("summary", "", "thinking…"), el("div", "think-body"));
+      live$.thinkText = document.createTextNode("");
+      const body = el("div", "think-body");
+      body.append(live$.thinkText);
+      live$.think.append(el("summary", "", "thinking…"), body);
       live$.box.prepend(live$.think);
     }
-    live$.think.lastChild.textContent += ev.text;
+    live$.thinkText.appendData(ev.text);
   } else {
     if (!live$.content) {
       live$.content = el("div", "msg assistant plain streaming");
+      live$.contentText = document.createTextNode("");
+      live$.content.append(live$.contentText);
       live$.box.append(live$.content);
       if (live$.think) live$.think.open = false;  // the answer started; fold the reasoning
     }
-    live$.content.textContent += ev.text;
+    live$.contentText.appendData(ev.text);
   }
   if (pinned) transcript.scrollTop = transcript.scrollHeight;
 }
@@ -892,7 +904,9 @@ async function refreshState() {
   if (!sel.options.length) {
     for (const m of state.modes) sel.append(new Option(m, m));
   }
-  if (!history.length) history = [...state.history];
+  // The server's history (typed text, /token masked) is the source of truth: a
+  // reconnect replays the backlog, so collecting user events would repeat it.
+  if (histIdx === -1) history = [...state.history];
   applyStatus(state.status);
   applyBusy(state.busy, state.waiting);
   $("#think-mode").checked = state.think;
@@ -915,7 +929,7 @@ function renderSkills() {
     cb.checked = active.includes(name);
     cb.onchange = async () => {
       await send(`/${cb.checked ? "load" : "unload"}-skill ${name}`);
-      setTimeout(refreshState, 200);
+      refreshState();  // the command has run by the time submit answers
     };
     lab.append(cb, " " + name);
     return lab;
@@ -965,6 +979,7 @@ function autosize() {
 async function submitInput() {
   const text = input.value;
   const isCmd = text.trim().startsWith("/");
+  if (text.trim()) pushHistory(text.trim());
   const ready = attachments.filter((a) => a.status === "ready");
   if (!isCmd && attachments.some((a) => a.status === "loading")) {
     attNote("Still converting attachments — send again in a moment.");
@@ -1028,8 +1043,10 @@ function renderQueue() {
     edit.append(icon("pencil", "icon sm"));
     edit.type = "button";
     edit.title = "Edit (moves it back into the input box)";
+    // Look the item up at click time: sendNextQueued may have shifted the queue.
+    const drop = () => { const at = queue.indexOf(q); if (at >= 0) queue.splice(at, 1); return at >= 0; };
     edit.onclick = () => {
-      queue.splice(i, 1);
+      if (!drop()) return renderQueue();
       input.value = q.text;
       for (const a of q.atts) attachments.push({ id: ++attSeq, status: "ready", name: a.name, text: a.text, chars: a.text.length });
       renderQueue(); renderChips(); autosize(); input.focus();
@@ -1038,7 +1055,7 @@ function renderQueue() {
     x.append(icon("x", "icon sm"));
     x.type = "button";
     x.title = "Remove from queue";
-    x.onclick = () => { queue.splice(i, 1); renderQueue(); };
+    x.onclick = () => { drop(); renderQueue(); };
     chip.append(name, meta, edit, x);
     return chip;
   }));
@@ -1048,11 +1065,11 @@ function renderQueue() {
 // ── attachments ───────────────────────────────────────────────────────────────
 // Files are converted to text by the server (/api/upload: text decoding, PDF
 // extraction) as soon as they are picked, then sent with the next message.
-const MAX_UPLOAD = 25e6;
 let attachments = [];   // {id, name, status: "loading"|"ready"|"error", text, chars, pages, truncated, error}
 let attSeq = 0;
 
-const fmtK = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
+// A count, shortened: 950, 1.2k, 34k.
+const fmtCount = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
 
 function addFiles(files) {
   for (const f of files) uploadOne(f);
@@ -1063,7 +1080,8 @@ async function uploadOne(file) {
   attachments.push(a);
   renderChips();
   try {
-    if (file.size > MAX_UPLOAD) throw new Error(`too large (max ${MAX_UPLOAD / 1e6} MB)`);
+    const max = state?.max_upload;  // the server enforces it too; this saves the upload
+    if (max && file.size > max) throw new Error(`too large (max ${max / 1e6} MB)`);
     const r = await fetch("api/upload", {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream", "X-Filename": encodeURIComponent(a.name) },
@@ -1090,7 +1108,7 @@ function renderChips() {
     else if (a.status === "error") meta = a.error;
     else {
       const tokens = Math.ceil(a.chars / 4);  // rough estimate, same heuristic as the harness
-      meta = `${a.pages ? `${a.pages} pages · ` : ""}${fmtK(a.chars)} chars · ~${fmtK(tokens)} tokens${a.truncated ? " · truncated" : ""}`;
+      meta = `${a.pages ? `${a.pages} pages · ` : ""}${fmtCount(a.chars)} chars · ~${fmtCount(tokens)} tokens${a.truncated ? " · truncated" : ""}`;
       const limit = state?.context_limit || 0;
       if (limit && tokens > limit * 0.25) {
         chip.classList.add("warn");
@@ -1282,34 +1300,19 @@ $("#tools-badge").onclick = () => send("/tools on");
 $("#net-badge").onclick = () => send(`/net ${status.net_access !== "off" ? "off" : "on"}`);
 $("#net-on").onchange = (e) => send(`/net ${e.target.checked ? "on" : "off"}`);
 $("#net-local").onchange = (e) => send(`/net ${e.target.checked ? "local" : "on"}`);
-$("#net-confirm").onchange = (e) => send(`/net-confirm ${e.target.checked ? "on" : "off"}`);
-$("#guides").onchange = (e) => send(`/guides ${e.target.checked ? "on" : "off"}`);
 $("#index-badge").onclick = (e) => {
-  e.stopPropagation();
-  if (!status.index_enabled) return send("/index on");
-  const menu = $("#index-menu");
-  if (!menu.hidden) return closeMenu();
-  closeMenu();
-  menu.replaceChildren(el("div", "menu-title", "Code index"), el("div", "muted", "Loading…"));
-  menu.hidden = false;
-  $("#index-badge").setAttribute("aria-expanded", "true");
-  refreshIndexMenu();
+  if (!status.index_enabled) { e.stopPropagation(); return send("/index on"); }
+  toggleMenu(e, "#index-menu", "Code index", refreshIndexMenu);
 };
-$("#index-on").onchange = (e) => send(`/index ${e.target.checked ? "on" : "off"}`);
-$("#index-persist").onchange = (e) => send(`/index-persist ${e.target.checked ? "on" : "off"}`);
-$("#index-route").onchange = (e) => send(`/index-route ${e.target.checked ? "on" : "off"}`);
-$("#index-max-mem").onchange = (e) => {
-  const v = e.target.value.trim();
-  if (v) send(`/index-max-mem ${v}`);
-};
-$("#index-max-files").onchange = (e) => {
-  const v = e.target.value.trim();
-  if (v) send(`/index-max-files ${v}`);
-};
-$("#index-workers").onchange = (e) => {
-  const v = e.target.value.trim();
-  if (v) send(`/index-workers ${v}`);
-};
+// Settings controls name their command in data-cmd: a checkbox sends on/off, a
+// text field sends its value.  Status events bring the server's value back.
+for (const c of document.querySelectorAll("input[data-cmd]")) {
+  c.onchange = () => {
+    if (c.type === "checkbox") return send(`${c.dataset.cmd} ${c.checked ? "on" : "off"}`);
+    const v = c.value.trim();
+    if (v) send(`${c.dataset.cmd} ${v}`);
+  };
+}
 $("#index-save").onclick = () => send("/index save");
 
 // ── index filter drawer ───────────────────────────────────────────────────────
@@ -1366,23 +1369,15 @@ $("#filter-text").addEventListener("keydown", (e) => {
   else if (e.key === "s" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#filter-save").click(); }
 });
 $("#index-load").onclick = () => send("/index load");
-$("#net-max-bytes").onchange = (e) => {
-  const v = e.target.value.trim();
-  if (v) send(`/net-max-bytes ${v}`);
-};
-$("#net-max-chars").onchange = (e) => {
-  const v = e.target.value.trim();
-  if (v) send(`/net-max-chars ${v}`);
-};
 
 // Shift+letter shortcuts when focus is outside the text box (TUI: chat focus).
 document.addEventListener("keydown", (e) => {
   if (e.target === input || e.target.matches?.("input, select, textarea")) return;
   if (e.key === "Escape") {
-    if (!$("#view-menu").hidden || !$("#model-menu").hidden || !$("#ctx-menu").hidden
-        || !$("#index-menu").hidden) return closeMenu();
-    for (const d of ["#filter-drawer", "#plan-drawer", "#sessions-drawer", "#files-drawer"]) {
-      if (!$(d).hidden) return ($(d).hidden = true);
+    if (MENUS.some(([, m]) => !$(m).hidden)) return closeMenu();
+    // Through each drawer's own close, so the filter's unsaved-changes check runs.
+    for (const [d, close] of Object.entries(DRAWERS)) {
+      if (!$(d).hidden) return close();
     }
     if (busy && !waiting) post("api/cancel").catch(() => {});
     return;
@@ -1404,25 +1399,31 @@ function syncViewMenu() {
   $("#notify-desktop").checked = desktopOn;
   $("#notify-sound").checked = notifyPrefs.sound;
 }
+// Popover menus: [button, menu].  One is open at a time; a click outside closes it.
+const MENUS = [["#view-btn", "#view-menu"], ["#model-btn", "#model-menu"],
+               ["#ctx-btn", "#ctx-menu"], ["#index-badge", "#index-menu"]];
 function closeMenu() {
-  $("#view-menu").hidden = true;
-  $("#model-menu").hidden = true;
-  $("#ctx-menu").hidden = true;
-  $("#index-menu").hidden = true;
-  $("#view-btn").setAttribute("aria-expanded", "false");
-  $("#ctx-btn").setAttribute("aria-expanded", "false");
-  $("#index-badge").setAttribute("aria-expanded", "false");
+  for (const [b, m] of MENUS) {
+    $(m).hidden = true;
+    $(b).setAttribute("aria-expanded", "false");
+  }
 }
-$("#view-btn").onclick = (e) => {
+// Open `menu` (or close it if it is open).  A menu with a loader shows "Loading…"
+// under `title` first; the loader must check menu.hidden before painting, since
+// the user may close the menu while it waits.
+function toggleMenu(e, menu, title = null, load = null) {
   e.stopPropagation();
-  const m = $("#view-menu");
-  const open = m.hidden;
+  const m = $(menu);
+  if (!m.hidden) return closeMenu();
   closeMenu();
-  m.hidden = !open;
-  $("#view-btn").setAttribute("aria-expanded", String(!m.hidden));
-};
+  if (title) m.replaceChildren(el("div", "menu-title", title), el("div", "muted", "Loading…"));
+  m.hidden = false;
+  $(MENUS.find(([, x]) => x === menu)[0]).setAttribute("aria-expanded", "true");
+  load?.();
+}
+$("#view-btn").onclick = (e) => toggleMenu(e, "#view-menu");
 document.addEventListener("click", (e) => {
-  if (!["#view-menu", "#model-menu", "#ctx-menu", "#index-menu"].some((m) => $(m).contains(e.target))) closeMenu();
+  if (!MENUS.some(([, m]) => $(m).contains(e.target))) closeMenu();
 });
 for (const cb of document.querySelectorAll("[data-view]")) {
   cb.onchange = () => { view[cb.dataset.view] = cb.checked; saveView(); syncViewMenu(); rerenderAll(); };
@@ -1430,8 +1431,6 @@ for (const cb of document.querySelectorAll("[data-view]")) {
 for (const r of document.querySelectorAll("input[name=diff-style]")) {
   r.onchange = () => { view.diffStyle = r.value; saveView(); rerenderAll(); };
 }
-$("#think-mode").onchange = (e) => send(`/think ${e.target.checked ? "on" : "off"}`);
-$("#idle-recap").onchange = (e) => send(`/companion-idle-recap ${e.target.checked ? "on" : "off"}`);
 $("#idle-recap-secs").onchange = (e) => {
   const n = Math.round(Number(e.target.value));
   if (Number.isFinite(n) && n >= 10) send(`/companion-idle-recap ${n}`);
@@ -1441,26 +1440,23 @@ $("#idle-recap-secs").onchange = (e) => {
 // ── plan drawer ───────────────────────────────────────────────────────────────
 $("#plan-btn").onclick = () => { refreshState(); $("#plan-drawer").hidden = false; };
 $("#plan-progress").onclick = $("#plan-btn").onclick;
-$("#plan-close").onclick = () => ($("#plan-drawer").hidden = true);
+$("#plan-close").onclick = () => DRAWERS["#plan-drawer"]();
 for (const b of document.querySelectorAll("#plan-drawer [data-cmd]")) {
-  b.onclick = () => { send(b.dataset.cmd); $("#plan-drawer").hidden = true; };
+  b.onclick = () => { send(b.dataset.cmd); DRAWERS["#plan-drawer"](); };
 }
 
 // ── model picker ──────────────────────────────────────────────────────────────
-$("#model-btn").onclick = async (e) => {
-  e.stopPropagation();
+$("#model-btn").onclick = (e) => toggleMenu(e, "#model-menu", "Model", refreshModelMenu);
+async function refreshModelMenu() {
   const menu = $("#model-menu");
-  if (!menu.hidden) return closeMenu();
-  closeMenu();
-  menu.replaceChildren(el("div", "menu-title", "Model"), el("div", "muted", "Loading models…"));
-  menu.hidden = false;
   let info;
   try {
     info = await (await fetch("api/models")).json();
   } catch (err) {
-    menu.lastChild.textContent = `Could not list models: ${err.message}`;
+    if (!menu.hidden) menu.lastChild.textContent = `Could not list models: ${err.message}`;
     return;
   }
+  if (menu.hidden) return;
   const rows = [el("div", "menu-title", `Model · ${info.provider}`)];
   if (!info.can_switch) {
     rows.push(el("div", "muted small", `${info.provider} serves one model per server — restart it to change models.`));
@@ -1474,7 +1470,7 @@ $("#model-btn").onclick = async (e) => {
     rows.push(b);
   }
   menu.replaceChildren(...rows);
-};
+}
 
 // ── context breakdown ─────────────────────────────────────────────────────────
 // Clicking the CTX meter shows where the context is spent. While it is open,
@@ -1498,6 +1494,23 @@ async function refreshCtxMenu() {
   if (menu.hidden) return;
   renderCtxMenu(menu, b);
 }
+// One row of the CTX / INDEX popovers: a lead mark (swatch or mini bar), a name,
+// a value and a share.
+function statRow(extraCls, lead, name, value, share, title = "") {
+  const row = el("div", `ctx-row${extraCls ? " " + extraCls : ""}`);
+  if (title) row.title = title;
+  row.append(lead, el("span", "ctx-name", name), el("span", "ctx-tok mono", value),
+             el("span", "ctx-pc mono", share));
+  return row;
+}
+function miniBar(frac) {
+  const mini = el("span", "idx-mini");
+  const f = el("span", "idx-mini-fill");
+  f.style.width = `${frac * 100}%`;
+  mini.append(f);
+  return mini;
+}
+
 function renderCtxMenu(menu, b) {
   const pctOf = (n) => (b.limit ? (n / b.limit) * 100 : 0);
   const shown = b.categories.filter((c) => c.key !== "generating" || b.streaming);
@@ -1512,12 +1525,9 @@ function renderCtxMenu(menu, b) {
   }
   const rows = el("div", "ctx-rows");
   for (const c of shown) {
-    const row = el("div", `ctx-row${c.sent ? "" : " unsent"}`);
-    row.append(el("span", `ctx-swatch ctx-${c.key}`), el("span", "ctx-name", c.label),
-      el("span", "ctx-tok mono", fmtTok(c.tokens)),
-      el("span", "ctx-pc mono", c.sent ? `${pctOf(c.tokens).toFixed(0)}%` : "—"));
-    if (!c.sent) row.title = "Kept in the transcript but not sent to the model";
-    rows.append(row);
+    rows.append(statRow(c.sent ? "" : "unsent", el("span", `ctx-swatch ctx-${c.key}`), c.label,
+      fmtTok(c.tokens), c.sent ? `${pctOf(c.tokens).toFixed(0)}%` : "—",
+      c.sent ? "" : "Kept in the transcript but not sent to the model"));
   }
   const meta = [`limit ${fmtTok(b.limit)}`];
   if (b.model_max) meta.push(`model max ${fmtTok(b.model_max)}`);
@@ -1528,16 +1538,7 @@ function renderCtxMenu(menu, b) {
     el("div", "muted small", meta.join(" · ")),
     el("div", "muted small", `Categories are estimates (~4 chars/token), total ~${fmtTok(b.estimated)}. Thinking stays in the transcript but is not re-sent.`));
 }
-$("#ctx-btn").onclick = (e) => {
-  e.stopPropagation();
-  const menu = $("#ctx-menu");
-  if (!menu.hidden) return closeMenu();
-  closeMenu();
-  menu.replaceChildren(el("div", "menu-title", "Context"), el("div", "muted", "Loading…"));
-  menu.hidden = false;
-  $("#ctx-btn").setAttribute("aria-expanded", "true");
-  refreshCtxMenu();
-};
+$("#ctx-btn").onclick = (e) => toggleMenu(e, "#ctx-menu", "Context", refreshCtxMenu);
 
 // ── code index composition ────────────────────────────────────────────────────
 // Clicking the INDEX badge (while the index is on) shows what the index's memory
@@ -1581,36 +1582,19 @@ function renderIndexMenu(menu, b) {
       seg.title = `${c.label}: ${formatSize(c.bytes)} — ${c.detail}`;
       stack.append(seg);
     }
-    const row = el("div", `ctx-row${c.enabled ? "" : " unsent"}`);
-    row.title = c.enabled ? c.detail : "Dropped to stay inside the memory budget — raise it to rebuild";
-    row.append(el("span", `ctx-swatch idx-${c.key}`), el("span", "ctx-name", c.label),
-      el("span", "ctx-tok mono", c.enabled ? formatSize(c.bytes) : "dropped"),
-      el("span", "ctx-pc mono", c.enabled ? pc(c.bytes) : "—"));
-    rows.append(row);
+    rows.append(statRow(c.enabled ? "" : "unsent", el("span", `ctx-swatch idx-${c.key}`), c.label,
+      c.enabled ? formatSize(c.bytes) : "dropped", c.enabled ? pc(c.bytes) : "—",
+      c.enabled ? c.detail : "Dropped to stay inside the memory budget — raise it to rebuild"));
   }
 
   const langs = el("div", "ctx-rows");
   for (const l of b.languages.slice(0, 8)) {
-    const row = el("div", "ctx-row idx-lang");
-    const mini = el("span", "idx-mini");
-    const f = el("span", "idx-mini-fill");
-    f.style.width = `${(l.bytes / used) * 100}%`;
-    mini.append(f);
-    row.title = `${l.files} file${l.files === 1 ? "" : "s"}`;
-    row.append(mini, el("span", "ctx-name", `${l.lang} · ${l.files}`),
-      el("span", "ctx-tok mono", formatSize(l.bytes)), el("span", "ctx-pc mono", pc(l.bytes)));
-    langs.append(row);
+    langs.append(statRow("idx-lang", miniBar(l.bytes / used), `${l.lang} · ${l.files}`,
+      formatSize(l.bytes), pc(l.bytes), `${l.files} file${l.files === 1 ? "" : "s"}`));
   }
   if (b.shared) {
-    const row = el("div", "ctx-row idx-lang");
-    const mini = el("span", "idx-mini");
-    const f = el("span", "idx-mini-fill");
-    f.style.width = `${(b.shared / used) * 100}%`;
-    mini.append(f);
-    row.title = "Distinct identifier names, shared by every file that uses them";
-    row.append(mini, el("span", "ctx-name", "shared names"),
-      el("span", "ctx-tok mono", formatSize(b.shared)), el("span", "ctx-pc mono", pc(b.shared)));
-    langs.append(row);
+    langs.append(statRow("idx-lang", miniBar(b.shared / used), "shared names", formatSize(b.shared),
+      pc(b.shared), "Distinct identifier names, shared by every file that uses them"));
   }
   if (b.languages.length > 8) {
     const rest = b.languages.slice(8);
@@ -1618,7 +1602,7 @@ function renderIndexMenu(menu, b) {
       + `${rest.reduce((n, l) => n + l.files, 0)} files, ${formatSize(rest.reduce((n, l) => n + l.bytes, 0))}`));
   }
 
-  const state = b.progress ? `${b.state} ${b.progress}` : b.state;
+  const phase = b.progress ? `${b.state} ${b.progress}` : b.state;
   const actions = el("div", "menu-row");
   const act = (label, cmd) => {
     const btn = el("button", "menu-link", label);
@@ -1642,7 +1626,7 @@ function renderIndexMenu(menu, b) {
   }
   if (b.error) notes.push(`Error: ${b.error}`);
   menu.replaceChildren(
-    el("div", "menu-title", `Code index · ${b.files.toLocaleString("en-US")} files · ${state}`),
+    el("div", "menu-title", `Code index · ${b.files.toLocaleString("en-US")} files · ${phase}`),
     el("div", "muted small", `Memory ${formatSize(b.used)} of ${formatSize(b.limit)} (${b.pct}%)`),
     budget,
     el("div", "menu-sub", "Made of"), stack, rows,
@@ -1655,12 +1639,23 @@ function renderIndexMenu(menu, b) {
     actions);
 }
 
-// ── left drawers: sessions and workspace files ────────────────────────────────
+// ── drawers ───────────────────────────────────────────────────────────────────
+// Each drawer's close action, in the order Esc closes them.  The filter's asks
+// before discarding unsaved edits.
+const hideDrawer = (id) => () => { $(id).hidden = true; };
+const DRAWERS = {
+  "#filter-drawer": closeFilter,
+  "#plan-drawer": hideDrawer("#plan-drawer"),
+  "#sessions-drawer": hideDrawer("#sessions-drawer"),
+  "#files-drawer": hideDrawer("#files-drawer"),
+};
+
+// The left drawers (sessions, workspace files) share one slot: opening one closes the other.
 function openDrawer(id) {
   for (const d of ["#sessions-drawer", "#files-drawer"]) $(d).hidden = d !== id || !$(d).hidden;
   return !$(id).hidden;
 }
-for (const b of document.querySelectorAll(".drawer-close")) b.onclick = () => (b.closest("aside").hidden = true);
+for (const b of document.querySelectorAll(".drawer-close")) b.onclick = () => DRAWERS[`#${b.closest("aside").id}`]();
 
 const ago = (t) => {
   const s = Math.max(0, Date.now() / 1000 - t);
@@ -1684,12 +1679,12 @@ async function loadSessions() {
   renderSessions();
 }
 
-function iconButton(icon, label, cls = "icon-btn") {
+function iconButton(name, label, cls = "icon-btn") {
   const b = el("button", cls);
   b.type = "button";
   b.title = label;
   b.setAttribute("aria-label", label);
-  b.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#${icon}"/></svg>`;
+  b.append(icon(name));
   return b;
 }
 
@@ -1746,12 +1741,12 @@ function renderSessions() {
     } else {
       row.onclick = () => {
         if (current) return;
-        $("#sessions-drawer").hidden = true;
+        DRAWERS["#sessions-drawer"]();
         send(`/session ${x.name}`);
       };
       item.append(row);
       if (!current) {
-        const del = iconButton("i-trash", "Delete this session", "icon-btn session-del");
+        const del = iconButton("trash", "Delete this session", "icon-btn session-del");
         del.onclick = async () => {
           if (await inlineConfirm(item, "Delete this session?")) deleteSessions([x.name]);
         };
@@ -1799,9 +1794,8 @@ $("#sessions-delete").onclick = async () => {
     await deleteSessions(names);
   }
 };
-$("#new-session").onclick = () => { $("#sessions-drawer").hidden = true; send("/new"); };
+$("#new-session").onclick = () => { DRAWERS["#sessions-drawer"](); send("/new"); };
 
-const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 
 async function loadDir(path, container) {
   container.replaceChildren(el("div", "muted small", "Loading…"));
@@ -1821,7 +1815,7 @@ async function loadDir(path, container) {
     const ti = el("span", "tree-icon");
     ti.append(icon(e.type === "dir" ? "chevron-right" : "file", "icon sm"));
     btn.append(ti, el("span", "tree-name", e.name),
-               el("span", "tree-size", e.type === "file" ? fmtSize(e.size) : ""));
+               el("span", "tree-size", e.type === "file" ? (e.size < 1024 ? `${e.size} B` : formatSize(e.size)) : ""));
     row.append(btn);
     if (e.type === "dir") {
       const kids = el("div", "tree-kids");
@@ -1886,9 +1880,14 @@ async function openPreview(rel) {
   $("#preview-name").title = rel;
   const lines = f.text.split("\n").length;
   $("#preview-meta").textContent = `${f.pages ? f.pages + " pages · " : ""}${lines} lines${f.truncated ? " · truncated" : ""}`;
-  $(".preview-gutter").textContent = Array.from({ length: lines }, (_, i) => i + 1).join("\n");
-  $(".preview-code code").innerHTML = f.kind === "pdf" ? esc(f.text) : highlight(f.text, langFromPath(rel) || "none");
-  $(".preview-scroll").scrollTop = 0;
+  // A big file shows its start first: the gutter and the highlighted copy of a
+  // multi-megabyte file would block the page.
+  const cut = f.text.length > PREVIEW_MAX_CHARS ? f.text.lastIndexOf("\n", PREVIEW_MAX_CHARS) : -1;
+  renderPreviewCode(f, rel, cut > 0 ? f.text.slice(0, cut) : f.text);
+  const all = $("#preview-all");
+  all.hidden = cut <= 0;
+  all.textContent = `Show all ${lines.toLocaleString("en-US")} lines`;
+  all.onclick = () => { renderPreviewCode(f, rel, f.text); all.hidden = true; };
   const isMd = f.kind !== "pdf" && /\.(md|markdown|mdx)$/i.test(rel);
   $("#preview-render").hidden = !isMd;
   const md = $(".preview-md");
@@ -1899,6 +1898,14 @@ async function openPreview(rel) {
   }
   setPreviewRendered(isMd && loadJSON("momo.previewRendered", true));
 }
+const PREVIEW_MAX_CHARS = 200_000;  // also highlight.js's limit: beyond it, text is shown plain
+function renderPreviewCode(f, rel, text) {
+  const n = text.split("\n").length;
+  $(".preview-gutter").textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n");
+  $(".preview-code code").innerHTML = f.kind === "pdf" ? esc(text) : highlight(text, langFromPath(rel) || "none");
+  $(".preview-scroll").scrollTop = 0;
+}
+
 // Markdown files open rendered by default; the toggle choice is remembered.
 function setPreviewRendered(on) {
   $(".preview-md").hidden = !on;

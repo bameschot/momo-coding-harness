@@ -25,6 +25,18 @@ VIEW_FIELDS = ("tool_output", "think_output", "md_render", "diff_output", "diff_
 
 # Commands that mutate harness.messages — refused while a worker thread runs.
 _MUTATING = ("/clear", "/compact", "/fast-compact", "/new", "/retry")
+# Commands that switch the mode: the running turn keeps its tool set, so a new
+# mode's prompt and rules would not match what the model can call.
+_MODE_COMMANDS = ("/code", "/design", "/chat", "/momo")
+_BUSY_MSG = "Busy — finish the response or interrupt before running that command."
+
+
+def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
+    """Commands that would change the turn a worker thread is running."""
+    arg = parts[1].strip().lower() if len(parts) > 1 else ""
+    return (cmd in _MUTATING or cmd in _MODE_COMMANDS
+            or (cmd == "/plan" and arg != "show")
+            or (cmd in ("/session", "/workspace", "/workdir") and bool(arg)))
 
 # Idle recap: how often the watcher checks, and the minimum gap between two recap
 # attempts (on top of "once per user turn" and "once per idle period").
@@ -292,8 +304,15 @@ class Controller:
             return True
         return False
 
-    def set_mode(self, mode: str):
+    def set_mode(self, mode: str) -> bool:
+        """Switch mode, unless a turn is running (its tools were chosen for the
+        old mode).  Returns whether the mode changed."""
+        if self._busy and not self.waiting:
+            self._system("Busy — finish the response or interrupt before switching mode.")
+            self.harness.emit_status()      # frontends put their mode control back
+            return False
         self.harness.set_mode(mode)
+        return True
 
     def cycle_net(self):
         """off -> on -> off.  '/net local' is deliberately not in the cycle: it is
@@ -379,10 +398,9 @@ class Controller:
 
         # Commands that mutate harness.messages while a worker thread is running
         # would corrupt the turn structure. Read-only commands are fine.
-        if self._busy and not self.waiting:
-            if cmd in _MUTATING or (cmd == "/session" and len(parts) > 1):
-                self._system("Busy — finish the response or interrupt before running that command.")
-                return SubmitOutcome()
+        if self._busy and not self.waiting and _blocked_while_busy(cmd, parts):
+            self._system(_BUSY_MSG)
+            return SubmitOutcome()
 
         result = handle_command(text, self.harness)
         if result.exit_app:

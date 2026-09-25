@@ -46,6 +46,7 @@ import os
 import ssl
 import threading
 from dataclasses import asdict
+from functools import cache
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -97,6 +98,7 @@ def is_loopback(host: str) -> bool:
         return False
 
 
+@cache
 def _pdf_support() -> bool:
     try:
         import pypdf  # noqa: F401
@@ -105,6 +107,7 @@ def _pdf_support() -> bool:
         return False
 
 
+@cache
 def _companion_data() -> dict:
     return {
         "walk_right": companion._MOMO_WR,
@@ -124,6 +127,15 @@ def _companion_data() -> dict:
 # ── sessions / workspace helpers ────────────────────────────────────────────
 
 _session_cache: dict[Path, tuple[float, dict]] = {}
+_session_lock = threading.Lock()   # request threads share the cache
+
+
+def _session_infos(paths: list[Path]) -> list[dict]:
+    """Drawer rows for these session files; the cache keeps only these."""
+    with _session_lock:
+        for gone in _session_cache.keys() - set(paths):   # deleted or aged out
+            del _session_cache[gone]
+    return [i for p in paths if (i := _session_info(p))]
 
 
 def _session_info(path: Path) -> dict | None:
@@ -131,7 +143,8 @@ def _session_info(path: Path) -> dict | None:
         mtime = path.stat().st_mtime
     except OSError:
         return None
-    cached = _session_cache.get(path)
+    with _session_lock:
+        cached = _session_cache.get(path)
     if cached and cached[0] == mtime:
         return cached[1]
     try:
@@ -148,7 +161,8 @@ def _session_info(path: Path) -> dict | None:
         "messages": sum(1 for m in msgs if m.get("role") in ("user", "assistant")),
         "preview": preview[:80] + ("…" if len(preview) > 80 else ""),
     }
-    _session_cache[path] = (mtime, info)
+    with _session_lock:
+        _session_cache[path] = (mtime, info)
     return info
 
 
@@ -240,6 +254,7 @@ class WebServer:
             "think": h.think,
             "context_limit": h.context_limit,
             "pdf_support": _pdf_support(),
+            "max_upload": attach_mod.MAX_UPLOAD_BYTES,
             "modes": _MODES,
             "commands": help_commands(),
             "skills": {"available": h.list_available_skills(), "active": list(h.active_skills)},
@@ -269,11 +284,11 @@ class WebServer:
             # ── helpers ──────────────────────────────────────────────────────
 
             def _send(self, status: int, body: bytes = b"", ctype: str = "text/plain; charset=utf-8",
-                      headers: dict | None = None):
+                      headers: dict | None = None, cache: str = "no-store"):
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control", cache)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
                 for k, v in (headers or {}).items():
@@ -345,13 +360,7 @@ class WebServer:
                     return
 
                 if path in _STATIC_FILES:
-                    name, ctype = _STATIC_FILES[path]
-                    try:
-                        body = (_STATIC_DIR / name).read_bytes()
-                    except OSError:
-                        self._send(HTTPStatus.NOT_FOUND, b"Not found\n")
-                        return
-                    self._send(HTTPStatus.OK, body, ctype)
+                    self._static(*_STATIC_FILES[path])
                 elif path == "/api/state":
                     self._json(web._state())
                 elif path == "/api/events":
@@ -359,11 +368,34 @@ class WebServer:
                 else:
                     self._get_api(path, parse_qs(parts.query))
 
+            def _static(self, name: str, ctype: str):
+                # Revalidated on every load (no-cache) but only re-sent when the file
+                # changed: the browser keeps it and asks with If-None-Match.
+                f = _STATIC_DIR / name
+                try:
+                    st = f.stat()
+                    etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+                    if self.headers.get("If-None-Match") == etag:
+                        self._send(HTTPStatus.NOT_MODIFIED, headers={"ETag": etag}, cache="no-cache")
+                        return
+                    body = f.read_bytes()
+                except OSError:
+                    self._send(HTTPStatus.NOT_FOUND, b"Not found\n")
+                    return
+                self._send(HTTPStatus.OK, body, ctype, headers={"ETag": etag}, cache="no-cache")
+
+            def do_HEAD(self):
+                # Static files only: HEAD on the event stream would hold the connection.
+                if urlsplit(self.path).path in _STATIC_FILES:
+                    self.do_GET()
+                else:
+                    self._send(HTTPStatus.METHOD_NOT_ALLOWED, headers={"Allow": "GET, POST"})
+
             def _get_api(self, path: str, qs: dict):
                 h = web.controller.harness
                 arg = lambda k, d="": (qs.get(k) or [d])[0]  # noqa: E731
                 if path == "/api/sessions":
-                    infos = [i for p in session_mod.list_sessions()[:50] if (i := _session_info(p))]
+                    infos = _session_infos(session_mod.list_sessions()[:50])
                     self._json({"current": h.session_path().stem, "sessions": infos})
                 elif path == "/api/models":
                     self._json({"current": h.client.model, "models": h.client.list_models(),
@@ -514,8 +546,7 @@ class WebServer:
                     if mode not in _MODES:
                         self._send(HTTPStatus.BAD_REQUEST, b"Unknown mode\n")
                         return
-                    c.set_mode(mode)
-                    self._json({"mode": mode})
+                    self._json({"mode": mode, "ok": c.set_mode(mode)})
                 elif path == "/api/sessions/delete":
                     names = data.get("names")
                     if (not isinstance(names, list) or not names or len(names) > 1000
@@ -524,8 +555,6 @@ class WebServer:
                         return
                     deleted, skipped = session_mod.delete_sessions(
                         names, current=c.harness.session_path().stem)
-                    for name in deleted:
-                        _session_cache.pop(session_mod.SESSION_DIR / f"{name}.json", None)
                     self._json({"deleted": deleted, "skipped": skipped})
                 elif path == "/api/retry":
                     self._json({"ok": c.retry_last()})
@@ -536,7 +565,7 @@ class WebServer:
                         return
                     msg = c.harness.set_index_filter(text)
                     if msg.startswith("ERROR"):
-                        self._json({"ok": False, "message": msg}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                        self._json({"error": msg}, HTTPStatus.INTERNAL_SERVER_ERROR)
                         return
                     c._system(msg)      # the change shows in every frontend's transcript
                     self._json({"ok": True, "message": msg})
