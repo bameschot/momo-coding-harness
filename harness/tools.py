@@ -3,8 +3,10 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import textwrap
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -454,6 +456,21 @@ def _safe_path(raw: str, workdir: Path) -> Path | str:
     return p
 
 
+def _safe_entry_path(raw: str, workdir: Path) -> Path | str:
+    """Like _safe_path, but a symlink stays the link itself (only its folder is
+    resolved): deleting or moving a link must not act on the file it points to."""
+    root = workdir.resolve()
+    q = Path(os.path.normpath(root / raw))
+    if q == root:
+        return "ERROR: path is the working directory itself"
+    parent = q.parent.resolve()
+    try:
+        parent.relative_to(root)
+    except ValueError:
+        return "ERROR: path outside working directory"
+    return parent / q.name
+
+
 # ── executors ────────────────────────────────────────────────────────────────
 
 _SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".tox", "dist", "build", ".mypy_cache", ".pytest_cache"}
@@ -725,15 +742,27 @@ def _file_info(path: str, *, workdir: Path) -> str:
     return "\n".join(lines)
 
 
+def _same_entry(a: Path, b: Path) -> bool:
+    """The same directory entry (a case-only rename on macOS), not following links."""
+    try:
+        sa, sb = os.lstat(a), os.lstat(b)
+    except OSError:
+        return False
+    return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
+
+
 def _move_file(src: str, dst: str, *, workdir: Path) -> str:
-    sp = _safe_path(src, workdir)
+    sp = _safe_entry_path(src, workdir)
     if isinstance(sp, str):
         return sp
-    dp = _safe_path(dst, workdir)
+    dp = _safe_entry_path(dst, workdir)
     if isinstance(dp, str):
         return dp
-    if not sp.exists():
+    if not sp.exists() and not sp.is_symlink():
         return f"ERROR: source not found: {src}"
+    if (dp.exists() or dp.is_symlink()) and not _same_entry(sp, dp):
+        return (f"ERROR: destination already exists: {dst} — nothing was moved. "
+                f"Delete it first if it should be replaced.")
     try:
         dp.parent.mkdir(parents=True, exist_ok=True)
         sp.rename(dp)
@@ -831,11 +860,31 @@ def _edit_file(path: str, old_string: str, new_string: str,
     if isinstance(p, str):
         return p
     try:
-        content = p.read_text(encoding="utf-8", errors="replace")
+        raw = p.read_bytes()
     except FileNotFoundError:
         return f"ERROR: file not found: {path}"
     except OSError as e:
         return f"ERROR: {e}"
+    # Decoding with errors="replace" and writing back would turn every non-UTF-8
+    # byte in the file into U+FFFD, not just the edited text.
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        return (f"ERROR: {path} is not valid UTF-8 (byte {e.start}), so edit_file cannot "
+                f"change it without corrupting it. Nothing was written.")
+    # A CRLF file is matched as LF (old_string from the model has LF) and written
+    # back as CRLF.  Mixed endings are matched as they are.
+    crlf = "\r\n" in content and content.count("\r\n") == content.count("\n")
+    if crlf:
+        content = content.replace("\r\n", "\n")
+        old_string, new_string = old_string.replace("\r\n", "\n"), new_string.replace("\r\n", "\n")
+
+    def save(text: str) -> str:
+        try:
+            p.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
+        except OSError as e:
+            return f"ERROR: {e}"
+        return ""
 
     old, new = old_string, new_string
     count = content.count(old)
@@ -854,8 +903,7 @@ def _edit_file(path: str, old_string: str, new_string: str,
                          (_strip_lineno_prefixes(old_string), _strip_lineno_prefixes(new_string))):
                 nc = _tolerant_replace(content, o, n)
                 if nc is not None:
-                    p.write_text(nc, encoding="utf-8")
-                    return "OK — 1 change applied (matched with whitespace tolerance)"
+                    return save(nc) or "OK — 1 change applied (matched with whitespace tolerance)"
         # Already-applied detection: if old_string is gone but a substantial
         # new_string is already present, the edit was very likely made on an
         # earlier turn. Report that as a non-error so the model stops re-trying
@@ -867,14 +915,12 @@ def _edit_file(path: str, old_string: str, new_string: str,
         return "ERROR: old_string not found in file." + _closest_lines_hint(content, old_string)
 
     if replace_all:
-        p.write_text(content.replace(old, new), encoding="utf-8")
-        return f"Replaced {count} occurrence(s)"
+        return save(content.replace(old, new)) or f"Replaced {count} occurrence(s)"
     # Default: require exactly one match so the model can't accidentally replace
     # the wrong occurrence when the same string appears multiple times.
     if count > 1:
         return f"ERROR: old_string found {count} times; must match exactly once (set replace_all=true to replace all)"
-    p.write_text(content.replace(old, new, 1), encoding="utf-8")
-    return "OK — 1 change applied"
+    return save(content.replace(old, new, 1)) or "OK — 1 change applied"
 
 
 def _size_note(content: str) -> str:
@@ -904,7 +950,7 @@ def _write_file(path: str, content: str, *, workdir: Path) -> str:
 
 
 def _delete_file(path: str, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
+    p = _safe_entry_path(path, workdir)
     if isinstance(p, str):
         return p
     try:
@@ -936,8 +982,20 @@ def _web_client_in(command: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the command and everything it started (it leads its own session)."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.communicate(timeout=5)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+
+
 def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: Path,
-                 net_access: str = "off") -> str:
+                 net_access: str = "off", cancel=None) -> str:
     # Steer page reads and API calls to fetch_url; downloads to disk still need
     # curl/wget.  With /net off, running curl would quietly bypass the user's
     # setting (observed: a 9B model with no fetch_url fell back to 50 curl calls
@@ -961,23 +1019,40 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
         timeout = _MAX_COMMAND_TIMEOUT
     if timeout <= 0 or timeout > _MAX_COMMAND_TIMEOUT:
         timeout = _MAX_COMMAND_TIMEOUT
+    # No stdin: a command that reads it (git commit without -m, a REPL) would
+    # otherwise fight the TUI for the terminal.  Its own session, so a timeout or
+    # Esc kills what it started too — killing only the shell leaves grandchildren
+    # holding the pipes open, and the read would wait for them.
     try:
-        r = subprocess.run(
-            command, shell=True, cwd=workdir,
-            capture_output=True, text=True, timeout=timeout,
-        )
-        parts = []
-        if r.stdout.strip():
-            parts.append(r.stdout.strip())
-        if r.stderr.strip():
-            parts.append(f"[stderr]\n{r.stderr.strip()}")
-        if r.returncode != 0:
-            parts.append(f"[exit code: {r.returncode}]")
-        return note + ("\n".join(parts) or "(no output)")
-    except subprocess.TimeoutExpired:
-        return f"ERROR: command timed out after {timeout}s"
+        proc = subprocess.Popen(command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)
     except OSError as e:
         return f"ERROR: {e}"
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            out, err = proc.communicate(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            if cancel is not None and cancel.is_set():
+                _kill_group(proc)
+                return "ERROR: command interrupted by the user"
+            if time.monotonic() >= deadline:
+                _kill_group(proc)
+                return f"ERROR: command timed out after {timeout}s"
+
+    def text(b: bytes) -> str:
+        return b.decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+
+    parts = []
+    if out_text := text(out):
+        parts.append(out_text)
+    if err_text := text(err):
+        parts.append(f"[stderr]\n{err_text}")
+    if proc.returncode != 0:
+        parts.append(f"[exit code: {proc.returncode}]")
+    return note + ("\n".join(parts) or "(no output)")
 
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
@@ -986,6 +1061,7 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
 # clear error messages before Python's TypeError exposes internal function names.
 _REQUIRED_ARGS: dict[str, list[str]] = {}
 _KNOWN_ARGS: dict[str, set[str]] = {}
+_ARG_TYPES: dict[str, dict[str, str]] = {}     # tool -> {arg: JSON schema type}
 for _tl in (READ_ONLY_TOOLS, CODE_NAV_TOOLS, INDEX_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS, NET_TOOLS):
     for _t in _tl:
         _tname = _t["function"]["name"]
@@ -993,6 +1069,8 @@ for _tl in (READ_ONLY_TOOLS, CODE_NAV_TOOLS, INDEX_TOOLS, SHARED_TOOLS, CODING_O
         _req   = _t["function"]["parameters"].get("required", [])
         if _tname not in _KNOWN_ARGS:
             _KNOWN_ARGS[_tname] = set(_props.keys())
+            _ARG_TYPES[_tname] = {k: v.get("type") for k, v in _props.items()
+                                  if isinstance(v.get("type"), str)}
         if _req and _tname not in _REQUIRED_ARGS:
             _REQUIRED_ARGS[_tname] = _req
 
@@ -1032,7 +1110,8 @@ if code_nav.AVAILABLE:
 # net_access is deliberately not in the fetch_url schema: the model must not be
 # able to ask for "local" and unblock the private network for itself.
 _NEEDS_NET_ACCESS = {"fetch_url"}
-# run_command only needs to know whether /net is off, to steer curl/wget.
+# run_command needs to know whether /net is off, to steer curl/wget, and the
+# turn's cancel flag, so Esc stops a running command.
 _NEEDS_NET_STATE = {"run_command"}
 # The index tools get the live ProjectIndex and the turn's cancel flag.
 _NEEDS_INDEX = INDEX_TOOL_NAMES
@@ -1040,6 +1119,26 @@ _NEEDS_INDEX = INDEX_TOOL_NAMES
 # index query does not depend on the stat-diff throttle to see the change.
 _WRITES_PATHS = {"write_file": ("path",), "edit_file": ("path",), "append_to_file": ("path",),
                  "delete_file": ("path",), "move_file": ("src", "dst")}
+
+
+_INT_RE = re.compile(r"\s*[-+]?\d+\s*")
+
+
+def _coerce_args(name: str, args: dict) -> dict:
+    """Small models often send numbers and booleans as strings ("40", "true"):
+    convert those the schema types as integer / boolean, leave the rest alone."""
+    types = _ARG_TYPES.get(name, {})
+    out = dict(args)
+    for k, v in args.items():
+        t = types.get(k)
+        if t == "integer":
+            if isinstance(v, str) and _INT_RE.fullmatch(v):
+                out[k] = int(v)
+            elif isinstance(v, float) and v.is_integer():
+                out[k] = int(v)
+        elif t == "boolean" and isinstance(v, str) and v.strip().lower() in ("true", "false"):
+            out[k] = v.strip().lower() == "true"
+    return out
 
 
 _PLACEHOLDER_RE = re.compile(r"^\s*\[written to [^\]]*\]\s*$")
@@ -1252,11 +1351,12 @@ def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_byt
             f"Valid arguments: {', '.join(sorted(known))}.{hint}"
         )
 
+    args = _coerce_args(name, args)
     if name in _NEEDS_NET_ACCESS:
         extra = {"net_access": net_access, "net_max_bytes": net_max_bytes,
                  "net_max_chars": net_max_chars}
     elif name in _NEEDS_NET_STATE:
-        extra = {"net_access": net_access}
+        extra = {"net_access": net_access, "cancel": cancel}
     elif name in _NEEDS_INDEX:
         extra = {"index": index, "cancel": cancel}
     else:

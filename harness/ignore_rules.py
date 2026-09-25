@@ -25,6 +25,7 @@ from pathlib import Path
 DEFAULT_EXCLUDES = (".venv/", "venv/", "__pycache__/", "node_modules/", ".tox/", "dist/",
                     "build/", ".mypy_cache/", ".pytest_cache/")
 _MAX_SEED_GITIGNORES = 500
+_MAX_SEED_DIRS = 20_000     # folders searched for nested .gitignore files (a workdir of $HOME)
 
 
 @dataclass(frozen=True)
@@ -198,7 +199,8 @@ def _read(p: Path) -> str:
 def seed_text(root: Path) -> str:
     """The first filter for a project: defaults + every .gitignore (nested ones
     rewritten to their directory) + .git/info/exclude.  Directories that the
-    rules so far exclude are not searched for more .gitignore files, as in git."""
+    rules so far exclude are not searched for more .gitignore files, as in git.
+    The search stops after _MAX_SEED_DIRS folders."""
     root = Path(root)
     is_repo = (root / ".git").exists()
     lines = ["# momo code index filter — gitignore syntax; the last matching line wins.",
@@ -213,8 +215,13 @@ def seed_text(root: Path) -> str:
         lines += ["", "# .gitignore", *root_gi.splitlines()]
     rules = Rules.parse("\n".join(lines))
     nested: list[str] = []
-    seen = 0
+    seen = dirs = 0
     for dirpath, dirnames, filenames in os.walk(root):
+        dirs += 1
+        if dirs > _MAX_SEED_DIRS:
+            nested += ["", f"# (stopped looking for nested .gitignore files after "
+                           f"{_MAX_SEED_DIRS:,} folders)"]
+            break
         rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
         rel_dir = "" if rel_dir == "." else rel_dir
         if rel_dir and ".gitignore" in filenames and seen < _MAX_SEED_GITIGNORES:
@@ -223,7 +230,7 @@ def seed_text(root: Path) -> str:
             rewritten = [r for r in (_rewrite_nested(l, rel_dir) for l in text.splitlines()) if r]
             if rewritten:
                 nested += ["", f"# {rel_dir}/.gitignore", *rewritten]
-                rules = Rules.parse("\n".join(lines + nested))
+                rules = Rules(rules.rules + [r for r in map(parse_line, rewritten) if r])
         dirnames[:] = sorted(d for d in dirnames
                              if not rules.dir_excluded(f"{rel_dir}/{d}" if rel_dir else d))
     lines += nested

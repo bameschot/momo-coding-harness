@@ -60,7 +60,7 @@ def _format_index(harness) -> str:
         if b["shared"]:
             lines.append(share_row("shared names", b["shared"], "identifier names used across files"))
     if b["skipped"]:
-        lines.append("Skipped: " + ", ".join(f"{v:,} {k.replace('_', ' ')}"
+        lines.append("Skipped: " + ", ".join(code_index._skip_label(k, v, b["max_files"])
                                              for k, v in b["skipped"].items()))
     if b["error"]:
         lines.append(f"Last error: {b['error']}")
@@ -114,10 +114,11 @@ def _index_filter(harness, arg: str) -> CommandResult:
             text.rstrip("\n") + "\n" + rest + "\n"))
     if sub == "remove":
         lines = text.splitlines()
-        if rest not in lines:
+        hit = next((i for i, ln in enumerate(lines) if ln.strip() == rest), None)
+        if hit is None:
             return CommandResult(handled=True, output=(
                 f"ERROR: no filter line {rest!r} — /index-filter lists them"))
-        lines.remove(rest)
+        del lines[hit]
         return CommandResult(handled=True, output=harness.set_index_filter("\n".join(lines) + "\n"))
     if sub == "reset":
         return CommandResult(handled=True, output=harness.reset_index_filter())

@@ -1635,7 +1635,10 @@ function renderIndexMenu(menu, b) {
   const notes = [];
   if (b.partial) notes.push("Partial: the budget was reached, so further files are not indexed.");
   if (Object.keys(b.skipped).length) {
-    notes.push("Skipped: " + Object.entries(b.skipped).map(([k, v]) => `${v} ${k.replace("_", " ")}`).join(", "));
+    // "limit" is a flag, not a count: the listing stops at the file limit.
+    notes.push("Skipped: " + Object.entries(b.skipped).map(([k, v]) => k === "limit"
+      ? `files past the ${b.max_files.toLocaleString()}-file limit`
+      : `${v} ${k.replace("_", " ")}`).join(", "));
   }
   if (b.error) notes.push(`Error: ${b.error}`);
   menu.replaceChildren(

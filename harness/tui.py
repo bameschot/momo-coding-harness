@@ -1299,7 +1299,8 @@ class TUI:
                 pass
         if new is not None:
             note = (self.harness.set_index_filter(new) if new != text
-                    else "Code index filter unchanged.")
+                    else f"Code index filter unchanged. (If {editor!r} returned before you "
+                         f"saved, it does not wait: set $VISUAL to e.g. 'code -w'.)")
         self._add_chat("system", note)
         self._rebuild()
 

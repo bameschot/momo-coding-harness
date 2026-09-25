@@ -247,7 +247,7 @@ class Budget(Base):
             self.assertIsNone(self.idx.wait_fresh())
             self.assertEqual(self.idx.live_count(), 2)
             self.assertTrue(self.idx.skipped["limit"])
-            self.assertIn("2-file limit", ci._degraded_note(self.idx))
+            self.assertIn("more than 2 files", ci._degraded_note(self.idx))
             self.idx.set_max_files(1000)
             self.assertIsNone(self.idx.wait_fresh())
             self.assertEqual(self.idx.live_count(), len(CHAIN))

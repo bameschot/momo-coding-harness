@@ -35,8 +35,10 @@ def main():
                         help="Backend base URL (default: 11434 for ollama, 8080 for llamacpp)")
     parser.add_argument("--model",   default=None, metavar="NAME",
                         help="Model name (default: last-used model or qwen3.5:9b)")
-    parser.add_argument("--workspace", "--workdir", default=".", metavar="PATH",
-                        dest="workdir", help="Root directory for all file operations")
+    parser.add_argument("--workspace", "--workdir", default=None, metavar="PATH",
+                        dest="workdir", help="Root directory for all file operations "
+                                             "(default: the restored session's, else the "
+                                             "current directory)")
     parser.add_argument("--context", default=None, type=int, metavar="N",
                         help="Override context token limit (default: read from model)")
     parser.add_argument("--mode",    default="design", choices=["design", "chat", "plan", "coding", "momo"],
@@ -129,7 +131,7 @@ def main():
         parser.error("--web-allow-host only applies to --web-insecure "
                      "(with a token, the Host header is not restricted)")
 
-    workdir = Path(args.workdir).expanduser().resolve()
+    workdir = Path(args.workdir or ".").expanduser().resolve()
     if not workdir.is_dir():
         print(f"error: --workdir is not a directory: {workdir}", file=sys.stderr)
         sys.exit(1)
@@ -206,6 +208,17 @@ def main():
                 new_provider,
                 host=args.host or (_DEFAULT_HOSTS[new_provider] if switched else harness.client.host),
                 model=args.model or (model if switched else harness.client.model))
+        # Likewise an explicit --workdir beats the restored session's, and a
+        # restored workdir that no longer exists falls back to this one.
+        if args.workdir is not None or not harness.workdir.is_dir():
+            if not harness.workdir.is_dir():
+                harness.event_queue.put(ChatEvent(
+                    "system", f"The session's working directory {harness.workdir} no longer "
+                              f"exists; using {workdir}."))
+            if harness.workdir.resolve() != workdir:
+                harness.workdir = workdir
+                harness.set_mode(harness.mode)   # the system prompt names the workdir
+                harness.reload_guides()
     else:
         harness.set_mode(args.mode)
     if args.context is not None:      # after the restore, which would overwrite it

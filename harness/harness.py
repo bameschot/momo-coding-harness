@@ -1101,7 +1101,8 @@ class Harness:
 
     def index_filter(self) -> tuple[str, str]:
         """(filter text, its path).  Reading it seeds it when it doesn't exist yet."""
-        text = self.index.filter_text if self.index is not None \
+        idx = self.index
+        text = idx.filter_text if idx is not None and not idx.filter_pending \
             else code_index.load_filter(self.workdir)[0]
         return text, str(code_index.filter_path(self.workdir))
 
@@ -1153,9 +1154,15 @@ class Harness:
         err = self._wait_index(name)
         if err:
             return err
-        return dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes,
-                        self._fetch_chars(), index=self.index, cancel=self._cancel,
-                        index_route=self.index_route)
+        # A tool that raises must still produce a result: the assistant turn with
+        # this call is already in the history, and an unanswered call breaks the
+        # next request (and an escaped traceback would land on the curses screen).
+        try:
+            return dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes,
+                            self._fetch_chars(), index=self.index, cancel=self._cancel,
+                            index_route=self.index_route)
+        except Exception as e:
+            return f"ERROR: {name} failed: {type(e).__name__}: {e}"
 
     def _build_system_prompt(self) -> str:
         if self._plan_executing():
@@ -1214,7 +1221,11 @@ class Harness:
         this or the reference goes stale — which matters for the small models
         that emit text-format tool calls by copying that reference.
         """
-        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
+        prompt = {"role": "system", "content": self._build_system_prompt()}
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0] = prompt
+        else:                       # a session file without one (hand-edited, damaged)
+            self.messages.insert(0, prompt)
 
     def _read_guides(self) -> list[tuple[str, str]]:
         """The workdir's guide files as (relpath, text), capped in total size."""

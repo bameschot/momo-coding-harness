@@ -263,10 +263,14 @@ def _private_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     tmp = path.with_suffix(f".tmp{os.getpid()}.{threading.get_ident()}")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _untrusted_reason(path: Path, st) -> str:
@@ -361,7 +365,8 @@ class ProjectIndex:
     def __init__(self, root: Path, max_bytes: int = DEFAULT_MAX_BYTES, on_change=None,
                  max_files: int = DEFAULT_MAX_FILES, filter_text: str | None = None,
                  workers: int = 0):
-        """filter_text None: load (or seed and save) the project's filter file.
+        """filter_text None: load (or seed and save) the project's filter file,
+        on the indexer thread — seeding walks the tree for .gitignore files.
         workers 0: auto_workers(); 1: build in the indexer thread only."""
         self.root = root.resolve()
         self.max_bytes = max(MIN_MAX_BYTES, int(max_bytes))
@@ -397,11 +402,11 @@ class ProjectIndex:
         # not re-read at every stat-diff.  rel -> (reason, mtime_ns, size)
         self._skipped: dict[str, tuple[str, int, int]] = {}
         self._beyond: frozenset[str] = frozenset()   # listed past max_files: kept out
-        filter_note = ""
-        if filter_text is None:
-            filter_text, filter_note = load_filter(self.root)
-        self.filter_text = filter_text
-        self._rules = ignore_rules.Rules.parse(filter_text)
+        # Until the worker has loaded the filter file, nothing is listed (the
+        # first _diff runs after it) and index_filter() reads the file itself.
+        self.filter_pending = filter_text is None
+        self.filter_text = filter_text or ""
+        self._rules = ignore_rules.Rules.parse(self.filter_text)
         self._diff_cost = 0.0
         self.version = 0
         self._notices: list[str] = []
@@ -409,8 +414,6 @@ class ProjectIndex:
         self._graph_cache: tuple | None = None
         self.last_error = ""
         self._thread: threading.Thread | None = None
-        if filter_note:
-            self._notices.append(filter_note)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -576,7 +579,8 @@ class ProjectIndex:
         if over > 0:
             beyond.update(gone)     # the os.walk fallback stops listing at the limit
         with self._cond:
-            self.skipped["limit"] = max(0, over)
+            # A flag, not a count: the listing stops one past the limit.
+            self.skipped["limit"] = 1 if over > 0 else 0
             self._beyond = frozenset(beyond)
             for rel in changed:
                 self._queue[rel] = None
@@ -592,6 +596,15 @@ class ProjectIndex:
             with self._cond:
                 self.state = "building"
             self._changed(force=True)
+            if self.filter_pending:
+                text, note = load_filter(self.root)
+                with self._cond:
+                    if self.filter_pending:         # set_filter() may have won meanwhile
+                        self.filter_pending = False
+                        self.filter_text = text
+                        self._rules = ignore_rules.Rules.parse(text)
+                    if note:
+                        self._notices.append(note)
             if load_pickle:
                 msg = self.load()
                 if msg:
@@ -974,6 +987,7 @@ class ProjectIndex:
         files now excluded and indexing the ones now let in."""
         rules = ignore_rules.Rules.parse(text)
         with self._cond:
+            self.filter_pending = False
             self.filter_text = text
             self._rules = rules
             self._rescan = True
@@ -1193,8 +1207,8 @@ def _degraded_note(index: ProjectIndex, component: str | None = None) -> str:
                       "idents": "the identifier index was dropped for memory, so files were re-parsed"
                       }[component])
     if index.skipped.get("limit"):
-        parts.append(f"{index.skipped['limit']} files beyond the {index.max_files:,}-file limit "
-                     f"are not indexed (/index-max-files)")
+        parts.append(f"the project has more than {index.max_files:,} files; the ones past "
+                     f"that limit are not indexed (/index-max-files)")
     return f"(note: {'; '.join(parts)})" if parts else ""
 
 
@@ -2529,6 +2543,13 @@ def breakdown(index: ProjectIndex) -> dict:
         }
 
 
+def _skip_label(reason: str, n: int, max_files: int) -> str:
+    """One "Skipped:" entry; "limit" is a flag (the listing stops at the limit)."""
+    if reason == "limit":
+        return f"files past the {max_files:,}-file limit"
+    return f"{n:,} {reason.replace('_', ' ')}"
+
+
 def workers_label(workers: int) -> str:
     return f"auto ({auto_workers()})" if workers == 0 else str(workers)
 
@@ -2558,7 +2579,8 @@ def status_text(index: ProjectIndex) -> str:
         ]
         sk = {k: v for k, v in index.skipped.items() if v}
         if sk:
-            lines.append("Skipped: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in sk.items()))
+            lines.append("Skipped: " + ", ".join(_skip_label(k, v, index.max_files)
+                                                 for k, v in sk.items()))
         if index.last_error:
             lines.append(f"Last error: {index.last_error}")
     return "\n".join(lines)

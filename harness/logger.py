@@ -9,7 +9,9 @@ class Logger:
         log_dir = Path.home() / ".momo-harness" / "sessions"
         log_dir.mkdir(parents=True, exist_ok=True)
         self._path = log_dir / f"{session_ts}.log"
-        self._fh = open(self._path, "a", encoding="utf-8")
+        # 0600 like the session file: the log holds tool arguments and results.
+        self._fh = open(os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
+                        "a", encoding="utf-8")
 
     def _write(self, record: dict):
         if self._fh.closed:
