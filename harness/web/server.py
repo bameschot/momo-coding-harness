@@ -57,11 +57,10 @@ from .. import companion
 from .. import ignore_rules
 from ..file_search import fuzzy_search, workspace_files
 from .. import session as session_mod
-from ..tools import _SKIP_DIRS, _safe_path
-from ..commands import help_commands, _render_markdown
+from ..paths import SKIP_DIRS, safe_path
+from ..commands import help_commands, render_markdown
 from ..controller import Controller
-from ..events import event_to_json
-from ..harness import ErrorEvent
+from ..events import ErrorEvent, event_to_json
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _STATIC_FILES = {
@@ -154,7 +153,7 @@ def _session_info(path: Path) -> dict | None:
 
 
 def _list_workspace(root: Path, rel: str, hidden: bool) -> list[dict] | str:
-    target = _safe_path(rel or ".", root)
+    target = safe_path(rel or ".", root)
     if isinstance(target, str):
         return target
     if not target.is_dir():
@@ -165,7 +164,7 @@ def _list_workspace(root: Path, rel: str, hidden: bool) -> list[dict] | str:
     except OSError as e:
         return f"ERROR: {e}"
     for e in entries:
-        if (not hidden and e.name.startswith(".")) or e.name in _SKIP_DIRS:
+        if (not hidden and e.name.startswith(".")) or e.name in SKIP_DIRS:
             continue
         is_dir = e.is_dir(follow_symlinks=False)
         try:
@@ -381,7 +380,7 @@ class WebServer:
                 elif path == "/api/last-user":
                     self._json(web.controller.last_user_message() or {})
                 elif path == "/api/export":
-                    body = _render_markdown(h.messages).encode("utf-8")
+                    body = render_markdown(h.messages).encode("utf-8")
                     self._send(HTTPStatus.OK, body, "text/markdown; charset=utf-8", headers={
                         "Content-Disposition": f'attachment; filename="momo-{h.session_path().stem}.md"'})
                 elif path == "/api/files":
@@ -398,7 +397,7 @@ class WebServer:
                     self._send(HTTPStatus.NOT_FOUND, b"Not found\n")
 
             def _file(self, root: Path, rel: str):
-                target = _safe_path(rel, root)
+                target = safe_path(rel, root)
                 if isinstance(target, str) or not rel:
                     self._json({"error": target if isinstance(target, str) else "missing path"},
                                HTTPStatus.BAD_REQUEST)

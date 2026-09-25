@@ -11,15 +11,19 @@ _PREFS_PATH = Path.home() / ".momo-harness" / "prefs.json"
 _prefs_lock = threading.Lock()     # save_prefs is called from the TUI, web and worker threads
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, *chunks: str | bytes, private_dir: bool = False) -> None:
     """Write via a temp file and rename, so a crash never leaves a truncated
-    file; 0600, since sessions hold file contents and conversations."""
+    file; 0600, since sessions, prefs and the code index hold file contents and
+    conversations.  private_dir also makes the folder 0700."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if private_dir:
+        os.chmod(path.parent, 0o700)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as f:
+            for chunk in chunks:
+                f.write(chunk.encode("utf-8") if isinstance(chunk, str) else chunk)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -37,7 +41,7 @@ def save_prefs(**kwargs) -> None:
     with _prefs_lock:
         prefs = load_prefs()
         prefs.update(kwargs)
-        _atomic_write(_PREFS_PATH, json.dumps(prefs, indent=2))
+        atomic_write(_PREFS_PATH, json.dumps(prefs, indent=2))
 
 
 def new_timestamp() -> str:
@@ -81,7 +85,7 @@ def save(ts: str, model: str, mode: str, workdir: Path,
         "turn_count": turn_count,
         "messages": messages,
     }
-    _atomic_write(session_path(ts), json.dumps(data, indent=2))
+    atomic_write(session_path(ts), json.dumps(data, indent=2))
 
 
 def load(path: Path) -> dict:
@@ -95,14 +99,9 @@ def list_sessions() -> list[Path]:
 
 def find_session(name: str) -> Path | None:
     """Resolve a session by exact filename stem or partial match."""
-    for p in list_sessions():
-        if p.stem == name or p.name == name:
-            return p
-    # partial prefix match
-    for p in list_sessions():
-        if p.stem.startswith(name):
-            return p
-    return None
+    sessions = list_sessions()
+    exact = next((p for p in sessions if p.stem == name or p.name == name), None)
+    return exact or next((p for p in sessions if p.stem.startswith(name)), None)
 
 
 # A session name is a file stem in SESSION_DIR: no separators, no leading dot,

@@ -45,6 +45,9 @@ from functools import lru_cache
 from pathlib import Path
 
 from . import code_nav, ignore_rules
+from .net import format_size, parse_size
+from .paths import BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, safe_path
+from .session import atomic_write
 
 FORMAT_VERSION = 7   # 6: HTML inline-script JavaScript; 7: skipped files, source fingerprint
 DEFAULT_MAX_BYTES = 100 * 1024 * 1024  # default memory budget of the index (/index-max-mem)
@@ -60,8 +63,6 @@ _SLOW_DIFF_S = 0.2
 _THROTTLE_PER_DIFF = 10
 _WAIT_POLL_S = 0.25         # wait_fresh re-checks the cancel flag this often
 _PROGRESS_EVERY_S = 0.25    # on_change is called at most this often while building
-_MAX_FILE_BYTES = 2_000_000 # same limit as grep_files
-_BINARY_SNIFF_BYTES = 4096
 _COMPACT_AFTER = 500        # dead files before the occurrence index is compacted mid-drain
 _UNPARTIAL_AT = 0.8         # budget share below which files left out are indexed again
 _PARALLEL_MIN = 200         # queued files before worker processes pay for their start-up
@@ -72,6 +73,40 @@ _AUTO_WORKERS_CAP = 8       # measured: no gain past 8 (a few big files dominate
 def auto_workers() -> int:
     """The worker count /index-workers auto picks: a core left for the UI."""
     return max(1, min((os.cpu_count() or 1) - 1, _AUTO_WORKERS_CAP))
+
+
+# Setting parsers shared by the CLI flags, the saved prefs and the /index-*
+# commands: (value, "") or (None, what is wrong).
+
+def parse_max_mem(value) -> tuple[int | None, str]:
+    size = parse_size(value)
+    if size is None:
+        return None, f"not a size: {value}. Use bytes or a unit, e.g. 100mb, 512kb, 1gb."
+    if size < MIN_MAX_BYTES:
+        return None, f"the minimum is {format_size(MIN_MAX_BYTES)}"
+    return size, ""
+
+
+def parse_max_files(value) -> tuple[int | None, str]:
+    if isinstance(value, bool):
+        return None, f"not a number: {value}"
+    try:
+        n = int(str(value).replace(",", "").replace("_", ""))
+    except ValueError:
+        return None, f"not a number: {value}"
+    if n < MIN_MAX_FILES:
+        return None, f"the minimum is {MIN_MAX_FILES:,} files"
+    return n, ""
+
+
+def parse_workers(value) -> tuple[int | None, str]:
+    """auto -> 0 (a saved pref stores it as the int 0), else 1..MAX_WORKERS."""
+    s = str(value).strip().lower()
+    if s == "auto" or (value == 0 and type(value) is int):
+        return 0, ""
+    if s.isdigit() and 1 <= int(s) <= MAX_WORKERS:
+        return int(s), ""
+    return None, f"expected auto or a number from 1 to {MAX_WORKERS}, got: {value}"
 
 # Estimated bytes per stored object, measured with a deep getsizeof walk and
 # tracemalloc on this repo and a 325-file C++/Python tree (imgui), then rounded
@@ -258,21 +293,6 @@ def filter_path(root: Path) -> Path:
     return pickle_path(root).with_suffix(".filter")
 
 
-def _private_write(path: Path, data: bytes) -> None:
-    """Write atomically, 0600 in a 0700 folder, like the saved index."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
-    tmp = path.with_suffix(f".tmp{os.getpid()}.{threading.get_ident()}")
-    try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
 def _untrusted_reason(path: Path, st) -> str:
     if not stat_mod.S_ISREG(st.st_mode):
         return f"{path} is not a regular file"
@@ -293,7 +313,7 @@ def load_filter(root: Path) -> tuple[str, str]:
     except FileNotFoundError:
         text = ignore_rules.seed_text(root)
         try:
-            _private_write(path, text.encode())
+            atomic_write(path, text, private_dir=True)
         except OSError as e:
             return text, f"Code index filter could not be saved ({e}); using the .gitignore defaults."
         n = len(ignore_rules.Rules.parse(text))
@@ -315,7 +335,7 @@ def save_filter(root: Path, text: str) -> str:
     if not text.endswith("\n"):
         text += "\n"
     try:
-        _private_write(filter_path(root), text.encode())
+        atomic_write(filter_path(root), text, private_dir=True)
     except OSError as e:
         return f"ERROR: could not save the code index filter: {e}"
     return ""
@@ -1067,14 +1087,7 @@ class ProjectIndex:
             data = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
             del payload
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(path.parent, 0o700)
-            tmp = path.with_suffix(f".tmp{os.getpid()}.{threading.get_ident()}")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as f:
-                f.write(header)
-                f.write(data)
-            os.replace(tmp, path)
+            atomic_write(path, header, data, private_dir=True)
         except OSError as e:
             return f"ERROR: could not save the code index: {e}"
         return f"Code index saved: {path} ({_fmt_size(path.stat().st_size)})"
@@ -1381,11 +1394,11 @@ def _build_entry(root: Path, rel: str, want_idents: bool, want_sig: bool):
     if not stat_mod.S_ISREG(st.st_mode):
         return None, None, None
     stamp = (st.st_mtime_ns, st.st_size)
-    if st.st_size > _MAX_FILE_BYTES:
+    if st.st_size > MAX_SCAN_FILE_BYTES:
         return None, None, ("too_big",) + stamp
     try:
         with open(full, "rb") as f:
-            head = f.read(_BINARY_SNIFF_BYTES)
+            head = f.read(BINARY_SNIFF_BYTES)
             if b"\x00" in head:
                 return None, None, ("binary",) + stamp     # never read the rest
             raw = head + f.read()
@@ -1650,11 +1663,10 @@ def _text_mentions(index: ProjectIndex, query: str, keep, limit: int = 5) -> str
 
 def _line_owner(index: ProjectIndex, line: int, path: str | None, workdir: Path) -> str:
     """'Which definition is line N of this file in?' — one line of output."""
-    from .tools import _safe_path
     if not path:
         return (f"ERROR: looking up line {line} needs the file it is in — pass it as path, "
                 f"e.g. index_search(\"{line}\", path=\"src/app.py\")")
-    p = _safe_path(path, workdir)
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     rel = index._rel(p)
@@ -2378,8 +2390,7 @@ def index_map(path: str | None = None, budget: int = 1500, *, workdir: Path,
 def index_file(path: str, *, workdir: Path, index: ProjectIndex | None = None, cancel=None) -> str:
     if (err := _ready(index, cancel)):
         return err
-    from .tools import _safe_path
-    p = _safe_path(path, workdir)
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     rel = index._rel(p)

@@ -8,12 +8,13 @@ False and tools.py leaves these tools out of every mode's tool set.
 """
 import fnmatch
 import importlib
-import os
 import re
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .paths import MAX_SCAN_FILE_BYTES, safe_path, walk_files
 
 try:
     from tree_sitter import Language, Parser
@@ -1500,8 +1501,6 @@ def _matches(sym: Symbol, name: str) -> bool:
 
 
 # ── tool helpers ─────────────────────────────────────────────────────────────
-# tools.py imports this module at load time, so its helpers (_safe_path,
-# _SKIP_DIRS, ...) are imported inside the functions to avoid a circular import.
 
 def _rel(p: Path, workdir: Path) -> str:
     try:
@@ -1519,7 +1518,6 @@ def _iter_source_files(root: Path, stats: dict | None = None):
     """Yield supported source files under root (or root itself if it is a file),
     skipping the same noise directories and oversized files as grep_files.  With
     `stats`, counts what was skipped so the caller can admit the gap."""
-    from .tools import _SKIP_DIRS, _MAX_GREP_FILE_BYTES
     if root.is_file():
         if language_for(root):
             yield root
@@ -1528,22 +1526,19 @@ def _iter_source_files(root: Path, stats: dict | None = None):
     if listed is not None:
         yield from listed
         return
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
-        for fname in sorted(filenames):
-            fpath = Path(dirpath) / fname
-            if language_for(fpath) is None:
-                continue
-            try:
-                if fpath.stat().st_size > _MAX_GREP_FILE_BYTES:
-                    if stats is not None:
-                        stats["too_big"] = stats.get("too_big", 0) + 1
-                    continue
-            except OSError:
+    for fpath in walk_files(root):
+        if language_for(fpath) is None:
+            continue
+        try:
+            if fpath.stat().st_size > MAX_SCAN_FILE_BYTES:
                 if stats is not None:
-                    stats["unreadable"] = stats.get("unreadable", 0) + 1
+                    stats["too_big"] = stats.get("too_big", 0) + 1
                 continue
-            yield fpath
+        except OSError:
+            if stats is not None:
+                stats["unreadable"] = stats.get("unreadable", 0) + 1
+            continue
+        yield fpath
 
 
 def _scan(root: Path, stats: dict, *, tree: bool = False):
@@ -2116,8 +2111,7 @@ _MAX_DEP_RESULTS    = 200
 
 
 def code_outline(path: str = ".", depth: int | None = None, *, workdir: Path) -> str:
-    from .tools import _safe_path
-    p = _safe_path(path, workdir)
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     if p.is_dir():
@@ -2170,8 +2164,7 @@ def _directory_outline(root: Path, depth: int, workdir: Path) -> str:
 
 
 def find_symbol(name: str, directory: str = ".", kind: str | None = None, *, workdir: Path) -> str:
-    from .tools import _safe_path
-    root = _safe_path(directory, workdir)
+    root = safe_path(directory, workdir)
     if isinstance(root, str):
         return root
     if not root.exists():
@@ -2229,8 +2222,7 @@ def find_symbol(name: str, directory: str = ".", kind: str | None = None, *, wor
 
 
 def read_symbol(path: str, name: str, *, workdir: Path) -> str:
-    from .tools import _safe_path
-    p = _safe_path(path, workdir)
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     if not p.is_file():
@@ -2275,8 +2267,7 @@ def read_symbol(path: str, name: str, *, workdir: Path) -> str:
 
 def find_references(name: str, directory: str = ".", role: str | None = None,
                     *, workdir: Path) -> str:
-    from .tools import _safe_path
-    root = _safe_path(directory, workdir)
+    root = safe_path(directory, workdir)
     if isinstance(root, str):
         return root
     if not root.exists():
@@ -2395,10 +2386,9 @@ def _module_candidates(p: Path, workdir: Path) -> tuple[str, set[str]]:
 def file_dependencies(path: str, direction: str = "both", *, workdir: Path) -> str:
     """What `path` imports, and which files import it.  Resolution is textual,
     not a real module resolver — see the note in the returned output."""
-    from .tools import _safe_path
     if direction not in ("both", "imports", "importers"):
         return "ERROR: direction must be 'both', 'imports' or 'importers'"
-    p = _safe_path(path, workdir)
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     if not p.is_file():

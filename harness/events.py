@@ -11,9 +11,85 @@ import collections
 import dataclasses
 import queue
 import threading
+from dataclasses import dataclass
 from typing import Any
 
+from . import code_index
+
 _BACKLOG_MAX = 5000
+
+
+# ── harness events ────────────────────────────────────────────────────────────────
+
+@dataclass
+class ChatEvent:
+    role: str   # "user" | "assistant" | "system"
+    text: str
+
+@dataclass
+class ToolCallEvent:
+    name: str
+    args: dict
+
+@dataclass
+class ToolResultEvent:
+    name: str
+    result: str
+
+@dataclass
+class StatusEvent:
+    mode: str
+    model: str
+    workdir: str
+    ctx_pct: int
+    ctx_color: str  # "normal" | "yellow" | "red"
+    tools_enabled: bool = True
+    run_confirm: bool = False
+    net_access: str = "off"     # "off" | "on" | "local"
+    net_confirm: bool = True    # ask y/N before a write request
+    net_max_bytes: int = 2097152  # ceiling on one fetch_url download
+    net_max_chars: int = 24000    # text returned per fetch_url call
+    host: str = ""
+    provider: str = ""
+    plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
+    guides: bool = False     # project guide files (AGENTS.md, ...) in the system prompt
+    index_enabled: bool = False   # /index: the code index and its index_* tools
+    index_state: str = "off"      # off | building | refreshing | idle | stopped
+    index_progress: str = ""      # "812/1873" while building/refreshing
+    index_files: int = 0
+    index_mem: int = 0            # estimated bytes in use
+    index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
+    index_max_files: int = code_index.DEFAULT_MAX_FILES
+    index_workers: int = 0        # /index-workers: 0 = auto
+    index_persist: bool = True    # /index-persist: load/save a pickle
+    index_route: bool = True      # /index-route: answer grep_files/find_files from the index
+    index_degraded: bool = False  # over budget: a component was dropped
+
+@dataclass
+class ErrorEvent:
+    text: str
+
+@dataclass
+class DoneEvent:
+    pass
+
+@dataclass
+class AskUserEvent:
+    question: str
+
+@dataclass
+class ThinkEvent:
+    text: str
+
+@dataclass
+class DiffEvent:
+    op: str                        # "edit" | "write" | "append" | "delete" | "move"
+    path: str                      # target path (for "move", the source path)
+    added: int
+    removed: int
+    body: list[tuple[str, int | None, int | None, str]]  # (kind, old_no, new_no, text); empty for "move"
+    dst: str | None = None         # destination path for "move"
+    is_new: bool = False           # write_file created a new file
 
 
 @dataclasses.dataclass

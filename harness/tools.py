@@ -2,15 +2,15 @@ import difflib
 import json
 import os
 import re
-import shlex
 import signal
 import subprocess
-import textwrap
 import time
 from datetime import datetime
 from pathlib import Path
 
 from . import code_index, code_nav, net
+from .paths import (BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, SKIP_DIRS, safe_entry_path,
+                    safe_path, walk_files)
 
 
 # ── schema helpers ───────────────────────────────────────────────────────────
@@ -445,41 +445,11 @@ PLAN_INVESTIGATE_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [
 PLAN_EXECUTE_TOOLS = ALL_TOOLS + [_plan_by_name["complete_step"], _plan_by_name["revise_plan"]]
 
 
-# ── path safety ───────────────────────────────────────────────────────────────
-
-def _safe_path(raw: str, workdir: Path) -> Path | str:
-    p = (workdir / raw).resolve()
-    try:
-        p.relative_to(workdir.resolve())
-    except ValueError:
-        return "ERROR: path outside working directory"
-    return p
-
-
-def _safe_entry_path(raw: str, workdir: Path) -> Path | str:
-    """Like _safe_path, but a symlink stays the link itself (only its folder is
-    resolved): deleting or moving a link must not act on the file it points to."""
-    root = workdir.resolve()
-    q = Path(os.path.normpath(root / raw))
-    if q == root:
-        return "ERROR: path is the working directory itself"
-    parent = q.parent.resolve()
-    try:
-        parent.relative_to(root)
-    except ValueError:
-        return "ERROR: path outside working directory"
-    return parent / q.name
-
-
 # ── executors ────────────────────────────────────────────────────────────────
-
-_SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".tox", "dist", "build", ".mypy_cache", ".pytest_cache"}
 
 _MAX_FIND_RESULTS  = 100
 _MAX_GREP_RESULTS  = 200
 _READ_FOOTER_LINES = 200  # show footer when file exceeds this length and no range given
-_MAX_GREP_FILE_BYTES = 2_000_000  # skip files larger than this in recursive grep
-_BINARY_SNIFF_BYTES  = 4096       # bytes inspected for a NUL byte to detect binary files
 _MAX_GREP_LINE_CHARS = 300        # a longer hit line (minified code) is clipped around the match
 
 
@@ -494,7 +464,7 @@ def _clip_hit(line: str, m: re.Match) -> str:
             + f" [line is {len(line):,} chars]")
 
 def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
-    root = _safe_path(directory, workdir)
+    root = safe_path(directory, workdir)
     if isinstance(root, str):
         return root
     # Bare filename patterns (no slash, no **) are promoted to recursive so
@@ -512,7 +482,7 @@ def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
             rel_parts = p.relative_to(root).parts
         except ValueError:
             continue
-        if any(part in _SKIP_DIRS for part in rel_parts):
+        if any(part in SKIP_DIRS for part in rel_parts):
             continue
         try:
             matches.append(str(p.relative_to(workdir)))
@@ -566,16 +536,25 @@ def _read_footer(p: Path, path: str, n: int, start_line: int, end_line: int | No
             f'read_symbol("{path}", "{owner.qualname}") reads that definition whole]')
 
 
-def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
+def _read_text(path: str, workdir: Path) -> tuple[Path, str] | str:
+    """(resolved path, text) of a file in the workdir, or an ERROR string."""
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     try:
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        return p, p.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return f"ERROR: file not found: {path}"
     except OSError as e:
         return f"ERROR: {e}"
+
+
+def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, workdir: Path) -> str:
+    got = _read_text(path, workdir)
+    if isinstance(got, str):
+        return got
+    p, text = got
+    lines = text.splitlines(keepends=True)
     n = len(lines)
     s = max(0, start_line - 1)
     e = end_line if end_line is not None else n
@@ -587,15 +566,10 @@ def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, w
 
 
 def _grep_file(pattern: str, path: str, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
-    if isinstance(p, str):
-        return p
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return f"ERROR: file not found: {path}"
-    except OSError as e:
-        return f"ERROR: {e}"
+    got = _read_text(path, workdir)
+    if isinstance(got, str):
+        return got
+    _, text = got
     try:
         rx = re.compile(pattern)
     except re.error as e:
@@ -608,15 +582,10 @@ def _grep_file(pattern: str, path: str, *, workdir: Path) -> str:
 
 
 def _grep_extract(pattern: str, path: str, group: int = 0, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
-    if isinstance(p, str):
-        return p
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return f"ERROR: file not found: {path}"
-    except OSError as e:
-        return f"ERROR: {e}"
+    got = _read_text(path, workdir)
+    if isinstance(got, str):
+        return got
+    _, text = got
     try:
         rx = re.compile(pattern)
     except re.error as e:
@@ -638,7 +607,7 @@ _INDEX_GREP_TIP = ("\n(index_text runs this search from the code index and names
 
 
 def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
-    root = _safe_path(directory, workdir)
+    root = safe_path(directory, workdir)
     if isinstance(root, str):
         return root
     try:
@@ -646,32 +615,26 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
     except re.error as e:
         return f"ERROR: invalid regex: {e}"
     results = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            # Skip oversized files: scanning them is slow and rarely useful.
-            try:
-                if fpath.stat().st_size > _MAX_GREP_FILE_BYTES:
-                    continue
-            except OSError:
+    for fpath in walk_files(root):
+        # Skip oversized files: scanning them is slow and rarely useful.
+        try:
+            if fpath.stat().st_size > MAX_SCAN_FILE_BYTES:
                 continue
-            try:
-                raw = fpath.read_bytes()
-            except OSError:
-                continue
-            # Skip binaries: a NUL byte in the first chunk is a reliable, cheap
-            # signal, and avoids polluting results with garbage decoded matches.
-            if b"\x00" in raw[:_BINARY_SNIFF_BYTES]:
-                continue
-            text = raw.decode("utf-8", errors="replace")
-            for i, line in enumerate(text.splitlines(), 1):
-                if m := rx.search(line):
-                    try:
-                        rel = fpath.relative_to(workdir)
-                    except ValueError:
-                        rel = fpath
-                    results.append(f"{rel}:{i}: {_clip_hit(line, m)}")
+            raw = fpath.read_bytes()
+        except OSError:
+            continue
+        # Skip binaries: a NUL byte in the first chunk is a reliable, cheap
+        # signal, and avoids polluting results with garbage decoded matches.
+        if b"\x00" in raw[:BINARY_SNIFF_BYTES]:
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        for i, line in enumerate(text.splitlines(), 1):
+            if m := rx.search(line):
+                try:
+                    rel = fpath.relative_to(workdir)
+                except ValueError:
+                    rel = fpath
+                results.append(f"{rel}:{i}: {_clip_hit(line, m)}")
     # With the code index on, point at the indexed search: it is faster and names
     # the definition each hit sits in.
     tip = _INDEX_GREP_TIP if code_nav._index_provider is not None else ""
@@ -684,7 +647,7 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
 
 
 def _list_directory(path: str = ".", show_hidden: bool = False, *, workdir: Path) -> str:
-    root = _safe_path(path, workdir)
+    root = safe_path(path, workdir)
     if isinstance(root, str):
         return root
     if not root.is_dir():
@@ -711,7 +674,7 @@ def _list_directory(path: str = ".", show_hidden: bool = False, *, workdir: Path
 
 
 def _file_info(path: str, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     if not p.exists() and not p.is_symlink():
@@ -752,10 +715,10 @@ def _same_entry(a: Path, b: Path) -> bool:
 
 
 def _move_file(src: str, dst: str, *, workdir: Path) -> str:
-    sp = _safe_entry_path(src, workdir)
+    sp = safe_entry_path(src, workdir)
     if isinstance(sp, str):
         return sp
-    dp = _safe_entry_path(dst, workdir)
+    dp = safe_entry_path(dst, workdir)
     if isinstance(dp, str):
         return dp
     if not sp.exists() and not sp.is_symlink():
@@ -772,7 +735,7 @@ def _move_file(src: str, dst: str, *, workdir: Path) -> str:
 
 
 def _append_to_file(path: str, content: str, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     try:
@@ -856,7 +819,7 @@ def _closest_lines_hint(content: str, old_string: str) -> str:
 
 def _edit_file(path: str, old_string: str, new_string: str,
                replace_all: bool = False, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     try:
@@ -929,7 +892,7 @@ def _size_note(content: str) -> str:
 
 
 def _write_file(path: str, content: str, *, workdir: Path) -> str:
-    p = _safe_path(path, workdir)
+    p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
     # A small model that doubts its write landed rewrites the same file again and
@@ -950,7 +913,7 @@ def _write_file(path: str, content: str, *, workdir: Path) -> str:
 
 
 def _delete_file(path: str, *, workdir: Path) -> str:
-    p = _safe_entry_path(path, workdir)
+    p = safe_entry_path(path, workdir)
     if isinstance(p, str):
         return p
     try:
@@ -1209,7 +1172,7 @@ def _route_to_index(name: str, args: dict, workdir: Path, index, cancel) -> str 
     real tool (bad arguments, a regex, a pattern with a directory part)."""
     if not set(args) <= _KNOWN_ARGS.get(name, set()) or not isinstance(args.get("pattern"), str):
         return None
-    root = _safe_path(str(args.get("directory") or "."), workdir)
+    root = safe_path(str(args.get("directory") or "."), workdir)
     if isinstance(root, str):
         return None
     rel = index._rel(root)
@@ -1265,7 +1228,7 @@ def _index_result_hint(name: str, args: dict, workdir: Path, index) -> str:
     if name not in ("list_directory", "code_outline", "grep_file", "find_symbol"):
         return ""
     target = args.get("path") if name != "find_symbol" else args.get("directory")
-    p = _safe_path(str(target or "."), workdir)
+    p = safe_path(str(target or "."), workdir)
     if isinstance(p, str):
         return ""
     rel = index._rel(p)

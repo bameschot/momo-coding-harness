@@ -15,8 +15,9 @@ from typing import Any, Callable
 
 from . import attachments as attach_mod
 from .commands import handle as handle_command
-from .events import BusyEvent, CompanionEvent, UserEvent
-from .harness import Harness, ChatEvent, ToolCallEvent, ToolResultEvent, ThinkEvent
+from .events import (BusyEvent, ChatEvent, CompanionEvent, ThinkEvent, ToolCallEvent,
+                     ToolResultEvent, UserEvent)
+from .harness import Harness
 from .llm import make_client
 
 # CommandResult fields that change how a frontend renders, not harness state.
@@ -186,7 +187,7 @@ class Controller:
             gen = self._activity_gen
             client = self._recap_client = make_client(
                 h.provider, host=h.client.host, model=h.client.model,
-                auth_token=h.client._auth_token)
+                auth_token=h.client.auth_token)
         try:
             lines = h.momo_recap(client, new_turns)
         finally:
@@ -301,12 +302,12 @@ class Controller:
         h.net_access = "off" if h.net_access != "off" else "on"
         self._system(f"Internet access: {h.net_access}")
         h.rebuild_system_prompt()
-        h._emit_status()
+        h.emit_status()
 
     def toggle_run_confirm(self):
         self.harness.run_confirm = not self.harness.run_confirm
         self._system(f"run_command confirmation: {'on' if self.harness.run_confirm else 'off'}")
-        self.harness._emit_status()
+        self.harness.emit_status()
 
     def submit(self, text: str, source: str = "tui",
                attachments: list[dict] | None = None) -> SubmitOutcome:

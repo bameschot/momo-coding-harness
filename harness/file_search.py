@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from .tools import _SKIP_DIRS
+from .paths import walk_files
 
 _SEARCH_MAX_FILES = 20_000
 _SEARCH_TTL_S = 10.0
@@ -22,15 +22,8 @@ def workspace_files(root: Path) -> list[str]:
         if _search_cache["root"] == root and now - _search_cache["ts"] < _SEARCH_TTL_S:
             return _search_cache["files"]
         files: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS and not d.startswith("."))
-            rel_dir = os.path.relpath(dirpath, root)
-            for f in sorted(filenames):
-                if f.startswith("."):
-                    continue
-                files.append(f if rel_dir == "." else f"{rel_dir}/{f}")
-                if len(files) >= _SEARCH_MAX_FILES:
-                    break
+        for f in walk_files(root, skip_hidden=True):
+            files.append(os.path.relpath(f, root))
             if len(files) >= _SEARCH_MAX_FILES:
                 break
         _search_cache.update(root=root, ts=now, files=files)

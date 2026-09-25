@@ -21,9 +21,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# Folders that are never worth indexing; seeded as editable `name/` lines.
-DEFAULT_EXCLUDES = (".venv/", "venv/", "__pycache__/", "node_modules/", ".tox/", "dist/",
-                    "build/", ".mypy_cache/", ".pytest_cache/")
+from .paths import SKIP_DIRS
+
+# Folders that are never worth indexing; seeded as editable `name/` lines
+# (.git/ is always excluded, so it needs no line).
+DEFAULT_EXCLUDES = tuple(f"{d}/" for d in SKIP_DIRS if d != ".git")
 _MAX_SEED_GITIGNORES = 500
 _MAX_SEED_DIRS = 20_000     # folders searched for nested .gitignore files (a workdir of $HOME)
 

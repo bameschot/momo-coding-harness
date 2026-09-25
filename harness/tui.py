@@ -19,11 +19,10 @@ from . import md_render
 from .commands import help_commands
 from .file_search import fuzzy_search, workspace_files
 from .controller import Controller
-from .events import BusyEvent, CompanionEvent, DeltaEvent, ResetEvent, StreamEndEvent, UserEvent
-from .harness import (
-    Harness, ChatEvent, ToolCallEvent, ToolResultEvent,
-    StatusEvent, ErrorEvent, DoneEvent, AskUserEvent, ThinkEvent, DiffEvent,
-)
+from .events import (AskUserEvent, BusyEvent, ChatEvent, CompanionEvent, DeltaEvent, DiffEvent,
+                     DoneEvent, ErrorEvent, ResetEvent, StatusEvent, StreamEndEvent, ThinkEvent,
+                     ToolCallEvent, ToolResultEvent, UserEvent)
+from .harness import Harness
 
 
 # ── color pair ids ────────────────────────────────────────────────────────────
@@ -1314,7 +1313,7 @@ class TUI:
         self.stdscr.noutrefresh()
         # emit initial status; a pre-loaded session was already pushed onto the
         # bus by the Controller and arrives here through the backlog replay.
-        self.harness._emit_status()
+        self.harness.emit_status()
         self._drain_events()
         self._chat_buf.scroll_to_bottom()
         self._redraw()

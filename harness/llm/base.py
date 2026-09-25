@@ -40,6 +40,11 @@ class LLMClient(ABC):
         self.model = model
         self._auth_token = auth_token
 
+    @property
+    def auth_token(self) -> str | None:
+        """The bearer token this client sends (None: none, or the env default)."""
+        return self._auth_token
+
     # Human-readable backend name, used in user-facing messages/errors.
     provider_name: str = "llm"
 

@@ -662,10 +662,9 @@ class FileDependencies(unittest.TestCase):
 
     def test_importers_of_a_real_module(self):
         repo = Path(__file__).resolve().parent.parent
-        out = code_nav.file_dependencies("harness/tools.py", direction="importers",
+        out = code_nav.file_dependencies("harness/paths.py", direction="importers",
                                          workdir=repo)
-        self.assertIn("harness/harness.py", out)
-        # The lazy `from .tools import _safe_path` inside code_nav's functions.
+        self.assertIn("harness/tools.py", out)
         self.assertIn("harness/code_nav.py", out)
 
     def test_direction_both_has_two_sections(self):

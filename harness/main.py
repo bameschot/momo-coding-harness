@@ -10,7 +10,8 @@ from . import code_index
 from . import net as net_mod
 from . import session as session_mod
 from .controller import Controller
-from .harness import Harness, ChatEvent
+from .events import ChatEvent
+from .harness import Harness
 from .tui import run_tui
 from .web import tls as tls_mod
 from .web.server import is_loopback, start_web_server
@@ -78,7 +79,7 @@ def main():
     parser.add_argument("--index-max-mem", default=None, metavar="SIZE",
                         help="Memory budget for the code index: 100mb, 512kb, 1gb (default: last "
                              "/index-max-mem setting, else 100mb)")
-    parser.add_argument("--index-max-files", type=int, default=None, metavar="N",
+    parser.add_argument("--index-max-files", default=None, metavar="N",
                         help="Most files the code index covers (default: last /index-max-files "
                              "setting, else 100000)")
     parser.add_argument("--index-workers", default=None, metavar="N",
@@ -159,40 +160,34 @@ def main():
         if not 1000 <= args.net_max_chars <= net_mod.HARD_MAX_CHARS:
             parser.error(f"--net-max-chars: expected 1000..{net_mod.HARD_MAX_CHARS}")
         harness.net_max_chars = args.net_max_chars
-    harness.idle_recap = bool(args.companion_idle_recap if args.companion_idle_recap is not None
-                              else prefs.get("idle_recap", False))
+    def flag_or_pref(flag, key: str, default: bool) -> bool:
+        return bool(flag if flag is not None else prefs.get(key, default))
+
+    def parsed(flag, name: str, key: str, parse, default):
+        """A flag's value (a bad one is a usage error), else a valid saved pref."""
+        if flag is not None:
+            value, err = parse(flag)
+            if value is None:
+                parser.error(f"{name}: {err}")
+            return value
+        if key in prefs:
+            value, _ = parse(prefs[key])
+            if value is not None:
+                return value
+        return default
+
+    harness.idle_recap = flag_or_pref(args.companion_idle_recap, "idle_recap", False)
     harness.idle_recap_secs = max(10, args.companion_idle_recap_secs or prefs.get("idle_recap_secs") or 90)
-    harness.guides = bool(args.guides if args.guides is not None else prefs.get("guides", False))
-    if args.index_max_mem:
-        size = net_mod.parse_size(args.index_max_mem)
-        if not size or size < code_index.MIN_MAX_BYTES:
-            parser.error(f"--index-max-mem: not a size of at least 1mb: {args.index_max_mem}")
-        harness.index_max_bytes = size
-    elif isinstance(prefs.get("index_max_mem"), int) and prefs["index_max_mem"] >= code_index.MIN_MAX_BYTES:
-        harness.index_max_bytes = prefs["index_max_mem"]
-    if args.index_max_files is not None:
-        if args.index_max_files < code_index.MIN_MAX_FILES:
-            parser.error(f"--index-max-files: expected at least {code_index.MIN_MAX_FILES}")
-        harness.index_max_files = args.index_max_files
-    elif (isinstance(prefs.get("index_max_files"), int)
-          and prefs["index_max_files"] >= code_index.MIN_MAX_FILES):
-        harness.index_max_files = prefs["index_max_files"]
-    if args.index_workers is not None:
-        w = args.index_workers.strip().lower()
-        if w == "auto":
-            harness.index_workers = 0
-        elif w.isdigit() and 1 <= int(w) <= code_index.MAX_WORKERS:
-            harness.index_workers = int(w)
-        else:
-            parser.error(f"--index-workers: expected auto or 1-{code_index.MAX_WORKERS}")
-    elif (isinstance(prefs.get("index_workers"), int)
-          and 0 <= prefs["index_workers"] <= code_index.MAX_WORKERS):
-        harness.index_workers = prefs["index_workers"]
-    harness.index_persist = bool(args.index_persist if args.index_persist is not None
-                                 else prefs.get("index_persist", True))
-    harness.index_route = bool(args.index_route if args.index_route is not None
-                               else prefs.get("index_route", True))
-    index_on = bool(args.index if args.index is not None else prefs.get("index", True))
+    harness.guides = flag_or_pref(args.guides, "guides", False)
+    harness.index_max_bytes = parsed(args.index_max_mem, "--index-max-mem", "index_max_mem",
+                                     code_index.parse_max_mem, harness.index_max_bytes)
+    harness.index_max_files = parsed(args.index_max_files, "--index-max-files", "index_max_files",
+                                     code_index.parse_max_files, harness.index_max_files)
+    harness.index_workers = parsed(args.index_workers, "--index-workers", "index_workers",
+                                   code_index.parse_workers, harness.index_workers)
+    harness.index_persist = flag_or_pref(args.index_persist, "index_persist", True)
+    harness.index_route = flag_or_pref(args.index_route, "index_route", True)
+    index_on = flag_or_pref(args.index, "index", True)
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 
     # Restore last session unless --fresh

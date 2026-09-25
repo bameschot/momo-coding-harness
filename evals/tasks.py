@@ -44,9 +44,9 @@ TASKS: list[Task] = [
     ),
     Task(
         id="callers",
-        prompt="Which functions call _safe_path? List the calling functions.",
+        prompt="Which functions call safe_path? List the calling functions.",
         ideal=frozenset({"find_references", "index_callers"}),
-        must=("code_outline", "_read_file", "_edit_file"),
+        must=("code_outline", "_read_text", "_edit_file"),
         note="find_references(role='call') is complete in one call. The known "
              "failure is re-deriving it with shell after already getting it.",
         max_calls=1,

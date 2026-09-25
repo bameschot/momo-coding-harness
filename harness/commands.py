@@ -9,7 +9,7 @@ from pathlib import Path
 from . import code_index, ignore_rules
 from . import net as net_mod
 from . import session as session_mod
-from .harness import Harness, ChatEvent
+from .harness import Harness
 from .tools import dispatch
 
 
@@ -91,6 +91,39 @@ class CommandResult:
     retry: bool = False                     # controller re-sends the last user message
     edit_index_filter: str | None = None    # TUI opens $EDITOR on this filter file
 
+
+
+_ON = ("on", "true", "1", "yes")
+_OFF = ("off", "false", "0", "no")
+# View toggles the frontend applies itself: command -> CommandResult field.
+_VIEW_TOGGLES = {"/tool-output": "tool_output", "/think-output": "think_output",
+                 "/markdown": "md_render", "/diff": "diff_output"}
+
+
+def _on_off(arg: str) -> bool | None:
+    """True / False for an on/off word, None for anything else."""
+    a = arg.strip().lower()
+    return True if a in _ON else False if a in _OFF else None
+
+
+def _bad_choice(arg: str, choices: str = "'on' or 'off'") -> CommandResult:
+    return CommandResult(handled=True, output=f"ERROR: expected {choices}"
+                                              + (f", got: {arg}" if arg else ""))
+
+
+def _toggle(harness, attr: str, arg: str, label: str,
+            on_note: str = "", off_note: str = "") -> CommandResult:
+    """/think, /tools, /run-confirm, /net-confirm: show or set a boolean setting."""
+    if not arg:
+        return CommandResult(handled=True,
+                             output=f"{label}: {'on' if getattr(harness, attr) else 'off'}")
+    on = _on_off(arg)
+    if on is None:
+        return _bad_choice(arg)
+    setattr(harness, attr, on)
+    harness.emit_status()
+    return CommandResult(handled=True,
+                         output=f"{label}: {'on' if on else 'off'}{on_note if on else off_note}")
 
 
 def _index_filter(harness, arg: str) -> CommandResult:
@@ -195,12 +228,12 @@ def handle(line: str, harness: Harness) -> CommandResult:
         # its context size so the display matches reality.
         harness._reconcile_fixed_model()
         harness._sync_context_limit(emit=True)
-        harness._emit_status()
+        harness.emit_status()
         return CommandResult(handled=True, output=f"Host set to: {arg}")
 
     if cmd == "/token":
         if not arg:
-            token = harness.client._auth_token
+            token = harness.client.auth_token
             if token:
                 return CommandResult(handled=True, output=f"Auth token: {_mask_token(token)}")
             return CommandResult(handled=True, output="Auth token: not set")
@@ -269,8 +302,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
         system_msg = harness.messages[0]
         harness.messages = [system_msg]
         guides_note = harness.reload_guides()
-        harness._token_estimate = harness._estimate(schemas=True)
-        harness._emit_status()
+        harness.refresh_status()
         return CommandResult(handled=True, output="Conversation cleared" + plan_note
                              + (f"\n{guides_note}" if guides_note else ""))
 
@@ -299,37 +331,15 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.set_mode(harness.mode)  # always refresh system prompt with new workdir
         guides_note = harness.reload_guides()
         index_note = harness.restart_index()
-        harness._emit_status()
+        harness.emit_status()
         return CommandResult(handled=True, output=f"Working directory set to: {p}"
                              + "".join(f"\n{n}" for n in (guides_note, index_note) if n))
 
-    if cmd == "/tool-output":
-        if arg.lower() in ("on", "true", "1", "yes"):
-            return CommandResult(handled=True, tool_output=True)
-        if arg.lower() in ("off", "false", "0", "no"):
-            return CommandResult(handled=True, tool_output=False)
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}" if arg else "ERROR: expected 'on' or 'off'")
-
-    if cmd == "/think-output":
-        if arg.lower() in ("on", "true", "1", "yes"):
-            return CommandResult(handled=True, think_output=True)
-        if arg.lower() in ("off", "false", "0", "no"):
-            return CommandResult(handled=True, think_output=False)
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}" if arg else "ERROR: expected 'on' or 'off'")
-
-    if cmd == "/markdown":
-        if arg.lower() in ("on", "true", "1", "yes"):
-            return CommandResult(handled=True, md_render=True)
-        if arg.lower() in ("off", "false", "0", "no"):
-            return CommandResult(handled=True, md_render=False)
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}" if arg else "ERROR: expected 'on' or 'off'")
-
-    if cmd == "/diff":
-        if arg.lower() in ("on", "true", "1", "yes"):
-            return CommandResult(handled=True, diff_output=True)
-        if arg.lower() in ("off", "false", "0", "no"):
-            return CommandResult(handled=True, diff_output=False)
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}" if arg else "ERROR: expected 'on' or 'off'")
+    if cmd in _VIEW_TOGGLES:
+        on = _on_off(arg)
+        if on is None:
+            return _bad_choice(arg)
+        return CommandResult(handled=True, **{_VIEW_TOGGLES[cmd]: on})
 
     if cmd == "/diff-style":
         if arg.lower() in ("git", "compact"):
@@ -359,7 +369,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             harness.context_pct = n
             harness.context_fixed = False
             harness._sync_context_limit(emit=False)
-            harness._emit_status()
+            harness.emit_status()
             return CommandResult(handled=True,
                                  output=f"Context limit set to {n}% of {reported:,} max: {harness.context_limit:,} tokens")
         try:
@@ -369,7 +379,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             harness.context_pct = None
             harness.context_fixed = True
             harness.context_limit = n
-            harness._emit_status()
+            harness.emit_status()
             return CommandResult(handled=True, output=f"Context limit set to: {n}")
         except ValueError:
             return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
@@ -390,16 +400,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
 
     if cmd == "/think":
-        if not arg:
-            state = "on" if harness.think else "off"
-            return CommandResult(handled=True, output=f"Thinking mode: {state}")
-        if arg.lower() in ("on", "true", "1", "yes"):
-            harness.think = True
-            return CommandResult(handled=True, output="Thinking mode: on")
-        if arg.lower() in ("off", "false", "0", "no"):
-            harness.think = False
-            return CommandResult(handled=True, output="Thinking mode: off")
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+        return _toggle(harness, "think", arg, "Thinking mode")
 
     if cmd == "/companion-idle-recap":
         def _state() -> str:
@@ -407,10 +408,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return f"Idle recap: {state} (after {harness.idle_recap_secs}s idle)"
         if not arg:
             return CommandResult(handled=True, output=_state())
-        if arg.lower() in ("on", "true", "1", "yes"):
-            harness.idle_recap = True
-        elif arg.lower() in ("off", "false", "0", "no"):
-            harness.idle_recap = False
+        if (on := _on_off(arg)) is not None:
+            harness.idle_recap = on
         else:
             try:
                 secs = int(arg)
@@ -424,15 +423,14 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/guides":
         sub = arg.lower()
-        if sub in ("on", "true", "1", "yes", "off", "false", "0", "no"):
-            harness.guides = sub in ("on", "true", "1", "yes")
+        if (on := _on_off(sub)) is not None:
+            harness.guides = on
             session_mod.save_prefs(guides=harness.guides)
         elif sub and sub != "reload":
             return CommandResult(handled=True, output=f"ERROR: expected 'on', 'off' or 'reload', got: {arg}")
         if sub:
             note = harness.reload_guides()
-            harness._token_estimate = harness._estimate(schemas=True)
-            harness._emit_status()
+            harness.refresh_status()
         else:
             note = harness.guides_summary()
         if not harness.guides:
@@ -440,32 +438,12 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return CommandResult(handled=True, output=f"Project guides: on\n{note}")
 
     if cmd == "/tools":
-        if not arg:
-            state = "on" if harness.tools_enabled else "off"
-            return CommandResult(handled=True, output=f"Tool calls: {state}")
-        if arg.lower() in ("on", "true", "1", "yes"):
-            harness.tools_enabled = True
-            harness._emit_status()
-            return CommandResult(handled=True, output="Tool calls: on")
-        if arg.lower() in ("off", "false", "0", "no"):
-            harness.tools_enabled = False
-            harness._emit_status()
-            return CommandResult(handled=True, output="Tool calls: off")
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+        return _toggle(harness, "tools_enabled", arg, "Tool calls")
 
     if cmd == "/run-confirm":
-        if not arg:
-            state = "on" if harness.run_confirm else "off"
-            return CommandResult(handled=True, output=f"run_command confirmation: {state}")
-        if arg.lower() in ("on", "true", "1", "yes"):
-            harness.run_confirm = True
-            harness._emit_status()
-            return CommandResult(handled=True, output="run_command confirmation: on (you will be asked y/N before each command)")
-        if arg.lower() in ("off", "false", "0", "no"):
-            harness.run_confirm = False
-            harness._emit_status()
-            return CommandResult(handled=True, output="run_command confirmation: off (commands run automatically)")
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+        return _toggle(harness, "run_confirm", arg, "run_command confirmation",
+                       " (you will be asked y/N before each command)",
+                       " (commands run automatically)")
 
     if cmd == "/net":
         def _net_state() -> str:
@@ -476,19 +454,16 @@ def handle(line: str, harness: Harness) -> CommandResult:
         if not arg:
             return CommandResult(handled=True, output=_net_state())
         a = arg.lower()
-        if a in ("on", "true", "1", "yes", "public"):
-            harness.net_access = "on"
-        elif a in ("off", "false", "0", "no"):
-            harness.net_access = "off"
-        elif a == "local":
-            harness.net_access = "local"
-        else:
-            return CommandResult(handled=True,
-                                 output=f"ERROR: expected 'on', 'off' or 'local', got: {arg}")
+        access = {"local": "local", "public": "on"}.get(a)
+        if access is None and (on := _on_off(a)) is not None:
+            access = "on" if on else "off"
+        if access is None:
+            return _bad_choice(arg, "'on', 'off' or 'local'")
+        harness.net_access = access
         # fetch_url enters/leaves the tool set, so the generated tool reference
         # in the system prompt has to be re-rendered.
         harness.rebuild_system_prompt()
-        harness._emit_status()
+        harness.emit_status()
         extra = ""
         if harness.net_access != "off":
             extra = ("\nFetched pages are untrusted input — consider '/run-confirm on' "
@@ -499,23 +474,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return CommandResult(handled=True, output=_net_state() + extra)
 
     if cmd == "/net-confirm":
-        if not arg:
-            state = "on" if harness.net_confirm else "off"
-            return CommandResult(handled=True, output=f"fetch_url write confirmation: {state}")
-        if arg.lower() in ("on", "true", "1", "yes"):
-            harness.net_confirm = True
-            harness._emit_status()
-            return CommandResult(handled=True,
-                                 output="fetch_url write confirmation: on (you will be asked "
-                                        "y/N before each POST/PUT/PATCH/DELETE)")
-        if arg.lower() in ("off", "false", "0", "no"):
-            harness.net_confirm = False
-            harness._emit_status()
-            return CommandResult(handled=True,
-                                 output="fetch_url write confirmation: off (write requests run "
-                                        "automatically; requests to local and private addresses "
-                                        "are still confirmed)")
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+        return _toggle(harness, "net_confirm", arg, "fetch_url write confirmation",
+                       " (you will be asked y/N before each POST/PUT/PATCH/DELETE)",
+                       " (write requests run automatically; requests to local and private "
+                       "addresses are still confirmed)")
 
     if cmd == "/net-max-bytes":
         cur = net_mod.format_size(harness.net_max_bytes)
@@ -534,7 +496,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"ERROR: {net_mod.format_size(size)} is above the "
                 f"{net_mod.format_size(net_mod.HARD_MAX_BYTES)} hard limit."))
         harness.net_max_bytes = size
-        harness._emit_status()
+        harness.emit_status()
         return CommandResult(handled=True, output=(
             f"fetch_url download cap: {net_mod.format_size(size)} ({size} bytes)"))
 
@@ -553,7 +515,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"ERROR: expected a number of characters between 1000 and "
                 f"{net_mod.HARD_MAX_CHARS:,}, got: {arg}"))
         harness.net_max_chars = n
-        harness._emit_status()
+        harness.emit_status()
         warn = ""
         if n // 4 > harness.context_limit // 2:
             warn = (f"\nThat is large: one fetch (~{n // 4:,} tokens) can fill over half "
@@ -565,15 +527,14 @@ def handle(line: str, harness: Harness) -> CommandResult:
         sub = arg.lower()
         if not sub or sub == "status":
             return CommandResult(handled=True, output=_format_index(harness))
-        if sub in ("on", "true", "1", "yes", "off", "false", "0", "no"):
-            on = sub in ("on", "true", "1", "yes")
+        if (on := _on_off(sub)) is not None:
             session_mod.save_prefs(index=on)
             return CommandResult(handled=True, output=harness.set_index(on))
         if harness.index is None:
             return CommandResult(handled=True, output=f"ERROR: the code index is off — /index on first")
         if sub == "rebuild":
             harness.index.rebuild()
-            harness._emit_status()
+            harness.emit_status()
             return CommandResult(handled=True, output="Code index: rebuilding from scratch")
         if sub == "save":
             return CommandResult(handled=True, output=harness.index.save())
@@ -581,7 +542,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             msg = harness.index.load() or (f"No saved code index for this workdir "
                                            f"({code_index.pickle_path(harness.workdir)}).")
             harness.index.mark_dirty()
-            harness._emit_status()
+            harness.emit_status()
             return CommandResult(handled=True, output=msg)
         return CommandResult(handled=True, output=(
             f"ERROR: expected on, off, status, rebuild, save or load, got: {arg}"))
@@ -593,18 +554,14 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"Code index memory budget: {cur}\nSet it with a size, e.g. /index-max-mem 200mb. "
                 f"Over budget the index drops text-search signatures first, then the identifier "
                 f"index, then stops adding files."))
-        size = net_mod.parse_size(arg)
+        size, err = code_index.parse_max_mem(arg)
         if size is None:
-            return CommandResult(handled=True, output=(
-                f"ERROR: not a size: {arg}. Use bytes or a unit, e.g. 100mb, 512kb, 1gb."))
-        if size < code_index.MIN_MAX_BYTES:
-            return CommandResult(handled=True, output=(
-                f"ERROR: the minimum is {net_mod.format_size(code_index.MIN_MAX_BYTES)}"))
+            return CommandResult(handled=True, output=f"ERROR: {err}")
         harness.index_max_bytes = size
         session_mod.save_prefs(index_max_mem=size)
         if harness.index is not None:
             harness.index.set_max_bytes(size)
-        harness._emit_status()
+        harness.emit_status()
         return CommandResult(handled=True, output=f"Code index memory budget: {net_mod.format_size(size)}")
 
     if cmd == "/index-max-files":
@@ -612,18 +569,14 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=(
                 f"Code index file limit: {harness.index_max_files:,}\nSet it with a number, "
                 f"e.g. /index-max-files 200000. Files beyond it (in path order) are not indexed."))
-        try:
-            n = int(arg.replace(",", "").replace("_", ""))
-        except ValueError:
-            return CommandResult(handled=True, output=f"ERROR: not a number: {arg}")
-        if n < code_index.MIN_MAX_FILES:
-            return CommandResult(handled=True, output=(
-                f"ERROR: the minimum is {code_index.MIN_MAX_FILES:,} files"))
+        n, err = code_index.parse_max_files(arg)
+        if n is None:
+            return CommandResult(handled=True, output=f"ERROR: {err}")
         harness.index_max_files = n
         session_mod.save_prefs(index_max_files=n)
         if harness.index is not None:
             harness.index.set_max_files(n)
-        harness._emit_status()
+        harness.emit_status()
         return CommandResult(handled=True, output=f"Code index file limit: {n:,} files")
 
     if cmd == "/index-workers":
@@ -634,21 +587,14 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"Set it with /index-workers auto or a number from 1 to {code_index.MAX_WORKERS}. "
                 f"A first build or rebuild reads and parses files in that many processes; "
                 f"1 builds in one process."))
-        if arg.lower() == "auto":
-            n = 0
-        else:
-            try:
-                n = int(arg)
-            except ValueError:
-                return CommandResult(handled=True, output=f"ERROR: not a number or auto: {arg}")
-            if not 1 <= n <= code_index.MAX_WORKERS:
-                return CommandResult(handled=True, output=(
-                    f"ERROR: expected auto or 1 to {code_index.MAX_WORKERS}"))
+        n, err = code_index.parse_workers(arg)
+        if n is None:
+            return CommandResult(handled=True, output=f"ERROR: {err}")
         harness.index_workers = n
         session_mod.save_prefs(index_workers=n)
         if harness.index is not None:
             harness.index.set_workers(n)
-        harness._emit_status()
+        harness.emit_status()
         return CommandResult(handled=True, output=(
             f"Code index workers: {code_index.workers_label(n)}"))
 
@@ -657,11 +603,11 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=(
                 f"Answer grep_files / find_files from the code index: "
                 f"{'on' if harness.index_route else 'off'}"))
-        if arg.lower() in ("on", "true", "1", "yes", "off", "false", "0", "no"):
-            harness.index_route = arg.lower() in ("on", "true", "1", "yes")
+        if (on := _on_off(arg)) is not None:
+            harness.index_route = on
             session_mod.save_prefs(index_route=harness.index_route)
             harness.rebuild_system_prompt()     # the prompt and grep/find descriptions change
-            harness._emit_status()
+            harness.emit_status()
             extra = (" — a plain-text grep_files and a file-name find_files are answered by "
                      "index_text / the index's file list; regex searches and files the index "
                      "does not cover still go to the disk") if harness.index_route else \
@@ -669,7 +615,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=(
                 f"Answer grep/find from the code index: {'on' if harness.index_route else 'off'}"
                 f"{extra}"))
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+        return _bad_choice(arg)
 
     if cmd == "/index-filter":
         return _index_filter(harness, arg)
@@ -679,15 +625,15 @@ def handle(line: str, harness: Harness) -> CommandResult:
             state = "on" if harness.index_persist else "off"
             return CommandResult(handled=True, output=(
                 f"Code index save/load to disk: {state} ({code_index.pickle_path(harness.workdir)})"))
-        if arg.lower() in ("on", "true", "1", "yes", "off", "false", "0", "no"):
-            harness.index_persist = arg.lower() in ("on", "true", "1", "yes")
+        if (on := _on_off(arg)) is not None:
+            harness.index_persist = on
             session_mod.save_prefs(index_persist=harness.index_persist)
-            harness._emit_status()
+            harness.emit_status()
             extra = (" — saved on exit, on a workdir change and after the first build; loaded "
                      "when the index starts") if harness.index_persist else ""
             return CommandResult(handled=True, output=(
                 f"Code index save/load to disk: {'on' if harness.index_persist else 'off'}{extra}"))
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg}")
+        return _bad_choice(arg)
 
     if cmd == "/cost":
         return CommandResult(handled=True, output=harness.logger.cost_summary())
@@ -740,7 +686,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/export":
         filename = arg.strip() or f"conversation-{harness._ts}.md"
-        rendered = _render_markdown(harness.messages)
+        rendered = render_markdown(harness.messages)
         out = harness.workdir / filename
         try:
             out.write_text(rendered, encoding="utf-8")
@@ -750,7 +696,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/copy":
         if arg.strip() == "all":
-            text = _render_markdown(harness.messages)
+            text = render_markdown(harness.messages)
         else:
             text = _last_assistant_text(harness.messages)
         if not text:
@@ -763,11 +709,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
     if cmd == "/companion":
         if not arg:
             return CommandResult(handled=True, output="Usage: /companion on|off  (Shift+Q to toggle)")
-        if arg.lower() in ("on", "true", "1", "yes"):
-            return CommandResult(handled=True, companion=True)
-        if arg.lower() in ("off", "false", "0", "no"):
-            return CommandResult(handled=True, companion=False)
-        return CommandResult(handled=True, output=f"ERROR: expected 'on' or 'off', got: {arg!r}")
+        on = _on_off(arg)
+        return _bad_choice(arg) if on is None else CommandResult(handled=True, companion=on)
 
     if cmd == "/read":
         if not arg:
@@ -809,7 +752,7 @@ def _mask_token(t: str) -> str:
     return t[:2] + "*" * (n - 5) + t[-3:]
 
 
-def _render_markdown(messages: list[dict]) -> str:
+def render_markdown(messages: list[dict]) -> str:
     parts = []
     for m in messages:
         role = m.get("role")

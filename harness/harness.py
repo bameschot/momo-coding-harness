@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import ast
 import json
 import queue
-import re
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from . import session as session_mod
 from .companion import MAX_RECAP_LINES, fit_bubble
@@ -17,11 +13,18 @@ from .events import EventBus, BusyEvent, DeltaEvent, StreamEndEvent
 from .llm import make_client
 from .logger import Logger
 from .plan import Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file, delete_plan_file
-from .tools import (DESIGN_TOOLS, ALL_TOOLS, CHAT_TOOLS, NET_TOOLS,
-                    PLAN_INVESTIGATE_TOOLS, PLAN_EXECUTE_TOOLS,
+from .tools import (ALL_TOOLS, NET_TOOLS, PLAN_EXECUTE_TOOLS,
                     dispatch, render_tool_reference, with_index_tools)
 from . import net as net_mod
+from . import tools as tools_mod
 from . import code_index, code_nav, ignore_rules
+from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
+                     StatusEvent, ThinkEvent, ToolCallEvent, ToolResultEvent)
+from .prompts import (_INDEX_BANNER, _INDEX_FIRST, _MODE_TOOLS,  # noqa: F401
+                      _PLAN_EXECUTION_RULES, _ROLE_LOADERS, _coding_prompt, _index_rules,
+                      _load_role)
+from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
+                            _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls)
 
 # Tools that mutate a file on disk — the harness snapshots the target before and
 # after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
@@ -31,7 +34,6 @@ _MUTATING_TOOLS = {
     "write_file", "delete_file", "move_file",
 }
 
-_ROLES_DIR  = Path(__file__).parent.parent / "roles"
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 # Project guide files for coding agents, read from the workdir root (matched
@@ -39,289 +41,6 @@ _SKILLS_DIR = Path(__file__).parent.parent / "skills"
 _GUIDE_FILES = ("AGENTS.md", "CLAUDE.md", "MOMO.md", "GEMINI.md",
                 ".github/copilot-instructions.md", ".cursorrules")
 _GUIDE_MAX_CHARS = 24_000   # all guides together; also capped at context_limit chars (~1/4)
-
-
-# ── text tool-call recovery ───────────────────────────────────────────────────
-# Static regexes for known tagged formats.  The tier-3 bare-JSON pattern is
-# built dynamically inside _extract_text_tool_calls from the live tool set.
-
-# Qwen3, Hermes 2/3, NousResearch — most common Ollama chat models
-_RX_QWEN      = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>',         re.DOTALL)
-# Functionary / older Hermes variants
-_RX_FUNC      = re.compile(r'<functioncall>\s*(\{.*?\})\s*</functioncall>',   re.DOTALL | re.IGNORECASE)
-_RX_FUNC2     = re.compile(r'<function_call>\s*(\{.*?\})\s*</function_call>', re.DOTALL | re.IGNORECASE)
-# Phi-3 / Phi-4 — no closing tag, JSON follows the token directly
-_RX_PHI       = re.compile(r'<\|tool_call\|>\s*(\{.*?\})',                    re.DOTALL)
-# DeepSeek-V2/V3/R1 — tool name precedes the args JSON, separated by a special token
-_RX_DEEPSEEK  = re.compile(
-    r'<｜tool▁call▁begin｜>(.*?)<｜tool▁sep｜>(.*?)<｜tool▁call▁end｜>', re.DOTALL
-)
-# Mistral / Mixtral — JSON array prefixed by a literal tag
-_RX_MISTRAL   = re.compile(r'\[TOOL_CALL\]\s*(\[.*?\])',                       re.DOTALL)
-# Command-R / Cohere — text-based action format
-_RX_COMMAND_R = re.compile(r'Action:\s*(\S+)\s*\nAction\s+Input:\s*(\{.*?\})', re.DOTALL)
-
-_JSON_DECODER = json.JSONDecoder()
-
-
-def _match_paren(s: str, i: int) -> int:
-    """Given s[i] == '(', return the index of the matching ')', skipping over
-    Python string literals (so parens/commas inside quotes are not counted).
-    Returns -1 if unbalanced.  Used to carve a `name(...)` call out of free text."""
-    depth = 0
-    n = len(s)
-    quote: str | None = None
-    triple = False
-    escaped = False
-    while i < n:
-        ch = s[i]
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif triple:
-                if s[i:i + 3] == quote * 3:
-                    i += 2
-                    quote = None
-            elif ch == quote:
-                quote = None
-        elif ch in ("'", '"'):
-            if s[i:i + 3] == ch * 3:
-                quote, triple = ch, True
-                i += 2
-            else:
-                quote, triple = ch, False
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
-
-
-def _strip_text_tool_calls(text: str) -> str:
-    """Remove text-based tool-call markup from an assistant message content string.
-
-    When a model embeds its tool call in plain text (instead of via the native
-    tool_calls API field), the harness extracts the call but the raw XML/tagged
-    markup is still sitting in `content`.  Re-sending that markup to Ollama causes
-    Qwen3's XML template engine to embed it verbatim inside its own XML output,
-    producing malformed nesting and a 500 "XML syntax error: element <function>
-    closed by </parameter>" on the next request.  Stripping before storage fixes this.
-    """
-    for rx in (_RX_QWEN, _RX_FUNC, _RX_FUNC2, _RX_MISTRAL):
-        text = rx.sub("", text)
-    text = _RX_PHI.sub("", text)
-    text = _RX_DEEPSEEK.sub("", text)
-    text = _RX_COMMAND_R.sub("", text)
-    return text.strip()
-
-
-def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
-    """
-    Recover tool calls embedded in plain text when the model bypassed the tool
-    API.  Tries all known tagged/structured formats first, then falls back to a
-    bare-JSON scan anchored to tool-name occurrences in the text.
-
-    The bare-JSON pattern is built dynamically from `tools`, so adding a tool
-    to tools.py automatically extends coverage without touching this function.
-
-    Returns a list of {"name": str, "arguments": dict}.
-    """
-    known = {t["function"]["name"] for t in tools}
-    results: list[dict] = []
-    seen: set[str] = set()
-
-    def _append(hit: dict) -> bool:
-        """Dedup-check and append.  Returns True if the hit was new."""
-        key = hit["name"] + json.dumps(hit["arguments"], sort_keys=True)
-        if key in seen:
-            return False
-        seen.add(key)
-        results.append(hit)
-        return True
-
-    def _accept_full(obj: object) -> dict | None:
-        """
-        Validate a {"name": ..., "arguments"|"parameters": ...} object.
-        Requires the arguments/parameters key to be explicitly present so that
-        an arbitrary JSON blob with a matching "name" field is not mistaken for
-        a tool call.  Does not touch `seen` — dedup is the caller's job.
-        """
-        if not isinstance(obj, dict):
-            return None
-        name = obj.get("name")
-        if name not in known:
-            return None
-        if "arguments" in obj:
-            args = obj["arguments"]
-        elif "parameters" in obj:
-            args = obj["parameters"]
-        else:
-            return None  # no explicit args key → not a tool-call structure
-        if not isinstance(args, dict):
-            return None
-        return {"name": name, "arguments": args}
-
-    def _accept_args(name: str, obj: object) -> dict | None:
-        """
-        Validate a plain args dict paired with a tool name supplied externally
-        (e.g. DeepSeek / Command-R formats where the name precedes the JSON).
-        Does not touch `seen`.
-        """
-        if name not in known or not isinstance(obj, dict):
-            return None
-        return {"name": name, "arguments": obj}
-
-    # ── Tagged / structured formats ───────────────────────────────────────────
-
-    for rx in (_RX_QWEN, _RX_FUNC, _RX_FUNC2, _RX_PHI):
-        for m in rx.finditer(text):
-            try:
-                hit = _accept_full(json.loads(m.group(1)))
-                if hit:
-                    _append(hit)
-            except json.JSONDecodeError:
-                pass
-
-    # DeepSeek: name before separator, captured group 2 is the raw args dict
-    for m in _RX_DEEPSEEK.finditer(text):
-        name = m.group(1).strip()
-        try:
-            hit = _accept_args(name, json.loads(m.group(2).strip()))
-            if hit:
-                _append(hit)
-        except json.JSONDecodeError:
-            pass
-
-    # Mistral wraps multiple calls in a JSON array
-    for m in _RX_MISTRAL.finditer(text):
-        try:
-            for obj in json.loads(m.group(1)):
-                hit = _accept_full(obj)
-                if hit:
-                    _append(hit)
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    for m in _RX_COMMAND_R.finditer(text):
-        name = m.group(1).strip()
-        try:
-            hit = _accept_args(name, json.loads(m.group(2).strip()))
-            if hit:
-                _append(hit)
-        except json.JSONDecodeError:
-            pass
-
-    # Nameless <tool_call> payloads: some models (notably gemma) emit the argument
-    # object directly inside the tag with no {"name":..., "arguments":...} wrapper.
-    # These carry no tool name, but a payload with a "content" key is a file write —
-    # attribute it to write_file when that tool is available.  raw_decode reads the
-    # full object, so braces inside the content value do not truncate parsing.
-    if "write_file" in known:
-        for m in re.finditer(r'<tool_call>\s*(\{)', text):
-            try:
-                obj, _ = _JSON_DECODER.raw_decode(text, m.start(1))
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(obj, dict) or obj.get("name") in known:
-                continue  # a named structure — already handled by the tiers above
-            if "content" in obj:
-                args = {k: v for k, v in obj.items() if k in ("path", "content")}
-                _append({"name": "write_file", "arguments": args})
-
-    # Python-call syntax: some models (notably gemma) emit tool calls as
-    # name(key='value', ...) — Python source, not JSON — sometimes wrapped in a
-    # print(...) call.  Anchor on each known tool name, carve out the balanced
-    # call with _match_paren, and parse it with `ast` so quoting/escaping in the
-    # argument values is handled correctly.
-    if not results:
-        # Declared parameter order per tool, so positional args like
-        # edit_file("app.py", "foo", "bar") can be mapped to their names.
-        param_order = {
-            t["function"]["name"]: list(t["function"]["parameters"].get("properties", {}).keys())
-            for t in tools
-        }
-        _call_pat = re.compile(
-            r'\b(' + '|'.join(re.escape(n) for n in sorted(known, key=len, reverse=True)) + r')\s*\('
-        )
-        for m in _call_pat.finditer(text):
-            fn = m.group(1)
-            open_idx = m.end() - 1            # position of the '(' the regex consumed
-            close_idx = _match_paren(text, open_idx)
-            if close_idx < 0:
-                continue
-            expr = fn + text[open_idx:close_idx + 1]
-            try:
-                node = ast.parse(expr, mode="eval").body
-            except SyntaxError:
-                continue
-            if (not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name)
-                    or node.func.id != fn):
-                continue
-            call_args: dict = {}
-            # Positional args → parameter names in declared order.
-            names = param_order.get(fn, [])
-            for i, an in enumerate(node.args):
-                if i < len(names):
-                    try:
-                        call_args[names[i]] = ast.literal_eval(an)
-                    except Exception:
-                        pass
-            # Keyword args (override/extend positionals).
-            for kw in node.keywords:
-                if kw.arg is None:
-                    continue
-                try:
-                    call_args[kw.arg] = ast.literal_eval(kw.value)
-                except Exception:
-                    pass  # non-literal value (f-string, expression) — skip that arg
-            # Require at least one resolved arg so a bare mention like read_file(x)
-            # in prose does not become an empty, argument-less call.
-            if call_args:
-                hit = _accept_args(fn, call_args)
-                if hit:
-                    _append(hit)
-
-    if results:
-        return results
-
-    # ── Tier 3: bare JSON scan anchored to tool-name occurrences ─────────────
-    # Build the name pattern dynamically.  Longer names listed first so that
-    # "grep_files" cannot be shadowed by the shorter prefix "grep_file".
-    name_pat = re.compile(
-        r'\b(' + '|'.join(re.escape(n) for n in sorted(known, key=len, reverse=True)) + r')\b'
-    )
-    for nm in name_pat.finditer(text):
-        found = nm.group(1)
-        # Start the window up to 300 chars before the match: the name may appear
-        # inside the JSON ({"name": "write_file", ...}) so the opening brace can
-        # precede the name.  Extend to end-of-text because content args can be large.
-        window_start = max(0, nm.start() - 300)
-        for i in range(window_start, len(text)):
-            if text[i] != '{':
-                continue
-            try:
-                obj, _ = _JSON_DECODER.raw_decode(text, i)
-                # Case A: {"name": "write_file", "arguments": {...}}
-                hit = _accept_full(obj)
-                if hit and hit["name"] == found:
-                    if _append(hit):
-                        break  # new result added — move on to the next name match
-                # Case B: write_file( {...} ) — JSON follows "(" after the tool
-                # name, with optional whitespace between "(" and "{".
-                pre = text[max(window_start, i - 10):i].rstrip()
-                if pre.endswith('('):
-                    hit = _accept_args(found, obj)
-                    if hit and _append(hit):
-                        break
-            except json.JSONDecodeError:
-                continue
-
-    return results
 
 
 def _mask_tool_args(name: str, args: dict) -> dict:
@@ -355,268 +74,6 @@ def _mask_messages(messages: list[dict]) -> list[dict]:
             for c in calls
         ]})
     return out
-
-
-def _derive_write_path(content: str, mode: str) -> str:
-    """Infer a filename for a write_file/append_to_file call that arrived with
-    'content' but no 'path'.  Some models (notably gemma) emit the large content
-    argument first and drop the trailing 'path', which would otherwise fail the
-    required-argument check.  Prefer the document's first Markdown H1 as the name,
-    else fall back to a mode-appropriate default."""
-    m = re.search(r'^\s{0,3}#\s+(.+?)\s*$', content, re.MULTILINE)
-    if m:
-        slug = re.sub(r'[^a-z0-9]+', '-', m.group(1).lower()).strip('-')
-        if slug:
-            return f"{slug[:60]}.md"
-    return "design.md" if mode == "design" else "untitled.md"
-
-
-_WRITE_INTENT = (
-    "let me write", "i will write", "i'll write", "i'm going to write",
-    "writing the design", "writing the spec", "writing it now",
-    "write the complete", "write the design", "write the specification",
-    "write the spec", "write it now", "now write", "will now write",
-    "let me create", "i'll draft", "i'll compose", "i'm going to create",
-    "going to write", "going to draft", "composing the", "drafting the",
-    "creating the design", "creating the spec", "i'm writing", "i'm creating",
-)
-
-def _has_write_intent(text: str) -> bool:
-    t = text.lower()
-    return any(p in t for p in _WRITE_INTENT)
-
-
-def _extract_and_strip_thinking(raw_content: str) -> tuple[str, str]:
-    """Return (content_without_think_tags, thinking_text).
-
-    Handles complete <think>…</think> blocks and incomplete <think>… blocks
-    (generation cut off mid-thinking).  Either or both may be absent.
-    """
-    thinking = ""
-    complete = re.search(r"<think>(.*?)</think>", raw_content, flags=re.DOTALL)
-    if complete:
-        thinking = complete.group(1).strip()
-    content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
-    incomplete = re.search(r"<think>(.*?)$", content, flags=re.DOTALL)
-    if incomplete:
-        if not thinking:
-            thinking = incomplete.group(1).strip()
-        content = content[:incomplete.start()].strip()
-    return content, thinking
-
-
-# ── TUI events ────────────────────────────────────────────────────────────────
-
-@dataclass
-class ChatEvent:
-    role: str   # "user" | "assistant" | "system"
-    text: str
-
-@dataclass
-class ToolCallEvent:
-    name: str
-    args: dict
-
-@dataclass
-class ToolResultEvent:
-    name: str
-    result: str
-
-@dataclass
-class StatusEvent:
-    mode: str
-    model: str
-    workdir: str
-    ctx_pct: int
-    ctx_color: str  # "normal" | "yellow" | "red"
-    tools_enabled: bool = True
-    run_confirm: bool = False
-    net_access: str = "off"     # "off" | "on" | "local"
-    net_confirm: bool = True    # ask y/N before a write request
-    net_max_bytes: int = 2097152  # ceiling on one fetch_url download
-    net_max_chars: int = 24000    # text returned per fetch_url call
-    host: str = ""
-    provider: str = ""
-    plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
-    guides: bool = False     # project guide files (AGENTS.md, ...) in the system prompt
-    index_enabled: bool = False   # /index: the code index and its index_* tools
-    index_state: str = "off"      # off | building | refreshing | idle | stopped
-    index_progress: str = ""      # "812/1873" while building/refreshing
-    index_files: int = 0
-    index_mem: int = 0            # estimated bytes in use
-    index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
-    index_max_files: int = code_index.DEFAULT_MAX_FILES
-    index_workers: int = 0        # /index-workers: 0 = auto
-    index_persist: bool = True    # /index-persist: load/save a pickle
-    index_route: bool = True      # /index-route: answer grep_files/find_files from the index
-    index_degraded: bool = False  # over budget: a component was dropped
-
-@dataclass
-class ErrorEvent:
-    text: str
-
-@dataclass
-class DoneEvent:
-    pass
-
-@dataclass
-class AskUserEvent:
-    question: str
-
-@dataclass
-class ThinkEvent:
-    text: str
-
-@dataclass
-class DiffEvent:
-    op: str                        # "edit" | "write" | "append" | "delete" | "move"
-    path: str                      # target path (for "move", the source path)
-    added: int
-    removed: int
-    body: list[tuple[str, int | None, int | None, str]]  # (kind, old_no, new_no, text); empty for "move"
-    dst: str | None = None         # destination path for "move"
-    is_new: bool = False           # write_file created a new file
-
-
-# ── system prompts ────────────────────────────────────────────────────────────
-
-def _load_role(name: str) -> str:
-    try:
-        return (_ROLES_DIR / f"{name}.md").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-def _design_prompt() -> str:
-    return _load_role("designer") or (
-        "You are a design assistant. When the user describes something to build, "
-        "have a short conversation to clarify the design, then write it up as a "
-        "Markdown spec using write_file when asked or when you have enough information."
-    )
-
-def _coding_prompt(workdir: str) -> str:
-    raw = _load_role("coder")
-    if raw:
-        return raw.replace("{workdir}", workdir)
-    return (
-        "You are an expert software engineer. "
-        "Use the provided tools to implement the user's request. "
-        "Always read files before editing them. "
-        "Use old_string/new_string for targeted edits. "
-        "Keep changes minimal. "
-        f"Working directory: {workdir}"
-    )
-
-def _chat_prompt() -> str:
-    return _load_role("chat") or (
-        "You are a knowledgeable assistant. Read code and documents when the user "
-        "points at them, then answer questions and actively ask follow-up questions "
-        "to deepen understanding. Never write or modify files."
-    )
-
-def _planner_prompt(workdir: str) -> str:
-    raw = _load_role("planner")
-    if raw:
-        return raw.replace("{workdir}", workdir)
-    return (
-        "You are an expert software engineer in plan mode. Investigate the user's "
-        "feature request or bug with the read tools and run_command, ask the user "
-        "about genuine uncertainties with ask_user, then call create_plan with a "
-        "specific, ordered, verifiable implementation plan. Do not edit files. "
-        f"Working directory: {workdir}"
-    )
-
-# Appended to the coder prompt while an approved plan is being executed.  The
-# live plan state is rendered after it on every step, so the model always knows
-# which step it is on even after context compaction.
-_INDEX_BANNER = (
-    "**Code index is ON for this project.** Find code, text, files and usages with the index_* "
-    "tools (index_search, index_text, index_callers, index_file, index_map) — not grep_files, "
-    "find_files or run_command. The file tools are only a fallback; see \"Code index: ON\" at "
-    "the end.")
-
-# What to reach for first, per role.
-_INDEX_FIRST = {
-    "coding":    "Start a task with index_map (unfamiliar code) or index_search (a named thing), "
-                 "not list_directory + read_file; before changing a definition, index_callers.",
-    "plan-exec": "Start each step with index_search / index_file for what it touches; before "
-                 "changing a definition, index_callers.",
-    "plan":      "Investigate with index_map, index_search, index_file and index_callers — not "
-                 "list_directory + read_file or grep; read_symbol reads one definition.",
-    "momo":      "Start with index_map (unfamiliar code) or index_search (a named thing), not "
-                 "list_directory + read_file.",
-    "chat":      "Look things up with index_search (definitions, config keys, files) and "
-                 "index_text (any text) before reading files.",
-    "design":    "Look things up with index_search (definitions, config keys, CSS rules, files) "
-                 "and index_text (any text) before reading files.",
-}
-
-
-def _index_rules(role: str) -> str:
-    """The system-prompt section while the code index is on."""
-    first = _INDEX_FIRST.get(role, _INDEX_FIRST["coding"])
-    return f"""## Code index: ON — search with the index first
-
-This project is indexed. For code and config, the index tools answer in one call
-what grep and find need several for, and they are always current. {first}
-
-| Instead of | Use |
-|---|---|
-| grep_files (text in files) | index_text |
-| find_files (a file by name or glob) | index_search(query, kind="file"), or index_map |
-| find_references / grep for usages | index_callers |
-| file_dependencies | index_file |
-| code_outline of a directory | index_map |
-| find_symbol by name | index_search (find_symbol still answers "which definition is line N in") |
-
-Indexed file types: {code_nav.SUPPORTED_EXTENSIONS} (definitions and uses), and every
-other text file for index_text.
-
-Use grep_files, grep_file or find_files only when an index tool found nothing, for a
-regex, for a file type not listed above, or for a file the index does not cover
-(git-ignored, binary, over 2 MB). Never grep or find with run_command.
-Where the role instructions above say grep_files, find_files, find_references or
-file_dependencies, read them as the index tools in this table."""
-
-
-_PLAN_EXECUTION_RULES = """## Executing an approved plan
-
-You are executing a plan the user approved. The harness drives it one step at a
-time: each step arrives as a user message "Plan step i/N". The step marked ▶ below
-is the current one.
-
-- Work only on the current step. Do not start later steps — the harness gives you each one in
-  turn — and do not redo finished ones.
-- Apply the Workflow above to the step: read the files it touches, make the change, verify it.
-- When the step is complete and verified, call complete_step with a short summary. That ends the
-  step; do not put other tool calls after it.
-- If you need the user's input, use ask_user. A plain-text reply without a tool call also ends the step.
-- If you discover the remaining plan is wrong or incomplete, call revise_plan with the complete
-  corrected list of remaining steps (every step you omit is dropped). Never deviate silently.
-- If the step turns out to be done already, verify that and call complete_step."""
-
-def _momo_prompt() -> str:
-    return _load_role("momo") or (
-        "You are Momo, a small enthusiastic black cat who lives in the coding harness. "
-        "Keep the user company, celebrate their wins, and help out when they ask. "
-        "You have access to all tools — read, write, edit, run things when asked or when "
-        "your curiosity takes over. Be warm, curious, and easily distracted."
-    )
-
-_ROLE_LOADERS = {
-    "design":  lambda wd: _design_prompt(),
-    "coding":  lambda wd: _coding_prompt(wd),
-    "chat":    lambda wd: _chat_prompt(),
-    "momo":    lambda wd: _momo_prompt(),
-    "plan":    lambda wd: _planner_prompt(wd),
-}
-
-_MODE_TOOLS = {
-    "design":  DESIGN_TOOLS,
-    "coding":  ALL_TOOLS,
-    "chat":    CHAT_TOOLS,
-    "momo":    ALL_TOOLS,
-    "plan":    PLAN_INVESTIGATE_TOOLS,
-}
 
 
 # ── token estimation ──────────────────────────────────────────────────────────
@@ -709,6 +166,29 @@ _RECAP_LINE_LEN = "20-36" # ... asked-for characters per line (bubble fits 38 af
 _RECAP_SHORT = 15         # ... a reply whose lines are all shorter gets one "longer" retry
 _RECAP_MAX_TURNS = 4      # ... never looks back further than this many user turns
 _MOMO_LINES_MAX = 30      # remembered recap lines per session
+
+
+# The one retry prompt after an empty reply: (why it was empty, whose turn).
+_RETRY_TEXT = {
+    ('cut_off', 'design'):
+        "Your previous response was cut off. Do NOT output any reasoning or thinking. Call write_file with both 'path' (the file path to write) and 'content' (the complete document). Or call ask_user if you need information.",
+    ('cut_off', 'investigating'):
+        'Your previous response was cut off. Do NOT output any reasoning or thinking. Call create_plan now if your investigation is complete, or call a tool to continue investigating, or ask_user if you need information.',
+    ('cut_off', 'other'):
+        'Your previous response was cut off. Do NOT output any reasoning or thinking. Call a tool directly or write a brief response.',
+    ('thinking_only', 'design'):
+        "You produced reasoning but no response or tool call. Based on your analysis, call write_file now with both 'path' (the file path to write) and 'content' (the complete document). Or call ask_user if you need more information.",
+    ('thinking_only', 'investigating'):
+        'You produced reasoning but no response or tool call. Based on your analysis, call create_plan now if you are ready, call a tool to keep investigating, or call ask_user if you need information.',
+    ('thinking_only', 'other'):
+        'You produced reasoning but no response or tool call. Based on your analysis, call a tool to continue or write your conclusion.',
+    ('empty', 'design'):
+        "Please respond. If you are ready to write the design, call write_file now with both 'path' (the file path to write) and 'content' (the full document).",
+    ('empty', 'investigating'):
+        'Please respond. If your investigation is complete, call create_plan now; otherwise call a tool to continue.',
+    ('empty', 'other'):
+        'Please respond with your current analysis or next step.',
+}
 
 
 def _has_model(available: list[str], name: str) -> bool:
@@ -815,6 +295,10 @@ class Harness:
         self.awaiting_input = False
         self._user_input_queue.put(text)
 
+    def _confirm(self, question: str) -> bool:
+        """A y/N question through the ask_user plumbing; only y / yes allows."""
+        return self._ask_user(question).strip().lower() in ("y", "yes")
+
     def _ask_user(self, question: str) -> str:
         """Emit an AskUserEvent and block the worker thread until a frontend answers."""
         self.awaiting_input = True
@@ -862,11 +346,10 @@ class Harness:
 
     def _read_text_safe(self, rel_path: str) -> tuple[str, bool]:
         """Read the text of a workdir-relative path. Returns (text, existed).
-        Missing files, directories, and read errors all yield ("", False)."""
-        try:
-            return (self.workdir / rel_path).read_text(encoding="utf-8", errors="replace"), True
-        except (FileNotFoundError, IsADirectoryError, OSError):
-            return "", False
+        Missing files, directories, paths outside the workdir and read errors
+        all yield ("", False)."""
+        got = tools_mod._read_text(rel_path, self.workdir)
+        return ("", False) if isinstance(got, str) else (got[1], True)
 
     def _emit_diff(self, name: str, args: dict, result: str,
                    old_text: str | None, existed: bool) -> bool:
@@ -898,22 +381,27 @@ class Harness:
             is_new=(name == "write_file" and not existed)))
         return True
 
-    def _sync_context_limit(self, emit: bool = False):
-        """Query the model's native context window and compute the compaction limit."""
+    def _sync_context_limit(self, emit: bool = False) -> int | None:
+        """Query the model's native context window and, unless the user set an
+        absolute limit (context_fixed), compute the compaction limit from it.
+        Returns the reported window (None when the server doesn't say)."""
         reported = self.client.context_length()
-        if reported:
-            # The model's real window is used as num_ctx so the full context is
-            # available; context_limit is only the compaction threshold (the point
-            # at which we start dropping old history to leave room for the reply).
-            self.model_max_ctx = reported
+        # The model's real window is used as num_ctx so the full context is
+        # available; context_limit is only the compaction threshold (the point
+        # at which we start dropping old history to leave room for the reply).
+        self.model_max_ctx = reported or None
+        if self.context_fixed:
+            msg = (f"Model context: {self.context_limit:,} tokens compaction threshold (set by you"
+                   + (f", {reported:,} max" if reported else "") + f", {self.client.model})")
+        elif reported:
             pct = self.context_pct if self.context_pct is not None else 50
             self.context_limit = max(256, int(reported * pct / 100))
             msg = f"Model context: {self.context_limit:,} tokens compaction threshold ({pct}% of {reported:,} max, {self.client.model})"
         else:
-            self.model_max_ctx = None
             msg = f"Model context: unknown — using default {self.context_limit:,} tokens ({self.client.model})"
         if emit:
             self.event_queue.put(ChatEvent("system", msg))
+        return reported or None
 
     def _reconcile_fixed_model(self):
         """For a backend that can't switch models at runtime (llama.cpp serves the
@@ -955,16 +443,12 @@ class Harness:
             why = ("the server's loaded model" if not c.can_switch_model
                    else f"{want_model} is not on the server; {c.model} is loaded")
             changes.append(f"model {want_model} → {c.model} ({why})")
-        reported = c.context_length()
-        if self.context_fixed:
-            self.model_max_ctx = reported
-            if reported and self.context_limit > reported:
-                changes.append(f"your {self.context_limit:,}-token context limit is over the "
-                               f"model's {reported:,}-token window; now its default half")
-                self.context_fixed = False
-                self._sync_context_limit(emit=False)
-        else:
-            self._sync_context_limit(emit=False)
+        reported = self._sync_context_limit()
+        if self.context_fixed and reported and self.context_limit > reported:
+            changes.append(f"your {self.context_limit:,}-token context limit is over the "
+                           f"model's {reported:,}-token window; now its default half")
+            self.context_fixed = False
+            self._sync_context_limit()
         if want_limit is not None and want_limit != self.context_limit:
             changes.append(f"context limit {want_limit:,} → {self.context_limit:,} tokens")
         if reported:
@@ -977,7 +461,7 @@ class Harness:
                    f"({'set by you' if self.context_fixed else 'default'})")
         if c.model != want_model:
             session_mod.save_prefs(model=c.model, provider=self.provider)
-        self._emit_status()
+        self.emit_status()
         msg = f"Model: {c.model} ({where}) — {ctx}."
         if changes:
             msg += "\nUpdated from the saved settings: " + "; ".join(changes) + "."
@@ -989,23 +473,20 @@ class Harness:
         self._expected_backend = (model, None)     # asked for now, not the saved one
         if provider != self.provider:
             self.client = make_client(provider, host=host, model=model,
-                                      auth_token=self.client._auth_token)
+                                      auth_token=self.client.auth_token)
             self.provider = provider
         else:
             self.client.set_host(host)
             self.client.set_model(model)
         self._reconcile_fixed_model()
-        if not self.context_fixed:
-            self._sync_context_limit(emit=False)
-        else:
-            self.model_max_ctx = self.client.context_length()
-        self._emit_status()
+        self._sync_context_limit()
+        self.emit_status()
 
     def set_model(self, model: str):
         """Switch model and re-sync context limit from the new model's capabilities."""
         self.client.set_model(model)
         self._sync_context_limit(emit=True)
-        self._emit_status()
+        self.emit_status()
 
     # ── mode switching ────────────────────────────────────────────────────────
 
@@ -1046,7 +527,7 @@ class Harness:
         else:
             note = f"Code index: {'on' if enabled else 'off'}"
         self.rebuild_system_prompt()
-        self._emit_status()
+        self.emit_status()
         return note
 
     def _start_index(self) -> None:
@@ -1079,7 +560,7 @@ class Harness:
         note = self._stop_index()
         self._start_index()
         self.rebuild_system_prompt()
-        self._emit_status()
+        self.emit_status()
         return f"Code index: re-indexing {self.workdir}" + note
 
     def shutdown_index(self) -> None:
@@ -1097,7 +578,7 @@ class Harness:
             # Save once after the first complete build; exit and workdir changes save again.
             self._index_saved_version = idx.version
             threading.Thread(target=self._save_index_quietly, args=(idx,), daemon=True).start()
-        self._emit_status()
+        self.emit_status()
 
     def index_filter(self) -> tuple[str, str]:
         """(filter text, its path).  Reading it seeds it when it doesn't exist yet."""
@@ -1211,7 +692,7 @@ class Harness:
     def set_mode(self, mode: str):
         self.mode = mode
         self.rebuild_system_prompt()
-        self._emit_status()
+        self.emit_status()
 
     def rebuild_system_prompt(self):
         """Re-render the system prompt in place.
@@ -1609,7 +1090,7 @@ class Harness:
         try:
             notice = self.compact(summarise=summarise)
             self.event_queue.put(ChatEvent("system", notice))
-            self._emit_status()
+            self.emit_status()
         finally:
             self.event_queue.put(DoneEvent())
 
@@ -1647,7 +1128,7 @@ class Harness:
             if outcome == "plan_approved":
                 self._execute_plan()
         finally:
-            self._emit_status()
+            self.emit_status()
             self._autosave()
             self.event_queue.put(DoneEvent())
 
@@ -1700,7 +1181,7 @@ class Harness:
                 # A compaction that could not help is reported once, not every iteration.
                 if changed or notice != compact_notice:
                     self.event_queue.put(ChatEvent("system", notice))
-                    self._emit_status()
+                    self.emit_status()
                 compact_notice = notice
 
             self.logger.log_request(
@@ -1814,49 +1295,19 @@ class Harness:
                                 _suppress_think_next = True
                                 self.event_queue.put(ChatEvent("system",
                                     "Response cut off (context limit). Retrying without thinking."))
-                                retry_text = (
-                                    "Your previous response was cut off. "
-                                    "Do NOT output any reasoning or thinking. "
-                                    "Call write_file with both 'path' (the file path to write) and 'content' (the complete document). "
-                                    "Or call ask_user if you need information."
-                                    if self.mode == "design" else
-                                    "Your previous response was cut off. "
-                                    "Do NOT output any reasoning or thinking. "
-                                    "Call create_plan now if your investigation is complete, "
-                                    "or call a tool to continue investigating, or ask_user if you need information."
-                                    if investigating else
-                                    "Your previous response was cut off. "
-                                    "Do NOT output any reasoning or thinking. "
-                                    "Call a tool directly or write a brief response."
-                                )
+                                reason = "cut_off"
                             elif raw_thinking:
                                 # Model reasoned but produced no output or tool call.
                                 # Disable thinking for the retry — passing think=True on a
                                 # retry after a thinking-only turn causes Ollama's Qwen3
                                 # XML template to generate malformed tool definitions (500).
                                 _suppress_think_next = True
-                                retry_text = (
-                                    "You produced reasoning but no response or tool call. "
-                                    "Based on your analysis, call write_file now with both 'path' (the file path to write) and 'content' (the complete document). "
-                                    "Or call ask_user if you need more information."
-                                    if self.mode == "design" else
-                                    "You produced reasoning but no response or tool call. "
-                                    "Based on your analysis, call create_plan now if you are ready, "
-                                    "call a tool to keep investigating, or call ask_user if you need information."
-                                    if investigating else
-                                    "You produced reasoning but no response or tool call. "
-                                    "Based on your analysis, call a tool to continue or write your conclusion."
-                                )
+                                reason = "thinking_only"
                             else:
-                                retry_text = (
-                                    "Please respond. If you are ready to write the design, "
-                                    "call write_file now with both 'path' (the file path to write) and 'content' (the full document)."
-                                    if self.mode == "design" else
-                                    "Please respond. If your investigation is complete, call create_plan now; "
-                                    "otherwise call a tool to continue."
-                                    if investigating else
-                                    "Please respond with your current analysis or next step."
-                                )
+                                reason = "empty"
+                            role = ("design" if self.mode == "design"
+                                    else "investigating" if investigating else "other")
+                            retry_text = _RETRY_TEXT[reason, role]
                             # Bridge a tool→user gap: Qwen3 expects an assistant turn
                             # between tool results and the next user turn. Without it
                             # the template may produce malformed XML for tool definitions.
@@ -1971,16 +1422,13 @@ class Harness:
                     # (reusing the ask_user input plumbing) before executing.
                     if name == "run_command" and self.run_confirm:
                         cmd = args.get("command", "")
-                        answer = self._ask_user(
-                            f"Run this command? Reply 'y' to allow, anything else to decline.\n  $ {cmd}"
-                        ).strip().lower()
-                        if answer in ("y", "yes"):
+                        if self._confirm(
+                                f"Run this command? Reply 'y' to allow, anything else to decline.\n  $ {cmd}"):
                             result = self._dispatch(name, args)
                         else:
                             result = "ERROR: command declined by user"
                     elif name == "fetch_url" and (q := self._net_confirm_prompt(args)):
-                        answer = self._ask_user(q).strip().lower()
-                        if answer in ("y", "yes"):
+                        if self._confirm(q):
                             result = self._dispatch(name, args)
                         else:
                             result = ("ERROR: the user declined this request, so it was "
@@ -2077,7 +1525,7 @@ class Harness:
                 before = self._ctx_pct()
                 self._stream_chars += len(text)
                 if self._ctx_pct() != before:
-                    self._emit_status()
+                    self.emit_status()
             buf.clear()
             state["ts"] = time.monotonic()
 
@@ -2174,7 +1622,7 @@ class Harness:
         self.plan_phase = "investigating"
         delete_plan_file(self.workdir)
         self._refresh_system_prompt()
-        self._emit_status()
+        self.emit_status()
         return f"Plan discarded: {title} ({PLAN_FILENAME} removed)"
 
     def _handle_create_plan(self, args: dict) -> str:
@@ -2201,7 +1649,7 @@ class Harness:
         if low in ("", "n", "no", "later", "not now"):
             self.plan_phase = "awaiting_approval"
             self._refresh_system_prompt()
-            self._emit_status()
+            self.emit_status()
             return (f"User chose to keep the plan for later (saved to {PLAN_FILENAME}). "
                     "Do not call any more tools; reply with one short sentence.")
         self.plan_phase = "investigating"
@@ -2222,7 +1670,7 @@ class Harness:
         steps[0].status = "in_progress"
         self._sync_plan_file()
         self._refresh_system_prompt()
-        self._emit_status()
+        self.emit_status()
         reason = str(args.get("reason") or "").strip()
         start = len(self.plan.steps) - len(steps) + 1
         listing = "\n".join(f"  {start + i}. {st.title}" for i, st in enumerate(steps))
@@ -2252,7 +1700,7 @@ class Harness:
             step.status = "in_progress"
             self._sync_plan_file()
             self._refresh_system_prompt()
-            self._emit_status()
+            self.emit_status()
             n = len(plan.steps)
             self.event_queue.put(ChatEvent("system", f"▶ Plan step {idx + 1}/{n}: {step.title}"))
             body = [f"Plan step {idx + 1}/{n}: {step.title}"]
@@ -2302,7 +1750,7 @@ class Harness:
         try:
             self._execute_plan()
         finally:
-            self._emit_status()
+            self.emit_status()
             self._autosave()
             self.event_queue.put(DoneEvent())
 
@@ -2315,7 +1763,12 @@ class Harness:
             return "awaiting approval"
         return "draft"
 
-    def _emit_status(self):
+    def refresh_status(self):
+        """Re-estimate the context (the prompt or history changed) and emit it."""
+        self._token_estimate = self._estimate(schemas=True)
+        self.emit_status()
+
+    def emit_status(self):
         self.event_queue.put(self.status_event())
 
     def status_event(self) -> StatusEvent:
@@ -2423,7 +1876,7 @@ class Harness:
                     saved_provider,
                     host=saved_host or self.client.host,
                     model=saved_model,
-                    auth_token=self.client._auth_token,
+                    auth_token=self.client.auth_token,
                 )
             except ValueError:
                 # Unknown provider in the session file: keep the current backend
@@ -2446,13 +1899,9 @@ class Harness:
         # A fixed-model backend may now be serving a different model than the one
         # saved in this session; trust the server over the saved label.
         self._reconcile_fixed_model()
-        if not self.context_fixed:
-            self._sync_context_limit(emit=False)
-        else:
+        if self.context_fixed:
             self.context_limit = data.get("context_limit", self.context_limit)
-            # Still need the model's real window for num_ctx even when the
-            # compaction limit is an absolute value rather than a percentage.
-            self.model_max_ctx = self.client.context_length()
+        self._sync_context_limit()      # num_ctx still needs the model's real window
         self.active_skills = data.get("active_skills", [])
         saved_plan = data.get("plan")
         self.plan = Plan.from_dict(saved_plan) if saved_plan else None
@@ -2474,7 +1923,7 @@ class Harness:
             self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
         self._token_estimate = self._estimate(schemas=True)
         self._measured_tokens = None
-        self._emit_status()
+        self.emit_status()
         return f"Session loaded: {path.name} ({len(self.messages)} messages)"
 
     def session_path(self) -> Path:
@@ -2496,7 +1945,7 @@ class Harness:
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
         self._token_estimate = self._estimate(schemas=True)
         self._measured_tokens = None
-        self._emit_status()
+        self.emit_status()
         notice = f"Started a new session: {self.session_path().name}"
         if (guides := self.guides_summary()):
             notice += f"\n{guides}"
@@ -2512,6 +1961,6 @@ class Harness:
                 self._token_estimate = self._estimate(schemas=True)
                 self._measured_tokens = None
                 self._autosave()
-                self._emit_status()
+                self.emit_status()
                 return content
         return None
