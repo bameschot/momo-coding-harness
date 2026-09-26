@@ -17,6 +17,20 @@ MAX_SCAN_FILE_BYTES = 2_000_000  # larger files are skipped by grep_files, code 
 BINARY_SNIFF_BYTES = 4096        # bytes inspected for a NUL byte to detect binary files
 
 
+def split_lines(text: str, keepends: bool = False) -> list[str]:
+    """Lines as tree-sitter, git and editors number them: split on "\\n" only.
+    str.splitlines() also splits on form feeds, \\u2028, \\x1c... and a lone
+    "\\r", which shifts every later line number off the parser's.  A "\\r"
+    before the "\\n" belongs to the line ending."""
+    parts = text.split("\n")
+    if parts and parts[-1] == "":
+        parts.pop()                   # "a\nb\n" is two lines, not three
+    if keepends:
+        return [p + "\n" for p in parts[:-1]] + ([parts[-1] + ("\n" if text.endswith("\n") else "")]
+                                                 if parts else [])
+    return [p[:-1] if p.endswith("\r") else p for p in parts]
+
+
 def safe_path(raw: str, workdir: Path) -> Path | str:
     """raw resolved against the workdir, or an ERROR string when it leaves it."""
     if "\0" in raw:

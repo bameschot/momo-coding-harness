@@ -46,7 +46,7 @@ from pathlib import Path
 
 from . import code_nav, ignore_rules
 from .net import format_size, parse_size
-from .paths import BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, safe_path
+from .paths import BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, safe_path, split_lines
 from .session import atomic_write
 
 FORMAT_VERSION = 7   # 6: HTML inline-script JavaScript; 7: skipped files, source fingerprint
@@ -191,13 +191,57 @@ def _mask(ids: set[int], m: int) -> int:
 
 
 _UNSAFE_REGEX = re.compile(r"\)[?*{]")
+_VERBOSE_FLAG = re.compile(r"\(\?[aiLmsu]*x")          # (?x): spaces and # comments are not text
+# Groups whose text a match does not contain: lookarounds and comments.
+_UNMATCHED_GROUP = re.compile(r"\(\?(?:<?[=!]|#)")
+# Syntax that looks like a word but is not text: group names and backreferences
+# by name; and counted quantifiers ({3}, {3,100}), which become "*" so the
+# character before one still counts as optional ({0,3}).
+_NOT_TEXT = re.compile(r"\(\?P<\w+>|\(\?P=\w+\)|\(\?<\w+>")
+_COUNTED = re.compile(r"\{\d*(?:,\d*)?\}")
+
+
+def _drop_groups(pattern: str, start: re.Pattern) -> str | None:
+    """`pattern` with every group `start` opens removed whole, or None when a
+    group's end cannot be found."""
+    out, i = [], 0
+    while (m := start.search(pattern, i)) is not None:
+        out.append(pattern[i:m.start()])
+        depth, k, in_class = 0, m.start(), False
+        while k < len(pattern):
+            c = pattern[k]
+            if c == "\\":
+                k += 2
+                continue
+            if in_class:
+                in_class = c != "]"
+            elif c == "[":
+                in_class = True
+                if pattern[k + 1:k + 2] == "]":
+                    k += 1             # "[]...]": the first ] is a literal
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        if depth:
+            return None
+        out.append(" ")
+        i = k + 1
+    return "".join(out) + pattern[i:]
 
 
 def _regex_literals(pattern: str) -> list[str]:
     """Lowercased [a-z0-9_] runs every match of `pattern` must contain, or []
     when that cannot be decided cheaply (alternation, optional groups)."""
-    if "|" in pattern or _UNSAFE_REGEX.search(pattern):
+    if "|" in pattern or _UNSAFE_REGEX.search(pattern) or _VERBOSE_FLAG.search(pattern):
         return []
+    pattern = _drop_groups(pattern, _UNMATCHED_GROUP)
+    if pattern is None:
+        return []
+    pattern = _COUNTED.sub("*", _NOT_TEXT.sub(" ", pattern))
     s = re.sub(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\N\{[^}]*\}|\\[0-7]{1,3}", " ", pattern)
     s = re.sub(r"\[(?:\\.|[^\]])*\]", " ", s)
     s = re.sub(r"\\.", " ", s)
@@ -432,6 +476,7 @@ class ProjectIndex:
         self._notices: list[str] = []
         self._rank_cache: tuple | None = None
         self._graph_cache: tuple | None = None
+        self._modules_cache: tuple | None = None
         self.last_error = ""
         self._thread: threading.Thread | None = None
 
@@ -1312,8 +1357,8 @@ def _overlap(qtoks: tuple[str, ...], stoks: tuple[str, ...]) -> float:
 
 
 # Test code: `tests/`, `test_x.py`, `x_test.go`, `x.test.ts`, `x.spec.js`, ...
-_TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|specs?)/|(^|/)test_[^/]*$|_test\.[^/.]+$"
-                        r"|\.(test|spec)\.[^/.]+$")
+_TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|specs?|fixtures?|testdata|evals?)/"
+                        r"|(^|/)test_[^/]*$|_test\.[^/.]+$|\.(test|spec)\.[^/.]+$")
 
 
 def _is_test(rel: str) -> bool:
@@ -1462,7 +1507,11 @@ def _mp_context():
 
 # ── executors ────────────────────────────────────────────────────────────────
 
-_MAX_SEARCH = 30
+# Answer sizes: a small model's context is 16k tokens, so one answer stays
+# well under 2k.  In one place, so the evals can tune them.
+_MAX_SEARCH = 30            # hits listed with an exact match block, and files listed
+_MAX_FUZZY = 12             # hits listed when nothing matches exactly: closest first
+_MAX_INLINE_RANK = 3        # only the best few hits get their source inlined
 # Short definitions whose value IS the answer (a constant, a config key, a CSS
 # rule, a SQL table's columns) are shown whole, so nothing is left to open.
 _VALUE_KINDS = {"constant", "variable", "key", "list", "table", "var", "rule", "column",
@@ -1473,12 +1522,13 @@ _MAX_INLINE_HITS = 8
 _MAX_APPROX_AFTER_EXACT = 5   # an exact hit is the answer; a few near misses are context
 _MAX_TEXT_HITS = 200
 _MAX_TEXT_LINE = 200
-_MAX_TEXT_CHARS = 9000      # the whole answer, like index_callers
+_MAX_TEXT_CHARS = 6000      # the whole answer, like index_callers
+_MAX_TEXT_PER_FILE = 5      # lines shown per file before moving on to the next file
 _MAX_CALLER_GROUPS = 25     # places listed at level 1
 _MAX_LINES_PER_GROUP = 3
 _MAX_EXPAND = 8             # level-1 definitions followed to level 2 (and so on)
 _MAX_EXPAND_GROUPS = 5      # places listed per followed definition
-_MAX_CALLERS_CHARS = 9000   # the whole answer; a small model's context is 16k tokens
+_MAX_CALLERS_CHARS = 6000   # the whole answer
 _MAX_EXPAND_FILES = 300     # a name used in more files than this is too common to expand
 
 
@@ -1487,6 +1537,11 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
                  cancel=None) -> str:
     if (err := _ready(index, cancel)):
         return err
+    return _search(query, kind, path, lang, workdir, index)
+
+
+def _search(query: str, kind: str | None, path: str | None, lang: str | None, workdir: Path,
+            index: ProjectIndex) -> str:
     q = (query or "").strip().replace("::", ".")
     if not q:
         return "ERROR: query is empty — pass a name or part of one, e.g. 'parse_config'"
@@ -1505,10 +1560,17 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
     hits = []
     file_hits = []
     with index._lock:
+        # 'code_nav.parse': a module-qualified name is exact for the module's
+        # top-level parse, though no qualname spells the module.
+        mod_fids, mod_name = set(), None
+        if "." in q and not pattern:
+            qual_mod, mod_name = q.rsplit(".", 1)
+            mod_fids = _module_names(index)[0].get(qual_mod.replace("/", "."), set())
         for fid, e in index._alive():
             if (langs and e.lang not in langs) or not keep(e.path):
                 continue
             page_js = lang == "javascript" and e.lang == "html"   # only its scripts
+            in_mod = fid in mod_fids
             if want_files:
                 fs = _file_score(e.path, q)
                 if fs:
@@ -1520,7 +1582,8 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
                     continue
                 if page_js and s.kind in _HTML_KINDS:
                     continue
-                sc = _score(s, q, ql, qtoks, pattern)
+                sc = 100 if in_mod and s.depth == 0 and s.name == mod_name else \
+                    _score(s, q, ql, qtoks, pattern)
                 if sc:
                     hits.append((-sc, _CODE_KIND_ORDER.get(s.kind, 3), len(s.qualname),
                                  e.path, s.start, s, e.lang, _is_test(e.path)))
@@ -1528,7 +1591,7 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
     file_hits.sort(key=lambda h: h[:3])
     if not hits and kind and kind != "file" and not file_hits:
         # The name exists, just not as that kind: say so rather than "nothing".
-        other = index_search(query, None, path, lang, workdir=workdir, index=index)
+        other = _search(query, None, path, lang, workdir, index)     # already fresh
         if not other.startswith("(no definition"):
             return (f"(nothing of kind '{kind}' matches '{query}' — without kind= it matches "
                     f"these:)\n" + other)
@@ -1566,7 +1629,8 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
         n_exact = sum(1 for h in hits if h[0] <= -90)
         shown_hits = hits[:min(_MAX_SEARCH, n_exact + _MAX_APPROX_AFTER_EXACT)]
     else:
-        shown_hits = hits[:_MAX_SEARCH]
+        n_exact = 0
+        shown_hits = hits[:_MAX_FUZZY]
     shown_sep = False
     file_lines: dict[str, list[str]] = {}
     inlined = 0
@@ -1578,7 +1642,7 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
             shown_sep = True
         out.append(f"{rel}:L{s.start}-{s.end}  {s.kind} {s.qualname}  | {s.signature}")
         span = s.end - s.start + 1
-        if s.kind not in _VALUE_KINDS or span > _MAX_INLINE_LINES:
+        if s.kind not in _VALUE_KINDS or span > _MAX_INLINE_LINES or i >= _MAX_INLINE_RANK:
             continue
         if span == 1:
             best_whole = best_whole or i == 0     # the signature is the whole source
@@ -1587,8 +1651,7 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
             continue
         if rel not in file_lines:
             try:
-                file_lines[rel] = (index.root / rel).read_text(
-                    encoding="utf-8", errors="replace").splitlines()
+                file_lines[rel] = split_lines(_read_source(index.root / rel))
             except OSError:
                 file_lines[rel] = []
         src = file_lines[rel][s.start - 1:s.end]
@@ -1596,9 +1659,15 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
             out.extend(f"    {s.start + k}: {line.rstrip()[:160]}" for k, line in enumerate(src))
             inlined += 1
             best_whole = best_whole or i == 0
-    head = f"{len(hits)} match{'es' if len(hits) != 1 else ''} for '{query}'"
-    if not exact_block:
-        head += " (no exact name match — closest first)"
+    if exact_block:
+        # Exact hits are the answer; the loose ones (a subsequence of the name
+        # matches thousands) are only counted.
+        head = f"{n_exact} exact match{'es' if n_exact != 1 else ''} for '{query}'"
+        if len(hits) > n_exact:
+            head += f" (+{len(hits) - n_exact} similar names)"
+    else:
+        head = (f"{len(hits)} match{'es' if len(hits) != 1 else ''} for '{query}' "
+                f"(no exact name match — closest first)")
     trailer = []
     if len(hits) > len(shown_hits):
         trailer.append(f"... ({len(shown_hits)} of {len(hits)} — narrow with kind=, lang= or path=)")
@@ -1615,9 +1684,16 @@ def index_search(query: str, kind: str | None = None, path: str | None = None,
         # Callers make sense for code — including JavaScript inside an HTML page —
         # not for a config key or a CSS rule: decide by what the definition is.
         code_like = best.kind in _CALLABLE_KINDS or best.kind in code_nav._CONTAINER_KINDS
+        callee = q if -hits[0][0] == 100 and best.depth == 0 and best.name == mod_name else best.name
         trailer.append(f'(next: read_symbol("{hits[0][3]}", "{best.qualname}") reads the best match'
-                       + (f"; index_callers(\"{best.name}\") shows who uses it)" if code_like else ")"))
+                       + (f"; index_callers(\"{callee}\") shows who uses it)" if code_like else ")"))
     return _with_note("\n".join([head + ":"] + out + trailer), index)
+
+
+def _read_source(path: Path) -> str:
+    """A file's text with its line endings as written: read_text() would turn a
+    lone "\r" into a line break the parser does not count."""
+    return path.read_bytes().decode("utf-8", errors="replace")
 
 
 def _text_mentions(index: ProjectIndex, query: str, keep, limit: int = 5) -> str:
@@ -1726,10 +1802,10 @@ def index_text(query: str, path: str | None = None, regex: bool = False, *, work
         if cancel is not None and i % 50 == 0 and cancel.is_set():
             return "ERROR: cancelled"
         try:
-            text = (index.root / rel).read_text(encoding="utf-8", errors="replace")
+            text = _read_source(index.root / rel)
         except OSError:
             continue
-        for ln, line in enumerate(text.splitlines(), 1):
+        for ln, line in enumerate(split_lines(text), 1):
             if rx.search(line):
                 total += 1
                 files_hit[rel] = files_hit.get(rel, 0) + 1
@@ -1745,7 +1821,11 @@ def index_text(query: str, path: str | None = None, regex: bool = False, *, work
     size = len(out[0])
     cur = None
     shown = 0
+    in_file = 0
+    listed: set[str] = set()
     for rel, ln, line, symbols in hits:
+        if rel == cur and in_file >= _MAX_TEXT_PER_FILE:
+            continue                # breadth first: the other files matter more
         owner = code_nav._enclosing(symbols, ln) if symbols else None
         where = f" [in {owner.qualname}]" if owner else ""
         text = line.strip()
@@ -1758,10 +1838,15 @@ def index_text(query: str, path: str | None = None, regex: bool = False, *, work
         out.extend(block)
         size += cost
         shown += 1
+        in_file = 1 if rel != cur else in_file + 1
         cur = rel
+        listed.add(rel)
+        if in_file == _MAX_TEXT_PER_FILE and files_hit[rel] > in_file:
+            more_here = files_hit[rel] - in_file
+            out.append(f"  ... {more_here} more in this file")
+            size += len(out[-1]) + 1
     if total > shown:
-        rest = sorted((f for f in files_hit if f not in {h[0] for h in hits[:shown]}),
-                      key=lambda f: -files_hit[f])
+        rest = sorted((f for f in files_hit if f not in listed), key=lambda f: -files_hit[f])
         more = (" — also in: " + ", ".join(f"{f} ({files_hit[f]})" for f in rest[:8])
                 + (" ..." if len(rest) > 8 else "")) if rest else ""
         out.append(f"... (first {shown} of {total} matches{more} — narrow with path= or a "
@@ -1862,11 +1947,13 @@ def query_target(index: ProjectIndex, name: str) -> tuple[str, str | None, str |
 
 
 def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
-          cls: str | None = None) -> tuple[list, list]:
+          cls: str | None = None, module: "_Module | None" = None) -> tuple[list, list]:
     """All uses of `bare`: ([(rel, row1, role, recv, owner, line_text)], defs [(rel, Symbol)]).
     With `cls` (a query for cls.bare), drop what syntax shows is another object's
     method: a call on `self.attr` / `this.attr`, or a bare call inside a class
-    that defines `bare` itself."""
+    that defines `bare` itself.  With `module` (a query for module.bare), keep
+    only uses that reach that module.  Otherwise, drop calls on a receiver whose
+    import or declared type is outside the project (`ast.parse`, `json.loads`)."""
     cls_last = cls.rsplit(".", 1)[-1] if cls else None
     with index._lock:
         named = [(index.files[f].lang, index.files[f].symbols[i])
@@ -1886,6 +1973,8 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
     # Every definition of the name is top-level (a function, not a method), so
     # `self.total` / `this.total` is some object's attribute, never a use of it.
     only_top_level = bool(named) and all(s.depth == 0 for s in named)
+    owner_classes = {s.qualname.rsplit(".", 2)[-2] for _, s in meant if "." in s.qualname}
+    unscoped = not cls and not want_recv and module is None
     with index._lock:
         if index.components["idents"]:
             occ = index._occurrences(bare)
@@ -1935,9 +2024,63 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
                                  if ".".join(scopes[:k]) in owners_of_name), None)
                     if here and here.rsplit(".", 1)[-1] != cls_last:
                         continue        # a bare call to the enclosing class's own method
+            if module is not None and not module.reaches(rel, recv, rtype):
+                continue
+            if unscoped and role == "call" and _external(index, recv, rtype, owner_classes):
+                continue                # ast.parse() is not the project's parse
             line = parsed.lines[r].strip() if r < len(parsed.lines) else ""
             uses.append((rel, r + 1, role, recv, owner, line))
     return uses, defs
+
+
+def _external(index: ProjectIndex, recv: str | None, rtype: str | None,
+              owner_classes: set[str]) -> bool:
+    """The receiver is bound to something outside the project: an import of a
+    library module (`import ast`) or a declared type the project does not
+    define.  Unknown, generic and self receivers never are; neither is a
+    library base class of a class defining the name (virtual dispatch)."""
+    if not recv or not rtype or recv.split(".", 1)[0] in ("self", "this", "cls", "super"):
+        return False
+    if rtype in _OPEN_TYPES or (len(rtype) <= 2 and rtype.isupper()):
+        return False
+    with index._lock:
+        if rtype in _module_names(index)[0]:
+            return False
+    if _is_project_class(index, rtype):
+        return False
+    return not any(_is_subtype(index, c, rtype) for c in owner_classes)
+
+
+@dataclass
+class _Module:
+    """A module a callers query names (`code_nav.parse`): the files that define
+    the name at top level, the names the module goes by, and the files that
+    import it."""
+    homes: set[str]
+    names: set[str]
+    importers: set[str]
+
+    def reaches(self, rel: str, recv: str | None, rtype: str | None) -> bool:
+        if recv is not None:
+            return rtype in self.names or recv.rsplit(".", 1)[-1] in self.names
+        return rel in self.homes or rel in self.importers
+
+
+def _module_scope(index: ProjectIndex, qualifier: str, bare: str) -> _Module | None:
+    """`code_nav` in `code_nav.parse`, when it names a project module that
+    defines `bare` at top level; None otherwise (then it filters receivers)."""
+    q = qualifier.replace("/", ".")
+    with index._lock:
+        cands, _ = _module_names(index)
+        fids = {f for f in cands.get(q, ())
+                if any(s.depth == 0 and s.name == bare for s in index.files[f].symbols)}
+        if not fids:
+            return None
+        homes = {index.files[f].path for f in fids}
+        names = {q.rsplit(".", 1)[-1]} | {Path(h).stem for h in homes}
+        importers = {index.files[r].path for r, targets in _import_graph(index).items()
+                     if not fids.isdisjoint(targets)}
+    return _Module(homes, names, importers)
 
 
 _USE_ROLES = ("call", "import", "type", "other")
@@ -1987,6 +2130,20 @@ def _files_named(index: ProjectIndex, name: str) -> list[str]:
     return sorted(out)
 
 
+def _qualified_names(defs) -> list[str]:
+    """How to name each definition apart: 'Rules.parse' for a method,
+    'code_nav.parse' (the module) for a top-level function."""
+    out: list[str] = []
+    for rel, sym in defs:
+        if "." in sym.qualname:
+            n = ".".join(sym.qualname.split(".")[-2:])
+        else:
+            n = f"{Path(rel).stem}.{sym.name}"
+        if n not in out:
+            out.append(n)
+    return out
+
+
 def _group(uses) -> "dict[tuple[str, str | None], list]":
     groups: dict = {}
     for u in uses:
@@ -2024,11 +2181,16 @@ def index_callers(name: str, depth: int = 1, role: str | None = None, *, workdir
     if not dotted:
         return "ERROR: name is empty"
     bare, want_recv, cls = query_target(index, dotted)
-    uses, defs = _uses(index, bare, want_recv, cancel, cls)
+    module = _module_scope(index, want_recv, bare) if want_recv else None
+    if module is not None:
+        want_recv = None            # code_nav.parse: parse() inside code_nav counts too
+    uses, defs = _uses(index, bare, want_recv, cancel, cls, module)
     if cancel is not None and cancel.is_set():
         return "ERROR: cancelled"
     if cls:
         defs = [d for d in defs if d[1].qualname == dotted or d[1].qualname.endswith("." + dotted)] or defs
+    elif module is not None:
+        defs = [d for d in defs if d[0] in module.homes] or defs
     if role:
         uses = [u for u in uses if u[2] == role]
     if not defs and not uses:
@@ -2046,6 +2208,13 @@ def index_callers(name: str, depth: int = 1, role: str | None = None, *, workdir
     if defs:
         where = "; ".join(f"{rel}:L{s.start}-{s.end} ({s.kind} {s.qualname})" for rel, s in defs[:5])
         out.append(f"'{dotted}' is defined at {where}" + (f" and {len(defs) - 5} more" if len(defs) > 5 else "") + ".")
+        if not cls and module is None and not want_recv:
+            names = _qualified_names(defs)
+            if len(names) > 1:
+                # A statement, not a "next:" hint: those get followed unasked.
+                out.append(f"({len(names)} different definitions share this name and their uses are "
+                           f"listed together; a qualified name like {' or '.join(repr(n) for n in names[:3])} "
+                           f"lists only one's)")
     else:
         out.append(f"'{dotted}' has no definition in the indexed files (external, dynamic or builtin).")
     if not uses:
@@ -2153,11 +2322,31 @@ def _import_graph(index: ProjectIndex) -> dict[int, dict[int, int]]:
     cached = index._graph_cache
     if cached is not None and cached[0] == index.version:
         return cached[1]
-    alive = [fid for fid, _ in index._alive()]
+    cands, fqns = _module_names(index)
+    out: dict[int, dict[int, int]] = defaultdict(dict)
+    for fid, _ in index._alive():
+        e = index.files[fid]
+        for imp in e.imports:
+            targets = _relative_import(imp, e, index)
+            if targets is None:
+                targets = _resolve_import(imp, e.lang, cands, fqns, index)
+            targets.discard(fid)
+            for d in targets:
+                out[fid].setdefault(d, imp.line)
+    index._graph_cache = (index.version, out)
+    return out
+
+
+def _module_names(index: ProjectIndex) -> tuple[dict[str, set[int]], dict[str, set[int]]]:
+    """(module name -> code files an import of it could mean, e.g. 'code_nav',
+    'harness.code_nav'; Java/Kotlin 'package.Name' -> the declaring files),
+    cached per index version."""
+    cached = index._modules_cache
+    if cached is not None and cached[0] == index.version:
+        return cached[1]
     cands: dict[str, set[int]] = defaultdict(set)
     fqns: dict[str, set[int]] = defaultdict(set)    # "com.acme.Money" -> Money.java
-    for fid in alive:
-        e = index.files[fid]
+    for fid, e in index._alive():
         if not e.lang or e.lang in _DATA_LANGS:
             continue
         for c in code_nav._module_candidates(index.root / e.path, index.root)[1]:
@@ -2171,18 +2360,8 @@ def _import_graph(index: ProjectIndex) -> dict[int, dict[int, int]]:
             for sym in e.symbols:           # the default package: `import CdpClient`
                 if sym.depth == 0:
                     fqns[sym.name].add(fid)
-    out: dict[int, dict[int, int]] = defaultdict(dict)
-    for fid in alive:
-        e = index.files[fid]
-        for imp in e.imports:
-            targets = _relative_import(imp, e, index)
-            if targets is None:
-                targets = _resolve_import(imp, e.lang, cands, fqns, index)
-            targets.discard(fid)
-            for d in targets:
-                out[fid].setdefault(d, imp.line)
-    index._graph_cache = (index.version, out)
-    return out
+    index._modules_cache = (index.version, (cands, fqns))
+    return cands, fqns
 
 
 _JS_EXTS = ("", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".d.ts",
@@ -2435,12 +2614,13 @@ def index_file(path: str, *, workdir: Path, index: ProjectIndex | None = None, c
                 # Which of this file's definitions each importer uses, so "who
                 # uses what" is one call instead of a grep per importer.
                 tops = [s for s in e.symbols if s.depth == 0 and len(s.name) >= 3]
+                refs = {s.name: index._ref_files(s.name) for s in tops} \
+                    if index.components["idents"] else {}
                 out.append(f"Imported by ({len(importers)}) — and the definitions each one uses:")
                 for ofid, where in importers[:20]:
                     own = {s.name for s in index.files[ofid].symbols if s.depth == 0}
                     names = [s.name for s in tops if s.name not in own
-                             and ofid in index._ref_files(s.name)] \
-                        if index.components["idents"] else []
+                             and ofid in refs.get(s.name, ())]
                     out.append(f"  {where}" + (f" — uses {', '.join(names[:10])}"
                                                + (" ..." if len(names) > 10 else "") if names else ""))
                 if len(importers) > 20:

@@ -705,6 +705,60 @@ class ReviewFixes(Base):
         self.assertIn("source", ci._header(self.root))
 
 
+class ReviewFixes0926(Base):
+    """Regressions from the 2026-09-26 review of the index."""
+
+    files = {
+        # A form feed is a line break to str.splitlines(), not to the parser.
+        "ff.py": "x = 1\n\x0c\ndef foo():\n    return 2\n\n\ndef bar():\n    return foo()\n",
+        "pkg/__init__.py": "",
+        "pkg/nav.py": "def parse(p):\n    return p\n\n\ndef outline(p):\n    return parse(p)\n",
+        "pkg/rules.py": "class Rules:\n    @classmethod\n    def parse(cls, t):\n        return cls()\n",
+        "user.py": ("import ast\nfrom pkg import nav\nfrom pkg.rules import Rules\n\n\n"
+                    "def go(t):\n    ast.parse(t)\n    Rules.parse(t)\n    return nav.parse(t)\n"),
+    }
+
+    def test_line_numbers_follow_newlines_only(self):
+        from harness.paths import split_lines
+        self.assertEqual(split_lines("a\x0cb\r\nc d\n"), ["a\x0cb", "c d"])
+        self.assertEqual("".join(split_lines("a\r\nb\n\nc", keepends=True)), "a\r\nb\n\nc")
+        self.assertIn("L8 (call) return foo()", self.callers("foo"))
+        self.assertIn("L8 [in bar]: return foo()", self.text("foo()"))
+        self.assertIn("   8: ", tools._grep_file("foo", "ff.py", workdir=self.root))
+
+    def test_regex_prefilter_keeps_real_matches(self):
+        self.assertEqual(ci._regex_literals(r"(?!foo)bar"), ["bar"])
+        self.assertEqual(ci._regex_literals(r"(?<!abc)def"), ["def"])
+        self.assertEqual(ci._regex_literals(r"(?P<word>\w+)"), [])
+        self.assertEqual(ci._regex_literals(r"x{3,100}"), [])
+        self.assertEqual(ci._regex_literals(r"ab{0,3}cde"), ["cde"])
+        self.assertEqual(ci._regex_literals(r"(?x) foo # bar"), [])
+        self.assertIn("ff.py", self.text(r"(?!zzz)return foo", regex=True))
+
+    def test_module_qualified_callers(self):
+        out = self.callers("nav.parse")
+        self.assertIn("'nav.parse' is defined at pkg/nav.py:L1-2 (function parse).", out)
+        self.assertIn("function outline", out)          # a bare call inside the module
+        self.assertIn("return nav.parse(t)", out)
+        self.assertNotIn("Rules.parse(t)", out)
+        self.assertIn("1 exact match for 'nav.parse'", self.search("nav.parse"))
+
+    def test_bare_callers_drop_library_receivers_and_flag_ambiguity(self):
+        out = self.callers("parse")
+        self.assertNotIn("ast.parse", out)
+        self.assertIn("Rules.parse(t)", out)
+        self.assertIn("2 different definitions share this name", out)
+        self.assertIn("'nav.parse'", out)
+        self.assertIn("'Rules.parse'", out)
+
+    def test_text_is_breadth_first(self):
+        _write(self.root, "a_many.txt", "needle\n" * 40)
+        _write(self.root, "z_one.txt", "needle\n")
+        out = self.text("needle")
+        self.assertIn("... 35 more in this file", out)
+        self.assertIn("z_one.txt (1)", out)
+
+
 class IndexRouting(Base):
     """/index-route (on by default): plain-text grep_files and file-name
     find_files are answered from the index; the rest still goes to the disk."""

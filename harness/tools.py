@@ -13,7 +13,7 @@ from pathlib import Path
 from . import code_index, code_nav, net, search
 from . import run_store as run_store_mod
 from .paths import (BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, SKIP_DIRS, safe_entry_path,
-                    safe_path, walk_files)
+                    safe_path, split_lines, walk_files)
 
 
 # ── limits (quoted by the schema descriptions below) ─────────────────────────
@@ -671,7 +671,7 @@ def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, w
     if isinstance(got, str):
         return got
     p, text = got
-    lines = text.splitlines(keepends=True)
+    lines = split_lines(text, keepends=True)
     n = len(lines)
     if n == 0:
         return "(empty)"
@@ -724,7 +724,7 @@ def _grep_file(pattern: str, path: str, *, workdir: Path) -> str:
         return got
     text, rx = got
     hits, total = [], 0
-    for i, line in enumerate(text.splitlines(), 1):
+    for i, line in enumerate(split_lines(text), 1):
         if m := rx.search(line):
             total += 1
             if total <= _MAX_GREP_RESULTS:
@@ -740,7 +740,7 @@ def _grep_extract(pattern: str, path: str, group: int = 0, *, workdir: Path) -> 
     if not 0 <= group <= rx.groups:
         return f"ERROR: group {group} does not exist in pattern (it has {rx.groups})"
     hits, total = [], 0
-    for i, line in enumerate(text.splitlines(), 1):
+    for i, line in enumerate(split_lines(text), 1):
         for m in rx.finditer(line):
             extracted = m.group(group)
             if extracted is None:
@@ -786,7 +786,7 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path, cancel=Non
             continue
         text = raw.decode("utf-8", errors="replace")
         rel = fpath.relative_to(base)
-        for i, line in enumerate(text.splitlines(), 1):
+        for i, line in enumerate(split_lines(text), 1):
             if m := rx.search(line):
                 total += 1
                 if total <= _MAX_GREP_RESULTS:      # past the cap only the count is kept

@@ -14,7 +14,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .paths import MAX_SCAN_FILE_BYTES, safe_path, walk_files
+from .paths import MAX_SCAN_FILE_BYTES, safe_path, split_lines, walk_files
 
 try:
     from tree_sitter import Language, Parser
@@ -1297,7 +1297,7 @@ def _parse_bytes(lang: str, raw: bytes) -> _Parsed:
     """One parse of a file's bytes: tree, symbols, imports — and, for HTML, the
     JavaScript of its inline <script> blocks as an embedded parse."""
     tree = _parser(lang).parse(raw)
-    lines = raw.decode("utf-8", errors="replace").splitlines()
+    lines = split_lines(raw.decode("utf-8", errors="replace"))
     imp_nodes: list = []
     symbols = _symbols_for(tree.root_node, lang, lines, imp_nodes)
     parsed = _Parsed(lang, lines, tree, symbols, _build_imports(imp_nodes, lang, lines))
