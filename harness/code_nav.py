@@ -1238,6 +1238,11 @@ def set_index_provider(fn, files=None) -> None:
     _index_files = files if fn is not None else None
 
 
+def index_active() -> bool:
+    """Whether the project index (/index on) is serving index() calls."""
+    return _index_provider is not None
+
+
 def index(path: Path) -> _Index | None:
     """Symbols and imports for a supported file, without retaining the parse
     tree.  Use this for project-wide scans; use parse() when the tree is needed.

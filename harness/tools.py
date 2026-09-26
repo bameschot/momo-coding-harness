@@ -1,9 +1,11 @@
 import difflib
+import fnmatch
 import json
 import os
 import re
 import signal
 import subprocess
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +13,14 @@ from pathlib import Path
 from . import code_index, code_nav, net
 from .paths import (BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, SKIP_DIRS, safe_entry_path,
                     safe_path, walk_files)
+
+
+# ── limits (quoted by the schema descriptions below) ─────────────────────────
+
+_MAX_FIND_RESULTS    = 100
+_MAX_GREP_RESULTS    = 200
+_MAX_COMMAND_TIMEOUT = 900   # 15 minutes — upper bound for a single run_command
+_MAX_SCAN_MB = MAX_SCAN_FILE_BYTES // 1_000_000
 
 
 # ── schema helpers ───────────────────────────────────────────────────────────
@@ -49,27 +59,33 @@ READ_ONLY_TOOLS = [
         "(e.g. '*.py') is searched recursively through all subdirectories; use an explicit "
         "path pattern (e.g. 'src/*.py') to restrict depth. Common noise directories (.git, "
         ".venv, node_modules, __pycache__, dist, build, and similar) are skipped, so files "
-        "inside them are never returned. Results are capped at 100 files.",
+        f"inside them are never returned. Results are capped at {_MAX_FIND_RESULTS} files.",
         {"pattern": {"type": "string", "description": "Glob pattern, e.g. '*.py' (recursive) or 'src/*.py' (one level)"},
          "directory": {"type": "string", "description": "Directory to search (default: .)"}},
         ["pattern"]),
 
-    _fn("read_file", "Read a file, optionally restricting to a line range",
+    _fn("read_file",
+        "Read a file, optionally restricting to a line range. A read too large for the "
+        "context left is refused with the number of lines that fit — then read a smaller "
+        "range, or search the file with grep_file.",
         {"path": {"type": "string", "description": "File to read"},
-         "start_line": {"type": "integer", "description": "1-based start line (default: 1)"},
+         "start_line": {"type": "integer", "description": "1-based start line (default: 1); a negative number counts from the end, e.g. -50 reads the last 50 lines"},
          "end_line": {"type": "integer", "description": "1-based end line inclusive (default: EOF)"}},
         ["path"]),
 
-    _fn("grep_file", "Single-file regex search. Search for a regex pattern in one file, returns matching lines with line numbers.",
-        {"pattern": {"type": "string", "description": "Regular expression to search for"},
+    _fn("grep_file",
+        "Single-file regex search. Search for a regex pattern in one file, returns matching "
+        f"lines with line numbers. Results are capped at {_MAX_GREP_RESULTS} matches.",
+        {"pattern": {"type": "string", "description": "Regular expression to search for. It matches the file's own text — the 'N:' line numbers shown in results are not part of the file, so never put them in the pattern"},
          "path": {"type": "string", "description": "File to search"}},
         ["pattern", "path"]),
 
     _fn("grep_files",
         "Multi-file recursive search. Search for a regex pattern across all files in a directory, "
         "returns file:line:content hits. Noise directories (.git, .venv, node_modules, __pycache__, "
-        "dist, build, and similar), binary files, and files larger than 2 MB are skipped and will "
-        "never appear in the results. Results are capped at 200 matches.",
+        f"dist, build, and similar), binary files, and files larger than {_MAX_SCAN_MB} MB are "
+        f"skipped and will never appear in the results. Results are capped at {_MAX_GREP_RESULTS} "
+        "matches. Given a file instead of a directory, it searches that one file.",
         {"pattern": {"type": "string", "description": "Regular expression to search for"},
          "directory": {"type": "string", "description": "Directory to search (default: .)"}},
         ["pattern"]),
@@ -77,8 +93,9 @@ READ_ONLY_TOOLS = [
     _fn("grep_extract",
         "Single-file regex extraction. Like grep_file, but returns only the matching text "
         "(or a specific capture group) rather than the whole line. Use to pull values out of "
-        "structured text, e.g. extract version strings, URLs, or identifiers.",
-        {"pattern": {"type": "string", "description": "Regex; use a capture group to extract part of the match"},
+        "structured text, e.g. extract version strings, URLs, or identifiers. Results are "
+        f"capped at {_MAX_GREP_RESULTS} matches.",
+        {"pattern": {"type": "string", "description": "Regex; use a capture group to extract part of the match. It matches the file's own text — the 'N:' line numbers shown in results are not part of the file"},
          "path":    {"type": "string", "description": "File to search"},
          "group":   {"type": "integer", "description": "Capture group to return (default: 0 = whole match)"}},
         ["pattern", "path"]),
@@ -241,7 +258,7 @@ _FALLBACK_NOTES = {
 }
 
 
-def _with_fallback_note(tool: dict, route: bool) -> dict:
+def _with_fallback_note(tool: dict) -> dict:
     fn = tool["function"]
     note = _FALLBACK_NOTES.get(fn["name"])
     if note is None:
@@ -249,7 +266,7 @@ def _with_fallback_note(tool: dict, route: bool) -> dict:
     return {**tool, "function": {**fn, "description": note + fn["description"]}}
 
 
-def with_index_tools(tools: list[dict], route: bool = True) -> list[dict]:
+def with_index_tools(tools: list[dict]) -> list[dict]:
     """The tool list with the index tools in place of the code-nav tools they
     replace, placed where the code-nav block starts so related tools stay
     together, and grep_files / find_files described as the fallback."""
@@ -264,7 +281,7 @@ def with_index_tools(tools: list[dict], route: bool = True) -> list[dict]:
             inserted = True
         if name in INDEX_REPLACES:
             continue
-        out.append(_with_fallback_note(t, route))
+        out.append(_with_fallback_note(t))
     if not inserted:
         out.extend(INDEX_TOOLS)
     return out
@@ -274,7 +291,8 @@ CODING_ONLY_TOOLS = [
     _fn("move_file",
         "Move or rename a file or directory. Both source and destination must be inside the "
         "working directory. Parent directories of the destination are created automatically. "
-        "If the destination already exists it is overwritten, so check first when unsure.",
+        "If the destination already exists nothing is moved and an error is returned — "
+        "delete the destination first if it should be replaced.",
         {"src": {"type": "string", "description": "Current path"},
          "dst": {"type": "string", "description": "Target path"}},
         ["src", "dst"]),
@@ -320,10 +338,11 @@ CODING_ONLY_TOOLS = [
         "working directory as its current directory. It is NON-INTERACTIVE: no stdin is "
         "connected, so a command that waits for input (e.g. 'git commit' with no -m, "
         "'npm init', a prompt for a password) will hang until it times out — always pass "
-        "flags that avoid prompts. Long output is returned in full; exit code is appended "
-        "when non-zero.",
+        "flags that avoid prompts. Long output is returned in full (up to the last 4 MB of "
+        "each stream); exit code is appended when non-zero. A command that times out or is "
+        "interrupted returns the end of its output so far.",
         {"command": {"type": "string", "description": "Shell command to execute (runs in the working directory)"},
-         "timeout": {"type": "integer", "description": "Timeout in seconds (default and maximum: 900 = 15 minutes)"}},
+         "timeout": {"type": "integer", "description": f"Timeout in seconds (default and maximum: {_MAX_COMMAND_TIMEOUT} = {_MAX_COMMAND_TIMEOUT // 60} minutes)"}},
         ["command"]),
 ]
 
@@ -384,10 +403,8 @@ NET_TOOLS = [
 DESIGN_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS
 ALL_TOOLS    = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
 
-_by_name = {t["function"]["name"]: t for t in CODING_ONLY_TOOLS}
-
-_shared_by_name = {t["function"]["name"]: t for t in SHARED_TOOLS}
-CHAT_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [_shared_by_name["ask_user"]]
+_by_name = {t["function"]["name"]: t for t in SHARED_TOOLS + CODING_ONLY_TOOLS}
+CHAT_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [_by_name["ask_user"]]
 
 # Plan-mode tools.  Like ask_user these are intercepted by the harness (they
 # change plan state rather than touching the filesystem), so they have no
@@ -437,7 +454,7 @@ _plan_by_name = {t["function"]["name"]: t for t in PLAN_TOOLS}
 # Investigation may run commands (reproduce a bug, check the test baseline) but
 # must not edit files until the plan is approved.
 PLAN_INVESTIGATE_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [
-    _shared_by_name["ask_user"],
+    _by_name["ask_user"],
     _by_name["run_command"],
     _plan_by_name["create_plan"],
 ]
@@ -447,8 +464,6 @@ PLAN_EXECUTE_TOOLS = ALL_TOOLS + [_plan_by_name["complete_step"], _plan_by_name[
 
 # ── executors ────────────────────────────────────────────────────────────────
 
-_MAX_FIND_RESULTS  = 100
-_MAX_GREP_RESULTS  = 200
 _READ_FOOTER_LINES = 200  # show footer when file exceeds this length and no range given
 _MAX_GREP_LINE_CHARS = 300        # a longer hit line (minified code) is clipped around the match
 
@@ -467,13 +482,20 @@ def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
     root = safe_path(directory, workdir)
     if isinstance(root, str):
         return root
-    # Bare filename patterns (no slash, no **) are promoted to recursive so
-    # "*.py" behaves the same as "**/*.py" without the caller needing to know.
-    glob_pat = pattern if ("/" in pattern or pattern.startswith("**")) else f"**/{pattern}"
-    try:
-        gen = root.glob(glob_pat)
-    except ValueError as e:
-        return f"ERROR: invalid pattern: {e}"
+    if not root.is_dir():
+        return f"ERROR: not a directory: {directory}"
+    base = workdir.resolve()
+    # A bare filename pattern ("*.py" or "**/*.py") is matched against every
+    # file name under root.  walk_files prunes SKIP_DIRS as it goes; a "**"
+    # glob would walk all of .venv / node_modules first and filter afterwards.
+    bare = pattern[3:] if pattern.startswith("**/") else pattern
+    if bare and "/" not in bare and "**" not in bare:
+        gen = (p for p in walk_files(root) if fnmatch.fnmatchcase(p.name, bare))
+    else:
+        try:
+            gen = root.glob(pattern)
+        except (ValueError, NotImplementedError) as e:
+            return f"ERROR: invalid pattern: {e} (use a pattern relative to directory)"
     matches = []
     for p in gen:
         if not p.is_file():
@@ -484,10 +506,7 @@ def _find_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
             continue
         if any(part in SKIP_DIRS for part in rel_parts):
             continue
-        try:
-            matches.append(str(p.relative_to(workdir)))
-        except ValueError:
-            matches.append(str(p))
+        matches.append(str(p.relative_to(base)))
     if not matches:
         return "(no matches)"
     total = len(matches)
@@ -520,7 +539,7 @@ def _read_footer(p: Path, path: str, n: int, start_line: int, end_line: int | No
     if whole:
         if n <= _READ_FOOTER_LINES:
             return ""
-        if code_nav._index_provider is not None:
+        if code_nav.index_active():
             return (f"\n[{n} lines total, {len(idx.symbols)} definitions — index_file shows this "
                     f"{idx.lang} file's outline, imports and users for a fraction of the tokens, "
                     f"and read_symbol reads one definition; or use start_line/end_line]")
@@ -536,77 +555,122 @@ def _read_footer(p: Path, path: str, n: int, start_line: int, end_line: int | No
             f'read_symbol("{path}", "{owner.qualname}") reads that definition whole]')
 
 
-def _read_text(path: str, workdir: Path) -> tuple[Path, str] | str:
-    """(resolved path, text) of a file in the workdir, or an ERROR string."""
+def _read_text(path: str, workdir: Path, *, refuse_binary: bool = False) -> tuple[Path, str] | str:
+    """(resolved path, text) of a file in the workdir, or an ERROR string.
+    With refuse_binary, a file with a NUL byte near the start is an ERROR too."""
     p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
+    if p.is_dir():
+        return f"ERROR: {path} is a directory — use list_directory to see what it contains"
     try:
-        return p, p.read_text(encoding="utf-8", errors="replace")
+        raw = p.read_bytes()
     except FileNotFoundError:
         return f"ERROR: file not found: {path}"
     except OSError as e:
         return f"ERROR: {e}"
+    if refuse_binary and b"\x00" in raw[:BINARY_SNIFF_BYTES]:
+        return (f"ERROR: {path} is a binary file ({len(raw):,} bytes), not text — "
+                f"file_info shows its size and type")
+    return p, raw.decode("utf-8", errors="replace")
 
 
-def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, workdir: Path) -> str:
-    got = _read_text(path, workdir)
+def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, workdir: Path,
+               read_budget: int | None = None) -> str:
+    """read_budget: the most characters this read may return (the context left,
+    less a reserve — see Harness._read_budget); None = no limit."""
+    got = _read_text(path, workdir, refuse_binary=True)
     if isinstance(got, str):
         return got
     p, text = got
     lines = text.splitlines(keepends=True)
     n = len(lines)
-    s = max(0, start_line - 1)
-    e = end_line if end_line is not None else n
-    chunk = lines[s:e]
-    numbered = "".join(f"{s + i + 1:4}: {l}" for i, l in enumerate(chunk))
-    if not numbered:
+    if n == 0:
         return "(empty)"
-    return numbered + _read_footer(p, path, n, start_line, end_line)
+    # A negative start_line counts from the end (-50 = the last 50 lines): what a
+    # model reaches for to see the end of a log.  Clamping it to line 1 read the
+    # whole file instead.
+    s = max(0, n + start_line) if start_line < 0 else max(0, start_line - 1)
+    first = s + 1
+    if s >= n:
+        return f"ERROR: start_line {start_line} is past the end — {path} has {n} lines"
+    if end_line is not None and end_line < first:
+        return f"ERROR: end_line {end_line} is before start_line {first}"
+    e = min(end_line if end_line is not None else n, n)
+    numbered = "".join(f"{s + i + 1:4}: {l}" for i, l in enumerate(lines[s:e]))
+    out = numbered + _read_footer(p, path, n, first, end_line)
+    if read_budget is not None and len(out) > read_budget:
+        per_line = max(1, len(numbered) // max(1, e - s))
+        fit = max(1, read_budget // per_line)
+        return (f"ERROR: nothing was read: lines {first}-{e} of {path} are {len(out):,} "
+                f"characters (~{len(out) // 4:,} tokens), more than the ~{read_budget // 4:,} "
+                f"tokens of context this read may use. About {fit:,} lines fit: read a range "
+                f'with read_file(path="{path}", start_line=..., end_line=...), or search the '
+                f'file with grep_file(pattern="<text or regex you are looking for>", '
+                f'path="{path}").')
+    return out
+
+
+def _capped(hits: list[str], total: int, advice: str) -> str:
+    """Hit lines, with a note when the cap cut some off."""
+    if not hits:
+        return "(no matches)"
+    more = f"\n... (first {len(hits)} of {total} matches — {advice})" if total > len(hits) else ""
+    return "\n".join(hits) + more
+
+
+def _grep_one(pattern: str, path: str, workdir: Path):
+    """(text, compiled regex) for the single-file greps, or an ERROR string."""
+    got = _read_text(path, workdir, refuse_binary=True)
+    if isinstance(got, str):
+        return got
+    try:
+        return got[1], re.compile(pattern)
+    except re.error as e:
+        return f"ERROR: invalid regex: {e}"
 
 
 def _grep_file(pattern: str, path: str, *, workdir: Path) -> str:
-    got = _read_text(path, workdir)
+    got = _grep_one(pattern, path, workdir)
     if isinstance(got, str):
         return got
-    _, text = got
-    try:
-        rx = re.compile(pattern)
-    except re.error as e:
-        return f"ERROR: invalid regex: {e}"
-    hits = []
+    text, rx = got
+    hits, total = [], 0
     for i, line in enumerate(text.splitlines(), 1):
         if m := rx.search(line):
-            hits.append(f"{i:4}: {_clip_hit(line, m)}")
-    return "\n".join(hits) if hits else "(no matches)"
+            total += 1
+            if total <= _MAX_GREP_RESULTS:
+                hits.append(f"{i:4}: {_clip_hit(line, m)}")
+    return _capped(hits, total, "narrow the pattern, or read_file a line range")
 
 
 def _grep_extract(pattern: str, path: str, group: int = 0, *, workdir: Path) -> str:
-    got = _read_text(path, workdir)
+    got = _grep_one(pattern, path, workdir)
     if isinstance(got, str):
         return got
-    _, text = got
-    try:
-        rx = re.compile(pattern)
-    except re.error as e:
-        return f"ERROR: invalid regex: {e}"
-    hits = []
+    text, rx = got
+    if not 0 <= group <= rx.groups:
+        return f"ERROR: group {group} does not exist in pattern (it has {rx.groups})"
+    hits, total = [], 0
     for i, line in enumerate(text.splitlines(), 1):
         for m in rx.finditer(line):
-            try:
-                extracted = m.group(group)
-            except IndexError:
-                return f"ERROR: group {group} does not exist in pattern"
-            if extracted is not None:
+            extracted = m.group(group)
+            if extracted is None:
+                continue
+            total += 1
+            if total <= _MAX_GREP_RESULTS:
+                if len(extracted) > _MAX_GREP_LINE_CHARS:
+                    extracted = (extracted[:_MAX_GREP_LINE_CHARS]
+                                 + f"… [match is {len(extracted):,} chars]")
                 hits.append(f"{i:4}: {extracted}")
-    return "\n".join(hits) if hits else "(no matches)"
+    return _capped(hits, total, "narrow the pattern")
 
 
 _INDEX_GREP_TIP = ("\n(index_text runs this search from the code index and names the definition "
                    "each hit is in)")
 
 
-def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
+def _grep_files(pattern: str, directory: str = ".", *, workdir: Path, cancel=None) -> str:
     root = safe_path(directory, workdir)
     if isinstance(root, str):
         return root
@@ -614,8 +678,13 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
         rx = re.compile(pattern)
     except re.error as e:
         return f"ERROR: invalid regex: {e}"
-    results = []
-    for fpath in walk_files(root):
+    if not root.exists():
+        return f"ERROR: directory not found: {directory}"
+    base = workdir.resolve()             # root is resolved, so it is always under this
+    results, total = [], 0
+    for fpath in ([root] if root.is_file() else walk_files(root)):
+        if cancel is not None and cancel.is_set():
+            return "ERROR: search interrupted by the user"
         # Skip oversized files: scanning them is slow and rarely useful.
         try:
             if fpath.stat().st_size > MAX_SCAN_FILE_BYTES:
@@ -628,22 +697,16 @@ def _grep_files(pattern: str, directory: str = ".", *, workdir: Path) -> str:
         if b"\x00" in raw[:BINARY_SNIFF_BYTES]:
             continue
         text = raw.decode("utf-8", errors="replace")
+        rel = fpath.relative_to(base)
         for i, line in enumerate(text.splitlines(), 1):
             if m := rx.search(line):
-                try:
-                    rel = fpath.relative_to(workdir)
-                except ValueError:
-                    rel = fpath
-                results.append(f"{rel}:{i}: {_clip_hit(line, m)}")
+                total += 1
+                if total <= _MAX_GREP_RESULTS:      # past the cap only the count is kept
+                    results.append(f"{rel}:{i}: {_clip_hit(line, m)}")
     # With the code index on, point at the indexed search: it is faster and names
     # the definition each hit sits in.
-    tip = _INDEX_GREP_TIP if code_nav._index_provider is not None else ""
-    if not results:
-        return "(no matches)" + tip
-    total = len(results)
-    if total > _MAX_GREP_RESULTS:
-        return "\n".join(results[:_MAX_GREP_RESULTS]) + f"\n... (first {_MAX_GREP_RESULTS} of {total} matches — narrow the pattern or specify a directory)" + tip
-    return "\n".join(results) + tip
+    tip = _INDEX_GREP_TIP if code_nav.index_active() else ""
+    return _capped(results, total, "narrow the pattern or specify a directory") + tip
 
 
 def _list_directory(path: str = ".", show_hidden: bool = False, *, workdir: Path) -> str:
@@ -656,13 +719,12 @@ def _list_directory(path: str = ".", show_hidden: bool = False, *, workdir: Path
         entries = list(os.scandir(root))
     except OSError as e:
         return f"ERROR: {e}"
-    dirs  = sorted([e for e in entries if e.is_dir(follow_symlinks=False)],  key=lambda e: e.name.lower())
-    files = sorted([e for e in entries if not e.is_dir(follow_symlinks=False)], key=lambda e: e.name.lower())
+    entries = [(e.is_dir(follow_symlinks=False), e) for e in entries
+               if show_hidden or not e.name.startswith(".")]
+    entries.sort(key=lambda de: (not de[0], de[1].name.lower()))     # dirs first
     lines = []
-    for e in dirs + files:
-        if not show_hidden and e.name.startswith("."):
-            continue
-        if e.is_dir(follow_symlinks=False):
+    for is_dir, e in entries:
+        if is_dir:
             lines.append(f"[D] {e.name}/")
         else:
             try:
@@ -674,9 +736,12 @@ def _list_directory(path: str = ".", show_hidden: bool = False, *, workdir: Path
 
 
 def _file_info(path: str, *, workdir: Path) -> str:
-    p = safe_path(path, workdir)
+    # The entry itself, so a symlink is reported as one rather than as its target.
+    p = safe_entry_path(path, workdir)
     if isinstance(p, str):
-        return p
+        p = safe_path(path, workdir)          # "." is the workdir itself
+        if isinstance(p, str):
+            return p
     if not p.exists() and not p.is_symlink():
         return f"exists:   no\npath:     {path}"
     try:
@@ -684,7 +749,10 @@ def _file_info(path: str, *, workdir: Path) -> str:
     except OSError as e:
         return f"ERROR: {e}"
     if p.is_symlink():
-        kind = "symlink"
+        try:
+            kind = f"symlink -> {os.readlink(p)}"
+        except OSError:
+            kind = "symlink"
     elif p.is_dir():
         kind = "directory"
     else:
@@ -697,12 +765,25 @@ def _file_info(path: str, *, workdir: Path) -> str:
         f"modified: {mtime}",
     ]
     if kind == "file":
-        try:
-            text = p.read_text(encoding="utf-8", errors="strict")
-            lines.append(f"lines:    {len(text.splitlines())}")
-        except (UnicodeDecodeError, OSError):
-            lines.append("lines:    (binary)")
+        lines.append(f"lines:    {_count_lines(p)}")
     return "\n".join(lines)
+
+
+def _count_lines(p: Path) -> str:
+    """Line count read in chunks (a big log is never held whole), or "(binary)"."""
+    try:
+        with p.open("rb") as f:
+            chunk = f.read(BINARY_SNIFF_BYTES)
+            if b"\x00" in chunk:
+                return "(binary)"
+            n, last = 0, b""
+            while chunk:
+                n += chunk.count(b"\n")
+                last = chunk[-1:]
+                chunk = f.read(1 << 20)
+    except OSError:
+        return "(unreadable)"
+    return str(n + (1 if last and last != b"\n" else 0))
 
 
 def _same_entry(a: Path, b: Path) -> bool:
@@ -749,10 +830,35 @@ def _append_to_file(path: str, content: str, *, workdir: Path) -> str:
 
 # Leading "  12: " line-number prefix as emitted by read_file — models often copy
 # it into old_string even though it is not part of the file.
-_LINENO_PREFIX = re.compile(r'^\s*\d+:\s')
+_LINENO_PREFIX = re.compile(r'^\s*(\d+):(?:\s|$)')
 
 
-def _strip_lineno_prefixes(s: str) -> str:
+def _lineno_start(s: str) -> int | None:
+    """The first line number when every non-blank line of s carries read_file's
+    prefix, numbered consecutively; else None.  Real text like a dict entry
+    `    1: "one",` or a YAML `  200: OK` rarely passes that."""
+    first = None
+    for i, ln in enumerate(s.split("\n")):
+        if not ln.strip():
+            continue
+        m = _LINENO_PREFIX.match(ln)
+        if m is None:
+            return None
+        n = int(m.group(1)) - i
+        if first is None:
+            first = n
+        elif n != first:
+            return None
+    return first
+
+
+def _strip_lineno_prefixes(s: str, start: int | None = None) -> str:
+    """s without read_file's line-number prefixes, or s unchanged when they are
+    not there — or, with start, when they do not begin at that line (new_string
+    copied from the same read as old_string starts where it does)."""
+    first = _lineno_start(s)
+    if first is None or (start is not None and first != start):
+        return s
     return "\n".join(_LINENO_PREFIX.sub("", ln, count=1) for ln in s.split("\n"))
 
 
@@ -768,18 +874,18 @@ def _tolerant_replace(content: str, old_string: str, new_string: str) -> str | N
     Requires a 1:1 line edit (new_string has the same number of lines as old_string)
     so each new line inherits the matched file line's actual leading whitespace — this
     fixes the common case where the model reproduced the code but with wrong or missing
-    indentation. Returns the new file content, or None if there is no safe unique match."""
+    indentation.  An indentation change between an old and a new line is applied on
+    top of the file's indentation.  Returns the new file content, or None if there
+    is no safe unique match."""
     file_lines = content.splitlines(keepends=True)
     old_lines = old_string.strip("\n").split("\n")
     new_lines = new_string.strip("\n").split("\n")
     k = len(old_lines)
-    if k == 0 or k > len(file_lines) or len(new_lines) != k:
+    if k > len(file_lines) or len(new_lines) != k:
         return None
     old_sig = [ln.strip() for ln in old_lines]
-    matches = [
-        i for i in range(len(file_lines) - k + 1)
-        if [file_lines[i + j].strip() for j in range(k)] == old_sig
-    ]
+    file_sig = [ln.strip() for ln in file_lines]
+    matches = [i for i in range(len(file_lines) - k + 1) if file_sig[i:i + k] == old_sig]
     if len(matches) != 1:
         return None
     i0 = matches[0]
@@ -788,6 +894,11 @@ def _tolerant_replace(content: str, old_string: str, new_string: str) -> str | N
         raw = file_lines[i0 + j]
         nl = raw[len(raw.rstrip("\r\n")):]        # preserve the original line ending
         indent = _leading_ws(raw)                 # transfer the file's real indentation
+        old_ws, new_ws = _leading_ws(old_lines[j]), _leading_ws(new_lines[j])
+        if new_ws.startswith(old_ws):             # the edit indents this line further
+            indent += new_ws[len(old_ws):]
+        elif old_ws.startswith(new_ws):           # the edit dedents it
+            indent = indent[:max(0, len(indent) - (len(old_ws) - len(new_ws)))]
         code = new_lines[j].strip()
         rebuilt.append(indent + code + nl if code else nl)
     return "".join(file_lines[:i0]) + "".join(rebuilt) + "".join(file_lines[i0 + k:])
@@ -803,11 +914,13 @@ def _closest_lines_hint(content: str, old_string: str) -> str:
         return ""
     # Match on the most distinctive (longest) line of old_string.
     query = max(old_nonblank, key=lambda ln: len(ln.strip())).strip()
-    scored = sorted(
-        ((difflib.SequenceMatcher(None, query, ln.strip()).ratio(), ln) for ln in file_lines),
-        key=lambda x: x[0], reverse=True,
-    )
-    best = [ln[:200] for ratio, ln in scored[:3] if ratio >= 0.6]
+    # get_close_matches runs the cheap quick_ratio filters before the full
+    # ratio, so a long file costs little; map back to the lines as written.
+    as_written: dict[str, str] = {}
+    for ln in file_lines:
+        as_written.setdefault(ln.strip(), ln)
+    best = [as_written[m][:200]
+            for m in difflib.get_close_matches(query, list(as_written), n=3, cutoff=0.6)]
     if not best:
         return ""
     return (
@@ -849,12 +962,22 @@ def _edit_file(path: str, old_string: str, new_string: str,
             return f"ERROR: {e}"
         return ""
 
+    # An empty old_string "occurs" between every character: replace_all would
+    # splice new_string in everywhere.  Only an empty file may be filled this way.
+    if not old_string and content:
+        return ("ERROR: old_string is empty. Copy the text to replace from read_file; "
+                "to add text at the end use append_to_file, to replace the whole file "
+                "use write_file. Nothing was written.")
+
     old, new = old_string, new_string
     count = content.count(old)
     # Fix 1: models often copy read_file's "  12: " line-number prefix into
     # old_string. If the exact match fails, strip the prefix and retry.
+    # new_string loses a prefix only when it is numbered from the same line.
+    start = _lineno_start(old_string)
+    s_old = _strip_lineno_prefixes(old_string)
+    s_new = new_string if start is None else _strip_lineno_prefixes(new_string, start)
     if count == 0:
-        s_old, s_new = _strip_lineno_prefixes(old), _strip_lineno_prefixes(new)
         if s_old != old and content.count(s_old) > 0:
             old, new, count = s_old, s_new, content.count(s_old)
 
@@ -862,19 +985,26 @@ def _edit_file(path: str, old_string: str, new_string: str,
         # Fix 2: whitespace-tolerant unique block match (single-edit path only).
         # Try the raw strings first, then the prefix-stripped variants.
         if not replace_all:
-            for o, n in ((old_string, new_string),
-                         (_strip_lineno_prefixes(old_string), _strip_lineno_prefixes(new_string))):
+            for o, n in ((old_string, new_string), (s_old, s_new)):
                 nc = _tolerant_replace(content, o, n)
+                if nc == content:
+                    return ("No change: old_string matched only after ignoring whitespace, and "
+                            "new_string applied that way leaves the file as it is. To change "
+                            "indentation, copy old_string exactly from read_file.")
                 if nc is not None:
                     return save(nc) or "OK — 1 change applied (matched with whitespace tolerance)"
         # Already-applied detection: if old_string is gone but a substantial
         # new_string is already present, the edit was very likely made on an
         # earlier turn. Report that as a non-error so the model stops re-trying
-        # the same change (a common cause of repeated "not found" errors).
-        for cand in (new_string, _strip_lineno_prefixes(new_string)):
-            if cand and cand != old_string and len("".join(cand.split())) >= 6 and cand in content:
-                return ("No change needed: the file already contains new_string — "
-                        "this edit appears to have been applied already.")
+        # the same change (a common cause of repeated "not found" errors).  A
+        # short or repeated new_string proves nothing — `return None` sits in
+        # many places — so it must be distinctive, and the line is named.
+        for cand in (new_string, s_new):
+            if (cand and cand != old_string and content.count(cand) == 1
+                    and (cand.strip().count("\n") >= 1 or len("".join(cand.split())) >= 30)):
+                line = content[:content.index(cand)].count("\n") + 1
+                return (f"No change needed: the file already contains new_string at line "
+                        f"{line} — this edit appears to have been applied already.")
         return "ERROR: old_string not found in file." + _closest_lines_hint(content, old_string)
 
     if replace_all:
@@ -916,6 +1046,8 @@ def _delete_file(path: str, *, workdir: Path) -> str:
     p = safe_entry_path(path, workdir)
     if isinstance(p, str):
         return p
+    if p.is_dir() and not p.is_symlink():
+        return f"ERROR: {path} is a directory — delete_file removes single files only"
     try:
         p.unlink()
     except FileNotFoundError:
@@ -925,8 +1057,6 @@ def _delete_file(path: str, *, workdir: Path) -> str:
     return "OK"
 
 
-
-_MAX_COMMAND_TIMEOUT = 900  # 15 minutes — upper bound for a single run_command
 
 # Web clients a model reaches for when fetch_url is missing (i.e. /net is off).
 # Matched in command position only — at the start, or after ; & | ( $( ` or a
@@ -945,6 +1075,11 @@ def _web_client_in(command: str) -> str | None:
     return m.group(1) if m else None
 
 
+_MAX_OUTPUT_BYTES = 64 * 2**20     # a command writing more than this is stopped
+_OUTPUT_READ_BYTES = 4 * 2**20     # per stream, the tail read back into the result
+_STOPPED_TAIL_CHARS = 4000         # output shown after a timeout / interrupt
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
     """Kill the command and everything it started (it leads its own session)."""
     try:
@@ -952,9 +1087,30 @@ def _kill_group(proc: subprocess.Popen) -> None:
     except OSError:
         pass
     try:
-        proc.communicate(timeout=5)
-    except (subprocess.TimeoutExpired, OSError, ValueError):
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
         pass
+
+
+def _clean_output(text: str) -> str:
+    """CRLF as LF, and a line a progress bar redrew with \r as its last frame
+    only — pip / npm / curl bars otherwise cost thousands of tokens."""
+    lines = []
+    for ln in text.replace("\r\n", "\n").split("\n"):
+        if "\r" in ln:
+            frames = [f for f in ln.split("\r") if f]
+            ln = frames[-1] if frames else ""
+        lines.append(ln)
+    return "\n".join(lines).strip("\n").rstrip()
+
+
+def _output_tail(f) -> str:
+    """The text a command wrote to temp file f: its last _OUTPUT_READ_BYTES."""
+    size = f.seek(0, os.SEEK_END)
+    skip = max(0, size - _OUTPUT_READ_BYTES)
+    f.seek(skip)
+    text = _clean_output(f.read().decode("utf-8", errors="replace"))
+    return f"[… first {skip:,} bytes of output not shown …]\n{text}" if skip else text
 
 
 def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: Path,
@@ -983,36 +1139,50 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
     if timeout <= 0 or timeout > _MAX_COMMAND_TIMEOUT:
         timeout = _MAX_COMMAND_TIMEOUT
     # No stdin: a command that reads it (git commit without -m, a REPL) would
-    # otherwise fight the TUI for the terminal.  Its own session, so a timeout or
-    # Esc kills what it started too — killing only the shell leaves grandchildren
-    # holding the pipes open, and the read would wait for them.
-    try:
-        proc = subprocess.Popen(command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                start_new_session=True)
-    except OSError as e:
-        return f"ERROR: {e}"
-    deadline = time.monotonic() + timeout
-    while True:
+    # otherwise fight the TUI for the terminal.  Output goes to temp files, not
+    # pipes: memory stays bounded however much it writes, a grandchild holding
+    # the output open cannot keep the call waiting, and what was written before
+    # a timeout is still there to show.  Its own session, so a timeout or Esc
+    # kills what it started too.  A normal exit leaves background processes
+    # alone: build daemons (Gradle, mvnd, Kotlin) outlive the command that
+    # started them, and killing them would cost every later build a cold JVM.
+    stopped = None
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
-            out, err = proc.communicate(timeout=0.25)
-            break
-        except subprocess.TimeoutExpired:
+            proc = subprocess.Popen(command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=err, start_new_session=True)
+        except OSError as e:
+            return f"ERROR: {e}"
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                proc.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                pass
             if cancel is not None and cancel.is_set():
+                stopped = "command interrupted by the user"
+            elif time.monotonic() >= deadline:
+                stopped = f"command timed out after {timeout}s"
+            elif (os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size
+                  > _MAX_OUTPUT_BYTES):
+                stopped = (f"command stopped: it wrote more than "
+                           f"{_MAX_OUTPUT_BYTES // 2**20} MB of output")
+            if stopped:
                 _kill_group(proc)
-                return "ERROR: command interrupted by the user"
-            if time.monotonic() >= deadline:
-                _kill_group(proc)
-                return f"ERROR: command timed out after {timeout}s"
-
-    def text(b: bytes) -> str:
-        return b.decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+                break
+        out_text, err_text = _output_tail(out), _output_tail(err)
 
     parts = []
-    if out_text := text(out):
+    if out_text:
         parts.append(out_text)
-    if err_text := text(err):
+    if err_text:
         parts.append(f"[stderr]\n{err_text}")
+    if stopped:
+        tail = "\n".join(parts)
+        if len(tail) > _STOPPED_TAIL_CHARS:
+            tail = "…" + tail[-_STOPPED_TAIL_CHARS:]
+        return f"ERROR: {stopped}" + (f"\n[output before it stopped]\n{tail}" if tail else "")
     if proc.returncode != 0:
         parts.append(f"[exit code: {proc.returncode}]")
     return note + ("\n".join(parts) or "(no output)")
@@ -1022,20 +1192,14 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
 
 # Required- and known-argument maps built from the tool schemas — used to generate
 # clear error messages before Python's TypeError exposes internal function names.
-_REQUIRED_ARGS: dict[str, list[str]] = {}
-_KNOWN_ARGS: dict[str, set[str]] = {}
-_ARG_TYPES: dict[str, dict[str, str]] = {}     # tool -> {arg: JSON schema type}
-for _tl in (READ_ONLY_TOOLS, CODE_NAV_TOOLS, INDEX_TOOLS, SHARED_TOOLS, CODING_ONLY_TOOLS, NET_TOOLS):
-    for _t in _tl:
-        _tname = _t["function"]["name"]
-        _props = _t["function"]["parameters"].get("properties", {})
-        _req   = _t["function"]["parameters"].get("required", [])
-        if _tname not in _KNOWN_ARGS:
-            _KNOWN_ARGS[_tname] = set(_props.keys())
-            _ARG_TYPES[_tname] = {k: v.get("type") for k, v in _props.items()
-                                  if isinstance(v.get("type"), str)}
-        if _req and _tname not in _REQUIRED_ARGS:
-            _REQUIRED_ARGS[_tname] = _req
+_SCHEMAS = {t["function"]["name"]: t["function"]["parameters"]
+            for t in (READ_ONLY_TOOLS + CODE_NAV_TOOLS + INDEX_TOOLS + SHARED_TOOLS
+                      + CODING_ONLY_TOOLS + NET_TOOLS)}
+_REQUIRED_ARGS: dict[str, list[str]] = {n: p["required"] for n, p in _SCHEMAS.items()}
+_KNOWN_ARGS: dict[str, set[str]] = {n: set(p["properties"]) for n, p in _SCHEMAS.items()}
+_ARG_TYPES: dict[str, dict[str, str]] = {      # tool -> {arg: JSON schema type}
+    n: {k: v["type"] for k, v in p["properties"].items() if isinstance(v.get("type"), str)}
+    for n, p in _SCHEMAS.items()}
 
 _EXECUTORS = {
     "list_directory":     _list_directory,
@@ -1069,15 +1233,18 @@ if code_nav.AVAILABLE:
     })
 
 
-# Tools that need harness state dispatch injects rather than model arguments.
+# Harness state dispatch injects rather than taking it from model arguments.
 # net_access is deliberately not in the fetch_url schema: the model must not be
 # able to ask for "local" and unblock the private network for itself.
-_NEEDS_NET_ACCESS = {"fetch_url"}
-# run_command needs to know whether /net is off, to steer curl/wget, and the
-# turn's cancel flag, so Esc stops a running command.
-_NEEDS_NET_STATE = {"run_command"}
-# The index tools get the live ProjectIndex and the turn's cancel flag.
-_NEEDS_INDEX = INDEX_TOOL_NAMES
+# run_command needs to know whether /net is off, to steer curl/wget; cancel
+# lets Esc stop a long command or scan; the index tools get the live index.
+_INJECTED = {
+    "fetch_url":   ("net_access", "net_max_bytes", "net_max_chars"),
+    "run_command": ("net_access", "cancel"),
+    "grep_files":  ("cancel",),
+    "read_file":   ("read_budget",),
+    **{n: ("index", "cancel") for n in INDEX_TOOL_NAMES},
+}
 # Tools that change files: their paths are re-indexed right away, so the next
 # index query does not depend on the stat-diff throttle to see the change.
 _WRITES_PATHS = {"write_file": ("path",), "edit_file": ("path",), "append_to_file": ("path",),
@@ -1104,6 +1271,8 @@ def _coerce_args(name: str, args: dict) -> dict:
     return out
 
 
+# The argument that carries text headed for the disk.
+_BODY_ARG = {"write_file": "content", "append_to_file": "content", "edit_file": "new_string"}
 _PLACEHOLDER_RE = re.compile(r"^\s*\[written to [^\]]*\]\s*$")
 # Notes the harness splices into tool results (compaction trim, size cutoff).
 # Content carrying one was rebuilt from a shortened result: writing it would
@@ -1116,12 +1285,15 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              net_max_bytes: int = net.DEFAULT_MAX_BYTES,
              net_max_chars: int = net.DEFAULT_MAX_CHARS,
              index: "code_index.ProjectIndex | None" = None, cancel=None,
-             index_route: bool = True) -> str:
+             index_route: bool = True, read_budget: int | None = None) -> str:
+    """read_budget: characters one read_file may return (None = no limit)."""
+    more = {"read_budget": read_budget}
     if index is not None and index_route and name in _ROUTED:
         routed = _route_to_index(name, args, workdir, index, cancel)
         if routed is not None:
             return routed
-    result = _dispatch(name, args, workdir, net_access, net_max_bytes, net_max_chars, index, cancel)
+    result = _dispatch(name, args, workdir, net_access, net_max_bytes, net_max_chars, index,
+                       cancel, more)
     if index is not None and name == "grep_files" and not result.startswith("ERROR"):
         result = _index_note_for_grep(result, index)     # a hint, routing or not
     if index is not None and not result.startswith("ERROR"):
@@ -1259,7 +1431,8 @@ def _index_result_hint(name: str, args: dict, workdir: Path, index) -> str:
 
 
 def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_bytes: int,
-              net_max_chars: int, index, cancel) -> str:
+              net_max_chars: int, index, cancel, more: dict | None = None) -> str:
+    more = more or {"read_budget": None}
     fn = _EXECUTORS.get(name)
     if fn is None:
         return f"ERROR: unknown tool '{name}'"
@@ -1271,20 +1444,21 @@ def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_byt
             and "content" not in args and "path" in args):
         routed = {k: args[k] for k in ("path", "old_string", "new_string", "replace_all")
                   if k in args}
-        return "(note: routed write_file to edit_file) " + dispatch("edit_file", routed, workdir,
-                                                                      index=index)
+        # dispatch() invalidates the index for this path under write_file's name.
+        return "(note: routed write_file to edit_file) " + _dispatch(
+            "edit_file", routed, workdir, net_access, net_max_bytes, net_max_chars, index, cancel)
 
     # Sessions saved before the harness stopped eliding write content hold
     # "[written to <path>]" in place of past file bodies, and a model reading that
     # history copies it.  Never let the placeholder reach the disk.
-    if (name in ("write_file", "append_to_file") and isinstance(args.get("content"), str)
-            and _PLACEHOLDER_RE.match(args["content"])):
-        return (f"ERROR: content is a history placeholder, not file content — nothing was "
+    field = _BODY_ARG.get(name)
+    body = args.get(field) if field else None
+    if isinstance(body, str) and _PLACEHOLDER_RE.match(body):
+        return (f"ERROR: {field} is a history placeholder, not file content — nothing was "
                 f"written. {args.get('path', 'The file')} still holds its previous contents. "
-                f"Pass the complete file text in 'content'.")
-    if (name in ("write_file", "append_to_file") and isinstance(args.get("content"), str)
-            and (m := _CUT_MARKER_RE.search(args["content"]))):
-        return (f"ERROR: content contains a harness note ({m.group(0).strip()[:60]}…), "
+                f"Pass the complete text in '{field}'.")
+    if isinstance(body, str) and (m := _CUT_MARKER_RE.search(body)):
+        return (f"ERROR: {field} contains a harness note ({m.group(0).strip()[:60]}…), "
                 f"so it was copied from a shortened tool result and is missing text — "
                 f"nothing was written. {args.get('path', 'The file')} still holds its previous "
                 f"contents. Re-read the part you need with read_file (start_line/end_line), "
@@ -1315,15 +1489,9 @@ def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_byt
         )
 
     args = _coerce_args(name, args)
-    if name in _NEEDS_NET_ACCESS:
-        extra = {"net_access": net_access, "net_max_bytes": net_max_bytes,
-                 "net_max_chars": net_max_chars}
-    elif name in _NEEDS_NET_STATE:
-        extra = {"net_access": net_access, "cancel": cancel}
-    elif name in _NEEDS_INDEX:
-        extra = {"index": index, "cancel": cancel}
-    else:
-        extra = {}
+    state = {"net_access": net_access, "net_max_bytes": net_max_bytes,
+             "net_max_chars": net_max_chars, "index": index, "cancel": cancel, **more}
+    extra = {k: state[k] for k in _INJECTED.get(name, ())}
     try:
         return fn(**args, workdir=workdir, **extra)
     except TypeError as e:

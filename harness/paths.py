@@ -19,6 +19,8 @@ BINARY_SNIFF_BYTES = 4096        # bytes inspected for a NUL byte to detect bina
 
 def safe_path(raw: str, workdir: Path) -> Path | str:
     """raw resolved against the workdir, or an ERROR string when it leaves it."""
+    if "\0" in raw:
+        return "ERROR: path contains a NUL character"
     p = (workdir / raw).resolve()
     try:
         p.relative_to(workdir.resolve())
@@ -30,8 +32,10 @@ def safe_path(raw: str, workdir: Path) -> Path | str:
 def safe_entry_path(raw: str, workdir: Path) -> Path | str:
     """Like safe_path, but a symlink stays the link itself (only its folder is
     resolved): deleting or moving a link must not act on the file it points to."""
+    if "\0" in raw:
+        return "ERROR: path contains a NUL character"
     root = workdir.resolve()
-    q = Path(os.path.normpath(root / raw))
+    q =Path(os.path.normpath(root / raw))
     if q == root:
         return "ERROR: path is the working directory itself"
     parent = q.parent.resolve()

@@ -109,6 +109,10 @@ _SUMMARY_OPEN = "[Earlier context summary:\n"
 _SUMMARY_CLOSE = "\n]\n\n"
 _SUMMARY_REPLY_TOKENS = 1024   # room kept free for the summary in the summariser call
 _TRIM_FLOOR_TOKENS = 256       # a trimmed tool result keeps at least this much
+_READ_RESERVE = 10             # % of the context window a read_file must leave free
+_READ_FLOOR_TOKENS = 1000      # a read may always use this much, so a nearly full
+                               # context (compaction runs only past the limit) never
+                               # blocks every read
 
 
 # Context breakdown categories, in display order: (key, label, sent to the model).
@@ -509,7 +513,7 @@ class Harness:
         if self.net_access != "off":
             tools = tools + NET_TOOLS
         if self.index is not None:
-            tools = with_index_tools(tools, self.index_route)
+            tools = with_index_tools(tools)
         return tools
 
     # ── code index ────────────────────────────────────────────────────────────
@@ -641,7 +645,7 @@ class Harness:
         try:
             return dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes,
                             self._fetch_chars(), index=self.index, cancel=self._cancel,
-                            index_route=self.index_route)
+                            index_route=self.index_route, read_budget=self._read_budget())
         except Exception as e:
             return f"ERROR: {name} failed: {type(e).__name__}: {e}"
 
@@ -1103,6 +1107,23 @@ class Harness:
         total = sum(cats[k] for k, _, sent in _CTX_CATEGORIES if sent and k != "generating")
         return total if schemas else total - cats["schemas"]
 
+    def _read_budget(self) -> int:
+        """Characters one read_file may return: the context the next request
+        leaves free, less _READ_RESERVE % of the window (tokens as the harness
+        estimates them, 4 characters each)."""
+        left = (self.context_limit - self._estimate(schemas=True)
+                - self.context_limit * _READ_RESERVE // 100)
+        return max(left, _READ_FLOOR_TOKENS) * 4
+
+    def _answer_from_thinking(self, thinking: str) -> None:
+        """End a turn whose reply came only as reasoning by showing that
+        reasoning as the answer, instead of ending with nothing."""
+        text = thinking.strip()
+        self.messages.append({"role": "assistant", "content": text})
+        self.event_queue.put(ChatEvent("system",
+            "The model replied only in its reasoning; showing that as its answer."))
+        self.event_queue.put(ChatEvent("assistant", text))
+
     def cancel(self):
         """Interrupt the running LLM call immediately."""
         self._cancel.set()
@@ -1161,6 +1182,7 @@ class Harness:
         tool_only_turns = 0
         last_tool: str | None = None
         empty_retried = False
+        retry_msg: dict | None = None   # the injected empty-reply retry prompt
         _suppress_think_next = False  # disable thinking for one turn after cutoff or thinking-only retry
         _nudged = False
         _write_nudged = False  # one write-intent recovery nudge per send()
@@ -1281,8 +1303,12 @@ class Harness:
                     if last_tool == "write_file":
                         # After write_file the model sometimes returns nothing — the
                         # write already happened so this is a clean terminal state.
-                        self.event_queue.put(ChatEvent("system",
-                            "File written."))
+                        # Its answer may sit in the reasoning (seen: a summary of
+                        # test failures after writing them to a file).
+                        if raw_thinking and raw_thinking.strip():
+                            self._answer_from_thinking(raw_thinking)
+                        else:
+                            self.event_queue.put(ChatEvent("system", "File written."))
                     elif not empty_retried:
                         # Retry once with an explicit prompt. Only inject a user message
                         # if the last turn is not already a user turn — consecutive user
@@ -1313,16 +1339,23 @@ class Harness:
                             # the template may produce malformed XML for tool definitions.
                             if self.messages[-1]["role"] == "tool":
                                 self.messages.append({"role": "assistant", "content": None})
-                            self.messages.append({"role": "user", "content": retry_text})
+                            retry_msg = {"role": "user", "content": retry_text}
+                            self.messages.append(retry_msg)
                         tool_only_turns = 0
                         continue
                     else:
                         # Second consecutive empty. Remove the injected retry message
-                        # so the next user send does not arrive as a consecutive-user pair.
-                        if (self.messages
-                                and self.messages[-1]["role"] == "user"
-                                and self.messages[-1].get("content", "").startswith("Please respond")):
-                            self.messages.pop()
+                        # so history does not keep the harness's prompt — by identity:
+                        # the reasoning stored after it means it is not always last.
+                        for i, m in enumerate(self.messages):
+                            if m is retry_msg:
+                                del self.messages[i]
+                                break
+                        if raw_thinking and raw_thinking.strip():
+                            # A small model often "answers" in its reasoning: show
+                            # that rather than nothing.
+                            self._answer_from_thinking(raw_thinking)
+                            return "done"
                         self.event_queue.put(ChatEvent("system",
                             "No response. Please rephrase or add more detail and try again."))
                         return "empty"
