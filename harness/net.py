@@ -13,20 +13,20 @@ guard in front of it matters more than the fetch itself:
   by hand — that is where this class of bypass comes from.
 * Redirects are re-checked on every hop — a public URL that 302s to
   ``http://127.0.0.1:8765/api/submit`` would otherwise drive the harness itself.
+* Connections are pinned to the addresses the guard approved.  urllib would
+  otherwise resolve the name a second time when it connects, and a 0-TTL
+  hostile resolver (DNS rebinding) could answer 169.254.169.254 the second
+  time.  The pinned connection dials the vetted IP but keeps the hostname for
+  SNI and certificate validation, so TLS behaves exactly as before.
 * Response text has C0/ANSI control bytes stripped.  Tool results are rendered
   into a curses TUI, so an escape sequence in a web page is a terminal-injection
   vector that no other tool in this repo can produce.
-
-Known limitation: DNS rebinding.  The guard resolves, approves, and then urllib
-resolves again when it connects, so a 0-TTL hostile resolver can answer
-differently the second time.  Closing it means pinning the vetted IP and passing
-``server_hostname`` through a custom HTTPSConnection to keep certificate
-validation working — well past "plain python", and the redirect guard already
-covers the path that actually shows up in practice.
 """
 from __future__ import annotations
 
+import codecs
 import gzip
+import http.client
 import io
 import ipaddress
 import json
@@ -62,13 +62,29 @@ _METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
 # Sites routinely reject the default "Python-urllib/3.x".
 _USER_AGENT = "momo-coding-harness/1.0 (+stdlib urllib)"
 
+# Shown above the untrusted-content fence, where the model reads text as harness
+# output — so only headers that carry facts it needs.  "server" was here and is
+# free text any server fills in: an injection foothold with no use.
 _SHOW_HEADERS = ("content-type", "content-length", "last-modified", "location",
-                 "server", "retry-after")
+                 "retry-after")
 
 # Header values masked before a call is displayed and stored — sessions and the
 # NDJSON log keep tool arguments verbatim.
 SECRET_HEADERS = ("authorization", "cookie", "proxy-authorization", "x-api-key",
                   "x-auth-token", "api-key")
+# Services invent their own names (GitLab Private-Token, X-Goog-Api-Key,
+# X-GitHub-Token), so a fixed list alone leaks them; this catches the families.
+_SECRET_HEADER_RE = re.compile(r"auth|token|key|secret|cookie|session|passw", re.I)
+
+# The only caller-supplied headers that follow a redirect to another origin.
+# Anything else may be a credential under a name no list anticipates.
+_CROSS_ORIGIN_HEADERS = ("accept", "accept-language", "user-agent", "content-type")
+
+
+def is_secret_header(name) -> bool:
+    """True if a request header's value should be masked before display/logging."""
+    n = str(name).lower()
+    return n in SECRET_HEADERS or bool(_SECRET_HEADER_RE.search(n))
 
 # Indirection so tests can replace the resolver and never touch real DNS.
 _getaddrinfo = socket.getaddrinfo
@@ -143,6 +159,10 @@ class _Deadline(Exception):
     """The wall-clock budget ran out mid-body."""
 
 
+class _Cancelled(Exception):
+    """The user pressed Esc while the request was in flight."""
+
+
 # ── URL guard ─────────────────────────────────────────────────────────────────
 
 def _embedded(ip):
@@ -187,53 +207,62 @@ def classify_url(url: str, allow_private: bool) -> tuple[str | None, str]:
     only the former should force a confirmation on a write.  Categories are
     "ok", "scheme", "creds", "host", "resolve" and "address".
     """
+    err, category, _ = _vet(url, allow_private)
+    return err, category
+
+
+def _vet(url: str, allow_private: bool
+         ) -> tuple[str | None, str, tuple[tuple[str, int], list[str]] | None]:
+    """classify_url plus, on success, ((host, port), addresses) — the exact
+    addresses that were approved, for the connection to be pinned to."""
     try:
         parts = urlsplit((url or "").strip())
     except ValueError as e:
-        return f"ERROR: blocked URL: malformed URL ({e}).", "host"
+        return f"ERROR: blocked URL: malformed URL ({e}).", "host", None
 
     if _CTRL.search(url or ""):
         # Never valid in a URL, and echoing one back would put an ANSI escape
         # into the curses TUI by way of the error message.
-        return ("ERROR: blocked URL: the URL contains control characters.", "host")
+        return ("ERROR: blocked URL: the URL contains control characters.", "host", None)
 
     scheme = (parts.scheme or "").lower()
     if scheme not in ("http", "https"):
         return (f"ERROR: blocked URL: scheme '{_safe_line(scheme, 20) or 'none'}' is not allowed. "
                 "fetch_url speaks http and https only — to read a local file use read_file.",
-                "scheme")
+                "scheme", None)
 
     # Credentials in the URL are both a secret-leak channel and a parser-confusion
     # trick: urlsplit('http://example.com\\@evil.com/') reports host 'evil.com'.
     if parts.username is not None or parts.password is not None or "@" in (parts.netloc or ""):
         return ("ERROR: blocked URL: credentials in the URL (user:pass@host) are not "
-                "allowed. Pass them in the headers argument instead.", "creds")
+                "allowed. Pass them in the headers argument instead.", "creds", None)
 
     host = parts.hostname  # lowercased, IPv6 brackets stripped
     if not host:
-        return "ERROR: blocked URL: no host in URL.", "host"
+        return "ERROR: blocked URL: no host in URL.", "host", None
     if not host.isascii():
         # getaddrinfo may resolve the UTF-8 form while http.client connects to the
         # IDNA form — two different names, one checked and the other fetched.
         return ("ERROR: blocked URL: non-ASCII hostname. Pass the punycode form "
-                "(e.g. xn--bcher-kva.de).", "host")
+                "(e.g. xn--bcher-kva.de).", "host", None)
 
     try:
         port = parts.port
     except ValueError:
-        return "ERROR: blocked URL: invalid port.", "host"
+        return "ERROR: blocked URL: invalid port.", "host", None
     port = port or (443 if scheme == "https" else 80)
 
     try:
         infos = _getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
-        return f"ERROR: could not resolve host '{_safe_line(host, 80)}': {_safe_line(e.strerror or e)}.", "resolve"
+        return f"ERROR: could not resolve host '{_safe_line(host, 80)}': {_safe_line(e.strerror or e)}.", "resolve", None
     except (UnicodeError, OSError) as e:
-        return f"ERROR: could not resolve host '{_safe_line(host, 80)}': {_safe_line(e)}.", "resolve"
+        return f"ERROR: could not resolve host '{_safe_line(host, 80)}': {_safe_line(e)}.", "resolve", None
     if not infos:
-        return f"ERROR: could not resolve host '{_safe_line(host, 80)}'.", "resolve"
+        return f"ERROR: could not resolve host '{_safe_line(host, 80)}'.", "resolve", None
+    addrs = [info[4][0] for info in infos]
     if allow_private:
-        return None, "ok"
+        return None, "ok", ((host, port), addrs)
 
     for info in infos:
         raw = info[4][0].split("%", 1)[0]  # strip the IPv6 zone id (fe80::1%en0)
@@ -241,12 +270,12 @@ def classify_url(url: str, allow_private: bool) -> tuple[str | None, str]:
             ip = ipaddress.ip_address(raw)
         except ValueError:
             return (f"ERROR: blocked URL: unparseable address for host "
-                    f"'{_safe_line(host, 80)}'.", "address")
+                    f"'{_safe_line(host, 80)}'.", "address", None)
         if (why := _blocked_reason(ip)):
             return (f"ERROR: blocked URL: '{_safe_line(host, 80)}' resolves to {ip} ({why}). fetch_url "
                     "only reaches public internet addresses. Ask the user to run "
-                    "'/net local' if reaching this address is intended.", "address")
-    return None, "ok"
+                    "'/net local' if reaching this address is intended.", "address", None)
+    return None, "ok", ((host, port), addrs)
 
 
 def check_url(url: str, allow_private: bool) -> str | None:
@@ -304,11 +333,13 @@ class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     It also does two things the stdlib handler does not:
 
-    * **Drops credentials when a redirect leaves the host.** The stdlib's
+    * **Drops caller headers when a redirect leaves the origin.** The stdlib's
       redirect_request copies every header except content-length/content-type,
       so an Authorization or Cookie set for api.example.com is replayed verbatim
       to whatever host it redirects to.  That is a straightforward token-theft
       path; requests solves it in rebuild_auth and urllib simply does not.
+      Only _CROSS_ORIGIN_HEADERS survive the hop: a credential can hide under
+      any name (Private-Token, X-Goog-Api-Key), so a denylist is not enough.
     * **Enforces the caller's wall-clock deadline.** Each hop otherwise gets a
       fresh socket timeout, so a chain of slow redirects multiplies the budget
       and holds the worker thread far longer than asked.
@@ -317,13 +348,21 @@ class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
     max_redirections = _MAX_REDIRECTS
     max_repeats = _MAX_REDIRECTS
 
-    def __init__(self, check, deadline: float | None = None):
+    def __init__(self, check, deadline: float | None = None, cancel=None):
         self._check = check          # callable(url) -> str | None
         self._deadline = deadline
+        self._cancel = cancel
         self.hops: list[str] = []
-        self.stripped_credentials = False
+        self.stripped: list[str] = []    # header names dropped on a cross-origin hop
+
+    @property
+    def stripped_credentials(self) -> bool:
+        return bool(self.stripped)
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if self._cancel is not None and self._cancel.is_set():
+            fp.close()
+            raise _Cancelled()
         if self._deadline is not None and time.monotonic() > self._deadline:
             fp.close()
             raise _Deadline("redirect chain ran past the time budget")
@@ -338,9 +377,10 @@ class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
                 raise BlockedURL(new.full_url, err)
             if _crosses_origin(req.full_url, new.full_url):
                 for key in list(new.headers):
-                    if key.lower() in SECRET_HEADERS:
+                    if key.lower() not in _CROSS_ORIGIN_HEADERS:
                         del new.headers[key]
-                        self.stripped_credentials = True
+                        if key not in self.stripped:
+                            self.stripped.append(key)
             self.hops.append(new.full_url)
         return new
 
@@ -354,7 +394,60 @@ def _ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-def build_opener(check, deadline: float | None = None
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    """HTTPHandler whose connections dial only addresses the guard approved.
+
+    `pins` maps (host, port) to the address list classify_url vetted; the
+    fetch's check() fills it for the first URL and every redirect hop.  The
+    connection keeps its hostname (Host header, and SNI plus certificate
+    validation for HTTPS, which wraps the socket after connect), only the
+    socket goes to the vetted IP instead of a second, unchecked lookup.
+    """
+
+    def __init__(self, pins: dict, **kw):
+        super().__init__(**kw)
+        self._pins = pins
+
+    def _dial(self, address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+        host, port = address
+        addrs = self._pins.get(((host or "").lower(), port))
+        if not addrs:
+            # Fail closed: a connection nobody vetted must not fall back to DNS.
+            raise OSError(f"refusing to connect to {host}:{port}: address was not vetted")
+        last: OSError | None = None
+        for ip in addrs:
+            try:
+                return socket.create_connection((ip, port), timeout, source_address)
+            except OSError as e:
+                last = e
+        raise last  # type: ignore[misc]
+
+    def _pinned(self, cls):
+        def make(host, **kw):
+            conn = cls(host, **kw)
+            conn._create_connection = self._dial
+            return conn
+        return make
+
+    def http_open(self, req):
+        return self.do_open(self._pinned(http.client.HTTPConnection), req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, pins: dict, **kw):
+        super().__init__(**kw)
+        self._pins = pins
+
+    _dial = _PinnedHTTPHandler._dial
+    _pinned = _PinnedHTTPHandler._pinned
+
+    def https_open(self, req):
+        return self.do_open(self._pinned(http.client.HTTPSConnection), req,
+                            context=self._context)
+
+
+def build_opener(check, deadline: float | None = None, pins: dict | None = None,
+                 cancel=None
                  ) -> tuple[urllib.request.OpenerDirector, _GuardedRedirectHandler]:
     """An opener with *only* the HTTP handlers.
 
@@ -367,11 +460,20 @@ def build_opener(check, deadline: float | None = None
     connection goes to the proxy, which resolves the hostname itself, and every
     address check above becomes decorative. That also means http_proxy /
     HTTPS_PROXY in the environment are ignored here, on purpose.
+
+    With `pins` the connections are pinned to vetted addresses (see
+    _PinnedHTTPHandler); `check` is then expected to fill it.  Without, they
+    resolve normally — only for callers that do not go through the guard.
     """
-    redirector = _GuardedRedirectHandler(check, deadline)
+    redirector = _GuardedRedirectHandler(check, deadline, cancel)
+    if pins is not None:
+        http_h = _PinnedHTTPHandler(pins)
+        https_h = _PinnedHTTPSHandler(pins, context=_ssl_context())
+    else:
+        http_h = urllib.request.HTTPHandler()
+        https_h = urllib.request.HTTPSHandler(context=_ssl_context())
     op = urllib.request.OpenerDirector()
-    for h in (urllib.request.HTTPHandler(),
-              urllib.request.HTTPSHandler(context=_ssl_context()),
+    for h in (http_h, https_h,
               urllib.request.HTTPErrorProcessor(),    # without it, redirects never run
               urllib.request.HTTPDefaultErrorHandler(),
               urllib.request.UnknownHandler(),        # raise on an unhandled scheme
@@ -389,7 +491,7 @@ def build_opener(check, deadline: float | None = None
 
 # ── bounded reading ───────────────────────────────────────────────────────────
 
-def _read_capped(resp, max_bytes: int, deadline: float) -> tuple[bytes, bool]:
+def _read_capped(resp, max_bytes: int, deadline: float, cancel=None) -> tuple[bytes, bool]:
     """Read at most `max_bytes`, giving up at the wall-clock `deadline`.
 
     Never plain .read(): with Transfer-Encoding: chunked and a server that omits
@@ -397,10 +499,13 @@ def _read_capped(resp, max_bytes: int, deadline: float) -> tuple[bytes, bool]:
     is per socket operation, so a server dripping one byte per second never
     trips it — this runs on the worker thread, so the deadline is what bounds it.
 
-    `resp` only needs .read(n), so tests can pass a fake.
+    `resp` only needs .read(n), so tests can pass a fake.  `cancel` (an Event)
+    is Esc: checked between chunks, so a slow download stops within one read.
     """
     chunks, total = [], 0
     while total < max_bytes:
+        if cancel is not None and cancel.is_set():
+            raise _Cancelled()
         if time.monotonic() > deadline:
             raise _Deadline("response was still arriving when the time budget ran out")
         chunk = resp.read(min(_CHUNK, max_bytes - total))
@@ -408,6 +513,10 @@ def _read_capped(resp, max_bytes: int, deadline: float) -> tuple[bytes, bool]:
             return b"".join(chunks), False
         chunks.append(chunk)
         total += len(chunk)
+    if time.monotonic() > deadline:
+        # The probe below can block for a whole socket timeout; past the
+        # deadline, report the cap as hit rather than wait to find out.
+        return b"".join(chunks), True
     return b"".join(chunks), bool(resp.read(1))
 
 
@@ -436,10 +545,16 @@ def _maybe_gunzip(raw: bytes, encoding: str, max_bytes: int = DEFAULT_MAX_BYTES
 
 # ── HTML → text ───────────────────────────────────────────────────────────────
 
-# Content that is never prose. form/select/button are here because their text is
-# UI chrome that crowds out the page body for a small model.
+# Content that is never prose. select/button/textarea are here because their
+# text is UI chrome that crowds out the page body for a small model.  <form> is
+# NOT: ASP.NET WebForms wraps the entire page in one, so dropping it dropped
+# everything.
 _DROP_TAGS = {"script", "style", "head", "nav", "footer", "aside", "noscript",
-              "svg", "template", "iframe", "form", "select", "button", "dialog"}
+              "svg", "template", "iframe", "select", "button", "textarea", "dialog"}
+# </head> is optional in HTML5 and minified pages leave it out, so a dropped
+# <head> also ends at the first tag that can only appear in the body.
+_BODY_START_TAGS = {"body", "main", "div", "p", "article", "section", "header",
+                    "ul", "ol", "table", "pre", "h1", "h2", "h3", "h4", "h5", "h6"}
 # The same chrome marked up with ARIA roles instead of semantic tags — Sphinx
 # breadcrumbs, for one, are <div role="navigation">, not <nav>.
 _DROP_ROLES = {"navigation", "banner", "contentinfo", "search", "complementary"}
@@ -517,6 +632,8 @@ class _TextExtractor(HTMLParser):
         if tag == "title" and self._drop_tag in (None, "head"):
             self._in_title = True
             return
+        if self._drop_tag == "head" and tag in _BODY_START_TAGS:
+            self._drop_tag, self._drop_depth = None, 0
         if self._drop_tag is not None:
             if tag == self._drop_tag:
                 self._drop_depth += 1
@@ -753,6 +870,38 @@ def _json_select(data, path: str):
     return cur, None
 
 
+# application/* types that are text even though the major type says otherwise.
+_TEXT_APP_TYPES = {"application/javascript", "application/x-javascript",
+                   "application/ecmascript", "application/yaml", "application/x-yaml",
+                   "application/toml", "application/x-toml", "application/x-sh",
+                   "application/x-shellscript", "application/sql", "application/graphql",
+                   "application/x-python", "application/x-httpd-php",
+                   "application/x-ndjson", "application/csv", "application/markdown",
+                   "application/x-tex", "application/x-perl", "application/x-ruby",
+                   "application/x-www-form-urlencoded", "application/rtf"}
+_SNIFF_BYTES = 4096
+
+
+def _looks_textual(ctype: str, raw: bytes) -> bool:
+    """Whether a body should be decoded as text rather than reported as binary."""
+    if ctype.startswith("text/") or ctype.endswith(("json", "+json", "xml", "+xml", "+yaml")):
+        return True
+    if ctype in _TEXT_APP_TYPES:
+        return True
+    if not ctype.startswith("application/"):
+        return False                 # image/, audio/, video/, font/ …
+    # Anything else under application/ (octet-stream included — raw file hosts
+    # use it for source code) is text if the start of it is NUL-free UTF-8.
+    head = raw[:_SNIFF_BYTES]
+    if not head or b"\x00" in head:
+        return False
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def _decode_body(raw: bytes, headers, final_url: str, json_path: str | None = None,
                  notes: list[str] | None = None) -> tuple[str, str]:
     """(kind, text). `headers` is an http.client.HTTPMessage where available."""
@@ -765,7 +914,7 @@ def _decode_body(raw: bytes, headers, final_url: str, json_path: str | None = No
         m = re.search(r"charset=([\w-]+)", raw_ct, re.I)
         charset = m.group(1) if m else "utf-8"
 
-    if not (ctype.startswith("text/") or ctype.endswith(("json", "+json", "xml", "+xml"))):
+    if not _looks_textual(ctype, raw):
         return "binary", f"({len(raw)} bytes of {ctype} — binary content not shown)"
     try:
         text = raw.decode(charset, errors="replace")
@@ -905,7 +1054,7 @@ def _render(url: str, final_url: str, status: int, reason: str, headers,
     # Everything below sits ABOVE the fence, so the model reads it as harness
     # output.  The status reason, the final URL and the response headers are all
     # server-controlled, so each one is reduced to a single safe line.
-    head = [f"HTTP {status} {_safe_line(reason, 80)} — {method} {_safe_line(final_url, 300)}"]
+    head = [f"HTTP {status} {_safe_line(reason, 40)} — {method} {_safe_line(final_url, 300)}"]
     if hops:
         head.append("redirected: " + _safe_line(" -> ".join([url, *hops]), 500))
     for name in _SHOW_HEADERS:
@@ -917,7 +1066,7 @@ def _render(url: str, final_url: str, status: int, reason: str, headers,
 
     if method == "HEAD" or not body.strip():
         return out + "\n\n(no body)"
-    return f"{out}\n\n{_BEGIN}\n{body}\n{_END}\n\n{_FOOTER}"
+    return f"{out}\n\n{fence(body)}"
 
 
 # ── page cache ────────────────────────────────────────────────────────────────
@@ -960,16 +1109,137 @@ def clear_cache() -> None:
 
 # ── the tool ──────────────────────────────────────────────────────────────────
 
+def _get(url: str, *, method: str = "GET", headers: dict | None = None,
+         data: bytes | None = None, allow_private: bool, max_bytes: int,
+         timeout: int, cancel=None, check=None, pins: dict | None = None,
+         cap_label: str = "") -> dict | str:
+    """One guarded request: the ERROR string, or the response as a dict with
+    raw (decompressed), headers, status, reason, final_url, hops, notes and at.
+
+    The shared network path for fetch_url and web_search, so both get the same
+    guard, pinning, caps, deadline and cancel.  An error status is a response,
+    not an error: its body carries the server's explanation.
+    """
+    if check is None:
+        pins = {}
+
+        def check(u: str) -> str | None:
+            err, _, vetted = _vet(u, allow_private)
+            if vetted is not None:
+                pins[vetted[0]] = vetted[1]
+            return err
+
+        if (err := check(url)):
+            return err
+
+    notes: list[str] = []
+    req = urllib.request.Request(url.strip(), data=data, method=method)
+    if isinstance(headers, dict):
+        for hkey, value in headers.items():
+            # Accept-Encoding stays at http.client's "identity": not requesting
+            # compression is what removes the gzip-bomb surface entirely.
+            if str(hkey).lower() in ("accept-encoding", "host", "content-length"):
+                continue
+            req.add_header(str(hkey), str(value))
+    if data is not None and not req.has_header("Content-type"):
+        req.add_header("Content-Type", "application/json")
+
+    deadline = time.monotonic() + timeout
+    opener, redirector = build_opener(check, deadline, pins, cancel)
+    try:
+        resp = opener.open(req, timeout=min(_SOCK_TIMEOUT, timeout))
+        if resp is None:
+            # A director with no handler for the scheme returns None rather than
+            # raising; without this the next line is a confusing AttributeError.
+            return f"ERROR: no handler could open {_safe_line(url, 300)}."
+        with resp:
+            raw, truncated = _read_capped(resp, max_bytes, deadline, cancel)
+            status = getattr(resp, "status", None) or resp.getcode()
+            reason = getattr(resp, "reason", "") or ""
+            rheaders = resp.headers
+            final_url = resp.geturl()
+    except BlockedURL as e:
+        return f"{_safe_line(e.detail, 400)} (blocked on a redirect from {_safe_line(url, 300)})"
+    except urllib.error.HTTPError as e:
+        # HTTPError is both the exception and the response: 4xx/5xx bodies carry
+        # the error message the model needs.
+        try:
+            with e:
+                raw, truncated = _read_capped(e, max_bytes, deadline, cancel)
+        except _Cancelled:
+            return f"ERROR: fetch of {_safe_line(url, 300)} cancelled by the user"
+        except Exception:
+            raw, truncated = b"", False
+        status, reason = e.code, (e.reason or "")
+        rheaders, final_url = (e.headers or {}), (e.url or url)
+        notes.append("server returned an error status")
+    except _Cancelled:
+        return f"ERROR: fetch of {_safe_line(url, 300)} cancelled by the user"
+    except _Deadline as e:
+        return f"ERROR: {_safe_line(url, 300)} timed out after {timeout}s: {_safe_line(e)}"
+    except (TimeoutError, socket.timeout):
+        return f"ERROR: {_safe_line(url, 300)} timed out after {timeout}s"
+    except ssl.SSLError as e:
+        return f"ERROR: TLS failure for {_safe_line(url, 300)}: {_safe_line(e)}"
+    except urllib.error.URLError as e:
+        return f"ERROR: could not fetch {_safe_line(url, 300)}: {_safe_line(e.reason)}"
+    except (OSError, ValueError, UnicodeError) as e:
+        return f"ERROR: could not fetch {_safe_line(url, 300)}: {_safe_line(e)}"
+
+    if truncated:
+        notes.append(
+            f"download stopped at {format_size(max_bytes)}{cap_label}"
+            " — the end of the page was not received; ask the user to raise the cap "
+            "with '/net-max-bytes' if you need it")
+    if redirector.stripped:
+        # Say so: otherwise an auth header that was dropped mid-chain shows up
+        # only as a puzzling 401 from a host the caller never named.
+        notes.append("a redirect left the original origin, so these request headers "
+                     f"were NOT sent to the final host: {', '.join(redirector.stripped)}")
+    raw, gz_note = _maybe_gunzip(raw, _header(rheaders, "Content-Encoding"), max_bytes)
+    if gz_note:
+        notes.append(gz_note)
+    return {"raw": raw, "headers": rheaders, "status": status, "reason": reason,
+            "final_url": final_url, "hops": list(redirector.hops), "notes": notes,
+            "at": time.monotonic()}
+
+
+def fetch_page(url: str, *, allow_private: bool, max_bytes: int,
+               timeout: int = _DEFAULT_TIMEOUT, cancel=None) -> dict | str:
+    """A plain GET through the page cache — for web_search's read mode.
+
+    Keyed exactly as fetch_url keys a call without max_bytes, so a follow-up
+    fetch_url(url, find=...) is served from what this downloaded.
+    """
+    key = (url.strip(), allow_private, max_bytes)
+    if (hit := _cache_get(key)):
+        return hit
+    got = _get(url, allow_private=allow_private, max_bytes=max_bytes,
+               timeout=timeout, cancel=cancel)
+    if not isinstance(got, str) and 200 <= got["status"] < 300:
+        _cache_put(key, got)
+    return got
+
+
+def fence(body: str) -> str:
+    """`body` inside the untrusted-content markers, with the data-not-instructions
+    footer.  Control characters are stripped FIRST, then the markers
+    neutralised — the other order lets a stripped byte reassemble a marker."""
+    body = _CTRL.sub("", body)
+    body = body.replace(_END, "[END-MARKER-REMOVED]").replace(_BEGIN, "[BEGIN-MARKER-REMOVED]")
+    return f"{_BEGIN}\n{body}\n{_END}\n\n{_FOOTER}"
+
+
 def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
               body: str | None = None, max_bytes=None,
               timeout: int = _DEFAULT_TIMEOUT, offset=0, find: str | None = None,
               json_path: str | None = None, *,
               workdir: Path, net_access: str = "off",
               net_max_bytes: int = DEFAULT_MAX_BYTES,
-              net_max_chars: int = DEFAULT_MAX_CHARS) -> str:
+              net_max_chars: int = DEFAULT_MAX_CHARS, cancel=None) -> str:
     """Fetch a URL over http/https.
 
-    `net_access`, `net_max_bytes` and `net_max_chars` are injected by
+    `net_access`, `net_max_bytes`, `net_max_chars` and `cancel` are injected by
     tools.dispatch from the harness settings, never by the model — it must not
     be able to unblock the private network or lift the user's limits for itself.
 
@@ -989,8 +1259,16 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
         return (f"ERROR: method '{_safe_line(method, 20)}' is not supported. "
                 f"Use one of: {', '.join(_METHODS)}.")
 
+    # Every URL this fetch approves — the first one and each redirect hop — is
+    # pinned to the addresses that were vetted, so the connection cannot be
+    # re-resolved somewhere else (DNS rebinding).
+    pins: dict[tuple[str, int], list[str]] = {}
+
     def check(u: str) -> str | None:
-        return check_url(u, allow_private)
+        err, _, vetted = _vet(u, allow_private)
+        if vetted is not None:
+            pins[vetted[0]] = vetted[1]
+        return err
 
     if (err := check(url)):
         return err
@@ -1008,7 +1286,9 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
         timeout = int(timeout)
     except (TypeError, ValueError):
         timeout = _DEFAULT_TIMEOUT
-    if timeout <= 0 or timeout > _HARD_MAX_TIMEOUT:
+    if timeout <= 0:
+        timeout = _DEFAULT_TIMEOUT
+    elif timeout > _HARD_MAX_TIMEOUT:
         timeout = _HARD_MAX_TIMEOUT
     try:
         offset = max(0, int(offset or 0))
@@ -1031,76 +1311,21 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
                        kind, text, notes, hit["hops"], method, max_chars, offset, find)
 
     data = body.encode("utf-8") if body and method not in _READ_METHODS else None
-    req = urllib.request.Request(url, data=data, method=method)
-    if isinstance(headers, dict):
-        for hkey, value in headers.items():
-            # Accept-Encoding stays at http.client's "identity": not requesting
-            # compression is what removes the gzip-bomb surface entirely.
-            if str(hkey).lower() in ("accept-encoding", "host", "content-length"):
-                continue
-            req.add_header(str(hkey), str(value))
-    if data is not None and not req.has_header("Content-type"):
-        req.add_header("Content-Type", "application/json")
-
-    deadline = time.monotonic() + timeout
-    opener, redirector = build_opener(check, deadline)
-    notes: list[str] = []
-    try:
-        resp = opener.open(req, timeout=min(_SOCK_TIMEOUT, timeout))
-        if resp is None:
-            # A director with no handler for the scheme returns None rather than
-            # raising; without this the next line is a confusing AttributeError.
-            return f"ERROR: no handler could open {_safe_line(url, 300)}."
-        with resp:
-            raw, truncated = _read_capped(resp, max_bytes, deadline)
-            status = getattr(resp, "status", None) or resp.getcode()
-            reason = getattr(resp, "reason", "") or ""
-            rheaders = resp.headers
-            final_url = resp.geturl()
-    except BlockedURL as e:
-        return f"{_safe_line(e.detail, 400)} (blocked on a redirect from {_safe_line(url, 300)})"
-    except urllib.error.HTTPError as e:
-        # HTTPError is both the exception and the response: 4xx/5xx bodies carry
-        # the error message the model needs.
-        try:
-            with e:
-                raw, truncated = _read_capped(e, max_bytes, deadline)
-        except Exception:
-            raw, truncated = b"", False
-        status, reason = e.code, (e.reason or "")
-        rheaders, final_url = (e.headers or {}), (e.url or url)
-        notes.append("server returned an error status")
-    except _Deadline as e:
-        return f"ERROR: {_safe_line(url, 300)} timed out after {timeout}s: {_safe_line(e)}"
-    except (TimeoutError, socket.timeout):
-        return f"ERROR: {_safe_line(url, 300)} timed out after {timeout}s"
-    except ssl.SSLError as e:
-        return f"ERROR: TLS failure for {_safe_line(url, 300)}: {_safe_line(e)}"
-    except urllib.error.URLError as e:
-        return f"ERROR: could not fetch {_safe_line(url, 300)}: {_safe_line(e.reason)}"
-    except (OSError, ValueError, UnicodeError) as e:
-        return f"ERROR: could not fetch {_safe_line(url, 300)}: {_safe_line(e)}"
-
-    if truncated:
-        notes.append(
-            f"download stopped at {format_size(max_bytes)}"
-            + (" (the current /net-max-bytes setting)" if max_bytes >= ceiling else
-               " (the max_bytes given for this call)")
-            + " — the end of the page was not received; ask the user to raise the cap "
-              "with '/net-max-bytes' if you need it")
-    if redirector.stripped_credentials:
-        # Say so: otherwise an auth header that was dropped mid-chain shows up
-        # only as a puzzling 401 from a host the caller never named.
-        notes.append("a redirect left the original origin, so the Authorization/Cookie "
-                     "headers were NOT sent to the final host")
-    raw, gz_note = _maybe_gunzip(raw, _header(rheaders, "Content-Encoding"), max_bytes)
-    if gz_note:
-        notes.append(gz_note)
-    if cacheable and 200 <= status < 300:
-        _cache_put(key, {"raw": raw, "headers": rheaders, "status": status,
-                         "reason": reason, "final_url": final_url,
-                         "hops": list(redirector.hops), "notes": list(notes),
-                         "at": time.monotonic()})
+    pre_notes = []
+    if body and data is None:
+        pre_notes.append(f"the body argument was ignored: {method} requests carry no body "
+                         "— use POST/PUT/PATCH to send one")
+    got = _get(url, method=method, headers=headers, data=data, allow_private=allow_private,
+               max_bytes=max_bytes, timeout=timeout, cancel=cancel, check=check, pins=pins,
+               cap_label=(" (the current /net-max-bytes setting)" if max_bytes >= ceiling else
+                          " (the max_bytes given for this call)"))
+    if isinstance(got, str):
+        return got
+    notes = pre_notes + got["notes"]
+    if cacheable and 200 <= got["status"] < 300:
+        _cache_put(key, {**got, "notes": list(notes)})
+    raw, rheaders, final_url = got["raw"], got["headers"], got["final_url"]
+    status, reason, hops = got["status"], got["reason"], got["hops"]
     kind, text = _decode_body(raw, rheaders, final_url, json_path, notes)
     return _render(url, final_url, status, reason, rheaders, kind, text,
-                   notes, redirector.hops, method, max_chars, offset, find)
+                   notes, hops, method, max_chars, offset, find)

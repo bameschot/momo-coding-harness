@@ -9,6 +9,7 @@ from pathlib import Path
 from . import code_index, ignore_rules
 from . import net as net_mod
 from . import run_store as run_store_mod
+from . import search as search_mod
 from . import session as session_mod
 from . import tools as tools_mod
 from .harness import Harness
@@ -92,6 +93,7 @@ class CommandResult:
     run_plan: bool = False                  # TUI runs execute_plan_threaded() on a worker thread
     retry: bool = False                     # controller re-sends the last user message
     edit_index_filter: str | None = None    # TUI opens $EDITOR on this filter file
+    send_prompt: str | None = None          # controller sends this to the model as a user turn
 
 
 
@@ -541,10 +543,14 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/net-max-chars":
         if not arg:
+            eff = harness._fetch_chars()
+            clamp = (f"\nIn effect: {eff:,} characters — capped to fit the "
+                     f"{harness.context_limit:,}-token context (or /tool-result)."
+                     if eff < harness.net_max_chars else "")
             return CommandResult(handled=True, output=(
                 f"fetch_url text per call: {harness.net_max_chars:,} characters "
                 f"(~{harness.net_max_chars // 4:,} tokens); the model pages through the "
-                f"rest with offset=/find=.\nSet it with a number, e.g. /net-max-chars 12000."))
+                f"rest with offset=/find=.{clamp}\nSet it with a number, e.g. /net-max-chars 12000."))
         try:
             n = int(arg.replace(",", "").replace("_", ""))
         except ValueError:
@@ -561,6 +567,53 @@ def handle(line: str, harness: Harness) -> CommandResult:
                     f"the context ({harness.context_limit:,} tokens).")
         return CommandResult(handled=True, output=(
             f"fetch_url text per call: {n:,} characters" + warn))
+
+    if cmd == "/search-sources":
+        reg = harness.search_sources
+        parts = arg.split()
+        if not parts:
+            return CommandResult(handled=True, output=reg.listing())
+        if parts[0] in ("rm", "remove", "delete") and len(parts) == 2:
+            out = reg.remove(parts[1])
+            harness.rebuild_system_prompt()       # the source list is in the schema
+            return CommandResult(handled=True, output=out)
+        if parts[0] == "reload" and len(parts) == 1:
+            reg.load()
+            harness.rebuild_system_prompt()
+            return CommandResult(handled=True, output=reg.listing())
+        if parts[0] == "suggest":
+            if harness.net_access == "off":
+                return CommandResult(handled=True, output=(
+                    "Turn on internet access first: /net on. The model needs web_search, "
+                    "fetch_url and add_search_source to try out the sources it proposes."))
+            if not harness.tools_enabled:
+                return CommandResult(handled=True, output=(
+                    "Tools are off: turn them on with /tools on first."))
+            focus = arg.split(None, 1)[1] if len(parts) > 1 else ""
+            prompt = search_mod.suggest_prompt(reg, search_mod.scan_project(harness.workdir),
+                                               focus)
+            return CommandResult(handled=True, send_prompt=prompt, output=(
+                "Asking the model to analyse the project and propose search sources. "
+                "Keep the ones you like with /search-sources save <name>."))
+        if parts[0] == "save" and len(parts) >= 2:
+            names = parts[1:]
+            if names == ["all"]:
+                names = sorted(n for n, s in reg.sources.items() if s.origin == "session")
+                if not names:
+                    return CommandResult(handled=True, output="No session sources to save.")
+            lines = []
+            for name in names:
+                src = reg.get(name)
+                if src is None:
+                    lines.append(f"No source named '{name}'.")
+                elif src.origin != "session":
+                    lines.append(f"'{name}' is already a {src.origin} source.")
+                else:
+                    lines.append(reg.save(name))
+            return CommandResult(handled=True, output="\n".join(lines))
+        return CommandResult(handled=True, output=(
+            "Usage: /search-sources | /search-sources suggest [focus] | "
+            "/search-sources save <name>|all | /search-sources rm <name> | /search-sources reload"))
 
     if cmd == "/index":
         sub = arg.lower()
@@ -893,6 +946,11 @@ Available commands:
   /net-max-bytes <n>  Set it, in bytes or with a unit: 200000, 500kb, 2mb
   /net-max-chars      Show how much page text one fetch_url call returns
   /net-max-chars <n>  Set it in characters (default 24000); the rest is paged
+  /search-sources     List web_search sources (shipped, user, session)
+  /search-sources suggest [focus]  Have the model analyse the project and add fitting sources
+  /search-sources save <name>|all  Keep session sources for future sessions
+  /search-sources rm <name>  Remove a user or session source
+  /search-sources reload     Re-read the source files
   /guides             Show whether project guide files are loaded, and which
   /guides on|off      Put AGENTS.md / CLAUDE.md / ... from the workdir in the system prompt
                       (re-read on new session, /clear and compaction)

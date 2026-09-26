@@ -1,0 +1,11 @@
+{
+  "name": "maven",
+  "description": "Maven Central artifacts (groupId:artifactId) with latest version",
+  "url": "https://central.sonatype.com/solrsearch/select?q={query}&rows={n}&wt=json",
+  "results": "response.docs",
+  "title": "id",
+  "link": "https://central.sonatype.com/artifact/{g}/{a}",
+  "extra": {
+    "version": "latestVersion"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "mdn",
+  "description": "MDN Web Docs: HTML, CSS, JavaScript and Web APIs",
+  "url": "https://developer.mozilla.org/api/v1/search?q={query}&size={n}&locale=en-US",
+  "results": "documents",
+  "title": "title",
+  "link": "https://developer.mozilla.org{mdn_url}",
+  "snippet": "summary",
+  "default": true
+}

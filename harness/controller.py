@@ -36,7 +36,8 @@ def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
     arg = parts[1].strip().lower() if len(parts) > 1 else ""
     return (cmd in _MUTATING or cmd in _MODE_COMMANDS
             or (cmd == "/plan" and arg != "show")
-            or (cmd in ("/session", "/workspace", "/workdir", "/run-mode") and bool(arg)))
+            or (cmd in ("/session", "/workspace", "/workdir", "/run-mode",
+                        "/search-sources") and bool(arg)))
 
 # Idle recap: how often the watcher checks, and the minimum gap between two recap
 # attempts (on top of "once per user turn" and "once per idle period").
@@ -433,6 +434,13 @@ class Controller:
         if result.run_compact:
             self._system("Compacting context...")
             self._run_bg(self.harness.compact_threaded, result.compact_summarise)
+            return SubmitOutcome()
+        if result.send_prompt:
+            # A command that starts a model turn (/search-sources suggest): the
+            # prompt goes to the model exactly like a typed message.
+            if result.output:
+                self._system(result.output)
+            self._run_bg(self.harness.send, result.send_prompt)
             return SubmitOutcome()
         if result.confirm_prompt:
             self._pending_confirm = result.confirm_action

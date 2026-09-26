@@ -1,0 +1,13 @@
+{
+  "name": "crates",
+  "description": "Rust crates on crates.io: name, latest stable version, description",
+  "url": "https://crates.io/api/v1/crates?q={query}&per_page={n}",
+  "results": "crates",
+  "title": "name",
+  "link": "https://crates.io/crates/{name}",
+  "snippet": "description",
+  "extra": {
+    "version": "max_stable_version",
+    "downloads": "downloads"
+  }
+}

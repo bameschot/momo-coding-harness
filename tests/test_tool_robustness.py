@@ -226,6 +226,7 @@ class HarnessDispatch(Base):
             workdir = self.root
             net_access, net_max_bytes, index, index_route = "off", 0, None, True
             run_mode, run_store, run_output_limit = "classic", None, 5000
+            search_sources = None
             _cancel = threading.Event()
 
             def _read_budget(self):

@@ -1,0 +1,13 @@
+{
+  "name": "wikipedia",
+  "description": "English Wikipedia articles: concepts, algorithms, protocols, history",
+  "url": "https://en.wikipedia.org/w/rest.php/v1/search/page?q={query}&limit={n}",
+  "results": "pages",
+  "title": "title",
+  "link": "https://en.wikipedia.org/wiki/{key}",
+  "snippet": "excerpt",
+  "extra": {
+    "about": "description"
+  },
+  "default": true
+}

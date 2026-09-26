@@ -1,0 +1,13 @@
+{
+  "name": "pypi",
+  "description": "PyPI exact package-name lookup: latest version, summary (no free-text search)",
+  "url": "https://pypi.org/pypi/{query}/json",
+  "results": "info",
+  "title": "name",
+  "link": "package_url",
+  "snippet": "summary",
+  "extra": {
+    "version": "version",
+    "python": "requires_python"
+  }
+}

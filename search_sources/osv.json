@@ -1,0 +1,13 @@
+{
+  "name": "osv",
+  "description": "Known vulnerabilities; query '<Ecosystem>:<package>[@version]', e.g. 'PyPI:requests@2.19.0'",
+  "results": "vulns",
+  "title": "id",
+  "link": "https://osv.dev/vulnerability/{id}",
+  "snippet": "summary",
+  "extra": {
+    "aliases": "aliases",
+    "published": "published"
+  },
+  "hook": "osv"
+}

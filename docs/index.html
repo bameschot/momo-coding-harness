@@ -457,8 +457,8 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     </div>
     <div class="card" style="--c: var(--focus)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>Guarded internet access</h3>
-      <p>An opt-in <code>fetch_url</code> tool that is off by default. Private addresses are blocked, redirects are re-checked, credentials are dropped across origins and page content is fenced off as untrusted.</p>
-      <a class="more" href="#net">Internet access →</a>
+      <p>Opt-in <code>fetch_url</code> and <code>web_search</code>, off by default. Search needs no API key and can return just the passages that answer the question. Private addresses are blocked and content is fenced off as untrusted.</p>
+      <a class="more" href="#search">Web search →</a>
     </div>
     <div class="card" style="--c: var(--danger)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Sandboxed by default</h3>
@@ -584,7 +584,7 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <tr><td><code>tree-sitter</code> + 16 grammars</td><td class="wrap">Code navigation and the code index. The grammar wheels are prebuilt and work offline.</td><td class="wrap">optional: without them, the code-navigation tools aren't offered</td></tr>
       <tr><td><code>pypdf</code></td><td class="wrap">Turning PDF attachments into text in the web UI (pure Python)</td><td class="wrap">optional</td></tr>
     </table></div>
-    <p>Everything else is Python's standard library: <code>curses</code> for the TUI, <code>http.server</code> for the web UI, <code>http.client</code> for Ollama and llama.cpp, <code>urllib</code> for <code>fetch_url</code>, and <code>threading</code> for the background work. The optional HTTPS mode (<code>--web-tls auto</code>) uses the <code>openssl</code> command that macOS and Linux already ship. The web UI is hand-written HTML, CSS and JavaScript with no npm, bundler or CDN. On disk, the optional packages take about <strong>22 MB</strong> (18 MB of that is grammars) and the harness itself about 1 MB.</p>
+    <p>Everything else is Python's standard library: <code>curses</code> for the TUI, <code>http.server</code> for the web UI, <code>http.client</code> for Ollama and llama.cpp, <code>urllib</code> for <code>fetch_url</code> and <code>web_search</code>, and <code>threading</code> for the background work. The optional HTTPS mode (<code>--web-tls auto</code>) uses the <code>openssl</code> command that macOS and Linux already ship. The web UI is hand-written HTML, CSS and JavaScript with no npm, bundler or CDN. On disk, the optional packages take about <strong>22 MB</strong> (18 MB of that is grammars) and the harness itself about 1 MB.</p>
     <h3 id="memory">Memory while running</h3>
     <p>Measured on 2026-09-23 on an Apple Silicon Mac with Python 3.14.7. Each figure is the resident memory of the momo process run with <code>--headless</code>, after the index had finished building. The model server isn't included.</p>
     <div class="table-scroll"><table>
@@ -759,6 +759,13 @@ ollama serve</code></pre></div>
       <tr><td><code>run_command</code></td><td>coding, momo, plan</td><td class="wrap">Any shell command. 900 s timeout. <code>/run-confirm on</code> asks before each one. The output is saved to a log, and the model gets <code>tail=</code>, <code>grep=</code> or a short head-and-tail view of it. See <a href="#run-output">Command output</a>.</td></tr>
       <tr><td><code>command_output</code></td><td>coding, momo, plan</td><td class="wrap">Search a saved command log again without rerunning it: <code>grep=</code>, <code>tail=</code> or a line range. Only in run mode <code>new</code>.</td></tr>
     </table></div>
+    <h3>Internet (all modes, only with <code>/net on</code>)</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Tool</th><th>Description</th></tr>
+      <tr><td><code>fetch_url</code></td><td class="wrap">Read a URL as text: HTML becomes light markdown, JSON is pretty-printed. Page on with <code>offset=</code>, jump with <code>find=</code>, pick JSON with <code>json_path=</code>. Writes (POST, PUT, PATCH, DELETE) ask first. See <a href="#net">Internet access</a>.</td></tr>
+      <tr><td><code>web_search</code></td><td class="wrap">Search keyless sources and check URLs the model proposes. <code>read=true</code> also returns the passages that answer the query. See <a href="#search">Web search</a>.</td></tr>
+      <tr><td><code>add_search_source</code></td><td class="wrap">Add a source that fits the project. It's dry-run first, then usable for the session; keeping it is your call.</td></tr>
+    </table></div>
   </section>
 
   <section id="run-output" data-voice="run-output">
@@ -858,7 +865,7 @@ FAILED (failures=2)
 
   <section id="net" data-voice="net">
     <h2>Internet access</h2>
-    <p><code>fetch_url</code> is the only tool that sends anything off your machine, so it's <strong>off by default</strong> and the model isn't even offered it until you turn it on. Neither setting is saved: both reset to the safe default at every launch.</p>
+    <p><code>fetch_url</code> and <code>web_search</code> are the only tools that send anything off your machine, so they're <strong>off by default</strong> and the model isn't even offered them until you turn them on. Neither setting is saved: both reset to the safe default at every launch. Everything below applies to both tools.</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/net on | local | off     <span class="com"># public only · also localhost + LAN · blocked</span>
 /net-confirm on|off       <span class="com"># ask before POST/PUT/PATCH/DELETE (default on)</span>
 /net-max-bytes 2mb        <span class="com"># download cap</span>
@@ -868,11 +875,68 @@ FAILED (failures=2)
     <ul>
       <li>Any scheme except <code>http</code> and <code>https</code>. The client is built without urllib's file, ftp and data handlers.</li>
       <li>Loopback, private, CGNAT and link-local addresses, unless you use <code>/net local</code>. Every <em>resolved</em> address is checked, so <code>http://2130706433/</code> and <code>http://127.1/</code> are blocked too.</li>
-      <li>Redirects into blocked addresses, because every hop is re-checked. <code>Authorization</code>, <code>Cookie</code> and API-key headers are dropped when a redirect changes the scheme, host or port.</li>
+      <li>Redirects into blocked addresses, because every hop is re-checked. When a redirect changes the scheme, host or port, every header the model set is dropped except <code>Accept</code>, <code>Accept-Language</code>, <code>User-Agent</code> and <code>Content-Type</code>, since a token can hide under any name.</li>
+      <li>DNS rebinding: the connection is pinned to the exact addresses that were checked, so a resolver can't answer "public" for the check and <code>169.254.169.254</code> a moment later. Certificates are still validated against the hostname.</li>
       <li>Credentials in the URL, control characters in URLs and responses, and compressed bodies (so no gzip bombs).</li>
       <li>Writes to local or private addresses <strong>always</strong> ask for confirmation, even with <code>/net-confirm off</code>.</li>
     </ul>
     <p class="note">Prompt injection and exfiltration aren't solved. Fetched pages are fenced as untrusted content, but small models don't resist injection well. Turn on <code>/run-confirm on</code> while browsing, and keep an eye on the URLs in the transcript.</p>
+  </section>
+
+  <section id="search" data-voice="search">
+    <h2>Web search</h2>
+    <p><code>fetch_url</code> only helps when the model already knows the URL, and small models guess URLs and loop on 404s. <code>web_search</code> gives them a way to find things without a search engine, an API key or Docker. It asks keyless JSON APIs directly and checks URLs the model proposes. It uses the same guard, pinning, size cap and untrusted-content fence as <code>fetch_url</code>.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">tool call</span></div><pre><code>web_search(query="python asyncio wait_for timeout", read=true,
+           urls=["https://docs.python.org/3/library/asyncio-task.html"])</code></pre></div>
+    <ul>
+      <li><strong><code>query</code> + <code>source</code>:</strong> with no source, the query goes in parallel to the defaults (Stack Overflow, Wikipedia, GitHub, MDN). Name one or more (<code>source="npm,crates"</code>) to search others. Six results with title, URL, a one-line snippet and fields such as the latest version take about 1.5k characters.</li>
+      <li><strong><code>urls</code>:</strong> up to five pages the model thinks hold the answer. A dead URL costs one line (<code>✗ … — HTTP 404</code>) instead of a whole <code>fetch_url</code> turn. A live one is listed first, with its best-matching passage as the snippet.</li>
+      <li><strong><code>read=true</code>:</strong> also fetches the top three pages and returns only the passages that match the query, ranked with BM25 over paragraphs and code blocks and kept within <code>/net-max-chars</code>. For Stack Overflow it uses the accepted and top-voted answers from the API. Pages land in the <code>fetch_url</code> cache, so a follow-up <code>find=</code> costs nothing.</li>
+    </ul>
+    <div class="table-scroll"><table>
+      <tr><th>Source</th><th>Finds</th></tr>
+      <tr><td><code>stackoverflow</code> (default)</td><td class="wrap">Questions; <code>read=true</code> returns the top answers. 300 requests a day per IP.</td></tr>
+      <tr><td><code>wikipedia</code> (default)</td><td class="wrap">Articles: concepts, algorithms, protocols</td></tr>
+      <tr><td><code>github</code> (default)</td><td class="wrap">Repositories. 10 searches a minute without a login.</td></tr>
+      <tr><td><code>mdn</code> (default)</td><td class="wrap">HTML, CSS, JavaScript and Web API docs</td></tr>
+      <tr><td><code>npm</code>, <code>crates</code>, <code>maven</code></td><td class="wrap">Packages with their latest version</td></tr>
+      <tr><td><code>pypi</code></td><td class="wrap">Exact package-name lookup (PyPI has no search API)</td></tr>
+      <tr><td><code>osv</code></td><td class="wrap">Known vulnerabilities; query <code>PyPI:requests@2.19.0</code>, <code>Maven:group:artifact@version</code> …</td></tr>
+    </table></div>
+    <h3>Adding a source</h3>
+    <p>A source is a small JSON file. Put it in <code>~/.momo-harness/search_sources/</code> and run <code>/search-sources reload</code>. The working directory is never read, so a cloned repository can't add endpoints.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">~/.momo-harness/search_sources/docsrs.json</span></div><pre><code>{"name": "docsrs", "description": "Rust crate docs on docs.rs",
+ "url": "https://crates.io/api/v1/crates?q={query}&amp;per_page={n}",
+ "results": "crates",
+ "title": "name", "link": "https://docs.rs/{name}", "snippet": "description",
+ "extra": {"version": "max_stable_version"}}</code></pre></div>
+    <ul>
+      <li><code>url</code>: an <code>https://</code> template with <code>{query}</code> and, optionally, <code>{n}</code>.</li>
+      <li><code>results</code>: the dotted path to the list of hits (<code>""</code> for the top level).</li>
+      <li><code>title</code>, <code>link</code>, <code>snippet</code>, <code>extra</code>: dotted paths within one hit. <code>link</code> may be a template such as <code>https://docs.rs/{name}</code>.</li>
+      <li>Optional: <code>headers</code> (no credentials), <code>"default": true</code> to include it in plain searches, and <code>"hook"</code> for the few APIs a template can't express.</li>
+    </ul>
+    <p>The model can add sources too, with <code>add_search_source</code>. Each one is dry-run with a test query. A wrong path returns the keys that are there, and a test that finds nothing is refused. A source that passes works for the rest of the session. Model-proposed sources can't use hooks, can't become a default, can't carry credential headers, and are limited to 10 per session.</p>
+    <h3>Let the model propose sources</h3>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/net on
+/search-sources suggest                  <span class="com"># analyse this project, add fitting sources</span>
+/search-sources suggest papers on tides  <span class="com"># …with a focus</span>
+/search-sources save all                 <span class="com"># keep what it added (or save &lt;name&gt;)</span></code></pre></div>
+    <ol>
+      <li><strong>momo scans the working directory:</strong> file types, layout, the README, other documents' headings, package manifests, and any custom package repository they name. Passwords, tokens and query strings are stripped from those URLs before the model sees them.</li>
+      <li><strong>The model gives its view of the project</strong>: what it is, who it's for, and what someone working on it would look up. That covers libraries and registries, and also subject matter like terminology, reference works and papers.</li>
+      <li><strong>It adds 3 to 6 sources.</strong> The ones the project's files call for are recommended up front: docs.rs for a <code>Cargo.toml</code>, Docker Hub for a <code>Dockerfile</code>, a search spec for your company's Nexus or Artifactory, and Wikidata, a thesaurus and Open Library for a project with no code. A dozen verified keyless APIs are offered as further options.</li>
+      <li><strong>It ends with a table</strong> of what it added. Nothing is kept until you run <code>/search-sources save</code>.</li>
+    </ol>
+    <p class="note">In a test with Qwen3.5 9B, a folder of novel chapters about a volcanic archipelago got Wikidata, a thesaurus, Open Library and Crossref papers. A Rust + Spring Boot tile server got docs.rs, Docker Hub, Wikidata and OpenAlex; the unreachable internal Nexus was tried once and skipped.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/search-sources</code></td><td class="wrap">List sources and where each comes from: shipped, user or session</td></tr>
+      <tr><td><code>/search-sources suggest [focus]</code></td><td class="wrap">Have the model analyse the project and add fitting sources for the session</td></tr>
+      <tr><td><code>/search-sources save &lt;name&gt;|all</code></td><td class="wrap">Keep session sources for future sessions</td></tr>
+      <tr><td><code>/search-sources rm &lt;name&gt;</code></td><td class="wrap">Remove a user or session source</td></tr>
+      <tr><td><code>/search-sources reload</code></td><td class="wrap">Re-read the source files</td></tr>
+    </table></div>
   </section>
 
   <section id="web" data-voice="web">
@@ -1103,6 +1167,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><th>Command</th><th>Description</th></tr>
       <tr><td><code>/index …</code></td><td class="wrap">See <a href="#index">Code index</a></td></tr>
       <tr><td><code>/net …</code></td><td class="wrap">See <a href="#net">Internet access</a></td></tr>
+      <tr><td><code>/search-sources …</code></td><td class="wrap">See <a href="#search">Web search</a></td></tr>
       <tr><td><code>/guides on|off|reload</code></td><td class="wrap">Project guide files in the system prompt</td></tr>
       <tr><td><code>/list-skills</code>, <code>/load-skill</code>, <code>/unload-skill</code></td><td class="wrap">Manage <a href="#skills">skills</a></td></tr>
     </table></div>
@@ -1148,6 +1213,8 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
 │   └── 3f2a9c…e1.filter  <span class="com"># which files that index covers (/index-filter)</span>
 ├── runs/
 │   └── 2026-09-23T18-04-11/r1.log  <span class="com"># saved run_command output, per session</span>
+├── search_sources/
+│   └── docsrs.json       <span class="com"># your web_search sources (/search-sources save)</span>
 └── tls/                  <span class="com"># only with --web-tls auto</span>
     ├── momo-ca.pem       <span class="com"># the CA certificate you trust on your devices</span>
     ├── momo-ca.key       <span class="com"># the CA's private key: never share</span>
@@ -1162,6 +1229,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line</td><td class="wrap">For auditing what the model did. Secret request headers are masked.</td></tr>
       <tr><td><code>index/*.pickle</code></td><td class="wrap">The code index, named by a hash of the workdir</td><td class="wrap">Written by <code>/index save</code>, and automatically with <code>/index-persist</code> (on by default). Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
       <tr><td><code>runs/&lt;session&gt;/rN.log</code></td><td class="wrap">The full output of each <code>run_command</code> (<a href="#run-output">Command output</a>)</td><td class="wrap">Last 20 per session. Deleted on <code>/clear</code>, <code>/new</code> and session load; other sessions' folders go after 3 days.</td></tr>
+      <tr><td><code>search_sources/*.json</code></td><td class="wrap">Your own <a href="#search">web_search sources</a>: ones you wrote, and ones saved with <code>/search-sources save</code></td><td class="wrap">Loaded after the shipped sources; a file with a shipped name overrides it. Never read from the workdir.</td></tr>
       <tr><td><code>index/*.filter</code></td><td class="wrap">Which files that workdir's index covers, in gitignore syntax</td><td class="wrap">Created from the project's <code>.gitignore</code> files the first time the index starts. Edit it with <code>/index-filter</code> or View → Code index → Filter…. Mode 0600.</td></tr>
       <tr><td><code>tls/</code></td><td class="wrap">momo's local CA and HTTPS certificate</td><td class="wrap">Folder 0700, keys 0600. Deleting it makes a new CA on the next <code>--web-tls auto</code> start, and every device must then trust the new one.</td></tr>
     </table></div>
@@ -1410,6 +1478,11 @@ const SPEECH = {
     "< off by default!", "< /net local for the lan", "< 127.1 is still blocked",
     "< every hop re-checked", "< no file:// sneaking", "< cookies stay home",
     "< untrusted content fence", "< /run-confirm on pls",
+  ],
+  search: [
+    "< no api key needed!", "< read=true: just the answer", "< a bad guess costs one line",
+    "< docs.rs for your crate~", "< /search-sources suggest", "< novels need thesauri too",
+    "< save all to keep them", "< 0 results? not added",
   ],
   web: [
     "< one session, two windows", "< no cdn, no build step", "< @ for paths, / for cmds",

@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import code_index, code_nav, net
+from . import code_index, code_nav, net, search
 from . import run_store as run_store_mod
 from .paths import (BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, SKIP_DIRS, safe_entry_path,
                     safe_path, walk_files)
@@ -460,6 +460,32 @@ NET_TOOLS = [
          "offset":    {"type": "integer", "description": "Character position in the page text to start from — use the offset named in the previous result's note to read the next part"},
          "json_path": {"type": "string",  "description": "For a JSON response: dotted path to return only that part, e.g. \"info.version\" or \"items.0.name\". A miss lists the keys available."}},
         ["url"]),
+    # The source list in `source` is filled in per session by
+    # search.web_search_tool (harness._current_tools), from the loaded sources.
+    _fn("web_search", search.WEB_SEARCH_DESCRIPTION,
+        {"query":       {"type": "string",  "description": "What to look for, in plain words, e.g. \"python asyncio timeout\". For osv: '<Ecosystem>:<package>@<version>'."},
+         "source":      {"type": "string",  "description": "Source name, or several comma-separated. Omit to search the defaults."},
+         "urls":        {"type": "array", "items": {"type": "string"}, "description": f"Up to {search._MAX_URLS} pages you think hold the answer (official docs, a README). Each is checked: a dead one costs one line, a live one is listed first."},
+         "max_results": {"type": "integer", "description": f"Results to list (default {search._DEFAULT_RESULTS}, maximum {search._MAX_RESULTS})"},
+         "read":        {"type": "boolean", "description": "Also fetch the top pages and return the passages that match the query (default false)"}},
+        []),
+    _fn("add_search_source",
+        "Add a search source for web_search that fits this project — e.g. docs.rs for a Rust "
+        "crate, a company's Nexus/Artifactory search, a Read the Docs project's search API. "
+        "First look at the API's response with fetch_url(url, json_path=...) to learn its "
+        "shape, then describe it as a spec. The source is dry-run with test_query: on success "
+        "it is usable at once for this session; on failure the error lists the keys found so "
+        "you can fix the paths and call again with the same name. save=true asks the user to "
+        "keep it for future sessions.",
+        {"spec": {"type": "object", "description": (
+            "JSON object: name (a-z0-9_-), description (one line), url (https template with "
+            "{query} and optional {n}), results (dotted path to the result list; \"\" for the "
+            "top level), title and link (dotted paths within one result; link may be a "
+            "template like \"https://docs.rs/{name}\"), optional snippet, extra "
+            "({label: path}, up to 5) and headers (no credentials).")},
+         "test_query": {"type": "string",  "description": "A query this source should find something for"},
+         "save":       {"type": "boolean", "description": "Ask the user to keep the source for future sessions (default false)"}},
+        ["spec", "test_query"]),
 ]
 
 DESIGN_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS
@@ -1360,6 +1386,8 @@ _EXECUTORS = {
     "run_command":        _run_command,
     "command_output":     _command_output,
     "fetch_url":          net.fetch_url,
+    "web_search":         search.web_search,
+    "add_search_source":  search.add_search_source,
 }
 if code_nav.AVAILABLE:
     _EXECUTORS.update({
@@ -1383,7 +1411,9 @@ if code_nav.AVAILABLE:
 # run_command needs to know whether /net is off, to steer curl/wget; cancel
 # lets Esc stop a long command or scan; the index tools get the live index.
 _INJECTED = {
-    "fetch_url":   ("net_access", "net_max_bytes", "net_max_chars"),
+    "fetch_url":   ("net_access", "net_max_bytes", "net_max_chars", "cancel"),
+    "web_search":  ("net_access", "net_max_bytes", "net_max_chars", "cancel", "search_sources"),
+    "add_search_source": ("net_access", "net_max_bytes", "cancel", "search_sources"),
     "run_command": ("net_access", "cancel", "run_mode", "run_store", "run_output_limit"),
     "command_output": ("run_store", "run_output_limit"),
     "grep_files":  ("cancel",),
@@ -1432,11 +1462,13 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              index: "code_index.ProjectIndex | None" = None, cancel=None,
              index_route: bool = True, read_budget: int | None = None,
              run_mode: str = "classic", run_store: "run_store_mod.RunStore | None" = None,
-             run_output_limit: int = run_store_mod.DEFAULT_LIMIT) -> str:
+             run_output_limit: int = run_store_mod.DEFAULT_LIMIT,
+             search_sources: "search.SourceRegistry | None" = None) -> str:
     """read_budget: characters one read_file may return (None = no limit).
-    run_mode "new" with a run_store saves run_command output to a log (/run-mode)."""
+    run_mode "new" with a run_store saves run_command output to a log (/run-mode).
+    search_sources: the session's web_search sources (None = the default set)."""
     more = {"read_budget": read_budget, "run_mode": run_mode, "run_store": run_store,
-            "run_output_limit": run_output_limit}
+            "run_output_limit": run_output_limit, "search_sources": search_sources}
     if index is not None and index_route and name in _ROUTED:
         routed = _route_to_index(name, args, workdir, index, cancel)
         if routed is not None:
@@ -1582,7 +1614,8 @@ def _index_result_hint(name: str, args: dict, workdir: Path, index) -> str:
 def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_bytes: int,
               net_max_chars: int, index, cancel, more: dict | None = None) -> str:
     more = {"read_budget": None, "run_mode": "classic", "run_store": None,
-            "run_output_limit": run_store_mod.DEFAULT_LIMIT, **(more or {})}
+            "run_output_limit": run_store_mod.DEFAULT_LIMIT, "search_sources": None,
+            **(more or {})}
     fn = _EXECUTORS.get(name)
     if fn is None:
         return f"ERROR: unknown tool '{name}'"
@@ -1708,6 +1741,13 @@ _TOOL_EXAMPLES: dict[str, dict] = {
                             "details": "Add test_last_page_included to tests/test_pager.py, then run python -m pytest.",
                             "files": ["tests/test_pager.py"]}]},
     "fetch_url":      {"url": "https://peps.python.org/pep-0008/", "find": "Naming Conventions"},
+    "web_search":     {"query": "python asyncio wait_for timeout", "read": True,
+                       "urls": ["https://docs.python.org/3/library/asyncio-task.html"]},
+    "add_search_source": {"spec": {"name": "docsrs", "description": "Rust crate docs on docs.rs",
+                                   "url": "https://crates.io/api/v1/crates?q={query}&per_page={n}",
+                                   "results": "crates", "title": "name",
+                                   "link": "https://docs.rs/{name}", "snippet": "description"},
+                          "test_query": "serde"},
     "complete_step":  {"summary": "Changed the loop bound in paginate(); python -m pytest tests/test_pager.py passes."},
     "revise_plan":    {"reason": "paginate() is also duplicated in api/pager.py",
                        "steps": [{"title": "Fix loop bound in both paginate() copies",

@@ -1,0 +1,12 @@
+{
+  "name": "npm",
+  "description": "npm packages: name, latest version, description",
+  "url": "https://registry.npmjs.org/-/v1/search?text={query}&size={n}",
+  "results": "objects",
+  "title": "package.name",
+  "link": "package.links.npm",
+  "snippet": "package.description",
+  "extra": {
+    "version": "package.version"
+  }
+}

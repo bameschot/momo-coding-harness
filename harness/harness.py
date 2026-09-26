@@ -17,6 +17,7 @@ from .tools import (ALL_TOOLS, NET_TOOLS, PLAN_EXECUTE_TOOLS,
                     dispatch, render_tool_reference, with_index_tools, with_run_mode)
 from . import run_store as run_store_mod
 from . import net as net_mod
+from . import search as search_mod
 from . import tools as tools_mod
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
@@ -44,6 +45,12 @@ _GUIDE_FILES = ("AGENTS.md", "CLAUDE.md", "MOMO.md", "GEMINI.md",
 _GUIDE_MAX_CHARS = 24_000   # all guides together; also capped at context_limit chars (~1/4)
 
 
+def _context_fetch_chars(context_limit: int) -> int:
+    """The context-derived ceiling on one fetch_url window, in characters:
+    20% of the compaction threshold at ~3.5 chars/token, at least 3,000."""
+    return max(3000, int(context_limit * 3.5 * 0.2))
+
+
 def _mask_tool_args(name: str, args: dict) -> dict:
     """Blank out secret request-header values in a fetch_url call.
 
@@ -54,7 +61,7 @@ def _mask_tool_args(name: str, args: dict) -> dict:
     """
     if name != "fetch_url" or not isinstance(args.get("headers"), dict):
         return args
-    headers = {k: ("***" if str(k).lower() in net_mod.SECRET_HEADERS else v)
+    headers = {k: ("***" if net_mod.is_secret_header(k) else v)
                for k, v in args["headers"].items()}
     return {**args, "headers": headers}
 
@@ -234,6 +241,9 @@ class Harness:
         # Text returned per fetch_url call (the rest is paged with offset=/find=).
         # /net-max-chars
         self.net_max_chars: int = net_mod.DEFAULT_MAX_CHARS
+        # web_search sources: shipped, the user's, and any the model added this
+        # session with add_search_source.  /search-sources
+        self.search_sources = search_mod.SourceRegistry()
         self.active_skills: list[str] = []
         self.input_history: list[str] = []
         # Idle recap: when on, momo recaps the last turns in its speech bubble after
@@ -322,10 +332,13 @@ class Harness:
 
     def _fetch_chars(self) -> int:
         """Text budget for one fetch_url result: /net-max-chars, but never above
-        /tool-result, which fetch_url is exempt from because it windows itself."""
+        /tool-result, which fetch_url is exempt from because it windows itself,
+        nor above ~20% of the context — the 24k default is most of an 8k window,
+        and the model pages on with offset=/find= anyway."""
+        n = self.net_max_chars
         if self.max_tool_result > 0:
-            return min(self.net_max_chars, self.max_tool_result)
-        return self.net_max_chars
+            n = min(n, self.max_tool_result)
+        return min(n, _context_fetch_chars(self.context_limit))
 
     def _net_confirm_prompt(self, args: dict) -> str | None:
         """The y/N question to ask before a fetch_url write, or None to just run it.
@@ -343,14 +356,33 @@ class Harness:
             return None
         url = str(args.get("url") or "")
         private = net_mod.is_private_target(url)
+        # Model-supplied text headed for the curses screen: no escape sequences.
+        shown_url = net_mod._safe_line(url, 500)
         if not self.net_confirm and not private:
             return None
         why = ("\nThis is a local/private address, so it is confirmed even though "
                "write confirmation is off." if private and not self.net_confirm else "")
-        body = str(args.get("body") or "")
+        body = net_mod._CTRL.sub("", str(args.get("body") or ""))
         shown = body if len(body) <= 500 else body[:500] + f"… (+{len(body) - 500} chars)"
         return (f"Send this request? Reply 'y' to allow, anything else to decline.{why}\n"
-                f"  {method} {url}" + (f"\n  body: {shown}" if shown else ""))
+                f"  {net_mod._safe_line(method, 20)} {shown_url}"
+                + (f"\n  body: {shown}" if shown else ""))
+
+    def _add_search_source(self, args: dict) -> str:
+        """add_search_source: the tool validates, dry-runs and registers the
+        source for the session; persisting it (save=true) is decided here and
+        ALWAYS asks — a saved source outlives the session, and a project file
+        could have prompt-injected the proposal."""
+        self.search_sources.last_added = None
+        result = self._dispatch("add_search_source", args)
+        save = args.get("save") in (True, "true", "True", 1)
+        name = self.search_sources.last_added
+        if not save or name is None or result.startswith("ERROR"):
+            return result
+        if self._confirm(self.search_sources.save_prompt(name)):
+            return result + "\n\n" + self.search_sources.save(name)
+        return (result + "\n\nNot saved: the user declined. The source still works for this "
+                "session; do not ask again.")
 
     # ── file-edit diffs ─────────────────────────────────────────────────────────
 
@@ -518,7 +550,10 @@ class Harness:
             tools = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
         tools = with_run_mode(tools, self.run_mode)
         if self.net_access != "off":
-            tools = tools + NET_TOOLS
+            # web_search's schema lists the loaded sources, so it is built per call.
+            tools = tools + [search_mod.web_search_tool(t, self.search_sources)
+                             if t["function"]["name"] == "web_search" else t
+                             for t in NET_TOOLS]
         if self.index is not None:
             tools = with_index_tools(tools)
         return tools
@@ -654,7 +689,8 @@ class Harness:
                             self._fetch_chars(), index=self.index, cancel=self._cancel,
                             index_route=self.index_route, read_budget=self._read_budget(),
                             run_mode=self.run_mode, run_store=self.run_store,
-                            run_output_limit=self.run_output_limit)
+                            run_output_limit=self.run_output_limit,
+                            search_sources=self.search_sources)
         except Exception as e:
             return f"ERROR: {name} failed: {type(e).__name__}: {e}"
 
@@ -1493,6 +1529,8 @@ class Harness:
                                       "never sent. The server was not contacted and nothing "
                                       "is wrong with it. Do not retry — ask the user what "
                                       "they would like to do instead.")
+                    elif name == "add_search_source":
+                        result = self._add_search_source(args)
                     else:
                         result = self._dispatch(name, args)
                     # fetch_url windows its own output (net_max_chars) and says how to
@@ -1500,7 +1538,7 @@ class Harness:
                     # content fence and point the model at read_file.
                     # New-mode run_command / command_output window themselves too.
                     if (self.max_tool_result > 0 and len(result) > self.max_tool_result
-                            and name != "fetch_url"
+                            and name not in ("fetch_url", "web_search")
                             and not (name in ("run_command", "command_output")
                                      and self.run_mode == "new")):
                         total = len(result)

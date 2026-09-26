@@ -366,11 +366,11 @@ class Hardening(unittest.TestCase):
     def test_folded_header_cannot_add_lines(self):
         # An obs-fold continuation injected its own line into the head block,
         # which sits ABOVE the fence and reads as harness output.
-        h = self._hdr("Content-Type: text/plain\nServer: line1\n\tline2-INJECTED\n")
+        h = self._hdr("Content-Type: text/plain\nLocation: line1\n\tline2-INJECTED\n")
         out = net._render("u", "u", 200, "OK", h, "text", "body", [], [], "GET")
         head = out.split("\n\n")[0]
-        server_lines = [l for l in head.splitlines() if l.startswith("server:")]
-        self.assertEqual(len(server_lines), 1)
+        location_lines = [l for l in head.splitlines() if l.startswith("location:")]
+        self.assertEqual(len(location_lines), 1)
         self.assertNotIn("\n\tline2", head)
         for line in head.splitlines():
             self.assertRegex(line, r"^(HTTP |redirected:|body:|note:|[a-z-]+:)")
@@ -628,10 +628,17 @@ class CredentialsAcrossRedirects(unittest.TestCase):
         self.assertIn("attacker page", out)
         self.assertIn("were NOT sent", out)   # the caller is told
 
-    def test_non_secret_headers_still_travel(self):
-        net.fetch_url(f"{self.base}/redir", workdir=WD, net_access="local",
-                      headers={"Accept": "text/plain", "X-Trace": "keep-me"})
-        self.assertEqual(ATTACKER_SAW[0].get("x-trace"), "keep-me")
+    def test_only_allowlisted_headers_travel(self):
+        # A credential can hide under any header name, so only the harmless
+        # content-negotiation headers follow a redirect to another origin.
+        out = net.fetch_url(f"{self.base}/redir", workdir=WD, net_access="local",
+                            headers={"Accept": "text/plain", "X-Trace": "drop-me",
+                                     "Private-Token": "glpat-SECRET"})
+        got = ATTACKER_SAW[0]
+        self.assertEqual(got.get("accept"), "text/plain")
+        self.assertIsNone(got.get("x-trace"))
+        self.assertIsNone(got.get("private-token"))
+        self.assertIn("Private-token", out)    # named in the note
 
 
 class LiveServer(unittest.TestCase):
@@ -909,10 +916,19 @@ class Budget(unittest.TestCase):
     def test_tool_result_cap_lowers_fetch_budget(self):
         from types import SimpleNamespace
         from harness.harness import Harness
-        h = SimpleNamespace(max_tool_result=5000, net_max_chars=24000)
+        h = SimpleNamespace(max_tool_result=5000, net_max_chars=24000, context_limit=65536)
         self.assertEqual(Harness._fetch_chars(h), 5000)
         h.max_tool_result = 0
         self.assertEqual(Harness._fetch_chars(h), 24000)
+
+    def test_small_context_lowers_fetch_budget(self):
+        # 24k chars is ~6k tokens: most of an 8k-context model's window.
+        from types import SimpleNamespace
+        from harness.harness import Harness
+        h = SimpleNamespace(max_tool_result=0, net_max_chars=24000, context_limit=8192)
+        self.assertEqual(Harness._fetch_chars(h), int(8192 * 3.5 * 0.2))
+        h.context_limit = 1024
+        self.assertEqual(Harness._fetch_chars(h), 3000)     # floor
 
     def test_schema_advertises_paging(self):
         desc = next(t for t in self.tools.NET_TOOLS
@@ -994,6 +1010,147 @@ class PagingLive(unittest.TestCase):
 
     def test_bad_offset_rejected(self):
         self.assertIn("not a number", self.fetch("/long", offset="soon"))
+
+
+
+class ReviewFixes(unittest.TestCase):
+    """Regressions for the fetch_url review: extraction, typing, pinning, cancel."""
+
+    BODY = "<p>" + "Real content here. " * 50 + "</p>"
+
+    def test_omitted_head_end_tag_keeps_body(self):
+        # </head> is optional in HTML5; the head drop used to swallow the page.
+        html = f"<html><head><title>T</title><meta charset=utf-8><body><main>{self.BODY}</main>"
+        out = net.html_to_text(html)
+        self.assertIn("# T", out)
+        self.assertIn("Real content here.", out)
+
+    def test_page_wrapped_in_form_kept(self):
+        # ASP.NET WebForms wraps the whole page in one <form>.
+        html = f"<html><head><title>T</title></head><body><form id=f>{self.BODY}" \
+               "<button>Submit me</button></form></body></html>"
+        out = net.html_to_text(html)
+        self.assertIn("Real content here.", out)
+        self.assertNotIn("Submit me", out)
+
+    def test_textual_application_types_decoded(self):
+        for ctype in ("application/javascript", "application/yaml", "application/toml",
+                      "application/octet-stream"):
+            kind, text = net._decode_body(b"let a = 1\n", {"Content-Type": ctype}, "u")
+            self.assertEqual(kind, "text", ctype)
+            self.assertIn("let a = 1", text)
+
+    def test_binary_still_binary(self):
+        png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        self.assertEqual(net._decode_body(png, {"Content-Type": "image/png"}, "u")[0], "binary")
+        self.assertEqual(net._decode_body(png, {"Content-Type": "application/octet-stream"},
+                                          "u")[0], "binary")
+        self.assertEqual(net._decode_body(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n",
+                                          {"Content-Type": "application/pdf"}, "u")[0], "binary")
+
+    def test_is_secret_header(self):
+        for name in ("Authorization", "Private-Token", "X-Goog-Api-Key", "X-GitHub-Token",
+                     "X-Session-Id", "Cookie"):
+            self.assertTrue(net.is_secret_header(name), name)
+        for name in ("Accept", "Content-Type", "X-Trace", "User-Agent"):
+            self.assertFalse(net.is_secret_header(name), name)
+
+    def test_log_masking_catches_custom_secret_headers(self):
+        from harness.harness import _mask_tool_args
+        shown = _mask_tool_args("fetch_url", {"url": "u", "headers": {
+            "X-Goog-Api-Key": "AIza-SECRET", "Accept": "text/plain"}})
+        self.assertEqual(shown["headers"]["X-Goog-Api-Key"], "***")
+        self.assertEqual(shown["headers"]["Accept"], "text/plain")
+
+    def test_read_capped_stops_on_cancel(self):
+        ev = threading.Event()
+        ev.set()
+        with self.assertRaises(net._Cancelled):
+            net._read_capped(io.BytesIO(b"x" * 5000), 10_000, time.monotonic() + 60, ev)
+
+    def test_redirect_stops_on_cancel(self):
+        ev = threading.Event()
+        ev.set()
+        h = net._GuardedRedirectHandler(lambda u: None, cancel=ev)
+        req = urllib.request.Request("https://example.com/a")
+        with self.assertRaises(net._Cancelled):
+            h.redirect_request(req, io.BytesIO(b""), 302, "Found",
+                               _headers("Location: https://example.com/b\n"),
+                               "https://example.com/b")
+
+    def test_confirm_prompt_strips_escapes(self):
+        from types import SimpleNamespace
+        from harness.harness import Harness
+        h = SimpleNamespace(net_confirm=True)
+        with mock.patch.object(net, "_getaddrinfo", fake_dns(DNS)):
+            q = Harness._net_confirm_prompt(h, {"method": "POST",
+                                                "url": "https://example.com/\x1b[2J",
+                                                "body": "a\x1b]0;pwn\x07b"})
+        self.assertNotIn("\x1b", q)
+        self.assertNotIn("\x07", q)
+
+
+class Pinning(unittest.TestCase):
+    """Connections dial the vetted address, never a second DNS answer."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.port = cls.srv.server_port
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def test_connection_uses_pinned_address(self):
+        # 'pinned.test' does not exist in real DNS, so reaching the server at
+        # all proves the socket went to the pinned IP, not a fresh lookup.
+        pins = {("pinned.test", self.port): ["127.0.0.1"]}
+        op, _ = net.build_opener(lambda u: None, pins=pins)
+        with op.open(f"http://pinned.test:{self.port}/", timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+
+    def test_unvetted_host_refused(self):
+        op, _ = net.build_opener(lambda u: None, pins={})
+        with self.assertRaises(urllib.error.URLError) as cm:
+            op.open(f"http://127.0.0.1:{self.port}/", timeout=5)
+        self.assertIn("not vetted", str(cm.exception.reason))
+
+    def test_rebinding_resolver_cannot_redirect_the_connection(self):
+        # First answer public (approved), any later answer loopback.  The
+        # connection must go to the approved address.
+        calls = []
+
+        def rebinding(host, port, *a, **kw):
+            calls.append(host)
+            ip = "93.184.216.34" if len(calls) == 1 else "127.0.0.1"
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+
+        dialled = []
+
+        def fake_connect(address, *a, **kw):
+            dialled.append(address)
+            raise OSError("test: not really connecting")
+
+        with mock.patch.object(net, "_getaddrinfo", rebinding), \
+                mock.patch.object(net.socket, "create_connection", fake_connect):
+            out = net.fetch_url(f"http://rebind.test:{self.port}/", workdir=WD,
+                                net_access="on")
+        self.assertIn("ERROR", out)
+        self.assertEqual(dialled, [("93.184.216.34", self.port)])
+
+    def test_fetch_end_to_end_through_pin(self):
+        with mock.patch.object(net, "_getaddrinfo", fake_dns({"local.test": ["127.0.0.1"]})):
+            out = net.fetch_url(f"http://local.test:{self.port}/", workdir=WD,
+                                net_access="local")
+        self.assertIn("HTTP 200", out)
+
+    def test_get_body_ignored_with_note(self):
+        out = net.fetch_url(f"http://127.0.0.1:{self.port}/", workdir=WD,
+                            net_access="local", body="{}")
+        self.assertIn("body argument was ignored", out)
 
 
 if __name__ == "__main__":

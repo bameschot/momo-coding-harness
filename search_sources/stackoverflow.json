@@ -1,0 +1,15 @@
+{
+  "name": "stackoverflow",
+  "description": "Stack Overflow questions; read=true returns the top answers",
+  "url": "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=stackoverflow&pagesize={n}",
+  "results": "items",
+  "title": "title",
+  "link": "link",
+  "snippet": "tags",
+  "extra": {
+    "score": "score",
+    "answers": "answer_count"
+  },
+  "default": true,
+  "hook": "stackexchange"
+}
