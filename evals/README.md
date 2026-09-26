@@ -252,3 +252,57 @@ Known C limits: in files with parse errors, locals of a mis-split function
 land at file level and are listed as variables (most of the 9.7% extra
 definitions); K&R-style definitions (`int f(a, b) int a; ...`, all of zlib) are
 not parsed by tree-sitter-c at all.
+
+## Command output (`/run-mode`, `run_output_bench.py`, `--suite shell`)
+
+`/run-mode new` (the default) saves `run_command` output to
+`~/.momo-harness/runs/<session>/rN.log` and returns a view: `tail=N`, `grep=`,
+or by default the whole output up to `/run-output-limit` (5000 chars), else its
+first 25% and last 75%. Every result ends with the log's full path, which
+`command_output` takes to search it again. `/run-mode classic` is the old
+whole-output behaviour, kept for comparison.
+
+**Without a model**: `python evals/run_output_bench.py` replays six generated
+outputs (pytest with failures, a make/gcc build, git log, pip, find, a short run)
+through the real `run_command` and checks which facts survive each view:
+
+| view | chars | facts |
+|---|---|---|
+| classic | 195,510 | 10/10 |
+| new, default view | 26,816 (14%) | 7/10 — misses what sits mid-output |
+| new, best tail=/grep= | 2,032 (1%) | 10/10 |
+| new, default + one command_output | 27,791 (14%) | 10/10 |
+
+The new schema costs ≈ +640 tokens in every request (tool reference + JSON).
+
+**With the model** (Qwen3.5-9B-Q4_0, llama.cpp, 3 runs × 5 tasks per mode, 2026-09-26):
+
+```bash
+python evals/run_evals.py --suite shell --run-mode classic --runs 3
+python evals/run_evals.py --suite shell --run-mode new --runs 3
+```
+
+| | classic | new |
+|---|---|---|
+| facts found | 15/15 runs | 15/15 runs |
+| tool calls | 71 | 66 |
+| command output sent to the model | 436 KB (28.4 KB/run, max 76) | 62 KB (4.1 KB/run, max 7) |
+| all tool output | 460 KB | 74 KB |
+| wall time | 1,060 s | 686 s (−35%) |
+| self-piped commands (`\| grep`, `\| tail`) | 16 | 3 |
+| same command run again | 9 | 3 |
+
+Per task (mean seconds): which-fail 67→38, count 44→29, warning 90→43,
+small 35→34, cause 118→86. Call counts did not drop: the build warning sits in
+the middle of 57 KB, so new mode needs a second look (4–6 calls vs 1–4), but
+each look is ~5 KB instead of ~57 KB. The model used `command_output` 13 times,
+passing the full printed path in 11. It also ran shell `grep` on the log file
+itself, which works because it is a plain file. It used the native
+`tail=`/`grep=` args 10 times. Once it garbled the long session directory in the
+path, so `command_output` now matches on the `rN.log` name (it only ever opens
+its own store's file).
+
+**Keep shell tasks `isolate=True`**: in coding mode the model edits the project.
+In the first attempt it fixed the fixture's planted bugs, and every later run
+chased failures that no longer existed (100 and 81 calls). Isolated tasks run in
+a fresh temp copy of their workdir.

@@ -514,6 +514,9 @@ function applyStatus(s) {
   $("#net-local").disabled = !netOn;
   $("#net-confirm").checked = s.net_confirm;
   $("#guides").checked = s.guides;
+  $("#run-mode").checked = s.run_mode !== "classic";
+  const rl = $("#run-output-limit");
+  if (document.activeElement !== rl && s.run_output_limit) rl.value = String(s.run_output_limit);
   $("#net-confirm").disabled = !netOn;
   const mb = $("#net-max-bytes");
   if (document.activeElement !== mb) mb.value = formatSize(s.net_max_bytes);

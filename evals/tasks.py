@@ -22,6 +22,10 @@ class Task:
     max_calls: int = 3         # over this and the run is inefficient, not wrong
     modes: tuple[str, ...] = ("chat",)
     workdir: str = ""          # project to run in, relative to the repo (default: the repo)
+    # Run in a fresh temp copy of workdir: in coding mode the model edits files
+    # (it fixed the fixture's planted bugs, and every later run then chased a
+    # failure that no longer existed), and runs must not see each other's changes.
+    isolate: bool = False
 
 
 TASKS: list[Task] = [
@@ -310,4 +314,38 @@ LANG_TASKS: list[Task] = [
          ("CartView", "App"), 2),
         ("trap", "What does the App component render, and with which title text?", _LOOKUP,
          ("CartView", "Shop"), 2)),
+]
+
+
+# Shell output (/run-mode new vs classic): evals/shell/project has a 300-test
+# suite with two failures, a build that prints ~57 KB with one warning in the
+# middle, and a quiet linter.  Every answer needs run_command; what differs is
+# how much output reaches the model and how many calls it takes to get the fact.
+# Run with --suite shell --run-mode new|classic and compare.
+_SHELL = "evals/shell/project"
+_RUN = frozenset({"run_command"})
+
+SHELL_TASKS: list[Task] = [
+    Task(id="shell-which-fail", prompt="Run ./run_tests.sh and tell me which tests fail. Don't change any files.",
+         ideal=_RUN, must=("test_restock_047", "test_price_203"), max_calls=1,
+         modes=("coding",), workdir=_SHELL, isolate=True,
+         note="failures and summary are at the end: the default view or tail= has them"),
+    Task(id="shell-count", prompt="Run ./run_tests.sh. How many tests ran in total? Don't change any files.",
+         ideal=_RUN, must=("300",), max_calls=1, modes=("coding",), workdir=_SHELL, isolate=True,
+         note="the 'Ran 300 tests' line is near the end"),
+    Task(id="shell-warning",
+         prompt="Run ./build.sh. Did the build print any warnings? Quote them exactly. "
+                "Don't change any files.",
+         ideal=_RUN, must=("max_conn", "max_connections"), max_calls=2,
+         modes=("coding",), workdir=_SHELL, isolate=True,
+         note="the warning is in the middle of ~57 KB: grep= (or a command_output "
+              "follow-up) finds it, the default head+tail view does not"),
+    Task(id="shell-small", prompt="Run ./lint.sh and list every issue it reports. Don't change any files.",
+         ideal=_RUN, must=("E501", "W291"), max_calls=1, modes=("coding",), workdir=_SHELL, isolate=True,
+         note="short output: must come back whole, no follow-up call"),
+    Task(id="shell-cause",
+         prompt="Run ./run_tests.sh and find out why test_price_203 fails: which function "
+                "in inventory.py is wrong, and what does it do wrong? Don't change any files.",
+         ideal=_RUN, must=("value",), max_calls=3, modes=("coding",), workdir=_SHELL, isolate=True,
+         note="run, then read the function; a rerun of the suite is waste"),
 ]

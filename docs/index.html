@@ -544,6 +544,7 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <tr><td><code>--context</code></td><td>auto</td><td class="wrap">Context token limit. The default is half the model's maximum.</td></tr>
       <tr><td><code>--mode</code></td><td><code>design</code></td><td class="wrap">Starting mode: <code>design</code>, <code>chat</code>, <code>plan</code>, <code>coding</code> or <code>momo</code></td></tr>
       <tr><td><code>--max-tool-result</code></td><td><code>0</code></td><td class="wrap">Max characters per tool result (0 = unlimited)</td></tr>
+      <tr><td><code>--run-mode</code></td><td>last used / <code>new</code></td><td class="wrap"><code>new</code>: <code>run_command</code> saves its output to a log and returns a view; <code>classic</code>: all of it. See <a href="#run-output">Command output</a>. <code>--run-output-limit</code> sets the view's size.</td></tr>
       <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
       <tr><td><code>--no-think</code></td><td>off</td><td class="wrap">Turn off the model's thinking/reasoning mode</td></tr>
       <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
@@ -755,8 +756,33 @@ ollama serve</code></pre></div>
       <tr><td><code>edit_file</code></td><td>coding, momo</td><td class="wrap">Replace <code>old_string</code> with <code>new_string</code>. It must match exactly once unless <code>replace_all</code> is set.</td></tr>
       <tr><td><code>append_to_file</code></td><td>coding, momo</td><td class="wrap">Append, creating the file if it's missing</td></tr>
       <tr><td><code>move_file</code> / <code>delete_file</code></td><td>coding, momo</td><td class="wrap">Rename or move (creates parent folders), or delete</td></tr>
-      <tr><td><code>run_command</code></td><td>coding, momo, plan</td><td class="wrap">Any shell command. 900 s timeout. <code>/run-confirm on</code> asks before each one.</td></tr>
+      <tr><td><code>run_command</code></td><td>coding, momo, plan</td><td class="wrap">Any shell command. 900 s timeout. <code>/run-confirm on</code> asks before each one. The output is saved to a log, and the model gets <code>tail=</code>, <code>grep=</code> or a short head-and-tail view of it. See <a href="#run-output">Command output</a>.</td></tr>
+      <tr><td><code>command_output</code></td><td>coding, momo, plan</td><td class="wrap">Search a saved command log again without rerunning it: <code>grep=</code>, <code>tail=</code> or a line range. Only in run mode <code>new</code>.</td></tr>
     </table></div>
+  </section>
+
+  <section id="run-output" data-voice="run-output">
+    <h2>Command output</h2>
+    <p>A test suite or a build can print tens of kilobytes, even when the model needs one line of it. By default, <code>run_command</code> saves the whole output to a log file and gives the model back only the part it asks for:</p>
+    <ul>
+      <li><strong><code>tail=N</code></strong>: the last N lines. Good for a test summary.</li>
+      <li><strong><code>grep="regex"</code></strong>: the matching lines, numbered. The regex is case-insensitive, <code>context=N</code> adds lines around each match, and with <code>tail=N</code> as well you get the last N matches.</li>
+      <li><strong>Neither</strong>: all of it when it fits in 5000 characters. Otherwise its first quarter and last three quarters, cut on line boundaries, with a note of what was left out in between.</li>
+    </ul>
+    <p>stdout and stderr share one log, in the order they were written. Every result ends with the log's full path, its size and the exit code. When the default view hid lines, it also names how many mention an error and how to list them:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">tool result</span></div><pre><code>Ran 300 tests in 0.004s
+
+FAILED (failures=2)
+[output saved: /Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log — 323 lines, 20 KB, exit code 1]
+[7 lines mention error/fail/warning — command_output(path="/Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log", grep="error|fail|warning|traceback") lists them]</code></pre></div>
+    <p>The model passes that path to <code>command_output</code> to search the same output again (<code>grep=</code>, <code>tail=</code>, <code>start_line=</code>/<code>end_line=</code>) instead of running the suite twice. A command that timed out or was interrupted keeps its log too.</p>
+    <p>Logs live in <code>~/.momo-harness/runs/&lt;session&gt;/</code>, outside the workdir, so they never show up in <code>git status</code> or the code index. momo keeps the last 20 per session and deletes them on <code>/clear</code>, <code>/new</code> and when a session loads. <code>command_output</code> only ever opens those files, whatever path it is given.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Setting</th><th>Description</th></tr>
+      <tr><td><code>/run-mode new|classic</code></td><td class="wrap"><code>new</code> (default): log, views and <code>command_output</code>. <code>classic</code>: return the whole output, as before. Remembered between runs; also <code>--run-mode</code> and View → Context.</td></tr>
+      <tr><td><code>/run-output-limit [n]</code></td><td class="wrap">Size of the default view in characters (default 5000, minimum 500)</td></tr>
+    </table></div>
+    <p class="note">Measured against Qwen3.5-9B on five command tasks, 3 runs per mode: both modes found every fact, but <code>new</code> sent 62 KB of command output to the model instead of 436 KB and finished 35% sooner. The call count stayed about the same, because a fact in the middle of a long log still takes a second look. The two tool descriptions cost about 640 more tokens per request. <code>evals/run_output_bench.py</code> measures the views without a model.</p>
   </section>
 
   <section id="index" data-voice="index">
@@ -1058,6 +1084,8 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/compact</code>, <code>/fast-compact</code></td><td class="wrap">Compact the context with or without an LLM summary</td></tr>
       <tr><td><code>/context [n|n%]</code></td><td class="wrap">Show usage, or set the limit in tokens or as a % of the model's maximum</td></tr>
       <tr><td><code>/tool-result [n]</code></td><td class="wrap">Character cap per tool result (0 = unlimited)</td></tr>
+      <tr><td><code>/run-mode new|classic</code></td><td class="wrap">Save <code>run_command</code> output to a log and return a view (default), or return all of it</td></tr>
+      <tr><td><code>/run-output-limit [n]</code></td><td class="wrap">Characters in <code>run_command</code>'s default view</td></tr>
       <tr><td><code>/cost</code></td><td class="wrap">Token usage by mode and model</td></tr>
     </table></div>
     <h3>Display</h3>
@@ -1118,6 +1146,8 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
 ├── index/
 │   ├── 3f2a9c…e1.pickle  <span class="com"># saved code index, one per workdir (/index-persist, on by default)</span>
 │   └── 3f2a9c…e1.filter  <span class="com"># which files that index covers (/index-filter)</span>
+├── runs/
+│   └── 2026-09-23T18-04-11/r1.log  <span class="com"># saved run_command output, per session</span>
 └── tls/                  <span class="com"># only with --web-tls auto</span>
     ├── momo-ca.pem       <span class="com"># the CA certificate you trust on your devices</span>
     ├── momo-ca.key       <span class="com"># the CA's private key: never share</span>
@@ -1127,10 +1157,11 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     └── server.json       <span class="com"># the names it covers, and its expiry</span></code></pre></div>
     <div class="table-scroll"><table>
       <tr><th>Path</th><th>What</th><th>Notes</th></tr>
-      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, code index settings, guides, companion idle recap</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools</code>, <code>/run-confirm</code>) are never saved and reset at every start.</td></tr>
+      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, code index settings, guides, companion idle recap, run mode</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools</code>, <code>/run-confirm</code>) are never saved and reset at every start.</td></tr>
       <tr><td><code>sessions/*.json</code></td><td class="wrap">Each conversation: messages, mode, model, host, workdir, context settings, active skills, plan, input history</td><td class="wrap">Saved after every reply. <code>/sessions</code> lists them and <code>/session &lt;name&gt;</code> loads one. The auth token is never stored. Delete them from the session drawer in the web UI.</td></tr>
       <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line</td><td class="wrap">For auditing what the model did. Secret request headers are masked.</td></tr>
       <tr><td><code>index/*.pickle</code></td><td class="wrap">The code index, named by a hash of the workdir</td><td class="wrap">Written by <code>/index save</code>, and automatically with <code>/index-persist</code> (on by default). Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
+      <tr><td><code>runs/&lt;session&gt;/rN.log</code></td><td class="wrap">The full output of each <code>run_command</code> (<a href="#run-output">Command output</a>)</td><td class="wrap">Last 20 per session. Deleted on <code>/clear</code>, <code>/new</code> and session load; other sessions' folders go after 3 days.</td></tr>
       <tr><td><code>index/*.filter</code></td><td class="wrap">Which files that workdir's index covers, in gitignore syntax</td><td class="wrap">Created from the project's <code>.gitignore</code> files the first time the index starts. Edit it with <code>/index-filter</code> or View → Code index → Filter…. Mode 0600.</td></tr>
       <tr><td><code>tls/</code></td><td class="wrap">momo's local CA and HTTPS certificate</td><td class="wrap">Folder 0700, keys 0600. Deleting it makes a new CA on the next <code>--web-tls auto</code> start, and every device must then trust the new one.</td></tr>
     </table></div>
@@ -1164,7 +1195,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     <h2>Tests &amp; evals</h2>
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python -m unittest discover tests                 <span class="com"># do the tools work?</span>
 python evals/run_evals.py --runs 3                <span class="com"># does the model use them? (needs a server)</span></code></pre></div>
-    <p><code>tests/</code> uses the standard-library <code>unittest</code>. It includes one fixture per tree-sitter grammar, so a grammar upgrade that renames a node fails a test instead of silently emptying a tool's output. <code>evals/</code> asks questions with known answers and scores whether the model reached the right tool, how many calls it took and how much output it pulled into context. Sampling isn't pinned, so read the min–max spread, not a single run.</p>
+    <p><code>tests/</code> uses the standard-library <code>unittest</code>. It includes one fixture per tree-sitter grammar, so a grammar upgrade that renames a node fails a test instead of silently emptying a tool's output. <code>evals/</code> asks questions with known answers and scores whether the model reached the right tool, how many calls it took and how much output it pulled into context. <code>--suite shell --run-mode new|classic</code> compares the two ways <code>run_command</code> returns output. Sampling isn't pinned, so read the min–max spread, not a single run.</p>
   </section>
 
   </article>
@@ -1364,6 +1395,11 @@ const SPEECH = {
     "< grep is love", "< read_symbol by line no.", "< find_references!",
     "< sandboxed to the workdir", "< .. escapes? rejected", "< edit_file: one match only",
     "< run_command can ask first", "< code_outline a folder!",
+  ],
+  "run-output": [
+    "< tail=30 for the summary", "< grep=\"fail\" finds it", "< logs, not floods~",
+    "< 436 KB → 62 KB, purrr", "< no rerun, just grep", "< full path in the footer",
+    "< /run-mode classic: all",
   ],
   index: [
     "< on by default!", "< never a stale answer", "< config parse→parse_config",

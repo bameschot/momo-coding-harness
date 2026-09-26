@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import code_index, code_nav, net
+from . import run_store as run_store_mod
 from .paths import (BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, SKIP_DIRS, safe_entry_path,
                     safe_path, walk_files)
 
@@ -287,6 +288,80 @@ def with_index_tools(tools: list[dict]) -> list[dict]:
     return out
 
 
+# run_command comes in two variants, switched by /run-mode (see with_run_mode):
+# classic returns the output itself; new saves it to a log and returns a view.
+_RUN_COMMAND_CLASSIC = _fn("run_command",
+    "Run a shell command from the working directory. Returns stdout and stderr. "
+    "Use for running scripts, tests, build tools, etc. To read a web page or call an "
+    "API use fetch_url, not curl or wget; to download a file to disk (a jar, "
+    "archive, image) curl -o or wget is fine. The command runs with the "
+    "working directory as its current directory. It is NON-INTERACTIVE: no stdin is "
+    "connected, so a command that waits for input (e.g. 'git commit' with no -m, "
+    "'npm init', a prompt for a password) will hang until it times out — always pass "
+    "flags that avoid prompts. Long output is returned in full (up to the last 4 MB of "
+    "each stream); exit code is appended when non-zero. A command that times out or is "
+    "interrupted returns the end of its output so far.",
+    {"command": {"type": "string", "description": "Shell command to execute (runs in the working directory)"},
+     "timeout": {"type": "integer", "description": f"Timeout in seconds (default and maximum: {_MAX_COMMAND_TIMEOUT} = {_MAX_COMMAND_TIMEOUT // 60} minutes)"}},
+    ["command"])
+
+_RUN_COMMAND_NOTES = (
+    "To read a web page or call an API use fetch_url, not curl or wget; to download a "
+    "file to disk (a jar, archive, image) curl -o or wget is fine. The command runs with "
+    "the working directory as its current directory. It is NON-INTERACTIVE: no stdin is "
+    "connected, so a command that waits for input (e.g. 'git commit' with no -m, "
+    "'npm init', a prompt for a password) will hang until it times out — always pass "
+    "flags that avoid prompts.")
+_RUN_COMMAND_FILE = _fn(
+    "run_command",
+    "Run a shell command in the working directory. Pass tail=N for only the last N lines "
+    "of output, or grep=\"regex\" for only the matching lines (both: the last N matches); "
+    "with neither, short output comes back whole and long output as its beginning and end. "
+    "The full output (stdout and stderr) is saved to a log whose path ends the result: "
+    "pass it to command_output to search it again instead of rerunning the command. Do "
+    "not pipe into tail/head/grep yourself (that hides the exit code). " + _RUN_COMMAND_NOTES,
+    {"command": {"type": "string", "description": "Shell command to execute"},
+     "tail":    {"type": "integer", "description": "Only the last N lines (e.g. 30 for a test summary)"},
+     "grep":    {"type": "string", "description": "Case-insensitive regex; only matching lines, numbered (e.g. \"error|fail\")"},
+     "context": {"type": "integer", "description": "With grep: lines around each match"},
+     "timeout": {"type": "integer", "description": f"Seconds (default and maximum {_MAX_COMMAND_TIMEOUT})"}},
+    ["command"])
+
+_COMMAND_OUTPUT = _fn(
+    "command_output",
+    "Search the saved output of an earlier run_command without running it again. path: "
+    "the log path at the end of that result (or its id, e.g. r3). grep=\"regex\" for the "
+    "matching lines, tail=N for the last N, start_line/end_line for a range; none: the "
+    "beginning and end.",
+    {"path":       {"type": "string", "description": "Log path from the run_command result"},
+     "grep":       {"type": "string", "description": "Case-insensitive regex"},
+     "context":    {"type": "integer", "description": "With grep: lines around each match"},
+     "tail":       {"type": "integer", "description": "Last N lines (with grep: last N matches)"},
+     "start_line": {"type": "integer", "description": "First line (negative: from the end)"},
+     "end_line":   {"type": "integer", "description": "Last line (inclusive)"}},
+    ["path"])
+
+RUN_MODES = ("new", "classic")
+
+
+def with_run_mode(tools: list[dict], mode: str) -> list[dict]:
+    """The tool list with the run_command variant for mode ("new" | "classic");
+    in new mode command_output follows run_command wherever that is offered."""
+    out: list[dict] = []
+    for t in tools:
+        name = t["function"]["name"]
+        if name == "command_output":
+            continue
+        if name == "run_command":
+            if mode == "classic":
+                out.append(_RUN_COMMAND_CLASSIC)
+            else:
+                out += [_RUN_COMMAND_FILE, _COMMAND_OUTPUT]
+            continue
+        out.append(t)
+    return out
+
+
 CODING_ONLY_TOOLS = [
     _fn("move_file",
         "Move or rename a file or directory. Both source and destination must be inside the "
@@ -330,20 +405,7 @@ CODING_ONLY_TOOLS = [
         {"path": {"type": "string", "description": "File to delete"}},
         ["path"]),
 
-    _fn("run_command",
-        "Run a shell command from the working directory. Returns stdout and stderr. "
-        "Use for running scripts, tests, build tools, etc. To read a web page or call an "
-        "API use fetch_url, not curl or wget; to download a file to disk (a jar, "
-        "archive, image) curl -o or wget is fine. The command runs with the "
-        "working directory as its current directory. It is NON-INTERACTIVE: no stdin is "
-        "connected, so a command that waits for input (e.g. 'git commit' with no -m, "
-        "'npm init', a prompt for a password) will hang until it times out — always pass "
-        "flags that avoid prompts. Long output is returned in full (up to the last 4 MB of "
-        "each stream); exit code is appended when non-zero. A command that times out or is "
-        "interrupted returns the end of its output so far.",
-        {"command": {"type": "string", "description": "Shell command to execute (runs in the working directory)"},
-         "timeout": {"type": "integer", "description": f"Timeout in seconds (default and maximum: {_MAX_COMMAND_TIMEOUT} = {_MAX_COMMAND_TIMEOUT // 60} minutes)"}},
-        ["command"]),
+    _RUN_COMMAND_CLASSIC,
 ]
 
 SHARED_TOOLS = [
@@ -1113,64 +1175,90 @@ def _output_tail(f) -> str:
     return f"[… first {skip:,} bytes of output not shown …]\n{text}" if skip else text
 
 
-def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: Path,
-                 net_access: str = "off", cancel=None) -> str:
-    # Steer page reads and API calls to fetch_url; downloads to disk still need
-    # curl/wget.  With /net off, running curl would quietly bypass the user's
-    # setting (observed: a 9B model with no fetch_url fell back to 50 curl calls
-    # over two sessions), so refuse and say what to do instead.
-    note = ""
-    if client := _web_client_in(command):
-        if net_access == "off":
-            return (f"ERROR: this command was not run: it uses {client} to reach the "
-                    "internet, and internet access is off. Do not retry with another "
-                    "command or script. Tell the user: \"Internet access is off. Run "
-                    "/net on and ask again.\" Turning it on gives you the fetch_url tool "
-                    "and lets curl and wget run.")
-        note = (f"(note: to read a page or call an API, use the fetch_url tool instead "
-                f"of {client} — it returns cleaner text. {client} is fine for "
-                "downloading files to disk.)\n")
-    # Clamp to the 15-minute ceiling; fall back to the ceiling for missing/invalid
-    # values so a hung command can never block the worker thread indefinitely.
+def _web_refusal(command: str, net_access: str) -> tuple[str | None, str]:
+    """(refusal, note): steer page reads and API calls to fetch_url; downloads to
+    disk still need curl/wget.  With /net off, running curl would quietly bypass
+    the user's setting (observed: a 9B model with no fetch_url fell back to 50
+    curl calls over two sessions), so refuse and say what to do instead."""
+    client = _web_client_in(command)
+    if not client:
+        return None, ""
+    if net_access == "off":
+        return (f"ERROR: this command was not run: it uses {client} to reach the "
+                "internet, and internet access is off. Do not retry with another "
+                "command or script. Tell the user: \"Internet access is off. Run "
+                "/net on and ask again.\" Turning it on gives you the fetch_url tool "
+                "and lets curl and wget run."), ""
+    return None, (f"(note: to read a page or call an API, use the fetch_url tool instead "
+                  f"of {client} — it returns cleaner text. {client} is fine for "
+                  "downloading files to disk.)\n")
+
+
+def _clamp_timeout(timeout) -> int:
+    """Clamp to the 15-minute ceiling; fall back to the ceiling for missing/invalid
+    values so a hung command can never block the worker thread indefinitely."""
     try:
         timeout = int(timeout)
     except (TypeError, ValueError):
-        timeout = _MAX_COMMAND_TIMEOUT
-    if timeout <= 0 or timeout > _MAX_COMMAND_TIMEOUT:
-        timeout = _MAX_COMMAND_TIMEOUT
-    # No stdin: a command that reads it (git commit without -m, a REPL) would
-    # otherwise fight the TUI for the terminal.  Output goes to temp files, not
-    # pipes: memory stays bounded however much it writes, a grandchild holding
-    # the output open cannot keep the call waiting, and what was written before
-    # a timeout is still there to show.  Its own session, so a timeout or Esc
-    # kills what it started too.  A normal exit leaves background processes
-    # alone: build daemons (Gradle, mvnd, Kotlin) outlive the command that
-    # started them, and killing them would cost every later build a cold JVM.
-    stopped = None
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        return _MAX_COMMAND_TIMEOUT
+    return _MAX_COMMAND_TIMEOUT if timeout <= 0 or timeout > _MAX_COMMAND_TIMEOUT else timeout
+
+
+def _exec(command: str, timeout: int, workdir: Path, cancel, out, err):
+    """Run command with its output going to the open files out and err (err may
+    be subprocess.STDOUT).  Returns (proc, stopped) — stopped says why it was
+    killed, None when it exited — or (None, error text) when it cannot start.
+
+    No stdin: a command that reads it (git commit without -m, a REPL) would
+    otherwise fight the TUI for the terminal.  Output goes to files, not pipes:
+    memory stays bounded however much it writes, a grandchild holding the output
+    open cannot keep the call waiting, and what was written before a timeout is
+    still there to show.  Its own session, so a timeout or Esc kills what it
+    started too.  A normal exit leaves background processes alone: build daemons
+    (Gradle, mvnd, Kotlin) outlive the command that started them, and killing
+    them would cost every later build a cold JVM."""
+    try:
+        proc = subprocess.Popen(command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
+                                stdout=out, stderr=err, start_new_session=True)
+    except OSError as e:
+        return None, f"ERROR: {e}"
+    files = [f for f in (out, err) if hasattr(f, "fileno")]
+    deadline = time.monotonic() + timeout
+    while True:
         try:
-            proc = subprocess.Popen(command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=err, start_new_session=True)
-        except OSError as e:
-            return f"ERROR: {e}"
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                proc.wait(timeout=0.25)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-            if cancel is not None and cancel.is_set():
-                stopped = "command interrupted by the user"
-            elif time.monotonic() >= deadline:
-                stopped = f"command timed out after {timeout}s"
-            elif (os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size
-                  > _MAX_OUTPUT_BYTES):
-                stopped = (f"command stopped: it wrote more than "
-                           f"{_MAX_OUTPUT_BYTES // 2**20} MB of output")
-            if stopped:
-                _kill_group(proc)
-                break
+            proc.wait(timeout=0.25)
+            return proc, None
+        except subprocess.TimeoutExpired:
+            pass
+        stopped = None
+        if cancel is not None and cancel.is_set():
+            stopped = "command interrupted by the user"
+        elif time.monotonic() >= deadline:
+            stopped = f"command timed out after {timeout}s"
+        elif sum(os.fstat(f.fileno()).st_size for f in files) > _MAX_OUTPUT_BYTES:
+            stopped = (f"command stopped: it wrote more than "
+                       f"{_MAX_OUTPUT_BYTES // 2**20} MB of output")
+        if stopped:
+            _kill_group(proc)
+            return proc, stopped
+
+
+def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, tail: int | None = None,
+                 grep: str | None = None, context: int = 0, *, workdir: Path,
+                 net_access: str = "off", cancel=None, run_mode: str = "classic",
+                 run_store: "run_store_mod.RunStore | None" = None,
+                 run_output_limit: int = run_store_mod.DEFAULT_LIMIT) -> str:
+    refusal, note = _web_refusal(command, net_access)
+    if refusal:
+        return refusal
+    timeout = _clamp_timeout(timeout)
+    if run_mode != "classic" and run_store is not None:
+        return note + _run_to_log(command, timeout, workdir, cancel, run_store,
+                                  run_output_limit, tail, grep, context)
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        proc, stopped = _exec(command, timeout, workdir, cancel, out, err)
+        if proc is None:
+            return stopped
         out_text, err_text = _output_tail(out), _output_tail(err)
 
     parts = []
@@ -1179,13 +1267,68 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
     if err_text:
         parts.append(f"[stderr]\n{err_text}")
     if stopped:
-        tail = "\n".join(parts)
-        if len(tail) > _STOPPED_TAIL_CHARS:
-            tail = "…" + tail[-_STOPPED_TAIL_CHARS:]
-        return f"ERROR: {stopped}" + (f"\n[output before it stopped]\n{tail}" if tail else "")
+        tail_text = "\n".join(parts)
+        if len(tail_text) > _STOPPED_TAIL_CHARS:
+            tail_text = "…" + tail_text[-_STOPPED_TAIL_CHARS:]
+        return f"ERROR: {stopped}" + (f"\n[output before it stopped]\n{tail_text}" if tail_text else "")
     if proc.returncode != 0:
         parts.append(f"[exit code: {proc.returncode}]")
     return note + ("\n".join(parts) or "(no output)")
+
+
+def _read_log(path: Path) -> str:
+    """A saved log as the model sees it: cleaned the same way every time, so the
+    line numbers of one view hold for the next."""
+    return _clean_output(path.read_bytes().decode("utf-8", errors="replace"))
+
+
+def _log_view(text: str, limit: int, tail, grep, context, start_line=None, end_line=None):
+    """(view, hint): the requested part of a log, and whether the footer should
+    say how to see the rest (a default view that had to leave lines out)."""
+    body = run_store_mod.view(text, limit, tail_n=tail, pattern=grep, context=context or 0,
+                              start_line=start_line, end_line=end_line)
+    default = not (grep or tail or start_line is not None or end_line is not None)
+    return body, default and len(text) > limit
+
+
+def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, context) -> str:
+    """/run-mode new: stdout and stderr in order in one log file, and a bounded
+    view of it back, ending with the log's full path for command_output."""
+    run_id, path = store.new_log()
+    with open(path, "wb") as log:
+        proc, stopped = _exec(command, timeout, workdir, cancel, log, subprocess.STDOUT)
+    if proc is None:
+        path.unlink(missing_ok=True)
+        return stopped
+    text = _read_log(path)
+    body, hint = _log_view(text, limit, tail, grep, context)
+    foot = run_store_mod.footer(path, text, proc.returncode, hint or bool(stopped), stopped)
+    if stopped:
+        return f"ERROR: {stopped}\n[output before it stopped]\n{body}\n{foot}" if text \
+            else f"ERROR: {stopped}\n{foot}"
+    return f"{body or '(no output)'}\n{foot}"
+
+
+def _command_output(path: str, grep: str | None = None, context: int = 0,
+                    tail: int | None = None, start_line: int | None = None,
+                    end_line: int | None = None, *, workdir: Path,
+                    run_store: "run_store_mod.RunStore | None" = None,
+                    run_output_limit: int = run_store_mod.DEFAULT_LIMIT) -> str:
+    if run_store is None:
+        return "ERROR: command_output is only available in /run-mode new"
+    log = run_store.resolve(path)
+    if log is None:
+        logs = run_store.logs()
+        have = ("Saved logs: " + ", ".join(str(p) for p in logs[-5:])) if logs else \
+            "No command output is saved in this session — run the command with run_command."
+        return (f"ERROR: no saved command output at {path!r}. Pass the path printed at the "
+                f"end of a run_command result. {have}")
+    text = _read_log(log)
+    body, hint = _log_view(text, run_output_limit, tail, grep, context, start_line, end_line)
+    if body.startswith("ERROR"):
+        return body
+    return f"{body or '(no output)'}\n" + run_store_mod.footer(log, text, None, hint).replace(
+        ", still running]", "]")
 
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
@@ -1194,7 +1337,7 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, *, workdir: 
 # clear error messages before Python's TypeError exposes internal function names.
 _SCHEMAS = {t["function"]["name"]: t["function"]["parameters"]
             for t in (READ_ONLY_TOOLS + CODE_NAV_TOOLS + INDEX_TOOLS + SHARED_TOOLS
-                      + CODING_ONLY_TOOLS + NET_TOOLS)}
+                      + CODING_ONLY_TOOLS + NET_TOOLS + [_RUN_COMMAND_FILE, _COMMAND_OUTPUT])}
 _REQUIRED_ARGS: dict[str, list[str]] = {n: p["required"] for n, p in _SCHEMAS.items()}
 _KNOWN_ARGS: dict[str, set[str]] = {n: set(p["properties"]) for n, p in _SCHEMAS.items()}
 _ARG_TYPES: dict[str, dict[str, str]] = {      # tool -> {arg: JSON schema type}
@@ -1215,6 +1358,7 @@ _EXECUTORS = {
     "edit_file":          _edit_file,
     "delete_file":        _delete_file,
     "run_command":        _run_command,
+    "command_output":     _command_output,
     "fetch_url":          net.fetch_url,
 }
 if code_nav.AVAILABLE:
@@ -1240,7 +1384,8 @@ if code_nav.AVAILABLE:
 # lets Esc stop a long command or scan; the index tools get the live index.
 _INJECTED = {
     "fetch_url":   ("net_access", "net_max_bytes", "net_max_chars"),
-    "run_command": ("net_access", "cancel"),
+    "run_command": ("net_access", "cancel", "run_mode", "run_store", "run_output_limit"),
+    "command_output": ("run_store", "run_output_limit"),
     "grep_files":  ("cancel",),
     "read_file":   ("read_budget",),
     **{n: ("index", "cancel") for n in INDEX_TOOL_NAMES},
@@ -1285,9 +1430,13 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              net_max_bytes: int = net.DEFAULT_MAX_BYTES,
              net_max_chars: int = net.DEFAULT_MAX_CHARS,
              index: "code_index.ProjectIndex | None" = None, cancel=None,
-             index_route: bool = True, read_budget: int | None = None) -> str:
-    """read_budget: characters one read_file may return (None = no limit)."""
-    more = {"read_budget": read_budget}
+             index_route: bool = True, read_budget: int | None = None,
+             run_mode: str = "classic", run_store: "run_store_mod.RunStore | None" = None,
+             run_output_limit: int = run_store_mod.DEFAULT_LIMIT) -> str:
+    """read_budget: characters one read_file may return (None = no limit).
+    run_mode "new" with a run_store saves run_command output to a log (/run-mode)."""
+    more = {"read_budget": read_budget, "run_mode": run_mode, "run_store": run_store,
+            "run_output_limit": run_output_limit}
     if index is not None and index_route and name in _ROUTED:
         routed = _route_to_index(name, args, workdir, index, cancel)
         if routed is not None:
@@ -1432,7 +1581,8 @@ def _index_result_hint(name: str, args: dict, workdir: Path, index) -> str:
 
 def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_bytes: int,
               net_max_chars: int, index, cancel, more: dict | None = None) -> str:
-    more = more or {"read_budget": None}
+    more = {"read_budget": None, "run_mode": "classic", "run_store": None,
+            "run_output_limit": run_store_mod.DEFAULT_LIMIT, **(more or {})}
     fn = _EXECUTORS.get(name)
     if fn is None:
         return f"ERROR: unknown tool '{name}'"
@@ -1546,6 +1696,7 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "move_file":      {"src": "old/path.py", "dst": "new/path.py"},
     "delete_file":    {"path": "old-file.py"},
     "run_command":    {"command": "python -m pytest"},
+    "command_output": {"path": "r1", "grep": "FAILED|Error"},
     "ask_user":       {"question": "Should I overwrite the existing file?"},
     "create_plan":    {"title": "Fix off-by-one in paginate()",
                        "goal": "Last page is dropped because paginate() uses < instead of <=.",
@@ -1567,6 +1718,8 @@ _TOOL_EXAMPLES: dict[str, dict] = {
 
 def _example_args(tool: dict) -> dict:
     name = tool["function"]["name"]
+    if tool is _RUN_COMMAND_FILE:
+        return {"command": "python -m pytest", "tail": 30}
     if name in _TOOL_EXAMPLES:
         return _TOOL_EXAMPLES[name]
     # Fallback for a tool with no curated example: required params only, with

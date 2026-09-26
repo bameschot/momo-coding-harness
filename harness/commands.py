@@ -8,7 +8,9 @@ from pathlib import Path
 
 from . import code_index, ignore_rules
 from . import net as net_mod
+from . import run_store as run_store_mod
 from . import session as session_mod
+from . import tools as tools_mod
 from .harness import Harness
 from .tools import dispatch
 
@@ -301,6 +303,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             plan_note = "; " + harness.cancel_plan()  # also refreshes messages[0]
         system_msg = harness.messages[0]
         harness.messages = [system_msg]
+        harness.drop_run_logs()
         guides_note = harness.reload_guides()
         harness.refresh_status()
         return CommandResult(handled=True, output="Conversation cleared" + plan_note
@@ -444,6 +447,42 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return _toggle(harness, "run_confirm", arg, "run_command confirmation",
                        " (you will be asked y/N before each command)",
                        " (commands run automatically)")
+
+    if cmd == "/run-mode":
+        def _mode_state() -> str:
+            if harness.run_mode == "classic":
+                return "run_command output: classic (the whole output is returned)"
+            return (f"run_command output: new (saved to a log; tail=/grep= views and "
+                    f"command_output; default view {harness.run_output_limit} chars)")
+        if not arg:
+            return CommandResult(handled=True, output=_mode_state())
+        mode = arg.strip().lower()
+        if (on := _on_off(mode)) is not None:     # the web UI's checkbox
+            mode = "new" if on else "classic"
+        if mode not in tools_mod.RUN_MODES:
+            return _bad_choice(arg, "'new' or 'classic'")
+        harness.run_mode = mode
+        session_mod.save_prefs(run_mode=mode)
+        harness.rebuild_system_prompt()     # the run_command schema changes
+        harness.emit_status()
+        return CommandResult(handled=True, output=_mode_state())
+
+    if cmd == "/run-output-limit":
+        if not arg:
+            return CommandResult(handled=True, output=(
+                f"run_command output view: {harness.run_output_limit} chars "
+                f"(first 25% and last 75% when longer)"))
+        try:
+            n = int(arg)
+        except ValueError:
+            return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
+        if n < run_store_mod.MIN_LIMIT:
+            return CommandResult(handled=True,
+                                 output=f"ERROR: the limit must be at least {run_store_mod.MIN_LIMIT} chars")
+        harness.run_output_limit = n
+        session_mod.save_prefs(run_output_limit=n)
+        harness.emit_status()
+        return CommandResult(handled=True, output=f"run_command output view: {n} chars")
 
     if cmd == "/net":
         def _net_state() -> str:
@@ -840,6 +879,9 @@ Available commands:
   /think on|off       Enable or disable model thinking/reasoning mode
   /run-confirm        Show run_command confirmation state (on/off)
   /run-confirm on|off Ask y/N before each run_command  (Shift+P toggles)
+  /run-mode [new|classic]  new: save command output to a log, return a view
+                      (tail=/grep=, command_output); classic: return it all
+  /run-output-limit [n]    Chars in run_command's default view (default 5000)
   /tools              Show whether tool calls are enabled (on/off)
   /tools on|off       Enable or disable tool calls entirely
   /net                Show internet access state (off/on/local)

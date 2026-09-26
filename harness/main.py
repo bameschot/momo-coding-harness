@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import code_index
 from . import net as net_mod
+from . import run_store as run_store_mod
 from . import session as session_mod
 from .controller import Controller
 from .events import ChatEvent
@@ -46,6 +47,13 @@ def main():
                         help="Starting mode (ignored when restoring a session)")
     parser.add_argument("--max-tool-result", default=0, type=int, metavar="N",
                         help="Max chars returned by a single tool call (0 = unlimited)")
+    parser.add_argument("--run-mode", choices=("new", "classic"), default=None,
+                        help="run_command output: 'new' saves it to a log and returns a view "
+                             "(tail/grep, command_output); 'classic' returns all of it "
+                             "(default: last /run-mode setting, else new)")
+    parser.add_argument("--run-output-limit", type=int, default=None, metavar="N",
+                        help="Chars in run_command's default view in run mode new "
+                             "(default: last /run-output-limit setting, else 5000)")
     parser.add_argument("--fresh", action="store_true", default=False,
                         help="Start a new session instead of restoring the last one")
     parser.add_argument("--no-think", action="store_true", default=False,
@@ -188,6 +196,16 @@ def main():
     harness.index_persist = flag_or_pref(args.index_persist, "index_persist", True)
     harness.index_route = flag_or_pref(args.index_route, "index_route", True)
     index_on = flag_or_pref(args.index, "index", True)
+    run_mode = args.run_mode or prefs.get("run_mode", "new")
+    harness.run_mode = run_mode if run_mode in ("new", "classic") else "new"
+    limit = args.run_output_limit if args.run_output_limit is not None \
+        else prefs.get("run_output_limit", harness.run_output_limit)
+    if not isinstance(limit, int) or limit < run_store_mod.MIN_LIMIT:
+        if args.run_output_limit is not None:
+            parser.error(f"--run-output-limit: expected at least {run_store_mod.MIN_LIMIT}")
+        limit = run_store_mod.DEFAULT_LIMIT
+    harness.run_output_limit = limit
+    harness.rebuild_system_prompt()     # the run_command schema depends on run_mode
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 
     # Restore last session unless --fresh

@@ -14,7 +14,8 @@ from .llm import make_client
 from .logger import Logger
 from .plan import Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file, delete_plan_file
 from .tools import (ALL_TOOLS, NET_TOOLS, PLAN_EXECUTE_TOOLS,
-                    dispatch, render_tool_reference, with_index_tools)
+                    dispatch, render_tool_reference, with_index_tools, with_run_mode)
+from . import run_store as run_store_mod
 from . import net as net_mod
 from . import tools as tools_mod
 from . import code_index, code_nav, ignore_rules
@@ -217,6 +218,11 @@ class Harness:
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
         self.run_confirm: bool = False  # when True, prompt y/N before each run_command; toggle via /run-confirm or Shift+P
+        # /run-mode: "new" saves run_command output to a log and returns a view of
+        # it (tail / grep / head+tail) plus command_output; "classic" returns it all.
+        self.run_mode: str = "new"
+        self.run_output_limit: int = run_store_mod.DEFAULT_LIMIT   # /run-output-limit
+        self._run_store: run_store_mod.RunStore | None = None
         # Internet access for fetch_url: "off" | "on" (public hosts only) |
         # "local" (also loopback/LAN).  Off by default and never persisted --
         # this is the only tool that sends data off the machine.  /net
@@ -510,6 +516,7 @@ class Harness:
             tools = PLAN_EXECUTE_TOOLS
         else:
             tools = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
+        tools = with_run_mode(tools, self.run_mode)
         if self.net_access != "off":
             tools = tools + NET_TOOLS
         if self.index is not None:
@@ -645,9 +652,27 @@ class Harness:
         try:
             return dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes,
                             self._fetch_chars(), index=self.index, cancel=self._cancel,
-                            index_route=self.index_route, read_budget=self._read_budget())
+                            index_route=self.index_route, read_budget=self._read_budget(),
+                            run_mode=self.run_mode, run_store=self.run_store,
+                            run_output_limit=self.run_output_limit)
         except Exception as e:
             return f"ERROR: {name} failed: {type(e).__name__}: {e}"
+
+    @property
+    def run_store(self) -> "run_store_mod.RunStore":
+        """This session's saved command output (/run-mode new), made on first use."""
+        root = run_store_mod.runs_root() / self._ts
+        if self._run_store is None or self._run_store.root != root:
+            self._run_store = run_store_mod.RunStore(root)
+            run_store_mod.prune_stale(current=root)
+        return self._run_store
+
+    def drop_run_logs(self) -> None:
+        """Delete the saved command output: the conversation that could refer to
+        it is gone (/clear, /new, a loaded session)."""
+        if self._run_store is not None:
+            self._run_store.clear()
+            self._run_store = None
 
     def _build_system_prompt(self) -> str:
         if self._plan_executing():
@@ -1473,8 +1498,11 @@ class Harness:
                     # fetch_url windows its own output (net_max_chars) and says how to
                     # page on; a generic cut here would slice through the untrusted-
                     # content fence and point the model at read_file.
+                    # New-mode run_command / command_output window themselves too.
                     if (self.max_tool_result > 0 and len(result) > self.max_tool_result
-                            and name != "fetch_url"):
+                            and name != "fetch_url"
+                            and not (name in ("run_command", "command_output")
+                                     and self.run_mode == "new")):
                         total = len(result)
                         cutoff = result.rfind("\n", 0, self.max_tool_result)
                         if cutoff < self.max_tool_result // 2:
@@ -1815,6 +1843,8 @@ class Harness:
             ctx_color=self._ctx_color(pct),
             tools_enabled=self.tools_enabled,
             run_confirm=self.run_confirm,
+            run_mode=self.run_mode,
+            run_output_limit=self.run_output_limit,
             net_access=self.net_access,
             net_confirm=self.net_confirm,
             net_max_bytes=self.net_max_bytes,
@@ -1885,6 +1915,7 @@ class Harness:
 
     def load_session(self, path: Path) -> str:
         data = session_mod.load(path)
+        self.drop_run_logs()
         self.messages = data["messages"]
         # Sessions saved in a mode that no longer exists (e.g. the removed
         # "writing" mode) fall back to design mode.
@@ -1967,6 +1998,7 @@ class Harness:
         if len(self.messages) > 1:
             self._autosave()
         self.logger.close()
+        self.drop_run_logs()
         self._ts = session_mod.new_timestamp()
         self.logger = Logger(self._ts)
         self.plan = None

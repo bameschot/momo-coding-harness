@@ -45,6 +45,8 @@ Options:
 | `--context` | auto-detected | Override context token limit (default: half the model's maximum) |
 | `--mode` | `design` | Starting mode (`design`, `chat`, `plan`, `coding`, or `momo`) |
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
+| `--run-mode` | last `/run-mode`, else `new` | `new`: `run_command` saves its output to a log and returns a view of it; `classic`: returns all of it (see [Command output](#command-output)) |
+| `--run-output-limit` | last setting, else `5000` | Characters in `run_command`'s default view in run mode `new` |
 | `--no-think` | off | Disable model thinking/reasoning mode (on by default) |
 | `--no-stream` | off | Wait for complete replies instead of streaming them as they are generated (streaming is on by default, in the TUI and the web UI) |
 | `--web` / `--no-web` | on | Serve the browser chat UI alongside the TUI |
@@ -262,6 +264,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
+| Command output | `/run-mode`, `/run-output-limit` | View → Context: save command output to a log and return a view, and the view's size in characters. Shared with the TUI |
 | Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index-max-files`, `/index-workers`, `/index-filter`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, the file limit, build workers, Save now / Load, and Filter… (edit which files are indexed). Shared with the TUI |
 | Play a sound | — | An audible cue (a synthesised kitten mew), focused or not, see [Notifications](#notifications) |
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
@@ -629,11 +632,44 @@ Offered only while internet access is on (`/net on`), so the model never sees a 
 | `append_to_file` | Append text to a file (creates if missing) |
 | `edit_file` | Change text inside a file: replace `old_string` with `new_string`. One occurrence by default (errors if it matches zero or multiple times); pass `replace_all: true` to replace every occurrence. |
 | `delete_file` | Delete a file |
-| `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 15 minutes (900s) by default; the model may request a shorter timeout, and 900s is the hard cap. |
+| `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 15 minutes (900s) by default; the model may request a shorter timeout, and 900s is the hard cap. In run mode `new` (the default) the output is saved to a log and the model gets a view of it: `tail=N` for the last N lines, `grep="regex"` for the matching lines, or by default the whole output when it is short and its beginning and end when it is long. See [Command output](#command-output). |
+| `command_output` | Search or page through the saved output of an earlier `run_command` without running it again: `grep=`, `tail=`, `start_line=`/`end_line=`. Takes the log path printed at the end of that result. Only in run mode `new`. |
 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
 
 `grep_files` returns at most 200 matches; `find_files` returns at most 100 files. Results over the cap include a trailer explaining how many were omitted.
+
+## Command output
+
+A test suite or a build can print tens of kilobytes, and with a whole-output `run_command` all of it lands in the context, even when the model needs one line of it. In run mode `new` (the default) that output goes to a log file instead, and the model gets back only the part it needs.
+
+- **`tail=N`**: the last N lines. Good for a test summary.
+- **`grep="regex"`**: only the matching lines, with their line numbers. The regex is case-insensitive, and `context=N` adds lines around each match. `a\|b` works like `a|b`, and an invalid regex is matched as plain text. With `tail=N` as well, you get the last N matches.
+- **Neither**: the whole output when it fits in the limit (5000 characters by default). Longer output comes back as its first 25% and last 75%, cut on line boundaries, with a note saying how many lines were left out in between.
+
+stdout and stderr go into the log together, in the order they were written, so the end of the view is the real end of the run. Every result ends with the log's full path, its size and the exit code:
+
+```
+Ran 300 tests in 0.004s
+
+FAILED (failures=2)
+[output saved: /Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log — 323 lines, 20 KB, exit code 1]
+[7 lines mention error/fail/warning — command_output(path="/Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log", grep="error|fail|warning|traceback") lists them]
+```
+
+The model passes that path to **`command_output`** to look again without rerunning the command: `grep=`, `tail=`, or `start_line=`/`end_line=` for a range (a negative start counts from the end). The second line appears only when the default view left lines out. It points at the lines worth a look, because a hint in the tool output steers a small model better than a rule in the prompt. A timed-out or interrupted command keeps its log too, so its partial output can still be searched.
+
+`command_output` only ever opens its own session's logs: it takes the `rN.log` name from whatever path it is given, and refuses symlinks. The short id (`r1`) works too. Logs live in `~/.momo-harness/runs/<session>/`, outside the workdir, so they never show up in `git status` or the code index. momo keeps the last 20 per session (at most 256 MB), deletes them on `/clear`, `/new` and when a session loads, and removes other sessions' log folders after 3 days.
+
+| Command | Effect |
+|---|---|
+| `/run-mode` | Show the current mode |
+| `/run-mode new\|classic` | `new`: log + views + `command_output`. `classic`: return the whole output, as before. Saved in `prefs.json`; refused while a reply is running, because it changes the tool set. `on`/`off` also work. |
+| `/run-output-limit [n]` | Show or set the default view's size in characters (minimum 500, default 5000) |
+
+The same settings are in the web UI under View → Context, and on the command line as `--run-mode` and `--run-output-limit`. `/tool-result` does not cut these results, because they are sized already.
+
+**Measured** against Qwen3.5-9B on five command tasks, 3 runs per mode (details in `evals/README.md`): both modes found every fact. `new` sent **62 KB** of command output to the model instead of 436 KB, finished in **686 s** instead of 1,060 s, and the model piped commands through `| grep`/`| tail` itself 3 times instead of 16. The call count stayed about the same (66 vs 71): when the fact sits in the middle of a long log, the model needs a second look, but that look is ~5 KB instead of ~57 KB. The two tool descriptions cost about 640 more tokens in every request.
 
 ## Code index
 
@@ -773,6 +809,15 @@ server and takes minutes, so it lives outside `tests/` and `unittest discover`
 never collects it. Sampling is not pinned — the harness sends no `temperature` or
 `seed` — so use `--runs 3` and read the `(min-max)` spread, not the mean.
 `evals/README.md` records the baseline.
+
+Command output has its own two measures. `python evals/run_output_bench.py` needs no
+model: it replays generated outputs (a pytest run with failures, a build, git log,
+pip, find) through the real `run_command` and reports, per view, how many
+characters it returns and which needed facts survive. `python evals/run_evals.py
+--suite shell --run-mode new` (or `classic`) runs five command tasks against the
+model on `evals/shell/project`, each in a fresh temp copy because the model edits
+files in coding mode, and adds the command-output KB, `tail=`/`grep=` views,
+`command_output` calls, self-piped commands and reruns to the summary.
 
 `tests/test_code_nav.py` covers the tree-sitter navigation tools, with one small
 fixture per supported language in `tests/fixtures/`. That is where the per-grammar
@@ -956,6 +1001,8 @@ Type any command in the input bar:
 | `/context <n>%` | Set the context limit as a percentage of the model's native maximum (e.g. `/context 75%`); saved in session and reapplied on model switch |
 | `/tool-result` | Show the current tool result character cap |
 | `/tool-result <n>` | Set the cap (e.g. `/tool-result 8000`); `0` = unlimited |
+| `/run-mode [new\|classic]` | How `run_command` returns output: saved to a log with a view (`new`, default) or all of it (`classic`). See [Command output](#command-output) |
+| `/run-output-limit [n]` | Characters in `run_command`'s default view (default 5000) |
 | `/compact` | Compact context — removes old messages and summarises them with the LLM |
 | `/fast-compact` | Compact context without LLM summarisation (instant) |
 | `/clear` | Clear conversation history and discard any active plan (removes `.momo-plan.md`, like `/plan cancel`) |
@@ -1007,6 +1054,8 @@ By default tool results are passed to the model without truncation. Set a cap to
 /tool-result 0        # disable cap (unlimited)
 ```
 
+`run_command` and `command_output` in run mode `new`, and `fetch_url`, are not cut: they size their own output (see [Command output](#command-output)).
+
 Truncated results are cut at the last line boundary before the cap and display a notice: `... (truncated after N chars of M — use read_file with start_line/end_line for specific sections)` so the model knows more content exists and gets an actionable hint for how to retrieve the rest.
 
 ## Sessions
@@ -1040,6 +1089,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 │   └── <timestamp>.log      # its request/tool log (NDJSON)
 ├── index/<hash>.pickle      # saved code index per workdir (/index save, /index-persist)
 ├── index/<hash>.filter      # which files that workdir's index covers (/index-filter)
+├── runs/<timestamp>/rN.log  # saved run_command output (/run-mode new), per session
 └── tls/                     # only with --web-tls auto (folder 0700, keys 0600)
     ├── momo-ca.pem          # the CA certificate you trust on your devices
     ├── momo-ca.key          # the CA's private key — never share
@@ -1050,10 +1100,11 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 
 | Path | What | Notes |
 |---|---|---|
-| `prefs.json` | Provider, model, code index settings, guides, companion idle recap | Security switches (`/net`, `/net-confirm`, `/tools`, `/run-confirm`) are never saved |
+| `prefs.json` | Provider, model, code index settings, guides, companion idle recap, run mode | Security switches (`/net`, `/net-confirm`, `/tools`, `/run-confirm`) are never saved |
 | `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |
+| `runs/<session>/rN.log` | Full output of each `run_command` in run mode `new` | Last 20 per session; deleted on `/clear`, `/new` and session load; other sessions' folders removed after 3 days |
 | `tls/` | momo's local CA and HTTPS certificate | Deleting it creates a new CA on the next `--web-tls auto` start; every device must trust it again |
 
 Elsewhere: `.momo-plan.md` in the workdir while a plan exists, `conversation-<timestamp>.md` from `/export`, and the web UI's theme, view and notification settings in each browser's `localStorage`. The `/token` value and the web UI access token are never stored anywhere.

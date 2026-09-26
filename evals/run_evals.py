@@ -9,6 +9,9 @@ are statistical rather than pass/fail.  It lives outside tests/ so
     python evals/run_evals.py --mode coding --runs 3 --tasks line-to-definition
     python evals/run_evals.py --json baseline.json
     python evals/run_evals.py --index --runs 3      # with the code index on (/index on)
+    python evals/run_evals.py --suite shell --run-mode classic --runs 3
+    python evals/run_evals.py --suite shell --run-mode new --runs 3
+                                                    # command output: /run-mode A/B
     python evals/run_evals.py --cache evals/.cache/runs.jsonl --runs 5
                                                     # reuse runs whose inputs did not change
 
@@ -32,6 +35,7 @@ import os
 import subprocess
 import queue
 import re
+import shutil
 import statistics
 import sys
 import tempfile
@@ -47,18 +51,30 @@ sys.path.insert(0, str(REPO))
 if not os.environ.get("MOMO_EVAL_KEEP_HOME"):
     os.environ["HOME"] = tempfile.mkdtemp(prefix="momo_eval_home_")
 
-from evals.tasks import INDEX_TASKS, LANG_TASKS, TASKS  # noqa: E402
+from evals.tasks import INDEX_TASKS, LANG_TASKS, SHELL_TASKS, TASKS  # noqa: E402
 from harness.harness import (Harness, ChatEvent, DoneEvent, ErrorEvent,  # noqa: E402
                              ToolCallEvent, ToolResultEvent)
 
 
 _SHELL_SEARCH = re.compile(r"^\s*(grep|rg|ag|find|fd|ack)\b")
+# A command filtered through the shell: the model trimming output itself, which
+# /run-mode new's tail=/grep= are meant to replace (a pipe also hides the exit code).
+_SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
 
 
-def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True):
+def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True,
+             run_mode="new"):
     """One task, one fresh conversation.  Returns what the model did."""
-    h = Harness(host=host, model=model, workdir=REPO / task.workdir, provider=provider)
+    workdir = REPO / task.workdir
+    scratch = None
+    if task.isolate:
+        scratch = tempfile.TemporaryDirectory(prefix="momo_eval_wd_")
+        workdir = Path(scratch.name) / "project"
+        shutil.copytree(REPO / task.workdir, workdir,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    h = Harness(host=host, model=model, workdir=workdir, provider=provider)
     h.mode = mode
+    h.run_mode = run_mode
     h.stream = False          # deltas would just duplicate the final ChatEvent
     h.think = think
     # Nobody is there to answer: without this a run that calls ask_user blocks forever.
@@ -75,6 +91,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     sub = h.event_queue.subscribe(replay=False)
     calls: list[tuple[str, dict]] = []
     results: list[str] = []
+    shell_results: list[str] = []   # write tools emit a diff instead, so no zip with calls
     answer, err = "", None
     replies: list[str] = []
 
@@ -90,6 +107,8 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
                 calls.append((ev.name, ev.args))
             elif isinstance(ev, ToolResultEvent):
                 results.append(ev.result or "")
+                if ev.name in ("run_command", "command_output"):
+                    shell_results.append(ev.result or "")
             elif isinstance(ev, ChatEvent):
                 # role="system" is the harness talking to itself (nudges,
                 # compaction notices) — only the assistant's reply is the answer.
@@ -111,6 +130,8 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     t.join(timeout=timeout + 30)
     sub.close()
     h.shutdown_index()
+    if scratch is not None:
+        scratch.cleanup()
 
     names = [c[0] for c in calls]
     # Grade every reply of the turn, not just the last: a fact stated before a
@@ -156,6 +177,15 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
                                                           "(no file in the code index"))),
         "route": route,
         "tool_chars": sum(len(r) for r in results),
+        # /run-mode: how the model got at command output.
+        "run_mode": run_mode,
+        "command_output_calls": sum(1 for n in names if n == "command_output"),
+        "run_views": sum(1 for n, a in calls if n == "run_command"
+                         and (a.get("tail") or a.get("grep"))),
+        "self_piped": sum(1 for n, a in calls if n == "run_command"
+                          and _SELF_PIPED.search(str(a.get("command", "")))),
+        "reruns": _reruns(calls),
+        "shell_chars": sum(len(r) for r in shell_results),
         "hits": [m for m in task.must if m.lower() in low],
         "n_must": len(task.must),
         "err": err,
@@ -163,10 +193,23 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     }
 
 
+def _reruns(calls) -> int:
+    """run_command calls that repeat an earlier command of the same run (ignoring
+    a trailing pipe): output the model could not get at the first time."""
+    seen, n = set(), 0
+    for name, a in calls:
+        if name != "run_command":
+            continue
+        cmd = re.split(r"\s*\|", str(a.get("command", "")), maxsplit=1)[0].strip()
+        n += cmd in seen
+        seen.add(cmd)
+    return n
+
+
 # Harness code whose behaviour reaches the model's tool results; the prompt and
 # tool schemas are fingerprinted separately, as rendered.
 _CODE_FILES = ("harness/tools.py", "harness/code_nav.py", "harness/harness.py",
-               "harness/net.py")
+               "harness/net.py", "harness/run_store.py")
 _INDEX_CODE_FILES = ("harness/code_index.py",)
 
 
@@ -190,13 +233,15 @@ def _project_hash(workdir: Path) -> str:
 _env_cache: dict = {}
 
 
-def fingerprint(task, *, mode, think, index, model, provider, host, route=True) -> str:
+def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
+                run_mode="new") -> str:
     """Everything that can change a run's outcome, hashed."""
-    key = (task.workdir, mode, index, route)
+    key = (task.workdir, mode, index, route, run_mode)
     if key not in _env_cache:
         h = Harness(host=host, model=model, workdir=REPO / task.workdir, provider=provider)
         h.mode = mode
         h.index_route = route
+        h.run_mode = run_mode
         if index:
             h.set_index(True)
         prompt = h._build_system_prompt()
@@ -213,7 +258,8 @@ def fingerprint(task, *, mode, think, index, model, provider, host, route=True) 
     spec = json.dumps({"id": task.id, "prompt": task.prompt, "must": list(task.must),
                        "ideal": sorted(task.ideal), "max_calls": task.max_calls,
                        "mode": mode, "think": think, "index": index, "provider": provider,
-                       **({} if route else {"route": False})},
+                       **({} if route else {"route": False}),
+                       **({} if run_mode == "new" else {"run_mode": run_mode})},
                       sort_keys=True)
     return hashlib.sha256((spec + _env_cache[key]).encode()).hexdigest()[:24]
 
@@ -282,6 +328,16 @@ def summarise(rows):
     out.append(f"  coached calls    {sum(r['coached_calls'] for r in rows)}  "
                "(tool explained the mistake; costs a round trip)")
     out.append(f"  harness repairs  {sum(r['repairs'] for r in rows)}")
+    if any(r.get("shell_chars") for r in rows):
+        runs = [r for r in rows if r.get("shell_chars") is not None]
+        modes = sorted({r.get("run_mode", "?") for r in runs})
+        out.append(f"  command output   run mode {'/'.join(modes)}: "
+                   f"{statistics.mean(r['shell_chars'] for r in runs) / 1024:.1f} KB/run "
+                   f"(max {max(r['shell_chars'] for r in runs) / 1024:.1f})")
+        out.append(f"    tail=/grep= views {sum(r['run_views'] for r in runs)}, "
+                   f"command_output {sum(r['command_output_calls'] for r in runs)}, "
+                   f"self-piped {sum(r['self_piped'] for r in runs)}, "
+                   f"reruns {sum(r['reruns'] for r in runs)}")
     errs = [r for r in rows if r["err"]]
     if errs:
         out.append(f"  runs with errors {len(errs)}: " +
@@ -310,7 +366,9 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="per-run seconds")
     ap.add_argument("--tasks", nargs="*", help="only these task ids")
     ap.add_argument("--json", metavar="PATH", help="write the full per-run records here")
-    ap.add_argument("--suite", choices=("nav", "index", "lang", "all"), default="nav",
+    ap.add_argument("--run-mode", choices=("new", "classic"), default="new",
+                    help="/run-mode for every run: new (saved log + views) or classic")
+    ap.add_argument("--suite", choices=("nav", "index", "lang", "shell", "all"), default="nav",
                     help="nav = the code-navigation tasks (default), index = the code-index "
                          "use cases, lang = 3 tasks per language on evals/lang/<lang>/project, "
                          "all = every task")
@@ -330,12 +388,12 @@ def main():
     if "://" not in args.host:
         ap.error(f"--host needs a scheme, e.g. http://{args.host}")
 
-    pool = {"nav": TASKS, "index": INDEX_TASKS, "lang": LANG_TASKS,
-            "all": TASKS + INDEX_TASKS + LANG_TASKS}[args.suite]
+    pool = {"nav": TASKS, "index": INDEX_TASKS, "lang": LANG_TASKS, "shell": SHELL_TASKS,
+            "all": TASKS + INDEX_TASKS + LANG_TASKS + SHELL_TASKS}[args.suite]
     tasks = pool
     if args.tasks:
         want = set(args.tasks)
-        pool = TASKS + INDEX_TASKS + LANG_TASKS
+        pool = TASKS + INDEX_TASKS + LANG_TASKS + SHELL_TASKS
         tasks = [t for t in pool if t.id in want]
         missing = want - {t.id for t in tasks}
         if missing:
@@ -354,7 +412,7 @@ def main():
             if cache_path:
                 fp = fingerprint(task, mode=mode, think=args.think, index=args.index,
                                  model=args.model, provider=args.provider, host=args.host,
-                                 route=args.route)
+                                 route=args.route, run_mode=args.run_mode)
                 stored = [] if args.refresh else cache.get(fp, [])
             for i in range(args.runs):
                 if i < len(stored):
@@ -364,7 +422,7 @@ def main():
                     r = run_once(task, host=args.host, model=args.model,
                                  provider=args.provider, mode=mode,
                                  think=args.think, timeout=args.timeout, index=args.index,
-                                 route=args.route)
+                                 route=args.route, run_mode=args.run_mode)
                     source = ""
                     if cache_path and not r.get("err"):
                         with cache_path.open("a") as f:
