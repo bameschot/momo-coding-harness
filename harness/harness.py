@@ -755,9 +755,16 @@ class Harness:
         return base
 
     def set_mode(self, mode: str):
+        changed = mode != self.mode
         self.mode = mode
         self.rebuild_system_prompt()
         self.emit_status()
+        if changed:
+            # Remember the switch now, not at the next turn's autosave: the
+            # session keeps its mode on restore, prefs seed a fresh start.
+            session_mod.save_prefs(mode=mode)
+            if len(self.messages) > 1:
+                self._autosave()
 
     def rebuild_system_prompt(self):
         """Re-render the system prompt in place.

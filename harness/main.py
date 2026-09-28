@@ -13,6 +13,7 @@ from . import session as session_mod
 from .controller import Controller
 from .events import ChatEvent
 from .harness import Harness
+from .prompts import _MODE_TOOLS
 from .tui import run_tui
 from .web import tls as tls_mod
 from .web.server import is_loopback, start_web_server
@@ -43,8 +44,9 @@ def main():
                                              "current directory)")
     parser.add_argument("--context", default=None, type=int, metavar="N",
                         help="Override context token limit (default: read from model)")
-    parser.add_argument("--mode",    default="design", choices=["design", "chat", "plan", "coding", "momo"],
-                        help="Starting mode (ignored when restoring a session)")
+    parser.add_argument("--mode",    default=None, choices=["design", "chat", "plan", "coding", "momo"],
+                        help="Starting mode (default: last-selected mode, else design; "
+                             "ignored when restoring a session)")
     parser.add_argument("--max-tool-result", default=0, type=int, metavar="N",
                         help="Max chars returned by a single tool call (0 = unlimited)")
     parser.add_argument("--run-mode", choices=("new", "classic"), default=None,
@@ -233,7 +235,8 @@ def main():
                 harness.set_mode(harness.mode)   # the system prompt names the workdir
                 harness.reload_guides()
     else:
-        harness.set_mode(args.mode)
+        mode = args.mode or prefs.get("mode")
+        harness.set_mode(mode if mode in _MODE_TOOLS else "design")
     if args.context is not None:      # after the restore, which would overwrite it
         harness.context_pct = None
         harness.context_fixed = True
