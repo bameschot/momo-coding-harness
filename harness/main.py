@@ -53,6 +53,9 @@ def main():
                         help="run_command output: 'new' saves it to a log and returns a view "
                              "(tail/grep, command_output); 'classic' returns all of it "
                              "(default: last /run-mode setting, else new)")
+    parser.add_argument("--tool-ref", choices=("full", "compact"), default=None,
+                        help="System prompt tool reference: 'full' or 'compact' (one line per "
+                             "tool) (default: last /tool-ref setting, else compact)")
     parser.add_argument("--run-output-limit", type=int, default=None, metavar="N",
                         help="Chars in run_command's default view in run mode new "
                              "(default: last /run-output-limit setting, else 5000)")
@@ -200,6 +203,8 @@ def main():
     index_on = flag_or_pref(args.index, "index", True)
     run_mode = args.run_mode or prefs.get("run_mode", "new")
     harness.run_mode = run_mode if run_mode in ("new", "classic") else "new"
+    tool_ref = args.tool_ref or prefs.get("tool_ref", "compact")
+    harness.tool_ref = tool_ref if tool_ref in ("full", "compact") else "compact"
     limit = args.run_output_limit if args.run_output_limit is not None \
         else prefs.get("run_output_limit", harness.run_output_limit)
     if not isinstance(limit, int) or limit < run_store_mod.MIN_LIMIT:

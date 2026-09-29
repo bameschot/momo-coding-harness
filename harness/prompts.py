@@ -2,6 +2,8 @@
 harness appends (code index rules, plan execution rules)."""
 from __future__ import annotations
 
+import platform
+from datetime import date
 from pathlib import Path
 
 from . import code_nav
@@ -57,16 +59,35 @@ def _planner_prompt(workdir: str) -> str:
         f"Working directory: {workdir}"
     )
 
-# Appended to the coder prompt while an approved plan is being executed.  The
-# live plan state is rendered after it on every step, so the model always knows
-# which step it is on even after context compaction.
-_INDEX_BANNER = (
-    "**Code index is ON for this project.** Find code, text, files and usages with the index_* "
-    "tools (index_search, index_text, index_callers, index_file, index_map) — not grep_files, "
-    "find_files or run_command. The file tools are only a fallback; see \"Code index: ON\" at "
-    "the end.")
+def _index_banner(tool_names: set[str]) -> str:
+    """First line of the prompt while the code index is on."""
+    avoid = "grep_files, find_files" + (" or run_command" if "run_command" in tool_names else "")
+    return ("**Code index is ON for this project.** Find code, text, files and usages with the "
+            "index_* tools (index_search, index_text, index_callers, index_file, index_map) — "
+            f"not {avoid}. The file tools are only a fallback; see \"Navigating code\" at the end.")
 
-# What to reach for first, per role.
+# ── navigating code ──────────────────────────────────────────────────────────
+# One section, generated per role and tool set, instead of a paragraph copied
+# into every role file: it only names tools the role actually has, and with the
+# index on it teaches the index tools rather than contradicting the role text.
+
+# What to reach for first, per role, without the index.
+_NAV_FIRST = {
+    "coding":    "Map an unfamiliar tree with code_outline on a directory; jump to a named "
+                 "thing with find_symbol; before changing a definition, find_references.",
+    "plan-exec": "Start each step with code_outline / read_symbol of what it touches; before "
+                 "changing a definition, find_references.",
+    "plan":      "Trace the code path the change touches by structure. For a rename, signature "
+                 "change or removal, find_references lists every place your steps must cover.",
+    "momo":      "Map an unfamiliar tree with code_outline on a directory; jump to a named "
+                 "thing with find_symbol.",
+    "chat":      "When the user points at code, outline it and read the definitions that "
+                 "matter rather than whole files.",
+    "design":    "Map an existing project with code_outline on a directory before you "
+                 "interview, and read the definitions that matter rather than whole files.",
+}
+
+# What to reach for first, per role, with the index on.
 _INDEX_FIRST = {
     "coding":    "Start a task with index_map (unfamiliar code) or index_search (a named thing), "
                  "not list_directory + read_file; before changing a definition, index_callers.",
@@ -83,31 +104,126 @@ _INDEX_FIRST = {
 }
 
 
-def _index_rules(role: str) -> str:
-    """The system-prompt section while the code index is on."""
-    first = _INDEX_FIRST.get(role, _INDEX_FIRST["coding"])
-    return f"""## Code index: ON — search with the index first
+_NO_SHELL_SEARCH = ("**Never explore with `run_command`** (`grep`, `find`, `sed`, `awk`, `head`, "
+                    "`tail`, `wc`) — keep it for building, testing and running things.")
 
-This project is indexed. For code and config, the index tools answer in one call
-what grep and find need several for, and they are always current. {first}
 
-| Instead of | Use |
-|---|---|
-| grep_files (text in files) | index_text |
-| find_files (a file by name or glob) | index_search(query, kind="file"), or index_map |
-| find_references / grep for usages | index_callers |
-| file_dependencies | index_file |
-| code_outline of a directory | index_map |
-| find_symbol by name | index_search (find_symbol still answers "which definition is line N in") |
+def _nav_rules(role: str, tool_names: set[str], index: bool) -> str:
+    """The "Navigating code" section for this role and exactly these tools."""
+    has = tool_names.__contains__
+    out = []
+    if index:
+        out.append(f"## Navigating code — the code index is ON\n\nThis project is indexed. For "
+                   "code and config, the index tools answer in one call what grep and find need "
+                   "several for, and they are always current. "
+                   + _INDEX_FIRST.get(role, _INDEX_FIRST["coding"]))
+        out.append("| To find | Use |\n|---|---|\n"
+                   "| a definition, config key, CSS rule or file by name | index_search "
+                   "(kind=\"file\" for files) |\n"
+                   "| any text | index_text |\n"
+                   "| every caller or use of a name | index_callers |\n"
+                   "| a file's imports and importers | index_file |\n"
+                   "| a map of the project or a directory | index_map |\n"
+                   "| which definition line N is in | find_symbol / read_symbol with the line |")
+    else:
+        head = "## Navigating code"
+        if has("code_outline"):
+            head += "\n\n" + _NAV_FIRST.get(role, _NAV_FIRST["coding"])
+        out.append(head)
+    bullets = []
+    if has("code_outline") and has("read_symbol"):
+        bullets.append("**Outline before you read.** `code_outline` on a source file costs about a "
+                       "twentieth of reading it whole and lists every definition with its line "
+                       "range; then `read_symbol` the one you need (a line number reads whatever "
+                       "definition contains it — use that on a grep hit or a traceback line)."
+                       + ("" if index else " `code_outline` on a DIRECTORY maps the whole tree in "
+                          "one call.")
+                       + " Read a whole source file only when it is short or you need all of it.")
+    if not index and has("find_symbol"):
+        bullets.append("`find_symbol` jumps to a definition (`name=\"*\"` with `kind=` lists them "
+                       "all). Config keys in YAML/TOML/JSON are definitions too: `find_symbol` "
+                       "finds `LOG_LEVEL` or `services.web.ports` by name, with its file and line.")
+    if not index and has("find_references"):
+        bullets.append("**Before renaming, changing a signature or deleting, `find_references`** "
+                       "(`role=\"call\"` for call sites only): it lists every real use and skips "
+                       "comments and strings."
+                       + (" `file_dependencies` shows what a file imports and what imports it."
+                          if has("file_dependencies") else ""))
+    if has("code_outline") or index:
+        bullets.append("**Trust these results.** Their lists are complete for the files they "
+                       "cover; do not re-check them by reading the files they name.")
+    if index:
+        bullets.append(f"Indexed: {code_nav.SUPPORTED_EXTENSIONS} (definitions and uses), and "
+                       "every other text file for index_text. Use grep_files, grep_file or "
+                       "find_files only when an index tool found nothing, for a regex, for another "
+                       "file type, or for a file the index skips (git-ignored, binary, over 2 MB).")
+    elif has("code_outline"):
+        bullets.append("The structure tools cover source files and config keys. For anything else "
+                       "(Markdown, plain text, other languages) `read_file` a small file whole, or "
+                       "`grep_file` / `grep_files` to locate the lines in a large one first.")
+    else:
+        bullets.append("Locate before you read: `grep_files` / `find_files` to find the file and "
+                       "line, then `read_file` with `start_line`/`end_line` for a large file.")
+    bullets.append("**Answer from what you found.** A search hit line often holds the answer "
+                   "itself (a config value, a constant, a message); read the file only for context "
+                   "you actually need. Once a search has answered the question, stop searching — "
+                   "put any doubt (\"this is a test fixture\") in your answer instead of hunting "
+                   "for a better match.")
+    if has("run_command"):
+        bullets.append(_NO_SHELL_SEARCH)
+    return "\n\n".join(out) + "\n\n" + "\n".join(f"- {b}" for b in bullets)
 
-Indexed file types: {code_nav.SUPPORTED_EXTENSIONS} (definitions and uses), and every
-other text file for index_text.
 
-Use grep_files, grep_file or find_files only when an index tool found nothing, for a
-regex, for a file type not listed above, or for a file the index does not cover
-(git-ignored, binary, over 2 MB). Never grep or find with run_command.
-Where the role instructions above say grep_files, find_files, find_references or
-file_dependencies, read them as the index tools in this table."""
+# ── environment ──────────────────────────────────────────────────────────────
+
+def _git_state(workdir: Path) -> str:
+    """'a git repository, branch `x`' / 'not a git repository', from the files
+    alone (no subprocess on every prompt build)."""
+    for d in (workdir, *workdir.parents):
+        git = d / ".git"
+        if git.is_dir():
+            try:
+                head = (git / "HEAD").read_text(encoding="utf-8").strip()
+            except OSError:
+                return "a git repository"
+            if head.startswith("ref: refs/heads/"):
+                return f"a git repository, branch `{head[len('ref: refs/heads/'):]}`"
+            return "a git repository (detached HEAD)"
+        if git.is_file():                        # a worktree or submodule
+            return "a git repository"
+    return "not a git repository"
+
+
+def _system_line() -> str:
+    system = platform.system()
+    if system == "Darwin":
+        return (f"macOS {platform.mac_ver()[0]}".rstrip() + "; run_command uses /bin/sh with the "
+                "BSD tools (`sed -i ''`, no GNU-only flags)")
+    if system == "Linux":
+        return "Linux; run_command uses /bin/sh with the GNU tools"
+    return f"{system}; run_command uses the system shell"
+
+
+def _environment(workdir: Path, tool_names: set[str], net_access: str) -> str:
+    lines = [f"- Working directory: `{workdir}`. Every path is relative to it; a path that "
+             "escapes it with `..` is rejected.",
+             f"- Today: {date.today().isoformat()}"]
+    if "run_command" in tool_names:
+        lines.append(f"- System: {_system_line()}")
+        lines.append(f"- Git: {_git_state(workdir)}")
+    if net_access != "off" and "fetch_url" in tool_names:
+        lines.append("- Internet: on — use fetch_url / web_search for documentation, APIs and "
+                     "package versions" + (" (local network too)" if net_access == "local" else "")
+                     + "; never curl or wget a page.")
+    else:
+        lines.append("- Internet: off — if a task needs the web, say so; do not try curl or wget.")
+    return "## Environment\n\n" + "\n".join(lines)
+
+
+# ── plan execution ───────────────────────────────────────────────────────────
+# Appended to the coder prompt while an approved plan is being executed.  The
+# live plan state is rendered after it on every step, so the model always knows
+# which step it is on even after context compaction.
 
 
 _PLAN_EXECUTION_RULES = """## Executing an approved plan
@@ -115,6 +231,8 @@ _PLAN_EXECUTION_RULES = """## Executing an approved plan
 You are executing a plan the user approved. The harness drives it one step at a
 time: each step arrives as a user message "Plan step i/N". The step marked ▶ below
 is the current one.
+
+These rules replace "To finish" in "How the loop works" above: a step ends with complete_step.
 
 - Work only on the current step. Do not start later steps — the harness gives you each one in
   turn — and do not redo finished ones.

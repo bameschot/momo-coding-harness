@@ -488,10 +488,12 @@ NET_TOOLS = [
         ["spec", "test_query"]),
 ]
 
-DESIGN_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS
 ALL_TOOLS    = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
 
 _by_name = {t["function"]["name"]: t for t in SHARED_TOOLS + CODING_ONLY_TOOLS}
+# Design mode writes one spec and revises it: edit_file changes a section
+# without rewriting a long document (which a small context can truncate).
+DESIGN_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS + [_by_name["edit_file"]]
 CHAT_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [_by_name["ask_user"]]
 
 # Plan-mode tools.  Like ask_user these are intercepted by the harness (they
@@ -1773,10 +1775,35 @@ def _example_args(tool: dict) -> dict:
     return out
 
 
-def render_tool_reference(tool_list: list[dict]) -> str:
+_TOOL_REFERENCE_INTRO_COMPACT = (
+    "## Tool reference\n\n"
+    "Each tool's full description and parameters come with the function-calling API. "
+    "If that is not available, output calls in the format of the examples below — the "
+    "harness detects and executes them. Pass arguments in the order shown; for file "
+    "writes put `path` before `content`."
+)
+
+_TOOL_REF_STYLES = ("full", "compact")
+
+
+def _first_sentence(text: str) -> str:
+    """The description up to its first sentence end, which is where every tool
+    names what it is for (see the evals note on putting affordances first)."""
+    m = re.search(r"[.!?](\s|$)", text)
+    return text[:m.start() + 1] if m else text
+
+
+def render_tool_reference(tool_list: list[dict], style: str = "full") -> str:
     """Render the Markdown tool reference for exactly the given tools. The harness
     calls this per mode with that mode's tool set, so each role sees a reference
-    covering precisely the tools it actually has."""
+    covering precisely the tools it actually has.
+
+    style="compact" gives one line per tool (signature, first sentence, example):
+    the full text already reaches the model in the native tool schemas, so the
+    full reference repeats it, and the prompt only needs enough for a model that
+    writes text-format calls to copy."""
+    if style == "compact":
+        return _render_compact_reference(tool_list)
     sections = [_TOOL_REFERENCE_INTRO]
     for tool in tool_list:
         fn = tool["function"]
@@ -1800,3 +1827,17 @@ def render_tool_reference(tool_list: list[dict]) -> str:
         lines.append(f"Example: `<tool_call>{example}</tool_call>`")
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
+
+
+def _render_compact_reference(tool_list: list[dict]) -> str:
+    entries = []
+    for tool in tool_list:
+        fn = tool["function"]
+        params = fn["parameters"]
+        required = set(params.get("required", []))
+        sig = ", ".join(p if p in required else p + "?" for p in params.get("properties", {}))
+        example = json.dumps({"name": fn["name"], "arguments": _example_args(tool)},
+                             ensure_ascii=False)
+        entries.append(f"- **{fn['name']}**({sig}) — {_first_sentence(fn.get('description', '').strip())}\n"
+                       f"  `<tool_call>{example}</tool_call>`")
+    return _TOOL_REFERENCE_INTRO_COMPACT + "\n\n" + "\n".join(entries)

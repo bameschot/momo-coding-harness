@@ -533,6 +533,23 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.emit_status()
         return CommandResult(handled=True, output=_mode_state())
 
+    if cmd == "/tool-ref":
+        def _ref_state() -> str:
+            return (f"Tool reference: {harness.tool_ref} "
+                    + ("(one line per tool; full descriptions travel in the tool schemas)"
+                       if harness.tool_ref == "compact" else
+                       "(every description and parameter, also sent as tool schemas)"))
+        if not arg:
+            return CommandResult(handled=True, output=_ref_state())
+        style = arg.strip().lower()
+        if style not in tools_mod._TOOL_REF_STYLES:
+            return _bad_choice(arg, "'full' or 'compact'")
+        harness.tool_ref = style
+        session_mod.save_prefs(tool_ref=style)
+        harness.rebuild_system_prompt()
+        harness.refresh_status()
+        return CommandResult(handled=True, output=_ref_state())
+
     if cmd == "/run-output-limit":
         if not arg:
             return CommandResult(handled=True, output=(
@@ -995,6 +1012,8 @@ Available commands:
   /run-mode [new|classic]  new: save command output to a log, return a view
                       (tail=/grep=, command_output); classic: return it all
   /run-output-limit [n]    Chars in run_command's default view (default 5000)
+  /tool-ref [full|compact]  How the system prompt describes the tools: full, or
+                      one line per tool (the tool schemas carry the rest)
   /system-prompt      Show the composed system prompt: role, tools, guides, skills (alias: /prompt)
   /system-prompt list  List the system prompt's parts and their size
   /tools              Pick this mode's tools (on/off per tool)

@@ -931,13 +931,13 @@ class HarnessIndex(unittest.TestCase):
         self.assertEqual(json.loads((Path(self.home.name) / "prefs.json").read_text())["index"], False)
 
     def test_prompt_and_descriptions_put_the_index_first(self):
-        self.assertNotIn("Code index: ON", self.h.messages[0]["content"])
+        self.assertNotIn("the code index is ON", self.h.messages[0]["content"])
         self.cmd("/index on")
         for mode in ("coding", "plan", "chat", "design", "momo"):
             self.h.set_mode(mode)
             prompt = self.h.messages[0]["content"]
             self.assertTrue(prompt.startswith("**Code index is ON"), mode)
-            self.assertIn("## Code index: ON", prompt[-4000:], mode)
+            self.assertIn("## Navigating code — the code index is ON", prompt[-4000:], mode)
             self.assertIn(hmod._INDEX_FIRST[mode], prompt, mode)
         for name in ("grep_files", "find_files"):
             t = next(t for t in self.h._current_tools() if t["function"]["name"] == name)

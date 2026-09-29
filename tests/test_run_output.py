@@ -282,7 +282,10 @@ class HarnessWiring(unittest.TestCase):
         self.assertEqual(self.h.run_mode, "new")
         names = self.names()
         self.assertEqual(names[names.index("run_command") + 1], "command_output")
-        self.assertIn("tail=N", self.h.messages[0]["content"])
+        # The full description travels in the schema (the prompt's tool
+        # reference is compact by default).
+        run = next(t for t in self.h._current_tools() if t["function"]["name"] == "run_command")
+        self.assertIn("tail=N", run["function"]["description"])
 
     def test_run_mode_command_swaps_the_schema(self):
         out = commands.handle("/run-mode classic", self.h).output

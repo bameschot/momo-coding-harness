@@ -22,9 +22,9 @@ from . import tools as tools_mod
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
                      StatusEvent, ThinkEvent, ToolCallEvent, ToolResultEvent)
-from .prompts import (_INDEX_BANNER, _INDEX_FIRST, _MODE_TOOLS,  # noqa: F401
-                      _PLAN_EXECUTION_RULES, _ROLE_LOADERS, _coding_prompt, _index_rules,
-                      _load_role)
+from .prompts import (_INDEX_FIRST, _index_banner, _MODE_TOOLS,  # noqa: F401
+                      _PLAN_EXECUTION_RULES, _ROLE_LOADERS, _coding_prompt, _environment,
+                      _load_role, _nav_rules)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls)
 
@@ -285,6 +285,10 @@ class Harness:
         self.plan: Plan | None = None
         self.plan_phase: str = "investigating"
         self._tool_ref = ""
+        # How the prompt's tool reference is rendered: "full" (every description
+        # and parameter table) or "compact" (one line per tool; the native
+        # schemas carry the rest).  /tool-ref
+        self.tool_ref: str = "compact"
         # Project guides: when on, the workdir's AGENTS.md / CLAUDE.md / ... are
         # appended to the system prompt; re-read on new/loaded session, /clear,
         # compaction and a workdir change (reload_guides).  /guides
@@ -851,10 +855,12 @@ class Harness:
                          "sep": sep if secs else ""})
 
         tools = self._current_tools()
-        if self.index is not None and any(t["function"]["name"] == "index_text" for t in tools):
-            # First and last, where a small model weighs it most: the role
-            # texts in between still teach grep_files / find_references.
-            add("index", "Code index banner", _INDEX_BANNER)
+        names = {t["function"]["name"] for t in tools}
+        index_on = self.index is not None and "index_text" in names
+        if index_on:
+            # First and last (the navigation section), where a small model
+            # weighs it most.
+            add("index", "Code index banner", _index_banner(names))
         if self._plan_executing():
             # Execution runs with exactly the coding agent's prompt plus the plan.
             role = (_coding_prompt(str(self.workdir)) + "\n\n---\n\n" + _PLAN_EXECUTION_RULES
@@ -870,28 +876,30 @@ class Harness:
                          "call create_plan again with the complete plan.\n\n"
                          + self.plan.render_for_prompt())
         add("role", label, role, sep="\n\n")
-        if str(self.workdir) not in role:
-            add("workdir", "Working directory", f"Working directory: {self.workdir}", sep="\n\n")
-        # The tool reference is generated from the schemas for exactly this
-        # mode's tool set, so it is always in sync with the real tools (the role
-        # .md files no longer carry a hand-copied version).  Kept so the context
-        # breakdown can attribute it to tools without re-rendering.
-        self._tool_ref = render_tool_reference(tools)
-        add("tools", f"Tool reference ({len(tools)} tools)", self._tool_ref)
+        add("env", "Environment", _environment(self.workdir, names, self.net_access))
+        # The user's own instructions sit next to the role they refine, not
+        # behind the (large) tool reference.
         self._guides_text = ""
         if self._guides:
             self._guides_text = (
-                "## Project guides\n\nInstructions from this project's own guide files "
-                "— follow them.\n\n"
+                "## Project guides\n\nInstructions from this project's own guide files. Follow "
+                "them: they refine the role above for this project (conventions, commands, "
+                "style). The loop and tool rules still apply.\n\n"
                 + "\n\n".join(f"### {name}\n\n{text}" for name, text in self._guides))
             add("guides", f"Project guides ({len(self._guides)})", self._guides_text)
         for name in self.active_skills:
             p = _SKILLS_DIR / f"{name}.md"
             if p.exists():
                 add(f"skill:{name}", f"Skill: {name}", p.read_text(encoding="utf-8").strip())
-        if secs[0]["key"] == "index":
-            role_name = "plan-exec" if self._plan_executing() else self.mode
-            add("index-rules", "Code index rules", _index_rules(role_name))
+        # The tool reference is generated from the schemas for exactly this
+        # mode's tool set, so it is always in sync with the real tools (the role
+        # .md files carry no tool tables).  Kept so the context breakdown can
+        # attribute it to tools without re-rendering.
+        self._tool_ref = render_tool_reference(tools, self.tool_ref)
+        add("tools", f"Tool reference ({len(tools)} tools, {self.tool_ref})", self._tool_ref)
+        role_name = "plan-exec" if self._plan_executing() else self.mode
+        add("nav", "Navigating code" + (" (code index)" if index_on else ""),
+            _nav_rules(role_name, names, index_on))
         return secs
 
     def system_prompt_view(self) -> dict:
@@ -1729,7 +1737,10 @@ class Harness:
                 # write_file is sticky — it must not be overwritten by a later
                 # tool in the same batch so the terminal detection below works.
                 _call_ok = not result.startswith("ERROR:")
-                if name == "write_file" and _call_ok:
+                # In design mode an edit_file revises the written spec: the
+                # same finished state as the write itself.
+                if _call_ok and (name == "write_file"
+                                 or (name == "edit_file" and self.mode == "design")):
                     last_tool = "write_file"
                     tool_only_turns = 0  # terminal action; suppress nudge on follow-up
                 elif last_tool != "write_file":
@@ -1752,9 +1763,9 @@ class Harness:
                 _nudged = True
                 nudge = (
                     "You have been calling tools for several turns without a text response. "
-                    "If you have gathered enough information to write the design, call write_file now with both 'path' (the file path to write) and 'content' (the complete spec). "
-                    "If you need more information, ask the user with ask_user. "
-                    "Otherwise write a text response summarising what you have found so far."
+                    "If the user asked a direct question, answer it now in plain text. "
+                    "If you are interviewing for a design: ask your next question with ask_user, "
+                    "or, once you have enough, call write_file with both 'path' (the file path to write) and 'content' (the complete spec)."
                     if self.mode == "design" else
                     "You have been calling tools for several turns without a text response. "
                     "If your investigation is complete, call create_plan now. "

@@ -63,7 +63,7 @@ _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
 
 
 def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True,
-             run_mode="new"):
+             run_mode="new", tool_ref="compact"):
     """One task, one fresh conversation.  Returns what the model did."""
     workdir = REPO / task.workdir
     scratch = None
@@ -75,6 +75,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     h = Harness(host=host, model=model, workdir=workdir, provider=provider)
     h.mode = mode
     h.run_mode = run_mode
+    h.tool_ref = tool_ref
     h.stream = False          # deltas would just duplicate the final ChatEvent
     h.think = think
     # Nobody is there to answer: without this a run that calls ask_user blocks forever.
@@ -179,6 +180,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         "tool_chars": sum(len(r) for r in results),
         # /run-mode: how the model got at command output.
         "run_mode": run_mode,
+        "tool_ref": tool_ref,
         "command_output_calls": sum(1 for n in names if n == "command_output"),
         "run_views": sum(1 for n, a in calls if n == "run_command"
                          and (a.get("tail") or a.get("grep"))),
@@ -234,14 +236,15 @@ _env_cache: dict = {}
 
 
 def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
-                run_mode="new") -> str:
+                run_mode="new", tool_ref="compact") -> str:
     """Everything that can change a run's outcome, hashed."""
-    key = (task.workdir, mode, index, route, run_mode)
+    key = (task.workdir, mode, index, route, run_mode, tool_ref)
     if key not in _env_cache:
         h = Harness(host=host, model=model, workdir=REPO / task.workdir, provider=provider)
         h.mode = mode
         h.index_route = route
         h.run_mode = run_mode
+        h.tool_ref = tool_ref
         if index:
             h.set_index(True)
         prompt = h._build_system_prompt()
@@ -368,6 +371,8 @@ def main():
     ap.add_argument("--json", metavar="PATH", help="write the full per-run records here")
     ap.add_argument("--run-mode", choices=("new", "classic"), default="new",
                     help="/run-mode for every run: new (saved log + views) or classic")
+    ap.add_argument("--tool-ref", choices=("full", "compact"), default="compact",
+                    help="system prompt tool reference style (/tool-ref A/B)")
     ap.add_argument("--suite", choices=("nav", "index", "lang", "shell", "all"), default="nav",
                     help="nav = the code-navigation tasks (default), index = the code-index "
                          "use cases, lang = 3 tasks per language on evals/lang/<lang>/project, "
@@ -412,7 +417,8 @@ def main():
             if cache_path:
                 fp = fingerprint(task, mode=mode, think=args.think, index=args.index,
                                  model=args.model, provider=args.provider, host=args.host,
-                                 route=args.route, run_mode=args.run_mode)
+                                 route=args.route, run_mode=args.run_mode,
+                                 tool_ref=args.tool_ref)
                 stored = [] if args.refresh else cache.get(fp, [])
             for i in range(args.runs):
                 if i < len(stored):
@@ -422,7 +428,8 @@ def main():
                     r = run_once(task, host=args.host, model=args.model,
                                  provider=args.provider, mode=mode,
                                  think=args.think, timeout=args.timeout, index=args.index,
-                                 route=args.route, run_mode=args.run_mode)
+                                 route=args.route, run_mode=args.run_mode,
+                                 tool_ref=args.tool_ref)
                     source = ""
                     if cache_path and not r.get("err"):
                         with cache_path.open("a") as f:

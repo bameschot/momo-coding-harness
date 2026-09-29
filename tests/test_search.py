@@ -583,7 +583,8 @@ class HarnessIntegration(unittest.TestCase):
         handle_command("/net on", self.h)
         self.assertIn("web_search", self.names())
         self.assertIn("add_search_source", self.names())
-        self.assertIn("stackoverflow (default)", self.h.messages[0]["content"])
+        ws = next(t for t in self.h._current_tools() if t["function"]["name"] == "web_search")
+        self.assertIn("stackoverflow (default)", json.dumps(ws))
         out = handle_command("/search-sources", self.h).output
         self.assertIn("npm", out)
         self.assertIn(str(Path(self.home.name)), out)

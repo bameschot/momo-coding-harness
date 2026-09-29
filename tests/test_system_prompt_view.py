@@ -3,6 +3,7 @@ web drawer).  The parts must join to exactly the prompt the model gets.
 
 Run with HOME pointed at a scratch dir — the harness writes prefs and sessions.
 """
+import re
 import unittest
 from pathlib import Path
 
@@ -60,11 +61,62 @@ class Sections(Base):
         self.h.index = _StubIndex(self.home)
         keys = [s["key"] for s in self.h.system_prompt_sections()]
         self.h.index = None
-        self.assertEqual(keys[0], "index")
-        self.assertEqual(keys[1], "role")
-        self.assertLess(keys.index("tools"), keys.index("guides"))
-        self.assertLess(keys.index("guides"), keys.index("skill:python"))
-        self.assertEqual(keys[-1], "index-rules")
+        self.assertEqual(keys, ["index", "role", "env", "guides", "skill:python", "tools", "nav"])
+
+    def test_environment(self):
+        self.h.set_mode("coding")
+        env = next(s["text"] for s in self.h.system_prompt_sections() if s["key"] == "env")
+        self.assertIn(str(self.h.workdir), env)
+        self.assertIn("Today:", env)
+        self.assertIn("Git:", env)
+        self.assertIn("Internet: off", env)
+        self.h.set_mode("chat")          # no run_command: no shell or git facts
+        env = next(s["text"] for s in self.h.system_prompt_sections() if s["key"] == "env")
+        self.assertNotIn("Git:", env)
+
+    def test_prompt_names_only_offered_tools(self):
+        """No role text or generated section may teach a tool the mode does not
+        offer — the hand-copied role tables went stale exactly this way."""
+        from harness.tools import ALL_TOOLS, INDEX_TOOLS, NET_TOOLS, PLAN_TOOLS, with_run_mode
+        every = {t["function"]["name"] for t in
+                 with_run_mode(ALL_TOOLS, "new") + INDEX_TOOLS + NET_TOOLS + PLAN_TOOLS}
+        for index in (None, _StubIndex(self.home)):
+            self.h.index = index
+            for mode in ("design", "chat", "plan", "coding", "momo"):
+                self.h.set_mode(mode)
+                offered = {t["function"]["name"] for t in self.h._current_tools()}
+                text = "".join(s["text"] for s in self.h.system_prompt_sections()
+                               if s["key"] != "tools")
+                stale = sorted(n for n in every - offered if re.search(rf"\b{n}\b", text))
+                self.assertEqual(stale, [], (mode, bool(index)))
+        self.h.index = None
+
+    def test_index_prompt_has_no_translation_patch(self):
+        self.h.index = _StubIndex(self.home)
+        for mode in ("design", "chat", "plan", "coding", "momo"):
+            self.h.set_mode(mode)
+            prompt = self.h.messages[0]["content"]
+            self.assertNotIn("read them as", prompt)
+            self.assertNotIn("find_references", prompt.split("## Tool reference")[0], mode)
+        self.h.index = None
+
+    def test_compact_tool_reference(self):
+        self.h.set_mode("coding")
+        self.assertEqual(self.h.tool_ref, "compact")        # the default
+        self.cmd("/tool-ref full")
+        full = self.h.system_prompt_view()
+        self.cmd("/tool-ref compact")
+        compact = self.h.system_prompt_view()
+        self.assertEqual(self.h.tool_ref, "compact")
+        ref = next(s for s in compact["sections"] if s["key"] == "tools")
+        self.assertLess(ref["tokens"] * 2, next(s["tokens"] for s in full["sections"]
+                                               if s["key"] == "tools"))
+        for t in self.h._current_tools():       # every tool still has a copyable example
+            self.assertIn(f'<tool_call>{{"name": "{t["function"]["name"]}"', ref["text"])
+        self.assertTrue(self.cmd("/tool-ref nope").startswith("ERROR"))
+        self.assertEqual(self.h.tool_ref, "compact")
+        self.assertIn("full", self.cmd("/tool-ref full"))
+        self.assertEqual(self.h.tool_ref, "full")
 
     def test_plan_parts(self):
         self.h.set_mode("plan")
