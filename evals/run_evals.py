@@ -57,6 +57,10 @@ from harness.harness import (Harness, ChatEvent, DoneEvent, ErrorEvent,  # noqa:
 
 
 _SHELL_SEARCH = re.compile(r"^\s*(grep|rg|ag|find|fd|ack)\b")
+# Modes whose tools can change files, and those tools.  Every eval task is a
+# question, so any file change is a behaviour failure (see "file changes").
+_WRITE_MODES = ("coding", "momo", "design")
+_WRITE_TOOLS = {"write_file", "edit_file", "append_to_file", "move_file", "delete_file"}
 # A command filtered through the shell: the model trimming output itself, which
 # /run-mode new's tail=/grep= are meant to replace (a pipe also hides the exit code).
 _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
@@ -67,11 +71,15 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     """One task, one fresh conversation.  Returns what the model did."""
     workdir = REPO / task.workdir
     scratch = None
-    if task.isolate:
+    if task.isolate or mode in _WRITE_MODES:
+        # A mode with write tools gets a throwaway copy: a model answering a
+        # question has written its answer into the real repo (safe_path_calls.txt).
+        # The copy leaves out the venv and the eval cache — the cache holds old
+        # model answers that grep_files would otherwise find.
         scratch = tempfile.TemporaryDirectory(prefix="momo_eval_wd_")
         workdir = Path(scratch.name) / "project"
         shutil.copytree(REPO / task.workdir, workdir,
-                        ignore=shutil.ignore_patterns("__pycache__"))
+                        ignore=shutil.ignore_patterns("__pycache__", ".venv", ".cache"))
     h = Harness(host=host, model=model, workdir=workdir, provider=provider)
     h.mode = mode
     h.run_mode = run_mode
@@ -164,6 +172,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         # Harness repairs, counted as model errors rather than successes.
         "repairs": sum(1 for r in results if r.startswith("(note: routed")),
         "shell_calls": sum(1 for n in names if n == "run_command"),
+        "file_changes": sum(1 for n in names if n in _WRITE_TOOLS),
         # Index-first search: how often the model reached for the index itself,
         # for grep/find (directly or through the shell), and how many of those
         # the harness answered from the index anyway (/index-route).
@@ -326,6 +335,9 @@ def summarise(rows):
         out.append(f"  first tool is index_*  {sum(t.startswith('index_') for t in firsts)}/{len(firsts)}")
     out.append(f"  ideal tool used  {sum(r['used_ideal'] for r in rows)}/{total}")
     out.append(f"  over call budget {sum(r['over_budget'] for r in rows)}/{total}")
+    changed = [r for r in rows if r.get("file_changes")]
+    out.append(f"  file changes     {sum(r['file_changes'] for r in changed)} in {len(changed)} runs  "
+               "(every task is a question — should be 0)")
     out.append(f"  rejected calls   {sum(r['rejected_calls'] for r in rows)}  "
                "(malformed args — should be 0)")
     out.append(f"  coached calls    {sum(r['coached_calls'] for r in rows)}  "
