@@ -21,7 +21,8 @@ from .harness import Harness
 from .llm import make_client
 
 # CommandResult fields that change how a frontend renders, not harness state.
-VIEW_FIELDS = ("tool_output", "think_output", "md_render", "diff_output", "diff_style", "companion")
+VIEW_FIELDS = ("tool_output", "think_output", "md_render", "diff_output", "diff_style", "companion",
+               "tool_picker", "show_system_prompt")
 
 # Commands that mutate harness.messages — refused while a worker thread runs.
 _MUTATING = ("/clear", "/compact", "/fast-compact", "/new", "/retry")
@@ -37,7 +38,9 @@ def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
     return (cmd in _MUTATING or cmd in _MODE_COMMANDS
             or (cmd == "/plan" and arg != "show")
             or (cmd in ("/session", "/workspace", "/workdir", "/run-mode",
-                        "/search-sources") and bool(arg)))
+                        "/search-sources") and bool(arg))
+            # a per-tool change (/tools <name> on|off) alters the running turn's tools
+            or (cmd == "/tools" and len(parts) > 1 and len(parts[1].split()) > 1))
 
 # Idle recap: how often the watcher checks, and the minimum gap between two recap
 # attempts (on top of "once per user turn" and "once per idle period").
@@ -319,10 +322,8 @@ class Controller:
         """off -> on -> off.  '/net local' is deliberately not in the cycle: it is
         the setting that exposes this harness's own API, so it stays explicit."""
         h = self.harness
-        h.net_access = "off" if h.net_access != "off" else "on"
+        h.set_net_access("off" if h.net_access != "off" else "on")
         self._system(f"Internet access: {h.net_access}")
-        h.rebuild_system_prompt()
-        h.emit_status()
 
     def toggle_run_confirm(self):
         self.harness.run_confirm = not self.harness.run_confirm

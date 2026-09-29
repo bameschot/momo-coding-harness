@@ -10,6 +10,7 @@ import curses
 import queue
 import textwrap
 import unittest
+from unittest import mock
 
 from harness import tui as T
 from harness.events import ChatEvent, DeltaEvent, StreamEndEvent
@@ -47,6 +48,7 @@ def make_tui(keys=(), cols=80, chat_h=10):
     t._events = FakeEvents()
     t._companion = T._Companion()
     t._spinner_frame = 0
+    t._picker = None
     return t
 
 
@@ -169,6 +171,84 @@ class ToolArgs(unittest.TestCase):
         self.assertLess(len(out), 100)
         self.assertIn('path="a.py"', out)
         self.assertIn("…", out)
+
+
+class ToolPicker(unittest.TestCase):
+    """/tools opens a checklist; Space toggles through the /tools command."""
+
+    class FakeHarness:
+        mode = "coding"
+
+        def __init__(self):
+            self.off = set()
+
+        def tool_choices(self):
+            return [{"name": n, "group": "files", "enabled": n not in self.off,
+                     "locked": n == "locked_tool", "note": "", "desc": f"What {n} does."}
+                    for n in ("read_file", "grep_files", "locked_tool")]
+
+    class FakeController:
+        def __init__(self, harness):
+            self.h, self.sent = harness, []
+
+        def submit(self, text, source="tui"):
+            self.sent.append(text)
+            if len(text.split()) == 3:
+                name, on = text.split()[1:]
+                (self.h.off.discard if on == "on" else self.h.off.add)(name)
+
+    def setUp(self):
+        self.t = make_tui()
+        self.t.harness = self.FakeHarness()
+        self.t.controller = self.FakeController(self.t.harness)
+        self.t._focus = "input"
+        self.t._sugg, self.t._sugg_idx, self.t._sugg_waiting = [], -1, False
+        self.t._open_picker()
+
+    def test_move_and_toggle(self):
+        t = self.t
+        self.assertEqual(t._handle_key(curses.KEY_DOWN), "full")
+        t._handle_key(" ")
+        self.assertEqual(t.controller.sent, ["/tools grep_files off"])
+        self.assertFalse(t._picker["items"][1]["enabled"])      # reloaded
+        t._handle_key(13)
+        self.assertEqual(t.controller.sent[-1], "/tools grep_files on")
+
+    def test_locked_rows_do_not_toggle_and_up_wraps(self):
+        t = self.t
+        t._handle_key(curses.KEY_UP)                             # wraps to the last row
+        self.assertEqual(t._picker["idx"], 2)
+        t._handle_key(" ")
+        self.assertEqual(t.controller.sent, [])
+
+    def test_question_mark_prints_details_and_closes(self):
+        self.t._handle_key(curses.KEY_DOWN)
+        self.t._handle_key("?")
+        self.assertEqual(self.t.controller.sent, ["/tools grep_files"])
+        self.assertIsNone(self.t._picker)
+
+    def test_highlighted_description_is_drawn(self):
+        class Win:
+            def __init__(self):
+                self.lines = {}
+
+            def addnstr(self, y, x, text, n, attr=0):
+                self.lines[y] = text[:n]
+
+            def noutrefresh(self):
+                pass
+
+        t = self.t
+        t._chat_win = Win()
+        t._layout = {"cols": 100, "chat_h": 20}
+        t._handle_key(curses.KEY_DOWN)
+        with mock.patch.object(curses, "color_pair", lambda n: 0):   # no initscr here
+            t._draw_picker()
+        self.assertIn("What grep_files does.", "\n".join(t._chat_win.lines.values()))
+
+    def test_esc_closes(self):
+        self.t._handle_key(T._KEY_ESC)
+        self.assertIsNone(self.t._picker)
 
 
 if __name__ == "__main__":

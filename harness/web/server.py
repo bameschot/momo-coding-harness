@@ -16,6 +16,8 @@ Routes
   GET  /api/models    models available on the backend
   GET  /api/context   context usage broken down per category (system, tools, …)
   GET  /api/index     code index memory broken down per category and language
+  GET  /api/tools     the current mode's tools and whether each is on (/tools)
+  GET  /api/system-prompt the composed system prompt in its parts (/system-prompt)
   GET  /api/export    the conversation as a Markdown download
   GET  /api/files     ?path= → directory listing (read-only, confined to the workspace)
   GET  /api/file      ?path= → file contents as text (same conversion as uploads)
@@ -406,6 +408,11 @@ class WebServer:
                     self._json(h.context_breakdown())
                 elif path == "/api/index":
                     self._json(h.index_breakdown())
+                elif path == "/api/system-prompt":
+                    self._json(h.system_prompt_view())
+                elif path == "/api/tools":
+                    self._json({"mode": h.mode, "tools_enabled": h.tools_enabled,
+                                "tools": h.tool_choices()})
                 elif path == "/api/index-filter":
                     text, fpath = h.index_filter()
                     self._json({"path": fpath, "text": text,

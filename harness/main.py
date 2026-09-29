@@ -247,7 +247,7 @@ def main():
 
     # Start the index only now, so a restored session's workdir is the one indexed.
     if index_on:
-        harness.event_queue.put(ChatEvent("system", harness.set_index(True)))
+        harness.event_queue.put(ChatEvent("system", harness.set_index(True, clear_choices=False)))
 
     # One Controller drives the harness for every frontend (TUI and web).
     controller = Controller(harness)

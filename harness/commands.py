@@ -94,6 +94,8 @@ class CommandResult:
     retry: bool = False                     # controller re-sends the last user message
     edit_index_filter: str | None = None    # TUI opens $EDITOR on this filter file
     send_prompt: str | None = None          # controller sends this to the model as a user turn
+    tool_picker: bool | None = None         # frontend opens its per-role tool picker
+    show_system_prompt: bool | None = None  # frontend shows the composed system prompt
 
 
 
@@ -128,6 +130,45 @@ def _toggle(harness, attr: str, arg: str, label: str,
     harness.emit_status()
     return CommandResult(handled=True,
                          output=f"{label}: {'on' if on else 'off'}{on_note if on else off_note}")
+
+
+def _tool_listing(harness) -> str:
+    """/tools list: the current role's tools, grouped, ✓ on / ✗ off."""
+    lines = [f"Tool calls: {'on' if harness.tools_enabled else 'off'} — "
+             f"tools in {harness.mode} mode (/tools <name> on|off):"]
+    group = None
+    for c in harness.tool_choices():
+        if c["group"] != group:
+            group = c["group"]
+            lines.append(f"  {group}")
+        mark = "✓" if c["enabled"] else "✗"
+        note = f"  ({'locked: ' if c['locked'] else ''}{c['note']})" if c["note"] else ""
+        lines.append(f"    {mark} {c['name']}{note}")
+    return "\n".join(lines)
+
+
+def _prompt_listing(harness) -> str:
+    """/system-prompt list: the prompt's parts and their estimated size."""
+    v = harness.system_prompt_view()
+    w = max(len(s["label"]) for s in v["sections"] + [v["schemas"]])
+    lines = [f"System prompt for {v['mode']} mode: ~{v['total_tokens']:,} tokens"]
+    lines += [f"  {s['label'].ljust(w)}  ~{s['tokens']:,}" for s in v["sections"]]
+    lines.append(f"  {v['schemas']['label'].ljust(w)}  ~{v['schemas']['tokens']:,}")
+    return "\n".join(lines)
+
+
+def _tool_details(harness, name: str) -> str | None:
+    """/tools <name>: what one tool does, its parameters, and whether it is on."""
+    c = next((c for c in harness.tool_choices() if c["name"] == name), None)
+    if c is None:
+        return None
+    state = f"{'on' if c['enabled'] else 'off'} in {harness.mode} mode"
+    note = f" ({'locked: ' if c['locked'] else ''}{c['note']})" if c["note"] else ""
+    lines = [f"{c['name']} — {c['group']} — {state}{note}", "", c["desc"]]
+    if c["params"]:
+        lines += ["", "Parameters (* = required):"]
+        lines += [f"  {'*' if req else ' '} {p}: {d}" for p, d, req in c["params"]]
+    return "\n".join(lines)
 
 
 def _index_filter(harness, arg: str) -> CommandResult:
@@ -442,8 +483,31 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output="Project guides: off")
         return CommandResult(handled=True, output=f"Project guides: on\n{note}")
 
+    if cmd in ("/system-prompt", "/prompt"):
+        sub = arg.strip().lower()
+        if sub not in ("", "list"):
+            return CommandResult(handled=True, output="Usage: /system-prompt | /system-prompt list")
+        return CommandResult(handled=True, output=_prompt_listing(harness),
+                             show_system_prompt=True if not sub else None)
+
     if cmd == "/tools":
-        return _toggle(harness, "tools_enabled", arg, "Tool calls")
+        parts = arg.split()
+        if not parts:
+            return CommandResult(handled=True, output=_tool_listing(harness), tool_picker=True)
+        if parts == ["list"]:
+            return CommandResult(handled=True, output=_tool_listing(harness))
+        if len(parts) == 1:
+            if _on_off(arg) is not None:
+                return _toggle(harness, "tools_enabled", arg, "Tool calls")
+            return CommandResult(handled=True, output=_tool_details(harness, parts[0]) or (
+                f"ERROR: no tool '{parts[0]}' in {harness.mode} mode — /tools list shows "
+                f"them; /tools on|off switches all tool calls"))
+        on = _on_off(parts[-1])
+        if on is None:
+            return CommandResult(handled=True, output=(
+                "Usage: /tools on|off | /tools list | /tools <name> [<name>...] on|off"))
+        return CommandResult(handled=True, output="\n".join(
+            harness.set_tool_enabled(name, on) for name in parts[:-1]))
 
     if cmd == "/run-confirm":
         return _toggle(harness, "run_confirm", arg, "run_command confirmation",
@@ -500,11 +564,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             access = "on" if on else "off"
         if access is None:
             return _bad_choice(arg, "'on', 'off' or 'local'")
-        harness.net_access = access
-        # fetch_url enters/leaves the tool set, so the generated tool reference
-        # in the system prompt has to be re-rendered.
-        harness.rebuild_system_prompt()
-        harness.emit_status()
+        harness.set_net_access(access)
         extra = ""
         if harness.net_access != "off":
             extra = ("\nFetched pages are untrusted input — consider '/run-confirm on' "
@@ -935,8 +995,13 @@ Available commands:
   /run-mode [new|classic]  new: save command output to a log, return a view
                       (tail=/grep=, command_output); classic: return it all
   /run-output-limit [n]    Chars in run_command's default view (default 5000)
-  /tools              Show whether tool calls are enabled (on/off)
+  /system-prompt      Show the composed system prompt: role, tools, guides, skills (alias: /prompt)
+  /system-prompt list  List the system prompt's parts and their size
+  /tools              Pick this mode's tools (on/off per tool)
   /tools on|off       Enable or disable tool calls entirely
+  /tools list         List this mode's tools and whether each is on
+  /tools <name>       Show what a tool does and its parameters
+  /tools <name> on|off  Turn one tool on or off for this mode (saved in the session)
   /net                Show internet access state (off/on/local)
   /net on|off         Allow or block fetch_url reaching the public internet
   /net local          Also allow localhost and the LAN (off by default)

@@ -70,6 +70,7 @@ _KEY_IGNORED      = 607  # an escape sequence we don't bind, swallowed whole
 # path suggestions; a leading "/" opens slash-command suggestions.
 _AT_RX = re.compile(r"(?:^|\s)@([\w./~+-]*)$")
 _SUGGEST_MAX_ROWS = 8
+_PICKER_DESC_LINES = 4   # /tools picker: description lines under the list
 _ARG_MAX = 60           # tool-call argument values are cut to this, as in the web UI
 _PASTE_IDLE_S = 1.0     # a bracketed paste whose end marker never comes is closed after this
 
@@ -430,6 +431,9 @@ class TUI:
         self._sugg_query: tuple | None = None  # query the list was computed for
         self._sugg_waiting = False      # the file list is still being walked
         self._commands = help_commands()
+        # /tools: the per-role tool picker, drawn over the chat pane while open.
+        # {"items": harness.tool_choices(), "idx": highlighted row}
+        self._picker: dict | None = None
         # Status bar components — assembled (with DIR shortening) in _draw_status.
         self._st_mode  = harness.mode
         self._st_model = harness.client.model
@@ -545,6 +549,7 @@ class TUI:
         self._chat_buf.render(self._chat_win, L["chat_h"], L["cols"], edge_color=chat_edge)
         self._update_suggest()
         self._draw_suggest()
+        self._draw_picker()
         if self._companion_win is not None:
             self._companion.draw(self._companion_win, L["cols"])
         self._draw_status()
@@ -819,6 +824,84 @@ class TUI:
             _put(win, content_h - n + row, 0, (" " + label).ljust(width), width, attr)
         win.noutrefresh()
 
+    # ── /tools picker ─────────────────────────────────────────────────────────
+
+    def _open_picker(self):
+        self._close_suggest()
+        self._picker = {"items": self.harness.tool_choices(), "idx": 0}
+
+    def _reload_picker(self):
+        if self._picker is not None:
+            items = self.harness.tool_choices()
+            self._picker = {"items": items,
+                            "idx": min(self._picker["idx"], max(0, len(items) - 1))}
+
+    def _picker_key(self, key) -> str | None:
+        """Keys while the picker is open: ↑/↓ move, Space/Enter toggle, ? prints the
+        tool's details (/tools <name>) and closes, Esc/q close.
+        Returns None for any other key, which then works as usual (PgUp/PgDn,
+        Shift+Tab to another mode, whose tools the picker then shows)."""
+        p = self._picker
+        n = len(p["items"])
+        if key in (_KEY_ESC, "q", "Q"):
+            self._picker = None
+        elif key in (curses.KEY_UP, curses.KEY_DOWN) and n:
+            p["idx"] = (p["idx"] + (1 if key == curses.KEY_DOWN else -1)) % n
+        elif key == "?" and n:
+            name = p["items"][p["idx"]]["name"]
+            self._picker = None
+            self.controller.submit(f"/tools {name}", source="tui")
+            self._drain_events()
+        elif key in (" ", 13, curses.KEY_ENTER) and n:
+            item = p["items"][p["idx"]]
+            if not item["locked"]:
+                self.controller.submit(
+                    f"/tools {item['name']} {'off' if item['enabled'] else 'on'}", source="tui")
+                self._drain_events()        # the notice, and the StatusEvent that reloads
+                self._reload_picker()
+        else:
+            return None
+        return "full"
+
+    def _draw_picker(self):
+        p = self._picker
+        if p is None or self._chat_win is None:
+            return
+        win = self._chat_win
+        cols = self._layout["cols"]
+        content_h = self._layout["chat_h"] - 1  # bottom row is the h-scrollbar
+        items = p["items"]
+        header = f" Tools — {self.harness.mode} mode   ↑↓ move · Space toggle · ? details · Esc close"
+        name_w = max((len(c["name"]) for c in items), default=0)
+        rows = [f" [{'x' if c['enabled'] else ' '}] {c['name'].ljust(name_w)}  {c['group']}"
+                + (f" · {c['note']}" if c["note"] else "") for c in items]
+        width = min(cols - 2, max([len(header), 72] + [len(r) for r in rows]) + 2)
+        # The highlighted tool's description under the list, cut to a few lines
+        # (? prints all of it and the parameters).
+        desc = []
+        if items:
+            desc = textwrap.wrap(items[p["idx"]].get("desc", ""), max(10, width - 2))
+            if len(desc) > _PICKER_DESC_LINES:
+                desc = desc[:_PICKER_DESC_LINES]
+                desc[-1] = desc[-1][:max(0, width - 4)] + " …"
+        n = min(len(rows), content_h - 2 - len(desc))
+        if n <= 0:
+            return
+        first = min(max(0, p["idx"] - n + 1), len(rows) - n)
+        top = content_h - n - 2 - len(desc)
+        _put(win, top, 0, header.ljust(width), width, curses.A_BOLD | curses.color_pair(_C_FOCUS))
+        for row, i in enumerate(range(first, first + n)):
+            c = items[i]
+            attr = (curses.A_REVERSE | curses.color_pair(_C_FOCUS) if i == p["idx"]
+                    else curses.color_pair(_C_SYSTEM) | curses.A_DIM if c["locked"]
+                    else curses.color_pair(_C_CMD))
+            _put(win, top + 1 + row, 0, rows[i].ljust(width), width, attr)
+        y = top + 1 + n
+        _put(win, y, 0, (" " + "─" * (width - 2)).ljust(width), width, curses.color_pair(_C_BORDER))
+        for k, line in enumerate(desc):
+            _put(win, y + 1 + k, 0, (" " + line).ljust(width), width, curses.color_pair(_C_SYSTEM))
+        win.noutrefresh()
+
     # ── adding lines to chat buffer ───────────────────────────────────────────
 
     def _add(self, *ev):
@@ -1053,6 +1136,8 @@ class TUI:
         parts = []
         if not ev.tools_enabled:
             parts.append("TOOLS: off")
+        elif ev.tools_off:
+            parts.append(f"TOOLS: {len(ev.tools_off)} off")
         if ev.run_confirm:
             parts.append("RUN: confirm")
         if ev.net_access != "off":
@@ -1077,6 +1162,7 @@ class TUI:
         if ev.workdir != self._st_dir:
             workspace_files_nowait(self.harness.workdir)   # warm the new tree's @-search list
         self._st_dir   = ev.workdir
+        self._reload_picker()     # mode, net or index may have changed its rows
 
     def _new_stream_part(self, kind: str, text: str = "") -> _StreamPart:
         cols = self._layout["cols"]
@@ -1179,6 +1265,12 @@ class TUI:
         if outcome.exit_app:
             raise SystemExit(0)
         v = outcome.view
+        if v.pop("tool_picker", None):
+            self._open_picker()
+        if v.pop("show_system_prompt", None):
+            self._drain_events()  # the echoed command first
+            self._show_system_prompt()
+            return
         if "edit_index_filter" in v:
             self._drain_events()  # the echoed command first
             self._edit_index_filter()
@@ -1186,6 +1278,43 @@ class TUI:
         self._set_view(v)
         self._drain_events()  # show the echoed input / command output right away
         self._redraw()
+
+    def _show_system_prompt(self):
+        """/system-prompt: suspend curses and page through the composed system
+        prompt, one ruled section per part, then the tool schemas sent with it."""
+        v = self.harness.system_prompt_view()
+
+        def rule(label: str, tokens: int) -> str:
+            return f"════ {label} (~{tokens:,} tokens) ".ljust(78, "═")
+
+        text = (f"System prompt for {v['mode']} mode: ~{v['total_tokens']:,} tokens\n\n"
+                + "\n\n".join(rule(s["label"], s["tokens"]) + "\n\n" + s["text"]
+                                for s in v["sections"])
+                + "\n\n" + rule(v["schemas"]["label"], v["schemas"]["tokens"])
+                + "\n(not part of the prompt text: the API sends these as the tool list)\n\n"
+                + v["schemas"]["text"] + "\n")
+        pager = os.environ.get("PAGER") or "less -R"
+        fd, tmp = tempfile.mkstemp(prefix="momo-system-prompt-", suffix=".md")
+        note = ""
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            curses.def_prog_mode()
+            curses.endwin()
+            try:
+                subprocess.run(shlex.split(pager) + [tmp])
+            except (OSError, ValueError) as e:
+                note = f"ERROR: could not run the pager {pager!r}: {e}"
+            finally:
+                curses.reset_prog_mode()
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        if note:
+            self._add("chat", "system", note)
+        self._rebuild()
 
     def _edit_index_filter(self):
         """/index-filter edit: suspend curses, open $VISUAL/$EDITOR on a private
@@ -1397,6 +1526,8 @@ class TUI:
         """Act on one key.  Returns "full" when the whole screen needs a redraw,
         "input" when only the input box changed, None when nothing is to draw."""
         chat = self._focus == "chat"
+        if self._picker is not None and (res := self._picker_key(key)) is not None:
+            return res
 
         # A pasted block (bracketed paste) or a typed character.
         if isinstance(key, str):

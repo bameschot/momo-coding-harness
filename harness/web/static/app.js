@@ -500,6 +500,13 @@ function applyStatus(s) {
   $(".ctx").className = `ctx ${s.ctx_color}`;
   if (!$("#ctx-menu").hidden) scheduleCtxRefresh();
   if (!$("#index-menu").hidden) scheduleIndexRefresh();
+  if (!$("#tools-menu").hidden) scheduleToolsRefresh();
+  if (!$("#prompt-drawer").hidden) schedulePromptRefresh();
+  const off = s.tools_off || [];
+  $("#tools-off").hidden = !off.length;
+  $("#tools-off").textContent = String(off.length);
+  $("#tools-btn").title = off.length ? `Tools for this mode — ${off.length} off: ${off.join(", ")}`
+                                     : "Tools for this mode (/tools)";
   $("#tools-badge").hidden = s.tools_enabled;
   const run = $("#run-badge");
   run.textContent = s.run_confirm ? "RUN: confirm" : "RUN: auto";
@@ -953,6 +960,10 @@ async function send(text, atts = []) {
 }
 
 function applyView(v) {
+  if (v.show_system_prompt) openPromptDrawer();
+  if (v.tool_picker && $("#tools-menu").hidden) {
+    toggleMenu({ stopPropagation() {} }, "#tools-menu", "Tools", refreshToolsMenu);
+  }
   let changed = false;
   for (const [k, val] of Object.entries(v)) {
     const key = VIEW_MAP[k];
@@ -1404,8 +1415,10 @@ function syncViewMenu() {
 }
 // Popover menus: [button, menu].  One is open at a time; a click outside closes it.
 const MENUS = [["#view-btn", "#view-menu"], ["#model-btn", "#model-menu"],
-               ["#ctx-btn", "#ctx-menu"], ["#index-badge", "#index-menu"]];
+               ["#ctx-btn", "#ctx-menu"], ["#index-badge", "#index-menu"],
+               ["#tools-btn", "#tools-menu"]];
 function closeMenu() {
+  hideToolTip();
   for (const [b, m] of MENUS) {
     $(m).hidden = true;
     $(b).setAttribute("aria-expanded", "false");
@@ -1539,9 +1552,171 @@ function renderCtxMenu(menu, b) {
     el("div", "menu-title", `Context · ~${fmtTok(b.used)} tokens (${b.pct}%)${b.streaming ? " · streaming" : ""}`),
     bar, rows,
     el("div", "muted small", meta.join(" · ")),
-    el("div", "muted small", `Categories are estimates (~4 chars/token), total ~${fmtTok(b.estimated)}. Thinking stays in the transcript but is not re-sent.`));
+    el("div", "muted small", `Categories are estimates (~4 chars/token), total ~${fmtTok(b.estimated)}. Thinking stays in the transcript but is not re-sent.`),
+    promptLink());
 }
 $("#ctx-btn").onclick = (e) => toggleMenu(e, "#ctx-menu", "Context", refreshCtxMenu);
+
+// ── per-mode tools ────────────────────────────────────────────────────────────
+// The wrench button lists the current mode's tools with a checkbox each; a change
+// sends /tools <name> on|off, and the status event it causes re-fetches the list
+// (net and index tools follow their toggles, and a mode switch swaps the list).
+let toolsRefreshTimer = null;
+function scheduleToolsRefresh() {
+  if (toolsRefreshTimer) return;
+  toolsRefreshTimer = setTimeout(() => { toolsRefreshTimer = null; refreshToolsMenu(); }, 200);
+}
+async function refreshToolsMenu() {
+  const menu = $("#tools-menu");
+  if (menu.hidden) return;
+  let b;
+  try {
+    b = await (await fetch("api/tools")).json();
+  } catch (err) {
+    menu.replaceChildren(el("div", "menu-title", "Tools"), el("div", "muted", `Could not load: ${err.message}`));
+    return;
+  }
+  if (menu.hidden) return;
+  renderToolsMenu(menu, b);
+}
+function renderToolsMenu(menu, b) {
+  const check = (checked, disabled, onchange) => {
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = checked;
+    cb.disabled = disabled;
+    cb.onchange = () => onchange(cb.checked);
+    return cb;
+  };
+  const master = el("label");
+  master.append(check(b.tools_enabled, false, (on) => send(`/tools ${on ? "on" : "off"}`)),
+                " Tool calls", el("kbd", null, "/tools"));
+  const rows = [el("div", "menu-title", `Tools — ${b.mode} mode`), master];
+  let group = null;
+  for (const t of b.tools) {
+    if (t.group !== group) { group = t.group; rows.push(el("div", "menu-sub", group)); }
+    const lab = el("label", "mono");
+    lab.dataset.name = t.name;
+    lab.dataset.desc = t.desc;
+    if (t.locked) lab.dataset.lock = `Can't be turned off: ${t.note}`;
+    lab.setAttribute("aria-description", t.desc);
+    lab.append(check(t.enabled, t.locked || !b.tools_enabled,
+                     (on) => send(`/tools ${t.name} ${on ? "on" : "off"}`)), " " + t.name);
+    if (t.note) lab.append(el("span", "muted small tool-note", t.note));
+    rows.push(lab);
+  }
+  menu.replaceChildren(...rows);
+  // A refresh (after a toggle) replaces the rows under the pointer: keep the
+  // tooltip on the same tool.
+  if (toolTipName) showToolTip(menu.querySelector(`label[data-name="${toolTipName}"]`), 0);
+}
+$("#tools-btn").onclick = (e) => toggleMenu(e, "#tools-menu", "Tools", refreshToolsMenu);
+
+// Tool descriptions on hover or keyboard focus.  A native title tooltip waits
+// about a second and can't be hurried, so this one shows after a short beat,
+// beside the menu (below the row when there's no room on the left).
+let toolTipName = null;
+let toolTipTimer = null;
+function showToolTip(lab, delay = 60) {
+  clearTimeout(toolTipTimer);
+  const tip = $("#tool-tip");
+  if (!lab) { toolTipName = null; tip.hidden = true; return; }
+  toolTipTimer = setTimeout(() => {
+    const menu = $("#tools-menu");
+    if (menu.hidden || !lab.isConnected) return;
+    toolTipName = lab.dataset.name;
+    const lock = lab.dataset.lock ? [el("div", "tool-tip-lock", lab.dataset.lock)] : [];
+    tip.replaceChildren(el("div", "tool-tip-name mono", lab.dataset.name), ...lock,
+                        el("div", null, lab.dataset.desc));
+    tip.hidden = false;
+    const r = lab.getBoundingClientRect(), m = menu.getBoundingClientRect();
+    const w = tip.offsetWidth, h = tip.offsetHeight, gap = 8;
+    let left = m.left - gap - w, top = r.top - 6;
+    if (left < gap) {                       // narrow window: under the row instead
+      left = Math.max(gap, Math.min(r.left, innerWidth - w - gap));
+      top = r.bottom + 4;
+      if (top + h > innerHeight - gap) top = r.top - h - 4;
+    }
+    tip.style.left = `${left}px`;
+    tip.style.top = `${Math.max(gap, Math.min(top, innerHeight - h - gap))}px`;
+  }, delay);
+}
+function hideToolTip() { showToolTip(null); }
+{
+  const menu = $("#tools-menu");
+  menu.addEventListener("pointerover", (e) => {
+    const lab = e.target.closest("label[data-desc]");
+    if (lab) { if (lab.dataset.name !== toolTipName || $("#tool-tip").hidden) showToolTip(lab); }
+    else hideToolTip();
+  });
+  menu.addEventListener("pointerleave", hideToolTip);
+  menu.addEventListener("focusin", (e) => showToolTip(e.target.closest("label[data-desc]"), 0));
+  menu.addEventListener("focusout", hideToolTip);
+  menu.addEventListener("scroll", hideToolTip);
+}
+
+// ── system prompt ─────────────────────────────────────────────────────────────
+// View → System prompt… (and the CTX popover, and /system-prompt) show the
+// composed system prompt part by part: role, tool reference, guides, skills,
+// index rules — then the tool schemas that go alongside it.  While the drawer is
+// open, status events (mode, tool, net, index, skill changes) re-fetch it.
+let promptText = "";
+let promptRefreshTimer = null;
+function schedulePromptRefresh() {
+  if (promptRefreshTimer) return;
+  promptRefreshTimer = setTimeout(() => { promptRefreshTimer = null; loadPrompt(); }, 300);
+}
+function promptLink() {
+  const b = el("button", "menu-link", "View system prompt");
+  b.type = "button";
+  b.onclick = openPromptDrawer;
+  return b;
+}
+function openPromptDrawer() {
+  closeMenu();
+  $("#prompt-drawer").hidden = false;
+  loadPrompt();
+}
+async function loadPrompt() {
+  const body = $("#prompt-body");
+  let v;
+  try {
+    v = await (await fetch("api/system-prompt")).json();
+  } catch (err) {
+    body.replaceChildren(el("div", "muted", `Could not load: ${err.message}`));
+    return;
+  }
+  if ($("#prompt-drawer").hidden) return;
+  // Keep what the user opened or closed across refreshes.
+  const open = new Map([...body.querySelectorAll("details")].map((d) => [d.dataset.key, d.open]));
+  promptText = v.text;
+  $("#prompt-mode").textContent = `${v.mode} mode`;
+  $("#prompt-tokens").textContent = `~${fmtTok(v.total_tokens)} tokens`;
+  const part = (key, label, tokens, text, defOpen, cls = "") => {
+    const d = el("details", cls);
+    d.dataset.key = key;
+    d.open = open.has(key) ? open.get(key) : defOpen;
+    const s = el("summary");
+    s.append(el("span", null, label), el("span", "muted mono", `~${fmtTok(tokens)}`));
+    d.append(s, el("pre", null, text));
+    return d;
+  };
+  body.replaceChildren(
+    ...v.sections.map((s) => part(s.key, s.label, s.tokens, s.text, s.key === "role" || s.key === "tools")),
+    part("schemas", v.schemas.label, v.schemas.tokens, v.schemas.text, false, "aside"));
+}
+$("#prompt-open").onclick = openPromptDrawer;
+$("#prompt-close").onclick = () => DRAWERS["#prompt-drawer"]();
+$("#prompt-copy").onclick = async () => {
+  const b = $("#prompt-copy");
+  try {
+    await copyText(promptText);
+    b.lastChild.textContent = " Copied";
+  } catch (err) {
+    b.lastChild.textContent = " Copy failed";
+  }
+  setTimeout(() => { b.lastChild.textContent = " Copy"; }, 1500);
+};
 
 // ── code index composition ────────────────────────────────────────────────────
 // Clicking the INDEX badge (while the index is on) shows what the index's memory
@@ -1648,6 +1823,7 @@ function renderIndexMenu(menu, b) {
 const hideDrawer = (id) => () => { $(id).hidden = true; };
 const DRAWERS = {
   "#filter-drawer": closeFilter,
+  "#prompt-drawer": hideDrawer("#prompt-drawer"),
   "#plan-drawer": hideDrawer("#plan-drawer"),
   "#sessions-drawer": hideDrawer("#sessions-drawer"),
   "#files-drawer": hideDrawer("#files-drawer"),

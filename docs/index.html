@@ -766,6 +766,20 @@ ollama serve</code></pre></div>
       <tr><td><code>web_search</code></td><td class="wrap">Search keyless sources and check URLs the model proposes. <code>read=true</code> also returns the passages that answer the query. See <a href="#search">Web search</a>.</td></tr>
       <tr><td><code>add_search_source</code></td><td class="wrap">Add a source that fits the project. It's dry-run first, then usable for the session; keeping it is your call.</td></tr>
     </table></div>
+    <h3 id="tool-choices">Turning tools on and off per mode</h3>
+    <p>Each mode keeps its own tool choices. A tool you turn off disappears from that mode's tool schemas and from the tool reference in its system prompt; the other modes keep it. If the model calls it anyway, it gets an error and nothing runs.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/tools                     <span class="com"># pick this mode's tools: TUI checklist, web Tools menu</span>
+/tools list                <span class="com"># grouped, ✓ on / ✗ off</span>
+/tools run_command         <span class="com"># what it does, its parameters, whether it's on</span>
+/tools run_command off     <span class="com"># one or more names, then on|off</span>
+/tools off                 <span class="com"># all tool calls off, as before</span></code></pre></div>
+    <ul>
+      <li><strong>TUI:</strong> <code>/tools</code> opens a checklist over the chat pane. <kbd>↑</kbd>/<kbd>↓</kbd> move, <kbd>Space</kbd> or <kbd>Enter</kbd> toggles, <kbd>?</kbd> prints the full description and parameters, <kbd>Esc</kbd> closes. The highlighted tool's description is shown under the list, and the status bar reads <code>TOOLS: N off</code>.</li>
+      <li><strong>Web UI:</strong> the wrench button in the status bar opens the same list, grouped, with the <em>Tool calls</em> master switch on top. Hover a tool for its description. A small count on the wrench says how many are off.</li>
+      <li><strong>Saved in the session,</strong> restored when you load it. <code>/new</code> starts with every tool on. Nothing goes into <code>prefs.json</code>.</li>
+      <li><strong>Internet and index tools follow their toggles.</strong> <code>/net on</code> or <code>/index on</code> turns every tool of that group on in every mode; turning it off shows them off but keeps your choices. Ticking one of them while its toggle is off turns the toggle on, with only that tool of the group on for this mode. Unticking the last one leaves the toggle on.</li>
+      <li><code>create_plan</code>, <code>complete_step</code> and <code>revise_plan</code> are locked, since plan mode needs them. Plan mode's choices hold while investigating and while executing.</li>
+    </ul>
   </section>
 
   <section id="run-output" data-voice="run-output">
@@ -951,7 +965,7 @@ FAILED (failures=2)
     </ul>
     <h3>What's in it</h3>
     <ul>
-      <li><strong>Status bar:</strong> the session drawer (load, start or delete sessions), a workspace file browser, mode and model pickers, a CTX meter with a per-category breakdown, and <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges.</li>
+      <li><strong>Status bar:</strong> the session drawer (load, start or delete sessions), a workspace file browser, mode and model pickers, a CTX meter with a per-category breakdown (with a link to the <a href="#system-prompt">system prompt</a>), <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges, and a wrench button for <a href="#tool-choices">this mode's tools</a>.</li>
       <li><strong>Transcript:</strong> streamed markdown replies, collapsible thinking, one-line tool calls that expand to show arguments and results, coloured diffs and question cards with Yes/No buttons.</li>
       <li><strong>Input:</strong> <kbd>/</kbd> command autocomplete, <kbd>@</kbd> fuzzy path search, a queue for messages sent while the model is busy, and Retry / Edit on your last message.</li>
       <li><strong>Attachments:</strong> drag, paste or pick files. Text and PDFs are converted to text. Chips show a token estimate and turn amber when a file would use more than a quarter of the context.</li>
@@ -1121,6 +1135,8 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><kbd>Shift+P</kbd></td><td class="wrap">Toggle <code>run_command</code> confirmation</td></tr>
       <tr><td><kbd>Shift+C</kbd> (web: <kbd>Esc</kbd>)</td><td class="wrap">Interrupt the running response</td></tr>
       <tr><td><kbd>@</kbd> / <kbd>/</kbd></td><td class="wrap">Path autocomplete, command autocomplete</td></tr>
+      <tr><td><code>/tools</code></td><td class="wrap">Tool checklist: <kbd>↑</kbd>/<kbd>↓</kbd>, <kbd>Space</kbd> toggles, <kbd>?</kbd> details, <kbd>Esc</kbd> closes</td></tr>
+      <tr><td><code>/system-prompt</code></td><td class="wrap">The system prompt in <code>$PAGER</code> (<code>less -R</code> by default); <kbd>q</kbd> returns</td></tr>
     </table></div>
   </section>
 
@@ -1136,6 +1152,9 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/token [key]</code>, <code>/clear-token</code></td><td class="wrap">Set, show (masked) or remove the Bearer token</td></tr>
       <tr><td><code>/workspace [path]</code></td><td class="wrap">Show or change the working directory (alias <code>/workdir</code>)</td></tr>
       <tr><td><code>/think on|off</code></td><td class="wrap">The model's reasoning mode</td></tr>
+      <tr><td><code>/tools</code>, <code>/tools list</code></td><td class="wrap">Pick or list the current mode's tools. See <a href="#tool-choices">Turning tools on and off</a></td></tr>
+      <tr><td><code>/tools &lt;name&gt;</code></td><td class="wrap">What a tool does, its parameters, and whether it's on</td></tr>
+      <tr><td><code>/tools &lt;name&gt;… on|off</code></td><td class="wrap">Turn tools on or off for the current mode (saved in the session)</td></tr>
       <tr><td><code>/tools on|off</code></td><td class="wrap">Turn tool calls on or off entirely</td></tr>
       <tr><td><code>/run-confirm on|off</code></td><td class="wrap">Ask y/N before each <code>run_command</code></td></tr>
     </table></div>
@@ -1169,6 +1188,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/net …</code></td><td class="wrap">See <a href="#net">Internet access</a></td></tr>
       <tr><td><code>/search-sources …</code></td><td class="wrap">See <a href="#search">Web search</a></td></tr>
       <tr><td><code>/guides on|off|reload</code></td><td class="wrap">Project guide files in the system prompt</td></tr>
+      <tr><td><code>/system-prompt</code>, <code>/system-prompt list</code></td><td class="wrap">Show the composed system prompt, or list its parts and sizes. Alias <code>/prompt</code>. See <a href="#system-prompt">The system prompt</a></td></tr>
       <tr><td><code>/list-skills</code>, <code>/load-skill</code>, <code>/unload-skill</code></td><td class="wrap">Manage <a href="#skills">skills</a></td></tr>
     </table></div>
     <h3>Sessions &amp; files</h3>
@@ -1224,8 +1244,8 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     └── server.json       <span class="com"># the names it covers, and its expiry</span></code></pre></div>
     <div class="table-scroll"><table>
       <tr><th>Path</th><th>What</th><th>Notes</th></tr>
-      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, code index settings, guides, companion idle recap, run mode</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools</code>, <code>/run-confirm</code>) are never saved and reset at every start.</td></tr>
-      <tr><td><code>sessions/*.json</code></td><td class="wrap">Each conversation: messages, mode, model, host, workdir, context settings, active skills, plan, input history</td><td class="wrap">Saved after every reply. <code>/sessions</code> lists them and <code>/session &lt;name&gt;</code> loads one. The auth token is never stored. Delete them from the session drawer in the web UI.</td></tr>
+      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, code index settings, guides, companion idle recap, run mode</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools on|off</code>, <code>/run-confirm</code>) are never saved and reset at every start. Per-mode tool choices are kept in the session instead.</td></tr>
+      <tr><td><code>sessions/*.json</code></td><td class="wrap">Each conversation: messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history</td><td class="wrap">Saved after every reply. <code>/sessions</code> lists them and <code>/session &lt;name&gt;</code> loads one. The auth token is never stored. Delete them from the session drawer in the web UI.</td></tr>
       <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line</td><td class="wrap">For auditing what the model did. Secret request headers are masked.</td></tr>
       <tr><td><code>index/*.pickle</code></td><td class="wrap">The code index, named by a hash of the workdir</td><td class="wrap">Written by <code>/index save</code>, and automatically with <code>/index-persist</code> (on by default). Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
       <tr><td><code>runs/&lt;session&gt;/rN.log</code></td><td class="wrap">The full output of each <code>run_command</code> (<a href="#run-output">Command output</a>)</td><td class="wrap">Last 20 per session. Deleted on <code>/clear</code>, <code>/new</code> and session load; other sessions' folders go after 3 days.</td></tr>
@@ -1250,6 +1270,19 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
 /unload-skill python</code></pre></div>
     <p>Built in: <code>bash</code>, <code>c</code>, <code>code-review</code>, <code>data-analysis</code>, <code>document-editing</code>, <code>html-javascript</code>, <code>java</code>, <code>kotlin</code>, <code>maven-dependency-updates</code>, <code>python</code>, <code>rust</code>, <code>software-design</code>, <code>sql</code>, <code>storytelling</code>, <code>tdd</code>, <code>text-based-game-design</code>, <code>typescript</code>. To add your own, drop a <code>.md</code> file into the folder.</p>
     <p><strong>Project guides</strong> (<code>/guides on</code>) load the workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>MOMO.md</code>, <code>GEMINI.md</code>, <code>.github/copilot-instructions.md</code> or <code>.cursorrules</code> into the system prompt, where compaction can't drop them. They're re-read on a new session, <code>/clear</code>, compaction and workdir changes.</p>
+    <h3 id="system-prompt">The system prompt</h3>
+    <p><code>/system-prompt</code> (alias <code>/prompt</code>) shows exactly what the model gets as its system message, part by part, each with an estimated token count:</p>
+    <div class="table-scroll"><table>
+      <tr><th>Part</th><th>When</th></tr>
+      <tr><td>Code index banner</td><td class="wrap">While the code index is on</td></tr>
+      <tr><td>Role</td><td class="wrap">Always: <code>roles/&lt;mode&gt;.md</code>, plus the draft plan or execution rules in plan mode</td></tr>
+      <tr><td>Tool reference</td><td class="wrap">Always, generated from the tools that are on in this mode</td></tr>
+      <tr><td>Project guides</td><td class="wrap">With <code>/guides on</code></td></tr>
+      <tr><td>Skill: &lt;name&gt;</td><td class="wrap">One per loaded skill</td></tr>
+      <tr><td>Code index rules</td><td class="wrap">While the code index is on</td></tr>
+      <tr><td>Tool schemas</td><td class="wrap">The JSON tool definitions sent <em>alongside</em> the prompt: they use context but aren't prompt text</td></tr>
+    </table></div>
+    <p>In the TUI it opens in <code>$PAGER</code> (<code>less -R</code> by default), one ruled section per part. In the web UI, View → <strong>System prompt…</strong> or the link in the CTX popover opens a side panel with collapsible parts and a <strong>Copy</strong> button; it refreshes while open when the mode, tools, internet access, index or skills change. <code>/system-prompt list</code> prints just the parts and sizes.</p>
   </section>
 
   <section id="companion-docs" data-voice="companion">

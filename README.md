@@ -169,6 +169,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
   - The **CTX meter** turns yellow at ≥ 75% and red at ≥ 90%, as in the TUI.
   - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on. A **`NET: on`** / **`NET: local`** badge appears when internet access is on; click it to turn it off. Both are also in View → Network. The **`INDEX`** badge shows the [code index](#code-index): `off`, build progress (`building 812/1873`), or files and memory against the budget (`312 files · 4MB/100MB`). While the index is off, clicking it turns it on. While it is on, clicking it opens a popover like the CTX one: a meter of memory against the budget, a stacked bar and one row per part of the index (file records, definitions, imports, identifiers, text signatures), the same split per language, and Rebuild / Save now / Turn off. It turns yellow when the index is over its memory budget and has dropped a part.
+  - **Tools** (wrench icon) opens the [tool picker](#turning-tools-on-and-off) for the current mode: one checkbox per tool, grouped, with the **Tool calls** master switch on top. Hovering a tool shows its description. A small count on the icon says how many tools are off in this mode.
   - **View options** (sliders icon, far right) opens the view options (below).
 - **Conversation**
   - Replies **stream in** as they're generated, with a blinking cursor. Reasoning streams into an open *thinking…* block that folds away once the answer starts. When the reply is complete, it's re-rendered as markdown. Use `--no-stream` to turn streaming off.
@@ -196,7 +197,7 @@ The browser and the terminal are two views of **the same session**, not separate
 
 The layout adapts to phone-width screens: the status bar collapses to mode, CTX and the view-options button. It follows the system light or dark theme.
 
-All buttons use one set of built-in line icons, drawn as inline SVG rather than emoji. They're the same size and stroke everywhere and follow the light or dark theme. The icon buttons in the top bar are, from left to right: **Sessions** (clock with arrow), **Workspace files** (folder), then on the right **Plan** (checklist, only while a plan exists) and **View options** (sliders). Hover over any icon button for its name.
+All buttons use one set of built-in line icons, drawn as inline SVG rather than emoji. They're the same size and stroke everywhere and follow the light or dark theme. The icon buttons in the top bar are, from left to right: **Sessions** (clock with arrow), **Workspace files** (folder), then on the right **Plan** (checklist, only while a plan exists), **Tools** (wrench) and **View options** (sliders). Hover over any icon button for its name.
 
 ### Attaching files
 
@@ -268,6 +269,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index-max-files`, `/index-workers`, `/index-filter`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, the file limit, build workers, Save now / Load, and Filter… (edit which files are indexed). Shared with the TUI |
 | Play a sound | — | An audible cue (a synthesised kitten mew), focused or not, see [Notifications](#notifications) |
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
+| System prompt… | `/system-prompt` | View → Other: a side panel with the [composed system prompt](#seeing-the-system-prompt), part by part. The CTX popover links to it too |
 | Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
 
 Typing the TUI command in the browser (e.g. `/think-output off`) has the same effect as the menu.
@@ -377,6 +379,8 @@ The page talks to the harness through a small JSON API, which can also be script
 | `GET /api/sessions` | Recent sessions: `{current, sessions: [{name, mtime, mode, model, provider, workdir, messages, preview}]}` |
 | `GET /api/models` | `{current, models, can_switch, provider}` |
 | `POST /api/sessions/delete` `{"names": [...]}` | Delete saved sessions (and their logs) by name. Returns `{deleted, skipped: [{name, reason}]}`; the current session and anything that isn't a plain session name are skipped |
+| `GET /api/tools` | The current mode's tools: `{mode, tools_enabled, tools: [{name, group, enabled, locked, note, desc, params}]}` |
+| `GET /api/system-prompt` | The composed system prompt: `{mode, text, total_tokens, sections: [{key, label, tokens, text}], schemas: {label, tokens, text}}` |
 | `GET /api/export` | The conversation as a Markdown download |
 | `GET /api/files?path=&hidden=0\|1` | Workspace directory listing |
 | `GET /api/file?path=` | A workspace file converted to text (same conversion as uploads) |
@@ -442,6 +446,8 @@ curl -sN localhost:8765/api/events          # watch the live event stream
   - **/ command autocomplete**: typing `/` at the start of the input lists the matching slash commands with their usage and description. It uses the same keys as `@`. A picked command that takes an argument gets a trailing space so you can type the argument.
   - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
 - **Chat pane scrolling** — `↑`/`↓`, `PgUp`/`PgDn`. When a table or other wide content is present, `←`/`→` scrolls horizontally (chat focus required). While you are scrolled up, new output does not pull the view down; the status line shows `▼ NEW (PgDn)` until you are back at the bottom. Resizing the terminal re-wraps the transcript to the new width.
+- **Tool picker** — `/tools` opens a checklist of the current mode's tools over the chat pane: `↑`/`↓` move, `Space`/`Enter` turn the highlighted tool on or off, `?` prints its full description and parameters, `Esc` closes. The highlighted tool's description is shown under the list. The status bar shows `TOOLS: N off` while tools are off in this mode. See [Turning tools on and off](#turning-tools-on-and-off).
+- **System prompt** — `/system-prompt` opens the composed system prompt in `$PAGER` (`less -R` if unset); `q` returns to momo. See [Seeing the system prompt](#seeing-the-system-prompt).
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green.
 - **Tool call visibility** — `/tool-output on|off` switches between full tool output and abbreviated mode (first 50 chars + `…`). Argument values are cut to 60 characters either way, as in the web UI; a written file's content shows in the diff.
 - **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/think-output on|off` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.
@@ -640,6 +646,27 @@ Offered only while internet access is on (`/net on`), so the model never sees a 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
 
 `grep_files` returns at most 200 matches; `find_files` returns at most 100 files. Results over the cap include a trailer explaining how many were omitted.
+
+### Turning tools on and off
+
+Each mode (design, chat, plan, coding, momo) has its own tool choices. Turn a tool off and the model no longer sees it in that mode: it disappears from the tool schemas and from the generated tool reference in the system prompt. The other modes keep it. A call to a tool that is off anyway (from recovered text or an older context) returns an error and does not run.
+
+```
+/tools                      # pick tools for this mode (TUI checklist; web: the Tools menu)
+/tools list                 # this mode's tools, grouped, ✓ on / ✗ off
+/tools run_command          # what a tool does, its parameters, and whether it is on
+/tools run_command off      # turn one or more tools off for this mode
+/tools edit_file write_file on
+/tools off                  # all tool calls off (the master switch, unchanged)
+```
+
+In the web UI, the wrench button in the status bar opens the same list. Hover a tool to read its description.
+
+- **Saved in the session.** Choices are stored with the session and restored when it is loaded; `/new` starts with every tool on. They are not written to `prefs.json`.
+- **Internet and index tools follow their toggles.** Turning `/net` or `/index` on turns every tool in that group on, in every mode. Turning it off shows them off but keeps your per-mode choices. Ticking a net or index tool while its toggle is off turns the toggle on, with only that tool of the group on for this mode. Unticking the last one leaves the toggle on.
+- **Some tools are locked.** `create_plan`, `complete_step` and `revise_plan` can't be turned off, because plan mode needs them. While the index is on, `find_references` and `file_dependencies` show as replaced by the index.
+- Plan mode's choices apply both while investigating and while executing a plan.
+- Changing tools is refused while a turn is running; interrupt or wait first.
 
 ## Command output
 
@@ -939,7 +966,7 @@ Each call to the model sends a messages array assembled from three sources: the 
 
 ### System prompt
 
-The system message is built from the active role file plus any loaded skills:
+The system message is built from the active role file, a tool reference generated for the current tool set, project guides, loaded skills and, while the code index is on, the index banner and rules. `/system-prompt` shows exactly what the model gets (see [Seeing the system prompt](#seeing-the-system-prompt)). The basic shape:
 
 ```
 ┌─ system ──────────────────────────────────────────────────────────────┐
@@ -959,7 +986,27 @@ The system message is built from the active role file plus any loaded skills:
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-The system message is rebuilt in-place whenever the mode changes or a skill is loaded or unloaded. Sessions save the active skill list and reconstruct the system prompt from the current files on disk when loaded, so edits to role or skill files take effect immediately on next load.
+The system message is rebuilt in-place whenever the mode changes, a skill is loaded or unloaded, or the tool set changes (`/tools`, `/net`, `/index`, `/run-mode`). Sessions save the active skill list and reconstruct the system prompt from the current files on disk when loaded, so edits to role or skill files take effect immediately on next load.
+
+### Seeing the system prompt
+
+`/system-prompt` (alias `/prompt`) shows the system prompt of the current mode, split into its parts in the order the model reads them:
+
+| Part | Present |
+|---|---|
+| Code index banner | While the code index is on |
+| Role | Always: `roles/<mode>.md`, plus the draft plan or the plan-execution rules in plan mode |
+| Working directory | When the role text doesn't already name it |
+| Tool reference (N tools) | Always, generated from the schemas of the tools that are on |
+| Project guides | With `/guides on` and a guide file in the workdir |
+| Skill: <name> | One per loaded skill |
+| Code index rules | While the code index is on |
+
+After the parts comes the **tool schemas** entry: the JSON tool definitions the API sends *alongside* the prompt. They count toward the context but aren't part of the prompt text. Every part shows an estimated token count (~4 characters per token, like the CTX popover).
+
+- **TUI:** opens the prompt in `$PAGER` (`less -R` if unset), each part under a `════ <part> (~N tokens) ════` rule. Press `q` to return.
+- **Web UI:** View → **System prompt…**, or **View system prompt** in the CTX popover. A side panel shows the mode, the total and one collapsible section per part with the raw text, plus a **Copy** button for the whole prompt. It refreshes while open when the mode, tools, internet access, index or skills change.
+- `/system-prompt list` prints the parts and their sizes in the chat.
 
 ### Conversation history
 
@@ -1015,6 +1062,8 @@ plan    → investigating: read-only tools + code navigation + run_command  ask_
 momo    → same as coding (full tool suite)
 ```
 
+Tools you turned off for a mode with `/tools` are removed from that mode's set, see [Turning tools on and off](#turning-tools-on-and-off).
+
 ## Slash Commands
 
 Type any command in the input bar:
@@ -1041,7 +1090,13 @@ Type any command in the input bar:
 | `/think on\|off` | Enable or disable model thinking/reasoning mode |
 | `/companion-idle-recap on\|off` | When you've been idle, momo recaps the last turns in its speech bubble (at most once per turn, 5-minute cooldown; lines are kept in the session). Off by default; also `--companion-idle-recap` |
 | `/companion-idle-recap <secs>` | How long you must be idle before momo recaps (default 90, also `--companion-idle-recap-secs`) |
-| `/tools on\|off` | Enable or disable tool calls (off = model receives no tool schemas) |
+| `/tools` | Pick the current mode's tools: a checklist in the TUI, the Tools menu in the web UI — see [Turning tools on and off](#turning-tools-on-and-off) |
+| `/tools list` | List the current mode's tools, grouped, and whether each is on |
+| `/tools <name>` | Show what a tool does, its parameters, and whether it is on in this mode |
+| `/tools <name> [<name>…] on\|off` | Turn tools on or off for the current mode (saved in the session) |
+| `/tools on\|off` | Enable or disable tool calls entirely (off = model receives no tool schemas) |
+| `/system-prompt` | Show the composed system prompt (TUI: `$PAGER`; web: side panel) — alias `/prompt`, see [Seeing the system prompt](#seeing-the-system-prompt) |
+| `/system-prompt list` | List the system prompt's parts and their estimated size |
 | `/net` | Show internet access state (off / on / local) |
 | `/net on\|off` | Allow or block `fetch_url` reaching the public internet (default: off) |
 | `/net local` | Also allow localhost and the LAN — see [Internet access](#internet-access) |
@@ -1143,7 +1198,7 @@ Each session is automatically saved after every assistant response to:
 ~/.momo-harness/sessions/<timestamp>.json
 ```
 
-Each session stores the model, Ollama host, mode, working directory, context settings, active skills, input history, and the full message history — all restored when the session is reloaded (the auth token is the only thing deliberately left out).
+Each session stores the model, Ollama host, mode, working directory, context settings, active skills, per-mode tool choices, input history, and the full message history — all restored when the session is reloaded (the auth token is the only thing deliberately left out).
 
 A log file (`.log`) is written alongside the JSON, recording every request, response, tool call, and token count in newline-delimited JSON format. Use it to audit what the model did or analyse token usage.
 
@@ -1178,8 +1233,8 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 
 | Path | What | Notes |
 |---|---|---|
-| `prefs.json` | Provider, model, code index settings, guides, companion idle recap, run mode | Security switches (`/net`, `/net-confirm`, `/tools`, `/run-confirm`) are never saved |
-| `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
+| `prefs.json` | Provider, model, code index settings, guides, companion idle recap, run mode | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
+| `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |
 | `runs/<session>/rN.log` | Full output of each `run_command` in run mode `new` | Last 20 per session; deleted on `/clear`, `/new` and session load; other sessions' folders removed after 3 days |

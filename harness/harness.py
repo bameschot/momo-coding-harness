@@ -13,8 +13,8 @@ from .events import EventBus, BusyEvent, DeltaEvent, StreamEndEvent
 from .llm import make_client
 from .logger import Logger
 from .plan import Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file, delete_plan_file
-from .tools import (ALL_TOOLS, NET_TOOLS, PLAN_EXECUTE_TOOLS,
-                    dispatch, render_tool_reference, with_index_tools, with_run_mode)
+from .tools import (ALL_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, NET_TOOLS,
+                    PLAN_EXECUTE_TOOLS, PLAN_INVESTIGATE_TOOLS, dispatch, render_tool_reference, with_index_tools, with_run_mode)
 from . import run_store as run_store_mod
 from . import net as net_mod
 from . import search as search_mod
@@ -37,6 +37,25 @@ _MUTATING_TOOLS = {
 }
 
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
+
+# Per-role tool choices (/tools <name> on|off): what the pickers group tools by,
+# and the tools that can't be turned off because plan mode stops working without them.
+_LOCKED_TOOLS = {"create_plan", "complete_step", "revise_plan"}
+_TOOL_GROUPS = (
+    ("files",       {t["function"]["name"] for t in tools_mod.READ_ONLY_TOOLS}),
+    ("code nav",    {t["function"]["name"] for t in tools_mod.CODE_NAV_TOOLS}),
+    ("net",         {t["function"]["name"] for t in NET_TOOLS}),
+    ("index",       INDEX_TOOL_NAMES),
+    ("ask & plan",  {"ask_user"} | _LOCKED_TOOLS),
+)
+
+
+# The pickers' section order (sorted() is stable, so tools keep their schema order within one).
+_GROUP_ORDER = ("files", "code nav", "index", "edit & shell", "net", "ask & plan")
+
+
+def _tool_group(name: str) -> str:
+    return next((g for g, names in _TOOL_GROUPS if name in names), "edit & shell")
 
 # Project guide files for coding agents, read from the workdir root (matched
 # case-insensitively) when /guides is on, in this order.
@@ -224,6 +243,9 @@ class Harness:
         self.think: bool = True    # enable model thinking/reasoning mode; configurable via /think or --think
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
+        # Per-role tool choices: mode -> names the user turned off (/tools <name>
+        # on|off, the web Tools menu, the TUI picker).  Saved with the session.
+        self.disabled_tools: dict[str, set[str]] = {}
         self.run_confirm: bool = False  # when True, prompt y/N before each run_command; toggle via /run-confirm or Shift+P
         # /run-mode: "new" saves run_command output to a log and returns a view of
         # it (tail / grep / head+tail) plus command_output; "classic" returns it all.
@@ -556,12 +578,116 @@ class Harness:
                              for t in NET_TOOLS]
         if self.index is not None:
             tools = with_index_tools(tools)
+        off = self.disabled_tools.get(self.mode)
+        if off:
+            tools = [t for t in tools if t["function"]["name"] not in off]
         return tools
+
+    # ── per-role tool choices ─────────────────────────────────────────────────
+
+    def _role_universe(self) -> list[dict]:
+        """Every tool the current role can be offered, whatever the toggles."""
+        if self.mode == "plan":
+            base = PLAN_INVESTIGATE_TOOLS + [t for t in PLAN_EXECUTE_TOOLS
+                                             if t not in PLAN_INVESTIGATE_TOOLS]
+        else:
+            base = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
+        return with_run_mode(base, self.run_mode) + NET_TOOLS + INDEX_TOOLS
+
+    def tool_choices(self) -> list[dict]:
+        """The current role's tools for the frontends' pickers:
+        [{name, group, enabled, locked, note, desc, params}], where params is
+        [(name, description, required)] from the schema."""
+        off = self.disabled_tools.get(self.mode, set())
+        out = []
+        universe = sorted(self._role_universe(),
+                          key=lambda t: _GROUP_ORDER.index(_tool_group(t["function"]["name"])))
+        for t in universe:
+            name = t["function"]["name"]
+            if name == "web_search":   # its description lists the loaded sources
+                t = search_mod.web_search_tool(t, self.search_sources)
+            group = _tool_group(name)
+            locked, note = False, ""
+            if name in _LOCKED_TOOLS:
+                locked, note = True, "plan mode needs it"
+            elif self.index is not None and name in INDEX_REPLACES:
+                locked, note = True, "replaced by the code index"
+            if group == "net" and self.net_access == "off":
+                note = "internet access is off"
+            elif group == "index" and not self.index_enabled:
+                note = "code index is off"
+            on = (name not in off and not (group == "net" and self.net_access == "off")
+                  and not (group == "index" and not self.index_enabled)
+                  and not (name in INDEX_REPLACES and self.index is not None))
+            schema = t["function"].get("parameters") or {}
+            required = set(schema.get("required") or ())
+            params = [(p, spec.get("description", ""), p in required)
+                      for p, spec in (schema.get("properties") or {}).items()]
+            out.append({"name": name, "group": group, "enabled": on,
+                        "locked": locked, "note": note,
+                        "desc": t["function"].get("description", ""), "params": params})
+        return out
+
+    def set_tool_enabled(self, name: str, on: bool) -> str:
+        """Turn one tool on or off for the current role; returns a notice.
+        Turning on a net or index tool while its toggle is off turns the toggle
+        on too, with only that tool of its group on for this role."""
+        choice = next((c for c in self.tool_choices() if c["name"] == name), None)
+        if choice is None:
+            return f"ERROR: no tool '{name}' in {self.mode} mode (see /tools list)"
+        if choice["locked"]:
+            return f"ERROR: {name} can't be turned off ({choice['note']})"
+        group = choice["group"]
+        notes, others = [], set()
+        # Turning the toggle on clears this group's choices first, so the set
+        # is looked up only afterwards.
+        if on and group == "net" and self.net_access == "off":
+            self.set_net_access("on")
+            others = {t["function"]["name"] for t in NET_TOOLS} - {name}
+            notes.append("Internet access: on")
+        elif on and group == "index" and not self.index_enabled:
+            notes.append(self.set_index(True))
+            others = INDEX_TOOL_NAMES - {name}
+        off = self.disabled_tools.setdefault(self.mode, set())
+        off |= others
+        if on:
+            off.discard(name)
+        else:
+            off.add(name)
+        if not off:
+            del self.disabled_tools[self.mode]
+        self.rebuild_system_prompt()
+        self.emit_status()
+        if len(self.messages) > 1:
+            self._autosave()
+        notes.append(f"{name}: {'on' if on else 'off'} in {self.mode} mode")
+        return "\n".join(notes)
+
+    def _clear_choices(self, names: set[str]) -> None:
+        """A toggle turned on: its tools are on again in every role."""
+        for mode in list(self.disabled_tools):
+            self.disabled_tools[mode] -= names
+            if not self.disabled_tools[mode]:
+                del self.disabled_tools[mode]
+
+    def set_net_access(self, access: str) -> None:
+        """/net off|on|local.  Turning it on turns every net tool on in every role."""
+        if self.net_access == "off" and access != "off":
+            self._clear_choices({t["function"]["name"] for t in NET_TOOLS})
+        self.net_access = access
+        # fetch_url enters/leaves the tool set, so the generated tool reference
+        # in the system prompt has to be re-rendered.
+        self.rebuild_system_prompt()
+        self.emit_status()
 
     # ── code index ────────────────────────────────────────────────────────────
 
-    def set_index(self, enabled: bool) -> str:
-        """Turn the code index on or off; returns a notice."""
+    def set_index(self, enabled: bool, clear_choices: bool = True) -> str:
+        """Turn the code index on or off; returns a notice.  Turning it on turns
+        every index tool on in every role, unless clear_choices is False (startup,
+        where a restored session's choices stand)."""
+        if enabled and not self.index_enabled and clear_choices:
+            self._clear_choices(INDEX_TOOL_NAMES)
         self.index_enabled = enabled
         if enabled and self.index is None:
             self._start_index()
@@ -711,48 +837,78 @@ class Harness:
             self._run_store = None
 
     def _build_system_prompt(self) -> str:
+        return "".join(sec["sep"] + sec["text"] for sec in self.system_prompt_sections())
+
+    def system_prompt_sections(self) -> list[dict]:
+        """The system prompt in its parts, in order: [{key, label, text, sep}],
+        where sep is what joins the part to the one before it.  Joining sep+text
+        gives exactly the prompt (_build_system_prompt); /system-prompt and the
+        web UI's System prompt drawer show the parts."""
+        secs: list[dict] = []
+
+        def add(key: str, label: str, text: str, sep: str = "\n\n---\n\n"):
+            secs.append({"key": key, "label": label, "text": text,
+                         "sep": sep if secs else ""})
+
+        tools = self._current_tools()
+        if self.index is not None and any(t["function"]["name"] == "index_text" for t in tools):
+            # First and last, where a small model weighs it most: the role
+            # texts in between still teach grep_files / find_references.
+            add("index", "Code index banner", _INDEX_BANNER)
         if self._plan_executing():
             # Execution runs with exactly the coding agent's prompt plus the plan.
-            base = (_coding_prompt(str(self.workdir)) + "\n\n---\n\n" + _PLAN_EXECUTION_RULES
+            role = (_coding_prompt(str(self.workdir)) + "\n\n---\n\n" + _PLAN_EXECUTION_RULES
                     + "\n\n### Current plan state\n\n" + self.plan.render_for_prompt())
+            label = "Role: plan (executing)"
         else:
             loader = _ROLE_LOADERS.get(self.mode, _ROLE_LOADERS["coding"])
-            base = loader(str(self.workdir))
+            role = loader(str(self.workdir))
+            label = f"Role: {self.mode}"
             if self.mode == "plan" and self.plan is not None:
-                base += ("\n\n---\n\n## Current draft plan\n\nYou already submitted this plan; "
+                role += ("\n\n---\n\n## Current draft plan\n\nYou already submitted this plan; "
                          "it was not approved yet. Revise it according to the user's feedback and "
                          "call create_plan again with the complete plan.\n\n"
                          + self.plan.render_for_prompt())
-        if str(self.workdir) not in base:
-            base += f"\n\nWorking directory: {self.workdir}"
-        # Append the tool reference generated from the schemas for exactly this
-        # mode's tool set, so the reference is always in sync with the real tools
-        # (the role .md files no longer carry a hand-copied version).
-        # Kept so the context breakdown can attribute it to tools without re-rendering.
-        self._tool_ref = render_tool_reference(self._current_tools())
-        base += "\n\n---\n\n" + self._tool_ref
+        add("role", label, role, sep="\n\n")
+        if str(self.workdir) not in role:
+            add("workdir", "Working directory", f"Working directory: {self.workdir}", sep="\n\n")
+        # The tool reference is generated from the schemas for exactly this
+        # mode's tool set, so it is always in sync with the real tools (the role
+        # .md files no longer carry a hand-copied version).  Kept so the context
+        # breakdown can attribute it to tools without re-rendering.
+        self._tool_ref = render_tool_reference(tools)
+        add("tools", f"Tool reference ({len(tools)} tools)", self._tool_ref)
         self._guides_text = ""
         if self._guides:
             self._guides_text = (
                 "## Project guides\n\nInstructions from this project's own guide files "
                 "— follow them.\n\n"
                 + "\n\n".join(f"### {name}\n\n{text}" for name, text in self._guides))
-            base += "\n\n---\n\n" + self._guides_text
-        parts = []
+            add("guides", f"Project guides ({len(self._guides)})", self._guides_text)
         for name in self.active_skills:
             p = _SKILLS_DIR / f"{name}.md"
             if p.exists():
-                parts.append(p.read_text(encoding="utf-8").strip())
-        if self.index is not None and any(t["function"]["name"] == "index_text"
-                                          for t in self._current_tools()):
-            # First and last, where a small model weighs it most: the role
-            # texts in between still teach grep_files / find_references.
-            base = _INDEX_BANNER + "\n\n" + base
-            role = "plan-exec" if self._plan_executing() else self.mode
-            parts.append(_index_rules(role))
-        if parts:
-            return base + "\n\n---\n\n" + "\n\n---\n\n".join(parts)
-        return base
+                add(f"skill:{name}", f"Skill: {name}", p.read_text(encoding="utf-8").strip())
+        if secs[0]["key"] == "index":
+            role_name = "plan-exec" if self._plan_executing() else self.mode
+            add("index-rules", "Code index rules", _index_rules(role_name))
+        return secs
+
+    def system_prompt_view(self) -> dict:
+        """/system-prompt and GET /api/system-prompt: the prompt's parts with token
+        estimates, plus the tool schemas the API sends alongside it."""
+        secs = self.system_prompt_sections()
+        tools = self._current_tools() if self.tools_enabled else []
+        return {
+            "mode": self.mode,
+            "text": "".join(s["sep"] + s["text"] for s in secs),
+            "total_tokens": sum(_text_tokens(s["sep"] + s["text"]) for s in secs),
+            "sections": [{"key": s["key"], "label": s["label"], "text": s["text"],
+                          "tokens": _text_tokens(s["text"])} for s in secs],
+            "schemas": {"label": f"Tool schemas ({len(tools)} tools, sent alongside the prompt)",
+                        "tokens": self._schema_tokens(),
+                        "text": json.dumps(tools, indent=2, ensure_ascii=False)},
+        }
 
     def set_mode(self, mode: str):
         changed = mode != self.mode
@@ -1500,7 +1656,11 @@ class Harness:
                     if snap_path:
                         diff_old, diff_existed = self._read_text_safe(snap_path)
 
-                if name == "ask_user":
+                if name in self.disabled_tools.get(self.mode, ()):
+                    # Offered no schema, but a text-recovered call or an older
+                    # context can still name it.
+                    result = f"ERROR: {name} is turned off for this role by the user."
+                elif name == "ask_user":
                     # Block the worker thread until the TUI routes the user's answer back.
                     # The TUI detects AskUserEvent, switches to waiting-for-input state,
                     # and calls provide_user_input() when the user submits a response.
@@ -1898,6 +2058,7 @@ class Harness:
             provider=self.provider,
             plan_progress=self._plan_progress(),
             guides=self.guides,
+            tools_off=sorted(self.disabled_tools.get(self.mode, ())),
             **self._index_status_fields(),
         )
 
@@ -1955,6 +2116,7 @@ class Harness:
             momo_lines=self.momo_lines,
             momo_recap_turn=self._momo_recap_turn,
             turn_count=self._turn_count,
+            disabled_tools={m: sorted(n) for m, n in self.disabled_tools.items()},
         )
         session_mod.save_prefs(model=self.client.model, provider=self.provider)
 
@@ -2012,6 +2174,7 @@ class Harness:
             self.context_limit = data.get("context_limit", self.context_limit)
         self._sync_context_limit()      # num_ctx still needs the model's real window
         self.active_skills = data.get("active_skills", [])
+        self.disabled_tools = {m: set(n) for m, n in (data.get("disabled_tools") or {}).items() if n}
         saved_plan = data.get("plan")
         self.plan = Plan.from_dict(saved_plan) if saved_plan else None
         self.plan_phase = (data.get("plan_phase") or "investigating") if self.plan else "investigating"
@@ -2051,6 +2214,7 @@ class Harness:
         self.momo_lines = []
         self._momo_recap_turn = 0
         self._turn_count = 0
+        self.disabled_tools = {}
         self._guides = self._read_guides() if self.guides else []
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
         self._token_estimate = self._estimate(schemas=True)

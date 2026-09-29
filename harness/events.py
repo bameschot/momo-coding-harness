@@ -11,7 +11,7 @@ import collections
 import dataclasses
 import queue
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import code_index
@@ -55,6 +55,7 @@ class StatusEvent:
     provider: str = ""
     plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
     guides: bool = False     # project guide files (AGENTS.md, ...) in the system prompt
+    tools_off: list = field(default_factory=list)  # tools turned off for the current mode
     index_enabled: bool = False   # /index: the code index and its index_* tools
     index_state: str = "off"      # off | building | refreshing | idle | stopped
     index_progress: str = ""      # "812/1873" while building/refreshing

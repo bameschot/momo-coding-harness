@@ -65,7 +65,8 @@ def save(ts: str, model: str, mode: str, workdir: Path,
          plan_phase: str | None = None,
          momo_lines: list[str] | None = None,
          momo_recap_turn: int = 0,
-         turn_count: int = 0):
+         turn_count: int = 0,
+         disabled_tools: dict[str, list[str]] | None = None):
     data = {
         "created_at": ts,
         "model": model,
@@ -83,6 +84,7 @@ def save(ts: str, model: str, mode: str, workdir: Path,
         "momo_lines": momo_lines or [],
         "momo_recap_turn": momo_recap_turn,
         "turn_count": turn_count,
+        "disabled_tools": disabled_tools or {},
         "messages": messages,
     }
     atomic_write(session_path(ts), json.dumps(data, indent=2))
