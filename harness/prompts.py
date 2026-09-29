@@ -174,6 +174,43 @@ def _nav_rules(role: str, tool_names: set[str], index: bool) -> str:
     return "\n\n".join(out) + "\n\n" + "\n".join(f"- {b}" for b in bullets)
 
 
+# ── using the internet ───────────────────────────────────────────────────────
+# Only while a net tool is offered.  The tools are additive (no habit to
+# override, and curl is guarded in run_command), so this is about how to use
+# them well, not which tool to pick.
+
+_NET_FIRST = {
+    "plan": "Verify any external library or API behaviour your steps rely on before you "
+            "write them into the plan.",
+}
+
+
+def _net_rules(role: str, tool_names: set[str], source_names: set[str]) -> str | None:
+    """The "Using the internet" section, or None when no net tool is offered."""
+    fetch, search = "fetch_url" in tool_names, "web_search" in tool_names
+    if not (fetch or search):
+        return None
+    look = " / ".join(n for n, on in (("web_search", search), ("fetch_url", fetch)) if on)
+    bullets = [f"**Check, don't recall.** Your knowledge is out of date: never state a version, "
+               f"API signature, flag or advisory from memory — look it up with {look}.",
+               "**Project first.** What the project uses (lockfile, pom.xml, pyproject, "
+               "package.json) is in the repo; read it before searching the web for \"latest\"."]
+    if search:
+        hint = ("General facts — a standard, an algorithm, a protocol, a term — you may answer "
+                "from what you know, but look them up")
+        if "wikipedia" in source_names:
+            hint += " (web_search with source=\"wikipedia\")"
+        bullets.append(hint + " when the topic is recent or ongoing, when you are not sure, or "
+                       "when the user asks you to.")
+    bullets.append("**Stop when answered.** One good source is enough; do not keep searching "
+                   "to confirm it.")
+    bullets.append("**Cite.** Name the URL each fact came from.")
+    head = "## Using the internet"
+    if role in _NET_FIRST:
+        head += "\n\n" + _NET_FIRST[role]
+    return head + "\n\n" + "\n".join(f"- {b}" for b in bullets)
+
+
 # ── environment ──────────────────────────────────────────────────────────────
 
 def _git_state(workdir: Path) -> str:

@@ -62,6 +62,34 @@ class Sections(Base):
         keys = [s["key"] for s in self.h.system_prompt_sections()]
         self.h.index = None
         self.assertEqual(keys, ["index", "role", "env", "guides", "skill:python", "tools", "nav"])
+        self.h.set_net_access("on")
+        keys = [s["key"] for s in self.h.system_prompt_sections()]
+        self.h.set_net_access("off")
+        self.assertEqual(keys[-2:], ["net", "nav"])
+
+    def net_section(self):
+        return next((s["text"] for s in self.h.system_prompt_sections() if s["key"] == "net"),
+                    None)
+
+    def test_net_section(self):
+        self.h.set_mode("coding")
+        self.assertIsNone(self.net_section())
+        self.h.set_net_access("on")
+        try:
+            text = self.net_section()
+            self.assertIn("Check, don't recall", text)
+            if "wikipedia" in self.h.search_sources.sources:
+                self.assertIn('source="wikipedia"', text)
+            self.h.set_tool_enabled("web_search", False)
+            text = self.net_section()
+            self.assertNotIn("web_search", text)
+            self.assertNotIn("wikipedia", text)
+            self.h.set_tool_enabled("fetch_url", False)
+            self.assertIsNone(self.net_section())
+        finally:
+            self.h.set_tool_enabled("web_search", True)
+            self.h.set_tool_enabled("fetch_url", True)
+            self.h.set_net_access("off")
 
     def test_environment(self):
         self.h.set_mode("coding")
@@ -80,16 +108,19 @@ class Sections(Base):
         from harness.tools import ALL_TOOLS, INDEX_TOOLS, NET_TOOLS, PLAN_TOOLS, with_run_mode
         every = {t["function"]["name"] for t in
                  with_run_mode(ALL_TOOLS, "new") + INDEX_TOOLS + NET_TOOLS + PLAN_TOOLS}
-        for index in (None, _StubIndex(self.home)):
-            self.h.index = index
-            for mode in ("design", "chat", "plan", "coding", "momo"):
-                self.h.set_mode(mode)
-                offered = {t["function"]["name"] for t in self.h._current_tools()}
-                text = "".join(s["text"] for s in self.h.system_prompt_sections()
-                               if s["key"] != "tools")
-                stale = sorted(n for n in every - offered if re.search(rf"\b{n}\b", text))
-                self.assertEqual(stale, [], (mode, bool(index)))
+        for net in ("off", "on"):
+            self.h.set_net_access(net)
+            for index in (None, _StubIndex(self.home)):
+                self.h.index = index
+                for mode in ("design", "chat", "plan", "coding", "momo"):
+                    self.h.set_mode(mode)
+                    offered = {t["function"]["name"] for t in self.h._current_tools()}
+                    text = "".join(s["text"] for s in self.h.system_prompt_sections()
+                                   if s["key"] != "tools")
+                    stale = sorted(n for n in every - offered if re.search(rf"\b{n}\b", text))
+                    self.assertEqual(stale, [], (mode, bool(index), net))
         self.h.index = None
+        self.h.set_net_access("off")
 
     def test_index_prompt_has_no_translation_patch(self):
         self.h.index = _StubIndex(self.home)

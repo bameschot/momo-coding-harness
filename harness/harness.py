@@ -24,7 +24,7 @@ from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent, 
                      StatusEvent, ThinkEvent, ToolCallEvent, ToolResultEvent)
 from .prompts import (_INDEX_FIRST, _index_banner, _MODE_TOOLS,  # noqa: F401
                       _PLAN_EXECUTION_RULES, _ROLE_LOADERS, _coding_prompt, _environment,
-                      _load_role, _nav_rules)
+                      _load_role, _nav_rules, _net_rules)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls)
 
@@ -898,6 +898,9 @@ class Harness:
         self._tool_ref = render_tool_reference(tools, self.tool_ref)
         add("tools", f"Tool reference ({len(tools)} tools, {self.tool_ref})", self._tool_ref)
         role_name = "plan-exec" if self._plan_executing() else self.mode
+        net = _net_rules(role_name, names, set(self.search_sources.sources))
+        if net:
+            add("net", "Using the internet", net)
         add("nav", "Navigating code" + (" (code index)" if index_on else ""),
             _nav_rules(role_name, names, index_on))
         return secs

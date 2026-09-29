@@ -766,6 +766,8 @@ Neither this nor `/net-confirm` is saved to `prefs.json`. Both reset to the safe
 
 While it is on, a `NET:` badge shows in the TUI status bar and the web header, and `fetch_url`, `web_search` and `add_search_source` are added to whatever mode you are in. While it is off the model is not offered them at all. `web_search` goes through the same guard as `fetch_url`, so everything below applies to both; see [Web search](#web-search) for how it finds things.
 
+While it is on, the system prompt also gets a short **Using the internet** part (see [System prompt](#system-prompt)): check versions and APIs rather than recall them, read the project's own manifests first, look up general facts when the topic is recent, the model is unsure or you ask, stop once answered, and cite URLs.
+
 ### What is blocked
 
 - **Only `http` and `https`.** `urllib` will happily serve `file:///etc/passwd`, which would read straight past the working-directory sandbox every other tool is confined to, so the HTTP client here is built without the file, ftp and data handlers.
@@ -966,43 +968,50 @@ Each call to the model sends a messages array assembled from three sources: the 
 
 ### System prompt
 
-The system message is built from the active role file, a tool reference generated for the current tool set, project guides, loaded skills and, while the code index is on, the index banner and rules. `/system-prompt` shows exactly what the model gets (see [Seeing the system prompt](#seeing-the-system-prompt)). The basic shape:
+The system message is assembled by `Harness.system_prompt_sections()` (`harness/harness.py`) from parts, in the order the model reads them. Each part is generated for the current mode and **exactly the tools that are on**, so no part names a tool the model can't call:
 
 ```
-┌─ system ──────────────────────────────────────────────────────────────┐
-│                                                                       │
-│  <role base text>                          ← roles/<mode>.md         │
-│  (designer / coder / planner / chat / momo)                           │
-│  {workdir} substituted with the actual working directory              │
-│                                                                       │
-│  ---                      (only present when skills are active)       │
-│                                                                       │
-│  <skill text>                              ← skills/<name>.md        │
-│                                                                       │
-│  ---                      (repeated for each additional skill)        │
-│                                                                       │
-│  <skill text>                              ← skills/<name>.md        │
-│                                                                       │
-└───────────────────────────────────────────────────────────────────────┘
+ INPUTS                                  SYSTEM MESSAGE (read top to bottom)
+                                        ┌────────────────────────────────┐
+ /index on ────────────────────────────▶│ 1 Code index banner       [if] │
+                                        │ ------------------------------ │
+ mode, roles/<mode>.md, plan ──────────▶│ 2 Role                         │
+                                        │ ------------------------------ │
+ workdir, date, OS, git, /net ─────────▶│ 3 Environment                  │
+                                        │ ------------------------------ │
+ /guides on + AGENTS.md, … ────────────▶│ 4 Project guides          [if] │
+                                        │ ------------------------------ │
+ /load-skill → skills/<name>.md ───────▶│ 5 Skill: <name>         [each] │
+                                        │ ------------------------------ │
+                  ┌─ /tool-ref ────────▶│ 6 Tool reference               │
+ tools on in this │                     │ ------------------------------ │
+                  ├─ fetch_url or ─────▶│ 7 Using the internet      [if] │
+ mode (/tools, ───┤  web_search on      │ ------------------------------ │
+                  ├─ index on/off ─────▶│ 8 Navigating code              │
+ /net, /index,    │                     └────────────────────────────────┘
+ /run-mode)       └────────────────────▶ Tool schemas (JSON, sent alongside the prompt)
 ```
 
-The system message is rebuilt in-place whenever the mode changes, a skill is loaded or unloaded, or the tool set changes (`/tools`, `/net`, `/index`, `/run-mode`). Sessions save the active skill list and reconstruct the system prompt from the current files on disk when loaded, so edits to role or skill files take effect immediately on next load.
+`[if]` parts appear only when their input is on, `[each]` repeats per loaded skill; the `---` lines are the rules that join the parts. When any input changes, the message is rebuilt in place.
+
+| # | Part | Present | Source |
+|---|---|---|---|
+| 1 | Code index banner | While the code index is on | `_index_banner` in `harness/prompts.py`: one line steering to the `index_*` tools |
+| 2 | Role | Always | `roles/<mode>.md` with `{workdir}` filled in; in plan mode also the draft plan, or, while executing, the coder role + plan-execution rules + the live plan with `▶` on the current step |
+| 3 | Environment | Always | `_environment`: working directory, today's date, OS/shell and git branch (when `run_command` is offered), and whether internet access is on or off |
+| 4 | Project guides | With `/guides on` and a guide file | `AGENTS.md`, `CLAUDE.md`, `MOMO.md`, … from the workdir |
+| 5 | Skill: &lt;name&gt; | One per loaded skill | `skills/<name>.md` |
+| 6 | Tool reference (N tools) | Always | Generated from the tool schemas; `/tool-ref full\|compact` picks the style |
+| 7 | Using the internet | While a net tool (`fetch_url`, `web_search`) is on | `_net_rules`: check versions and APIs rather than recall them, read the project's own manifests first, look up general facts when the topic is recent, you're unsure or the user asks, stop once answered, cite URLs |
+| 8 | Navigating code | Always | `_nav_rules`: how to find code with the tools this mode has; with the index on it becomes the index table (`index_search`, `index_callers`, …) |
+
+The parts are joined with `---` rules (the role follows the banner with a blank line only). The index banner goes first and the navigation rules last on purpose: a small model weighs the start and end of the prompt most. Role text is behaviour; tool usage lives in the generated parts, so the role files carry no tool tables that could go stale.
+
+The system message is rebuilt in place whenever something it depends on changes: the mode, a skill, the guides, the plan, or the tool set (`/tools`, `/net`, `/index`, `/run-mode`, `/tool-ref`). Sessions save the active skill list and reconstruct the system prompt from the current files on disk when loaded, so edits to role or skill files take effect on the next load.
 
 ### Seeing the system prompt
 
-`/system-prompt` (alias `/prompt`) shows the system prompt of the current mode, split into its parts in the order the model reads them:
-
-| Part | Present |
-|---|---|
-| Code index banner | While the code index is on |
-| Role | Always: `roles/<mode>.md`, plus the draft plan or the plan-execution rules in plan mode |
-| Working directory | When the role text doesn't already name it |
-| Tool reference (N tools) | Always, generated from the schemas of the tools that are on |
-| Project guides | With `/guides on` and a guide file in the workdir |
-| Skill: <name> | One per loaded skill |
-| Code index rules | While the code index is on |
-
-After the parts comes the **tool schemas** entry: the JSON tool definitions the API sends *alongside* the prompt. They count toward the context but aren't part of the prompt text. Every part shows an estimated token count (~4 characters per token, like the CTX popover).
+`/system-prompt` (alias `/prompt`) shows the system prompt of the current mode, split into the parts above. After the parts comes the **tool schemas** entry: the JSON tool definitions the API sends *alongside* the prompt. They count toward the context but aren't part of the prompt text. Every part shows an estimated token count (~4 characters per token, like the CTX popover).
 
 - **TUI:** opens the prompt in `$PAGER` (`less -R` if unset), each part under a `════ <part> (~N tokens) ════` rule. Press `q` to return.
 - **Web UI:** View → **System prompt…**, or **View system prompt** in the CTX popover. A side panel shows the mode, the total and one collapsible section per part with the raw text, plus a **Copy** button for the whole prompt. It refreshes while open when the mode, tools, internet access, index or skills change.

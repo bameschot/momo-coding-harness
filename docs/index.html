@@ -260,6 +260,91 @@ section { scroll-margin-top: 64px; }
     radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / .25), transparent) right / 10px 100% no-repeat scroll;
 }
 table { border-collapse: collapse; font-size: 14px; width: 100%; }
+
+.prompt-diagram { margin: 1em 0; font-size: 13.5px; }
+.pd-grid {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.1fr);
+  gap: 5px 10px; align-items: center;
+}
+.pd-row { display: contents; }
+.pd-head.in { text-align: right; }
+.pd-head { font: 600 11px var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.pd-in { font-family: var(--mono); font-size: 12.5px; color: var(--muted); text-align: right; }
+.pd-arrow { color: var(--muted); }
+.pd-part {
+  display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
+  padding: 6px 10px; border: 1.5px solid var(--gen); border-radius: 6px;
+  background: color-mix(in srgb, var(--gen) 10%, var(--surface));
+}
+.pd-part.file { --gen: var(--user); }
+.pd-part.cond { border-style: dashed; }
+.pd-part.aside { --gen: var(--muted); margin-top: 8px; }
+.prompt-diagram { --gen: var(--tool); }
+.pd-tag { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+.pd-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; color: var(--muted); font-size: 12.5px; }
+.pd-legend span::before {
+  content: ""; display: inline-block; width: 14px; height: 10px; margin-right: 6px;
+  border: 1.5px solid var(--gen); border-radius: 3px; vertical-align: -1px;
+  background: color-mix(in srgb, var(--gen) 10%, var(--surface));
+}
+.pd-legend .file { --gen: var(--user); }
+.pd-legend .cond::before { border-style: dashed; --gen: var(--muted); }
+.prompt-diagram figcaption { margin-top: 6px; color: var(--muted); font-size: 12.5px; }
+
+/* .flow: step diagrams (agent loop, fetch_url guard, plan lifecycle) */
+.flow { margin: 1em 0; font-size: 13.5px; --gen: var(--border); }
+.flow figcaption { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.flow .box {
+  border: 1.5px solid var(--gen); border-radius: 6px; padding: 6px 10px;
+  background: color-mix(in srgb, var(--gen) 10%, var(--surface));
+}
+.flow .box small { display: block; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.flow .box code { font-size: 11.5px; }
+.flow .harness { --gen: var(--tool); }
+.flow .model   { --gen: var(--assistant); }
+.flow .you     { --gen: var(--user); }
+.flow .end     { --gen: var(--muted); }
+.flow .box.cond { border-style: dashed; }
+.flow-who { font: 600 10.5px var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--gen); }
+/* vertical: steps on the left, side exits on the right */
+.flow-col { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 0 14px; max-width: 760px; }
+.flow-col .box { grid-column: 1; }
+.flow-col .side { grid-column: 2; align-self: center; font-size: 12.5px; color: var(--muted); }
+.flow-col .side b { color: var(--text); font-weight: 600; }
+.flow-col .down { grid-column: 1; text-align: center; color: var(--muted); line-height: 1.5; font-size: 13px; }
+.flow .inline small { display: inline; margin-left: 6px; }
+.flow .inline b { font-weight: 600; }
+.flow-col .down.tight { line-height: 1.1; font-size: 11px; }
+.flow-col .back { grid-column: 1; justify-self: end; margin-top: 6px; font: 12px var(--mono); color: var(--muted);
+  border: 1px dashed var(--border); border-radius: 999px; padding: 2px 10px; }
+/* horizontal: wraps like .pipeline */
+.flow-row { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; }
+.flow-row .box { flex: 1 1 120px; max-width: 200px; }
+.flow-row .arrow { align-self: center; color: var(--muted); }
+.flow-edges { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.flow-edges li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.flow-edges .from, .flow-edges .to { color: var(--text); font-weight: 600; }
+.flow-edges .via { font-family: var(--mono); font-size: 12px; }
+.flow-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; color: var(--muted); font-size: 12.5px; }
+.flow-legend span::before {
+  content: ""; display: inline-block; width: 14px; height: 10px; margin-right: 6px; vertical-align: -1px;
+  border: 1.5px solid var(--gen); border-radius: 3px; background: color-mix(in srgb, var(--gen) 10%, var(--surface));
+}
+.flow-legend .cond::before { border-style: dashed; }
+@media (max-width: 640px) {
+  .flow-col { grid-template-columns: minmax(0, 1fr); }
+  .flow-col .side { grid-column: 1; margin: 4px 0 0 12px; }
+  .flow-row { flex-direction: column; }
+  .flow-row .box { max-width: none; flex-basis: auto; }
+  .flow-row .arrow { transform: rotate(90deg); align-self: center; }
+}
+@media (max-width: 640px) {
+  .pd-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .pd-row { display: flex; flex-direction: column; gap: 2px; }
+  .pd-arrow, .pd-head.in { display: none; }
+  .pd-in { text-align: left; order: 1; }
+  .pd-in::before { content: "↑ "; }
+}
 th, td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; vertical-align: top; }
 th { background: var(--surface-2); white-space: nowrap; }
 td:first-child { white-space: nowrap; }
@@ -707,7 +792,17 @@ ollama serve</code></pre></div>
 
   <section id="plan" data-voice="plan">
     <h2>Plan mode</h2>
-    <div class="pipeline"><span class="step">1 investigate</span><span class="arrow">→</span><span class="step">2 plan</span><span class="arrow">→</span><span class="step">3 confirm</span><span class="arrow">→</span><span class="step">4 execute</span></div>
+    <figure class="flow" aria-label="Plan mode lifecycle">
+      <div class="flow-row"><div class="box model">1 Investigate<small>read the code, reproduce, <code>ask_user</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">2 Plan<small><code>create_plan</code> writes <code>.momo-plan.md</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">3 Confirm<small><code>y</code> runs it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">4 Execute<small>one step at a time, ▶ in the prompt</small></div><span class="arrow" aria-hidden="true">→</span><div class="box end">Done<small>the plan file is deleted</small></div></div>
+      <ul class="flow-edges">
+        <li><span class="from">Confirm</span><span class="via">— any other reply (feedback) →</span><span class="to">Plan, revised</span></li>
+        <li><span class="from">Confirm</span><span class="via">— <code>n</code> →</span><span class="to">Kept — <code>/plan run</code> → Execute</span></li>
+        <li><span class="from">Execute</span><span class="via">— interrupt, backend error or iteration cap →</span><span class="to">Paused — <code>/plan resume</code> or any message → Execute</span></li>
+        <li><span class="from">Execute</span><span class="via">— <code>revise_plan</code> →</span><span class="to">the remaining steps are replaced</span></li>
+        <li><span class="from">Any</span><span class="via">— <code>/plan cancel</code> →</span><span class="to">the plan and its file are discarded</span></li>
+      </ul>
+      <figcaption>Step checkboxes in <code>.momo-plan.md</code>: <code>[ ]</code> pending · <code>[~]</code> in progress · <code>[x]</code> done · <code>[-]</code> skipped.</figcaption>
+    </figure>
     <ol>
       <li><strong>Investigate.</strong> The model follows the code path the change touches, tries to reproduce a bug with <code>run_command</code> and finds out how the project is tested. It uses <code>ask_user</code> for questions that would change the plan, one at a time.</li>
       <li><strong>Plan.</strong> It calls <code>create_plan</code> with a title, a goal and ordered steps. Each step names the file and function it changes, the change itself and how to verify it. The harness writes this to <code>.momo-plan.md</code>.</li>
@@ -727,6 +822,26 @@ ollama serve</code></pre></div>
 
   <section id="tools" data-voice="tools">
     <h2>Tools</h2>
+    <figure class="flow" aria-label="One turn of the agent loop">
+      <div class="flow-col">
+        <div class="box you"><div class="flow-who">you</div>Send a message</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness cond"><div class="flow-who">harness</div>Compact the history<small>only when it is over the context limit</small></div>
+        <div class="side"><b>Esc / Stop</b> at any point → “Interrupted.”</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">model</div>Reply: text, thinking, tool calls<small>tool calls written as plain text are recovered too</small></div>
+        <div class="side"><b>no tool calls</b> → the text is the answer; the turn ends</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness cond"><div class="flow-who">harness</div>Ask you first<small><code>run_command</code> with <code>/run-confirm on</code>, <code>fetch_url</code> writes, <code>ask_user</code> questions</small></div>
+        <div class="side"><b>declined</b> → the model gets “declined” as the result</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Run the tools, add the results to the history<small>sandboxed to the working directory</small></div>
+        <div class="side"><b>100 rounds</b> (40 in design mode) → stop; a running plan pauses</div>
+        <div class="back">↺ back to compact, then the model</div>
+      </div>
+      <div class="flow-legend"><span class="you">you</span><span class="model">model</span><span class="harness">harness</span><span class="harness cond">only in some cases</span></div>
+      <figcaption>One turn. Every tool result goes back to the model until it answers in text.</figcaption>
+    </figure>
     <p>The tool reference in each system prompt is generated from the tool schemas, so the model always sees exactly the tools its current mode offers. All file operations are sandboxed to the working directory, and <code>..</code> escapes are rejected.</p>
     <h3>Read-only (all modes)</h3>
     <div class="table-scroll"><table>
@@ -885,6 +1000,36 @@ FAILED (failures=2)
 /net-max-bytes 2mb        <span class="com"># download cap</span>
 /net-max-chars 24000      <span class="com"># text returned per call; the rest is paged</span></code></pre></div>
     <p>HTML is converted to readable text, keeping link targets, and JSON is pretty-printed. The model can page through long pages with <code>offset=</code>, jump to a section with <code>find=</code> or pick part of a JSON response with <code>json_path=</code>. Those follow-up calls are served from a short cache.</p>
+    <p>While it's on, the system prompt gains a short <a href="#system-prompt">Using the internet</a> part: check versions and APIs rather than recall them, read the project's manifests first, stop once answered, and cite URLs.</p>
+    <figure class="flow" aria-label="The path of a fetch_url call">
+      <div class="flow-col">
+        <div class="box inline harness cond"><b>Confirm</b><small>writes (POST, PUT, PATCH, DELETE) with <code>/net-confirm</code>; always for a private target</small></div>
+        <div class="side"><b>declined</b> → never sent</div>
+        <div class="down tight" aria-hidden="true">↓</div>
+        <div class="box inline harness"><b>Check the URL</b><small>http/https only, no credentials, every resolved address public (or <code>/net local</code>)</small></div>
+        <div class="side"><b>blocked</b> → the reason goes back to the model</div>
+        <div class="down tight" aria-hidden="true">↓</div>
+        <div class="box inline harness cond"><b>Page cache</b><small>a follow-up <code>find=</code>, <code>offset=</code> or <code>json_path=</code> is served from here</small></div>
+        <div class="side"><b>hit</b> → skip to To text</div>
+        <div class="down tight" aria-hidden="true">↓</div>
+        <div class="box inline harness"><b>Connect pinned</b><small>to the checked addresses; TLS verified against the hostname</small></div>
+        <div class="down tight" aria-hidden="true">↓</div>
+        <div class="box inline harness cond"><b>Redirect</b><small>the model’s headers dropped when the origin changes</small></div>
+        <div class="side"><b>each hop</b> ↺ Check the URL again</div>
+        <div class="down tight" aria-hidden="true">↓</div>
+        <div class="box inline harness"><b>Read, capped</b><small><code>/net-max-bytes</code> and a deadline</small></div>
+        <div class="down tight" aria-hidden="true">↓</div>
+        <div class="box inline harness"><b>To text</b><small>HTML → readable text; JSON pretty-printed or <code>json_path</code></small></div>
+        <div class="down tight" aria-hidden="true">↓</div>
+        <div class="box inline harness"><b>Window</b><small><code>/net-max-chars</code> at a time, from <code>offset=</code> or <code>find=</code></small></div>
+        <div class="down tight" aria-hidden="true">↓</div>
+        <div class="box inline harness"><b>Fence</b><small>marked as untrusted content</small></div>
+        <div class="down tight" aria-hidden="true">↓</div>
+        <div class="box inline model"><b>Model</b><small>reads the result</small></div>
+      </div>
+      <div class="flow-legend"><span class="harness">always</span><span class="harness cond">only in some cases</span></div>
+      <figcaption>The path of one <code>fetch_url</code> call. A failed check stops the request and tells the model why; each check is one bullet below.</figcaption>
+    </figure>
     <h3>What is blocked</h3>
     <ul>
       <li>Any scheme except <code>http</code> and <code>https</code>. The client is built without urllib's file, ftp and data handlers.</li>
@@ -1271,17 +1416,37 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     <p>Built in: <code>bash</code>, <code>c</code>, <code>code-review</code>, <code>data-analysis</code>, <code>document-editing</code>, <code>html-javascript</code>, <code>java</code>, <code>kotlin</code>, <code>maven-dependency-updates</code>, <code>python</code>, <code>rust</code>, <code>software-design</code>, <code>sql</code>, <code>storytelling</code>, <code>tdd</code>, <code>text-based-game-design</code>, <code>typescript</code>. To add your own, drop a <code>.md</code> file into the folder.</p>
     <p><strong>Project guides</strong> (<code>/guides on</code>) load the workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>MOMO.md</code>, <code>GEMINI.md</code>, <code>.github/copilot-instructions.md</code> or <code>.cursorrules</code> into the system prompt, where compaction can't drop them. They're re-read on a new session, <code>/clear</code>, compaction and workdir changes.</p>
     <h3 id="system-prompt">The system prompt</h3>
-    <p><code>/system-prompt</code> (alias <code>/prompt</code>) shows exactly what the model gets as its system message, part by part, each with an estimated token count:</p>
+    <p>The system message is built from parts, in the order the model reads them. Each part is generated for the current mode and exactly the tools that are on, so the prompt never names a tool the model can't call. Role files describe behaviour; everything about tools lives in the generated parts.</p>
+    <figure class="prompt-diagram" aria-label="How the system prompt is built">
+      <div class="pd-grid">
+      <div class="pd-head in">Inputs</div><div></div><div class="pd-head">System message, top to bottom</div>
+        <div class="pd-row"><div class="pd-in"><code>/index</code> on</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Code index banner</span><span class="pd-tag">if index</span></div></div>
+        <div class="pd-row"><div class="pd-in">mode · <code>roles/&lt;mode&gt;.md</code> · plan</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file"><span>Role</span></div></div>
+        <div class="pd-row"><div class="pd-in">workdir · date · OS · git · <code>/net</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Environment</span></div></div>
+        <div class="pd-row"><div class="pd-in"><code>/guides on</code> · <code>AGENTS.md</code>, …</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Project guides</span><span class="pd-tag">if guides</span></div></div>
+        <div class="pd-row"><div class="pd-in"><code>/load-skill</code> · <code>skills/&lt;name&gt;.md</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Skill: &lt;name&gt;</span><span class="pd-tag">each skill</span></div></div>
+        <div class="pd-row"><div class="pd-in">tools on in this mode · <code>/tool-ref</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Tool reference</span></div></div>
+        <div class="pd-row"><div class="pd-in"><code>fetch_url</code> / <code>web_search</code> on</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Using the internet</span><span class="pd-tag">if net</span></div></div>
+        <div class="pd-row"><div class="pd-in">tools on · index on or off</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Navigating code</span></div></div>
+        <div class="pd-row"><div class="pd-in">the same tools, as JSON</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part aside"><span>Tool schemas</span><span class="pd-tag">sent alongside</span></div></div>
+      </div>
+      <div class="pd-legend"><span>generated by the harness</span><span class="file">from a file</span><span class="cond">only when its input is on</span></div>
+      <figcaption>Parts are joined by <code>---</code> rules and rebuilt in place whenever an input changes.</figcaption>
+    </figure>
     <div class="table-scroll"><table>
-      <tr><th>Part</th><th>When</th></tr>
-      <tr><td>Code index banner</td><td class="wrap">While the code index is on</td></tr>
-      <tr><td>Role</td><td class="wrap">Always: <code>roles/&lt;mode&gt;.md</code>, plus the draft plan or execution rules in plan mode</td></tr>
-      <tr><td>Tool reference</td><td class="wrap">Always, generated from the tools that are on in this mode</td></tr>
-      <tr><td>Project guides</td><td class="wrap">With <code>/guides on</code></td></tr>
-      <tr><td>Skill: &lt;name&gt;</td><td class="wrap">One per loaded skill</td></tr>
-      <tr><td>Code index rules</td><td class="wrap">While the code index is on</td></tr>
-      <tr><td>Tool schemas</td><td class="wrap">The JSON tool definitions sent <em>alongside</em> the prompt: they use context but aren't prompt text</td></tr>
+      <tr><th>Part</th><th>When</th><th>What it says</th></tr>
+      <tr><td>Code index banner</td><td class="wrap">Index on</td><td class="wrap">One line: find code with the <code>index_*</code> tools, not grep or find</td></tr>
+      <tr><td>Role</td><td class="wrap">Always</td><td class="wrap"><code>roles/&lt;mode&gt;.md</code>; in plan mode also the draft plan, or the execution rules and the live plan</td></tr>
+      <tr><td>Environment</td><td class="wrap">Always</td><td class="wrap">Working directory, today's date, OS/shell and git branch (with <code>run_command</code>), internet on or off</td></tr>
+      <tr><td>Project guides</td><td class="wrap">With <code>/guides on</code></td><td class="wrap">The workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, …</td></tr>
+      <tr><td>Skill: &lt;name&gt;</td><td class="wrap">One per loaded skill</td><td class="wrap"><code>skills/&lt;name&gt;.md</code></td></tr>
+      <tr><td>Tool reference</td><td class="wrap">Always</td><td class="wrap">Generated from the tool schemas, <code>/tool-ref full|compact</code></td></tr>
+      <tr><td>Using the internet</td><td class="wrap">While <code>fetch_url</code> or <code>web_search</code> is on</td><td class="wrap">Check versions and APIs instead of recalling them; read the project's manifests first; look up general facts (e.g. Wikipedia) when the topic is recent, the model is unsure or you ask; stop once answered; cite URLs</td></tr>
+      <tr><td>Navigating code</td><td class="wrap">Always</td><td class="wrap">How to find code with this mode's tools; with the index on, a table of the <code>index_*</code> tools</td></tr>
+      <tr><td>Tool schemas</td><td class="wrap">Always</td><td class="wrap">The JSON tool definitions sent <em>alongside</em> the prompt: they use context but aren't prompt text</td></tr>
     </table></div>
+    <p>The index banner comes first and the navigation rules last on purpose: small models weigh the start and end of a prompt most. The prompt is rebuilt in place whenever the mode, skills, guides, plan or tool set (<code>/tools</code>, <code>/net</code>, <code>/index</code>, <code>/run-mode</code>, <code>/tool-ref</code>) change.</p>
+    <p><code>/system-prompt</code> (alias <code>/prompt</code>) shows exactly what the model gets, part by part, each with an estimated token count.</p>
     <p>In the TUI it opens in <code>$PAGER</code> (<code>less -R</code> by default), one ruled section per part. In the web UI, View → <strong>System prompt…</strong> or the link in the CTX popover opens a side panel with collapsible parts and a <strong>Copy</strong> button; it refreshes while open when the mode, tools, internet access, index or skills change. <code>/system-prompt list</code> prints just the parts and sizes.</p>
   </section>
 
