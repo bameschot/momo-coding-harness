@@ -66,7 +66,10 @@ def save(ts: str, model: str, mode: str, workdir: Path,
          momo_lines: list[str] | None = None,
          momo_recap_turn: int = 0,
          turn_count: int = 0,
-         disabled_tools: dict[str, list[str]] | None = None):
+         disabled_tools: dict[str, list[str]] | None = None,
+         title: str = "",
+         title_turn: int = 0,
+         title_locked: bool = False):
     data = {
         "created_at": ts,
         "model": model,
@@ -85,6 +88,9 @@ def save(ts: str, model: str, mode: str, workdir: Path,
         "momo_recap_turn": momo_recap_turn,
         "turn_count": turn_count,
         "disabled_tools": disabled_tools or {},
+        "title": title,
+        "title_turn": title_turn,
+        "title_locked": title_locked,
         "messages": messages,
     }
     atomic_write(session_path(ts), json.dumps(data, indent=2))
@@ -97,6 +103,19 @@ def load(path: Path) -> dict:
 def list_sessions() -> list[Path]:
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     return sorted(SESSION_DIR.glob("*.json"), reverse=True)
+
+
+def latest_session() -> Path | None:
+    """The newest saved session that has a conversation (a user message);
+    unreadable files and settings-only sessions are skipped."""
+    for path in list_sessions():
+        try:
+            msgs = load(path).get("messages") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        if any(isinstance(m, dict) and m.get("role") == "user" for m in msgs):
+            return path
+    return None
 
 
 def find_session(name: str) -> Path | None:

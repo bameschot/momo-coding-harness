@@ -163,6 +163,7 @@ def _session_info(path: Path) -> dict | None:
         "provider": data.get("provider") or "", "workdir": data.get("workdir", ""),
         "messages": sum(1 for m in msgs if m.get("role") in ("user", "assistant")),
         "preview": preview[:80] + ("…" if len(preview) > 80 else ""),
+        "title": str(data.get("title") or ""),
     }
     with _session_lock:
         _session_cache[path] = (mtime, info)

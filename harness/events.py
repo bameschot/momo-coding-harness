@@ -54,6 +54,7 @@ class StatusEvent:
     host: str = ""
     provider: str = ""
     plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
+    title: str = ""          # session title (model-generated or /title)
     guides: bool = False     # project guide files (AGENTS.md, ...) in the system prompt
     think_level: str = "on"       # /think: off | on | low | medium | high
     think_effective: str = "on"   # what the model is sent: the above, or "n/a"

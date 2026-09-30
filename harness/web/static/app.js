@@ -612,7 +612,8 @@ function formatSize(n) {
 }
 
 function updateTitle() {
-  document.title = `${unseen ? "(•) " : ""}momo · ${status.mode || ""}${busy ? " …" : ""}`;
+  const name = status.title ? ` · ${status.title}` : "";
+  document.title = `${unseen ? "(•) " : ""}momo · ${status.mode || ""}${name}${busy ? " …" : ""}`;
 }
 
 // ── notifications (only while the window is away) ─────────────────────────────
@@ -1946,15 +1947,17 @@ function renderSessions() {
     const item = el("div", "session-item");
     const row = el("button", `session-row${current ? " current" : ""}`);
     row.type = "button";
-    row.title = current ? `${x.name} (open now)\n${x.workdir}` : `${x.name}\n${x.workdir}`;
-    row.append(el("span", "session-preview", x.preview || "(no messages)"),
+    const label = x.title || x.preview || "(no messages)";
+    const first = x.title && x.preview ? `\n${x.preview}` : "";
+    row.title = `${x.name}${current ? " (open now)" : ""}${first}\n${x.workdir}`;
+    row.append(el("span", "session-preview", label),
                el("span", "session-meta", `${x.mode} · ${x.model} · ${x.messages} msgs · ${ago(x.mtime)}`));
     if (selecting) {
       const cb = el("input");
       cb.type = "checkbox";
       cb.disabled = current;
       cb.checked = selected.has(x.name);
-      cb.setAttribute("aria-label", `Select ${x.preview || x.name}`);
+      cb.setAttribute("aria-label", `Select ${x.title || x.preview || x.name}`);
       cb.onchange = () => { cb.checked ? selected.add(x.name) : selected.delete(x.name); updateBulk(); };
       row.onclick = () => { if (!current) { cb.checked = !cb.checked; cb.onchange(); } };
       item.append(cb, row);

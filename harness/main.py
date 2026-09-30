@@ -199,6 +199,7 @@ def main():
         return default
 
     harness.idle_recap = flag_or_pref(args.companion_idle_recap, "idle_recap", False)
+    harness.session_titles = bool(prefs.get("session_titles", True))
     harness.idle_recap_secs = max(10, args.companion_idle_recap_secs or prefs.get("idle_recap_secs") or 90)
     harness.guides = flag_or_pref(args.guides, "guides", False)
     harness.index_max_bytes = parsed(args.index_max_mem, "--index-max-mem", "index_max_mem",
@@ -225,9 +226,9 @@ def main():
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 
     # Restore last session unless --fresh
-    sessions = session_mod.list_sessions()
-    if not args.fresh and sessions:
-        harness.load_session(sessions[0])
+    last = None if args.fresh else session_mod.latest_session()
+    if last is not None:
+        harness.load_session(last)
         # Backend flags given on the command line beat the backend the restored
         # session was saved with — otherwise `--provider ollama` is silently undone.
         if args.provider or args.host or args.model:

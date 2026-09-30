@@ -46,6 +46,10 @@ def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
 # attempts (on top of "once per user turn" and "once per idle period").
 _IDLE_POLL = 5.0
 _RECAP_COOLDOWN = 300.0
+# Session title: generated once the user has been idle this long after a reply,
+# then refreshed every _TITLE_EVERY user turns.
+_TITLE_IDLE = 15.0
+_TITLE_EVERY = 5
 
 
 @dataclass
@@ -107,6 +111,7 @@ class Controller:
         self._recapped_this_idle = False
         self._last_recap_ts: float | None = None
         self._recap_client = None   # set while a recap is generating
+        self._title_client = None   # set while a session title is generating
         self._activity_gen = 0      # bumped on user input; a recap from an older gen is stale
         if len(harness.messages) > 1:
             self.replay_transcript(reset=False)
@@ -149,10 +154,11 @@ class Controller:
             self._last_activity = time.monotonic()
             self._recapped_this_idle = False
             self._activity_gen += 1
-            client = self._recap_client
+            clients = (self._recap_client, self._title_client)
             was_idle, self._idle = self._idle, False
-        if client is not None:
-            client.abort()
+        for client in clients:
+            if client is not None:
+                client.abort()
         if was_idle:
             self._emit_companion()
 
@@ -163,6 +169,47 @@ class Controller:
                 self._idle_tick()
             except Exception:
                 pass  # never kill the watcher (and never print — it would corrupt curses)
+
+    def _title_due(self, now: float) -> bool:
+        h = self.harness
+        last = h.messages[-1] if len(h.messages) > 1 else {}
+        turns = h.user_turns()
+        return (
+            h.session_titles and not h.title_locked
+            and self._title_client is None
+            and not (self._busy or self._pending_confirm is not None or h._plan_executing())
+            and now - self._last_activity >= _TITLE_IDLE
+            and last.get("role") == "assistant"                # a finished reply
+            and bool((last.get("content") or "").strip())
+            # untitled: try once per new turn; titled: refresh every _TITLE_EVERY turns
+            and (turns - h._title_turn >= _TITLE_EVERY if h.title else turns > h._title_turn)
+        )
+
+    def _title_tick(self):
+        h = self.harness
+        with self._lock:
+            if not self._title_due(time.monotonic()):
+                return
+            # Record the attempt up front, so a failed title never retries in a loop.
+            new_turns = h.user_turns() - h._title_turn
+            h._title_turn = h.user_turns()
+            gen, ts = self._activity_gen, h._ts
+            client = self._title_client = make_client(
+                h.provider, host=h.client.host, model=h.client.model,
+                auth_token=h.client.auth_token)
+        try:
+            title = h.session_title(client, max(1, new_turns))
+        finally:
+            with self._lock:
+                self._title_client = None
+        with self._lock:
+            if gen != self._activity_gen or self._busy or h._ts != ts:
+                return  # the user came back (or switched session) meanwhile
+            if title and not h.title_locked:
+                h.title = title
+            h._autosave()   # persists the attempt even when it failed
+            if title:
+                h.emit_status()
 
     def _recap_due(self, now: float) -> bool:
         h = self.harness
@@ -178,6 +225,10 @@ class Controller:
         )
 
     def _idle_tick(self):
+        try:
+            self._title_tick()
+        except Exception:
+            pass  # a failed title must not stop the recap check below
         h = self.harness
         with self._lock:
             if not h.idle_recap:

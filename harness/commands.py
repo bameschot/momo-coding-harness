@@ -877,6 +877,32 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output="Usage: /unload-skill <name>")
         return CommandResult(handled=True, output=harness.unload_skill(arg.strip()))
 
+    if cmd == "/title":
+        if not arg:
+            state = " (set by you)" if harness.title_locked else ""
+            return CommandResult(handled=True, output=(
+                f"Session title: {harness.title}{state}" if harness.title else
+                "This session has no title yet — it is generated after a reply "
+                "(or set one with /title <text>)."))
+        if arg.strip().lower() == "auto":
+            harness.title_locked = False
+            harness._title_turn = 0    # regenerate at the next idle moment
+            harness._autosave()
+            return CommandResult(handled=True, output=(
+                "Session title: automatic — regenerated when idle"
+                + ("" if harness.session_titles else " (turn /session-titles on first)")))
+        harness.title = " ".join(arg.split())[:80]
+        harness.title_locked = True
+        harness._autosave()
+        harness.emit_status()
+        return CommandResult(handled=True, output=f"Session title: {harness.title}")
+
+    if cmd == "/session-titles":
+        result = _toggle(harness, "session_titles", arg, "Model-generated session titles")
+        if arg and _on_off(arg) is not None:
+            session_mod.save_prefs(session_titles=harness.session_titles)
+        return result
+
     if cmd == "/sessions":
         sessions = session_mod.list_sessions()
         if not sessions:
@@ -887,9 +913,11 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 data = json.loads(p.read_text(encoding="utf-8"))
                 mode  = data.get("mode", "?")
                 model = data.get("model", "?")
+                title = data.get("title") or ""
             except Exception:
                 mode = model = "?"
-            lines.append(f"  {p.stem}  [{mode}]  {model}")
+                title = ""
+            lines.append(f"  {p.stem}  [{mode}]  {model}" + (f"  {title}" if title else ""))
         return CommandResult(handled=True, output="Recent sessions:\n" + "\n".join(lines))
 
     if cmd == "/export":
@@ -1098,7 +1126,9 @@ Available commands:
   /list-skills        List available skills and show which are active
   /load-skill <name>  Append a skill's instructions to the system prompt
   /unload-skill <name> Remove a skill from the system prompt
-  /sessions           List recent sessions with mode and model info
+  /sessions           List recent sessions with mode, model and title
+  /title [text|auto]  Show or set the session title (auto = let the model name it)
+  /session-titles on|off  Model-generated session titles, refreshed when idle (default on)
   /export [filename]  Export conversation to a Markdown file
   /copy               Copy last assistant message to clipboard
   /copy all           Copy full conversation to clipboard
