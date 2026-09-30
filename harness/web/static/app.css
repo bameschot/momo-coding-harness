@@ -486,6 +486,7 @@ body.is-busy .user-actions { display: none; }
 .ctx-tool_calls   { background: var(--tool); }
 .ctx-tool_results { background: var(--ok); }
 .ctx-thinking     { background: var(--think); }
+.ctx-reasoning    { background: var(--think); }
 .ctx-generating   { background: repeating-linear-gradient(45deg, var(--assistant) 0 4px, transparent 4px 8px); }
 /* Code index popover: same layout as the context one. */
 .idx-used     { background: var(--ok); }

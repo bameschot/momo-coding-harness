@@ -67,7 +67,7 @@ _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
 
 
 def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True,
-             run_mode="new", tool_ref="compact"):
+             run_mode="new", tool_ref="compact", think_history="off"):
     """One task, one fresh conversation.  Returns what the model did."""
     workdir = REPO / task.workdir
     scratch = None
@@ -86,6 +86,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     h.tool_ref = tool_ref
     h.stream = False          # deltas would just duplicate the final ChatEvent
     h.think = think
+    h.think_history = think_history
     # Nobody is there to answer: without this a run that calls ask_user blocks forever.
     # The model mostly asks "want me to look into X too?" once it has answered, so
     # decline — an open-ended reply sent it exploring and its last message then
@@ -245,7 +246,7 @@ _env_cache: dict = {}
 
 
 def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
-                run_mode="new", tool_ref="compact") -> str:
+                run_mode="new", tool_ref="compact", think_history="off") -> str:
     """Everything that can change a run's outcome, hashed."""
     key = (task.workdir, mode, index, route, run_mode, tool_ref)
     if key not in _env_cache:
@@ -271,7 +272,9 @@ def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
                        "ideal": sorted(task.ideal), "max_calls": task.max_calls,
                        "mode": mode, "think": think, "index": index, "provider": provider,
                        **({} if route else {"route": False}),
-                       **({} if run_mode == "new" else {"run_mode": run_mode})},
+                       **({} if run_mode == "new" else {"run_mode": run_mode}),
+                       # Runs cached before reasoning could be sent back are "off".
+                       **({} if think_history == "off" else {"think_history": think_history})},
                       sort_keys=True)
     return hashlib.sha256((spec + _env_cache[key]).encode()).hexdigest()[:24]
 
@@ -378,6 +381,8 @@ def main():
     ap.add_argument("--think", action="store_true", default=True,
                     help="model thinking mode, the harness default (on)")
     ap.add_argument("--no-think", dest="think", action="store_false")
+    ap.add_argument("--think-history", choices=("off", "turn", "all"), default="off",
+                    help="send the model's own reasoning back: off (as before), turn, all")
     ap.add_argument("--timeout", type=int, default=600, help="per-run seconds")
     ap.add_argument("--tasks", nargs="*", help="only these task ids")
     ap.add_argument("--json", metavar="PATH", help="write the full per-run records here")
@@ -430,7 +435,7 @@ def main():
                 fp = fingerprint(task, mode=mode, think=args.think, index=args.index,
                                  model=args.model, provider=args.provider, host=args.host,
                                  route=args.route, run_mode=args.run_mode,
-                                 tool_ref=args.tool_ref)
+                                 tool_ref=args.tool_ref, think_history=args.think_history)
                 stored = [] if args.refresh else cache.get(fp, [])
             for i in range(args.runs):
                 if i < len(stored):
@@ -441,7 +446,7 @@ def main():
                                  provider=args.provider, mode=mode,
                                  think=args.think, timeout=args.timeout, index=args.index,
                                  route=args.route, run_mode=args.run_mode,
-                                 tool_ref=args.tool_ref)
+                                 tool_ref=args.tool_ref, think_history=args.think_history)
                     source = ""
                     if cache_path and not r.get("err"):
                         with cache_path.open("a") as f:

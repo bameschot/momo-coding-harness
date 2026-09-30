@@ -557,6 +557,9 @@ function applyThinkStatus(s) {
   badge.title = `Thinking level (/think) — ${note}`;
   $("#think-note").textContent = note;
   const values = choices.includes(level) ? choices : [...choices, level];
+  for (const r of document.querySelectorAll("input[name=think-history]")) {
+    r.checked = r.value === (s.think_history || "turn");
+  }
   $("#think-levels").replaceChildren(...values.map((v) => {
     const r = el("input");
     r.type = "radio"; r.name = "think-level"; r.value = v; r.checked = v === level;
@@ -1349,6 +1352,9 @@ $("#net-badge").onclick = () => send(`/net ${status.net_access !== "off" ? "off"
 $("#net-on").onchange = (e) => send(`/net ${e.target.checked ? "on" : "off"}`);
 $("#net-local").onchange = (e) => send(`/net ${e.target.checked ? "local" : "on"}`);
 $("#think-badge").onclick = (e) => toggleMenu(e, "#think-menu");
+for (const r of document.querySelectorAll("input[name=think-history]")) {
+  r.onchange = () => send(`/think-history ${r.value}`);
+}
 $("#index-badge").onclick = (e) => {
   if (!status.index_enabled) { e.stopPropagation(); return send("/index on"); }
   toggleMenu(e, "#index-menu", "Code index", refreshIndexMenu);
@@ -1587,7 +1593,7 @@ function renderCtxMenu(menu, b) {
     el("div", "menu-title", `Context · ~${fmtTok(b.used)} tokens (${b.pct}%)${b.streaming ? " · streaming" : ""}`),
     bar, rows,
     el("div", "muted small", meta.join(" · ")),
-    el("div", "muted small", `Categories are estimates (~4 chars/token), total ~${fmtTok(b.estimated)}. Thinking stays in the transcript but is not re-sent.`),
+    el("div", "muted small", `Categories are estimates (~4 chars/token), total ~${fmtTok(b.estimated)}. Thinking stays in the transcript; only what /think-history sends back counts.`),
     promptLink());
 }
 $("#ctx-btn").onclick = (e) => toggleMenu(e, "#ctx-menu", "Context", refreshCtxMenu);

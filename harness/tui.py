@@ -1158,6 +1158,8 @@ class TUI:
         if ev.think_level != "on" or eff != "on":
             parts.append(f"THINK: {ev.think_level}"
                          + ("" if eff == ev.think_level else f"→{eff}"))
+        if ev.think_history != "turn":
+            parts.append(f"THINK-HIST: {ev.think_history}")
         self._st_extra = "".join(f" | {p}" for p in parts)
         self._st_mode  = f"{ev.mode} [{ev.plan_progress}]" if ev.plan_progress else ev.mode
         self._st_model = ev.model

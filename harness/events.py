@@ -59,6 +59,7 @@ class StatusEvent:
     think_effective: str = "on"   # what the model is sent: the above, or "n/a"
     think_choices: list = field(default_factory=lambda: ["off", "on"])  # values the model honours
     think_known: bool = False     # the server said what the model takes
+    think_history: str = "turn"   # /think-history: off | turn | all
     tools_off: list = field(default_factory=list)  # tools turned off for the current mode
     index_enabled: bool = False   # /index: the code index and its index_* tools
     index_state: str = "off"      # off | building | refreshing | idle | stopped

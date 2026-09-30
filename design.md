@@ -42,10 +42,10 @@ user message
   └─ append to messages
   └─ loop (up to 100 iterations, 40 in design mode):
        ├─ auto-compact if token estimate > context_limit
-       ├─ filter thinking messages out of API call
+       ├─ fold stored thinking into the next assistant message (/think-history)
        ├─ call ollama_client.chat(messages, tools)
        ├─ extract thinking from msg.thinking field or <think>…</think> tags
-       │    └─ stored as role:"thinking", emitted as ThinkEvent, never re-sent to API
+       │    └─ stored as role:"thinking", emitted as ThinkEvent; sent back per /think-history
        ├─ if response has tool_calls:
        │    ├─ emit ToolCallEvent to TUI
        │    ├─ execute each tool, apply result cap if set
@@ -58,7 +58,7 @@ user message
        └─ safety valves (see below)
 ```
 
-Tool results are appended as `{"role": "tool", ...}` messages. Thinking content (`role: "thinking"`) is appended but filtered out before every API call — it is display-only and never re-injected as context.
+Tool results are appended as `{"role": "tool", ...}` messages. Thinking content (`role: "thinking"`) is stored as its own message and never sent as one. `Harness._api_messages()` attaches it to the following assistant message as `reasoning` (llama.cpp `reasoning_content`, Ollama `thinking`) when `/think-history` covers it: `turn` = since the last user message, `all` = every turn, `off` = never. A cut-off reply's reasoning and reasoning shown as the answer are marked `unsent`.
 
 ### Iteration limits
 

@@ -77,7 +77,9 @@ class Breakdown(Base):
         self.assertEqual(c["user"]["tokens"], 100)
         self.assertEqual(c["assistant"]["tokens"], 50)
         self.assertEqual(c["tool_results"]["tokens"], 300)
-        self.assertEqual(c["thinking"]["tokens"], 200)
+        # The current turn's reasoning goes back to the model (/think-history turn).
+        self.assertEqual((c["reasoning"]["tokens"], c["thinking"]["tokens"]), (200, 0))
+        self.assertTrue(c["reasoning"]["sent"])
         self.assertFalse(c["thinking"]["sent"])
         self.assertGreater(c["tool_calls"]["tokens"], 0)
         self.assertGreater(c["tools"]["tokens"], 0)
@@ -87,6 +89,11 @@ class Breakdown(Base):
         self.assertEqual(self.h._estimate(schemas=True), sent)
         # Compaction measures without the fixed tool schemas.
         self.assertLess(self.h._estimate(), sent)
+        # With /think-history off it is kept but not sent.
+        self.h.think_history = "off"
+        c = self.cats()
+        self.assertEqual((c["reasoning"]["tokens"], c["thinking"]["tokens"]), (0, 200))
+        self.assertEqual(self.h._estimate(schemas=True), sent - 200)
 
     def test_tool_reference_attributed_to_tools(self):
         with_tools = self.cats()

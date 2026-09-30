@@ -77,7 +77,9 @@ class LlamaCppClient(LLMClient):
         - assistant tool calls need an `id` and `type: "function"`, and their
           `arguments` must be a JSON *string* (not a dict);
         - each following `tool` result needs a `tool_call_id` linking it back to
-          the call it answers.
+          the call it answers;
+        - reasoning the harness sends back (`reasoning`) goes in
+          `reasoning_content`, where the chat template looks for it.
 
         The harness emits an assistant turn's tool calls followed immediately by
         their results in order, so a FIFO of generated ids pairs them up."""
@@ -103,7 +105,8 @@ class LlamaCppClient(LLMClient):
                     })
                 out.append({"role": "assistant",
                             "content": m.get("content"),
-                            "tool_calls": new_calls})
+                            "tool_calls": new_calls}
+                           | ({"reasoning_content": m["reasoning"]} if m.get("reasoning") else {}))
             elif role == "tool":
                 if pending_ids:
                     cid = pending_ids.pop(0)
@@ -113,6 +116,9 @@ class LlamaCppClient(LLMClient):
                 out.append({"role": "tool",
                             "tool_call_id": cid,
                             "content": m.get("content", "")})
+            elif role == "assistant" and "reasoning" in m:
+                out.append({k: v for k, v in m.items() if k != "reasoning"}
+                           | ({"reasoning_content": m["reasoning"]} if m["reasoning"] else {}))
             else:
                 out.append(m)
         return out
@@ -158,6 +164,8 @@ class LlamaCppClient(LLMClient):
         elif think:
             payload["chat_template_kwargs"] = ({"enable_thinking": True} if toggle else {}) \
                 | {"reasoning_effort": think}
+        if self.preserve_thinking is not None:
+            payload.setdefault("chat_template_kwargs", {})["preserve_thinking"] = self.preserve_thinking
 
         client = self._client   # abort() swaps in a fresh one; keep reading this one
         if on_delta is None:

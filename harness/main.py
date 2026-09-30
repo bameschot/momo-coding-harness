@@ -12,7 +12,7 @@ from . import run_store as run_store_mod
 from . import session as session_mod
 from .controller import Controller
 from .events import ChatEvent
-from .harness import Harness
+from .harness import THINK_HISTORY, Harness
 from .llm.base import THINK_LEVELS
 from .prompts import _MODE_TOOLS
 from .tui import run_tui
@@ -67,6 +67,9 @@ def main():
                              "models that take one (default: last /think setting, else on)")
     parser.add_argument("--no-think", action="store_true", default=False,
                         help="Same as --think off")
+    parser.add_argument("--think-history", choices=THINK_HISTORY, default=None,
+                        help="Send the model's own reasoning back to it: off, turn (since "
+                             "the last user message) or all (default: last setting, else turn)")
     parser.add_argument("--net", choices=("off", "on", "local"), default="off",
                         help="Let the model fetch URLs with fetch_url: 'on' reaches the "
                              "public internet, 'local' also allows localhost and the LAN "
@@ -164,6 +167,8 @@ def main():
     harness.max_tool_result = args.max_tool_result
     think = "off" if args.no_think else args.think or prefs.get("think")
     harness.think_level = think if think in THINK_LEVELS else "on"
+    history = args.think_history or prefs.get("think_history")
+    harness.think_history = history if history in THINK_HISTORY else "turn"
     if args.no_stream:
         harness.stream = False
     harness.net_access = args.net

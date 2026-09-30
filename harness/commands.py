@@ -12,7 +12,7 @@ from . import run_store as run_store_mod
 from . import search as search_mod
 from . import session as session_mod
 from . import tools as tools_mod
-from .harness import Harness
+from .harness import THINK_HISTORY, Harness
 from .llm.base import THINK_LEVELS
 from .tools import dispatch
 
@@ -472,6 +472,20 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/think":
         return _think(harness, arg)
+
+    if cmd == "/think-history":
+        labels = {"off": "off — the model never sees its earlier reasoning",
+                  "turn": "turn — the model sees its reasoning since your last message",
+                  "all": "all — the model sees its reasoning from every turn in history"}
+        if not arg:
+            return CommandResult(handled=True, output=f"Reasoning sent back: {labels[harness.think_history]}")
+        choice = arg.strip().lower()
+        if choice not in THINK_HISTORY:
+            return _bad_choice(arg, "'off', 'turn' or 'all'")
+        harness.think_history = choice
+        session_mod.save_prefs(think_history=choice)
+        harness.emit_status()
+        return CommandResult(handled=True, output=f"Reasoning sent back: {labels[choice]}")
 
     if cmd == "/companion-idle-recap":
         def _state() -> str:
@@ -1034,6 +1048,8 @@ Available commands:
   /think off|on|low|medium|high|xhigh  Set the model's thinking/reasoning level
                       (saved); levels need a model that takes them (gpt-oss,
                       Qwen3.8); the nearest one it takes is sent
+  /think-history off|turn|all  Send the model's own reasoning back to it: none,
+                      since your last message (default), or every turn (saved)
   /run-confirm        Show run_command confirmation state (on/off)
   /run-confirm on|off Ask y/N before each run_command  (Shift+P toggles)
   /run-mode [new|classic]  new: save command output to a log, return a view

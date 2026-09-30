@@ -49,6 +49,7 @@ Options:
 | `--run-output-limit` | last setting, else `5000` | Characters in `run_command`'s default view in run mode `new` |
 | `--think` | last used / `on` | Thinking level: `off`, `on`, or an effort level (`low`, `medium`, `high`, `xhigh`, …) for models that take one. See [Thinking level](#thinking-level) |
 | `--no-think` | off | Same as `--think off` |
+| `--think-history` | last used / `turn` | Send the model's own reasoning back to it: `off`, `turn` (since your last message) or `all`. See [Sending reasoning back](#sending-reasoning-back) |
 | `--no-stream` | off | Wait for complete replies instead of streaming them as they are generated (streaming is on by default, in the TUI and the web UI) |
 | `--web` / `--no-web` | on | Serve the browser chat UI alongside the TUI |
 | `--web-host` | `127.0.0.1` | Interface for the web UI (a non-loopback host requires an access token) |
@@ -169,7 +170,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - Clicking the **model name** opens a model picker listing the models on the backend, like `/model`. llama.cpp serves a single model, so there the list is informational.
   - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
   - The **CTX meter** turns yellow at ≥ 75% and red at ≥ 90%, as in the TUI.
-  - The **`THINK`** badge shows the [thinking level](#thinking-level). Clicking it opens a menu of the values the current model takes (e.g. off / on / low / medium / xhigh for Qwen3.8), plus your current choice, greyed out if the model can't take it. When the model gets something other than your choice, the badge shows both (`THINK: high→on`) and turns yellow. It shows `THINK: n/a` for a model that takes no thinking setting.
+  - The **`THINK`** badge shows the [thinking level](#thinking-level). Clicking it opens a menu of the values the current model takes (e.g. off / on / low / medium / xhigh for Qwen3.8), plus your current choice, greyed out if the model can't take it. When the model gets something other than your choice, the badge shows both (`THINK: high→on`) and turns yellow. It shows `THINK: n/a` for a model that takes no thinking setting. Below the levels, **Send reasoning back** picks off / this turn / all turns ([`/think-history`](#sending-reasoning-back)).
   - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on. A **`NET: on`** / **`NET: local`** badge appears when internet access is on; click it to turn it off. Both are also in View → Network. The **`INDEX`** badge shows the [code index](#code-index): `off`, build progress (`building 812/1873`), or files and memory against the budget (`312 files · 4MB/100MB`). While the index is off, clicking it turns it on. While it is on, clicking it opens a popover like the CTX one: a meter of memory against the budget, a stacked bar and one row per part of the index (file records, definitions, imports, identifiers, text signatures), the same split per language, and Rebuild / Save now / Turn off. It turns yellow when the index is over its memory budget and has dropped a part.
   - **Tools** (wrench icon) opens the [tool picker](#turning-tools-on-and-off) for the current mode: one checkbox per tool, grouped, with the **Tool calls** master switch on top. Hovering a tool shows its description. A small count on the icon says how many tools are off in this mode.
   - **View options** (sliders icon, far right) opens the view options (below).
@@ -266,6 +267,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Idle recap | `/companion-idle-recap on\|off\|<secs>` | View → Companion: a checkbox and the idle time. Shared with the TUI |
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking level | `/think off\|on\|<level>` | The `THINK` badge in the status bar, not the View menu: how much the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
+| Send reasoning back | `/think-history off\|turn\|all` | In the same `THINK` menu: whether the model sees its own earlier reasoning. Shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
 | Command output | `/run-mode`, `/run-output-limit` | View → Context: save command output to a log and return a view, and the view's size in characters. Shared with the TUI |
 | Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index-max-files`, `/index-workers`, `/index-filter`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, the file limit, build workers, Save now / Load, and Filter… (edit which files are indexed). Shared with the TUI |
@@ -453,7 +455,7 @@ curl -sN localhost:8765/api/events          # watch the live event stream
 - **System prompt** — `/system-prompt` opens the composed system prompt in `$PAGER` (`less -R` if unset); `q` returns to momo. See [Seeing the system prompt](#seeing-the-system-prompt).
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green.
 - **Tool call visibility** — `/tool-output on|off` switches between full tool output and abbreviated mode (first 50 chars + `…`). Argument values are cut to 60 characters either way, as in the web UI; a written file's content shows in the diff.
-- **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/think-output on|off` or `Shift+T` (when chat focused). Thinking content is never re-injected as context.
+- **Thinking output** — `[thinking]` blocks show the model's internal reasoning in orange/yellow. Toggle display with `/think-output on|off` or `Shift+T` (when chat focused). Hiding it doesn't change what the model sees; that is [`/think-history`](#sending-reasoning-back).
 - **Markdown rendering** — assistant responses are rendered as formatted markdown by default. Headings use box-drawing decorations, lists use `•`/numbered prefixes, code blocks are prefixed with `│`, tables render with full box-drawing characters. Toggle with `/markdown on|off` or `Shift+M` (when chat focused). When a table is wider than the terminal, a horizontal scrollbar appears at the bottom of the chat pane; scroll it with `←`/`→` while the chat pane is focused.
 - **Edit diffs** — whenever the model changes a file (`edit_file`, `append_to_file`, `write_file`, `delete_file`, `move_file`), the chat pane shows a colored diff of exactly what changed on disk instead of a terse `OK` line. Added lines are green, removed lines red, hunk headers cyan. Each line has a two-column line-number gutter (old | new): context lines show both numbers, removed lines only the old, added lines only the new — so every change is anchored to its position in the file. `write_file` to a new path shows as a new file, `delete_file` shows every line removed, and `move_file` shows a rename notice. Shown by default; toggle with `/diff on|off` or `Shift+D` (when chat focused). Choose the presentation with `/diff-style compact` (default — a `± path (+N -M)` header with hunks) or `/diff-style git` (full `git diff` layout with `diff --git`/`---`/`+++` headers). Diffs are display-only and reconstructed from disk at edit time, so a reloaded session shows the plain tool result rather than the diff.
 
@@ -1022,7 +1024,7 @@ The system message is rebuilt in place whenever something it depends on changes:
 
 ### Conversation history
 
-User messages, assistant replies, and tool results are appended as the session progresses. Thinking blocks are stored locally for display but are stripped before every API call:
+User messages, assistant replies, and tool results are appended as the session progresses. Thinking is stored as its own message, just before the assistant message it led to. It never goes to the model as a message of its own. [`/think-history`](#sending-reasoning-back) decides whether it rides along on that assistant message:
 
 ```
 ┌─ user ────────────────────────────────────────────────────────────────┐
@@ -1034,7 +1036,7 @@ User messages, assistant replies, and tool results are appended as the session p
 ┌─ tool ────────────────────────────────────────────────────────────────┐
 │  <tool result text>                                                   │
 └───────────────────────────────────────────────────────────────────────┘
-  thinking: "..."   ← stored for display; never sent to the model
+  thinking: "..."   ← sent back on the next assistant message (/think-history turn|all)
 ┌─ assistant ───────────────────────────────────────────────────────────┐
 │  <text>                                                               │
 └───────────────────────────────────────────────────────────────────────┘
@@ -1100,6 +1102,7 @@ Type any command in the input bar:
 | `/workspace <path>` | Change the working directory. If the path does not exist, prompts for confirmation before creating it. |
 | `/think` | Show the thinking level and what the current model takes |
 | `/think off\|on\|low\|medium\|high\|xhigh` | Set the model's thinking/reasoning level (saved). See [Thinking level](#thinking-level) |
+| `/think-history off\|turn\|all` | Send the model's own reasoning back to it: none, since your last message (default), or every turn (saved). See [Sending reasoning back](#sending-reasoning-back) |
 | `/companion-idle-recap on\|off` | When you've been idle, momo recaps the last turns in its speech bubble (at most once per turn, 5-minute cooldown; lines are kept in the session). Off by default; also `--companion-idle-recap` |
 | `/companion-idle-recap <secs>` | How long you must be idle before momo recaps (default 90, also `--companion-idle-recap-secs`) |
 | `/tools` | Pick the current mode's tools: a checklist in the TUI, the Tools menu in the web UI — see [Turning tools on and off](#turning-tools-on-and-off) |
@@ -1199,7 +1202,46 @@ What each model takes differs. Qwen3.5 and Gemma 4 take on/off only. gpt-oss tak
 
 The startup check reports what the model takes (`thinking: off/on`). The check runs again when you switch model or host.
 
-Compaction summaries and the companion's recaps always ask for no reasoning, whatever the level, and so does the retry after a reply that was cut off. Higher levels produce longer reasoning, which takes time and output tokens. It doesn't fill the context, because reasoning is never sent back to the model.
+Compaction summaries and the companion's recaps always ask for no reasoning, whatever the level, and so does the retry after a reply that was cut off. Higher levels produce longer reasoning, which takes time and output tokens, and context too while it is being [sent back](#sending-reasoning-back).
+
+### Sending reasoning back
+
+```
+/think-history          # the current setting
+/think-history turn     # reasoning since your last message goes back to the model (default)
+/think-history all      # reasoning from every turn still in history
+/think-history off      # the model never sees its earlier reasoning
+```
+
+Saved in `prefs.json`; `--think-history` sets it at startup. In the web UI it is in the `THINK` menu.
+
+During a tool loop the model reasons, calls a tool, gets the result, and reasons again. Chat templates are written for the model to see its reasoning from the earlier steps of that loop. The templates of the local models show what each expects:
+
+| Model | Earlier reasoning its template shows the model |
+|---|---|
+| Qwen3.5 | Since the last user message (the current tool loop). Older turns are dropped even when sent |
+| Qwen3.8 | Every turn by default (`preserve_thinking`), or only the current one |
+| Gemma 4 | Since the last user message; with `preserve_thinking`, also earlier turns' tool calls |
+
+With `off`, the template renders an empty `<think></think>` where the model actually reasoned, so the model looks back on a tool call it apparently made without thinking.
+
+How it is sent:
+- The reasoning goes on the assistant message it led to: `reasoning_content` for llama.cpp, `thinking` for Ollama. momo also passes `chat_template_kwargs.preserve_thinking` (`false` for `turn`, `true` for `all`) to templates that read it.
+- **Not sent back:** reasoning from a reply that was cut off (`done_reason: length`), and reasoning momo already showed as the answer.
+- **Context:** sent reasoning counts toward the context. The CTX breakdown shows it as *Reasoning sent back*; the rest stays *Thinking (not sent)*.
+- **Compaction:** with `all`, compaction first stops sending the reasoning of earlier turns ("stopped sending back N earlier reasoning blocks") before it removes any messages. It stays in the transcript.
+- **Prompt cache:** llama.cpp can reuse its cache across the tool step, because the prompt now matches what the model generated. Measured on Qwen3.5-9B: 21 instead of 53 prompt tokens re-evaluated per step. That's a small saving, not the reason to use it.
+
+Measured with the code-navigation evals on Qwen3.5-9B (llama.cpp, 13 task/mode pairs × 3 runs per side, clean worktree, 2026-09-30):
+
+| | `off` | `turn` |
+|---|---|---|
+| Facts in the answers | 101/105 | 100/105 |
+| Tool calls | 78 | 58 |
+| Runs over their call budget | 14/39 | 6/39 |
+| Total time | ~22 min | ~13.5 min |
+
+Accuracy was unchanged, within the noise of 3 runs per task. The gain is efficiency: the model stopped re-planning after each tool result. It made a quarter fewer tool calls and finished in about 40% less time, and the slowest task (blast-radius) went from 117 s and 80 KB of tool output to 39 s and 8 KB. Hence `turn` is the default. `all` hasn't been measured.
 
 ## Context Management
 
@@ -1215,6 +1257,7 @@ Token usage is estimated as `sum(len(content) // 4)` across all messages (a fast
 
 Compaction fires automatically when token usage exceeds the limit:
 
+0. **Pass 0** — with `/think-history all`, stops sending back the reasoning of earlier turns (it stays in the transcript).
 1. **Pass 1** — removes tool-call groups (oldest first): the assistant message that issued tool calls plus all its tool/thinking result messages are removed as a unit until usage drops to 33% of the limit.
 2. **Pass 2** — if still over limit, removes the oldest user/assistant message pairs until the target is met.
 
@@ -1281,7 +1324,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 
 | Path | What | Notes |
 |---|---|---|
-| `prefs.json` | Provider, model, thinking level, code index settings, guides, companion idle recap, run mode | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
+| `prefs.json` | Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
 | `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |

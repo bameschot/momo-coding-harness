@@ -123,10 +123,11 @@ def _calls_tokens(m: dict) -> int:
     return _text_tokens(json.dumps([tc.get("function", tc) for tc in calls], default=str))
 
 
-def _msg_tokens(m: dict) -> int:
-    """Estimated tokens one message costs in a request (thinking is never sent)."""
+def _msg_tokens(m: dict, sent: set[int] = frozenset()) -> int:
+    """Estimated tokens one message costs in a request.  A stored thinking
+    message costs nothing unless its id is in `sent` (Harness._sent_thinking)."""
     if m.get("role") == "thinking":
-        return 0
+        return _text_tokens(_content_text(m)) if id(m) in sent else 0
     return _text_tokens(_content_text(m)) + _calls_tokens(m)
 
 
@@ -151,9 +152,16 @@ _CTX_CATEGORIES = (
     ("assistant", "Assistant", True),
     ("tool_calls", "Tool calls", True),
     ("tool_results", "Tool results", True),
+    ("reasoning", "Reasoning sent back", True),
     ("generating", "Generating", True),
-    ("thinking", "Thinking", False),
+    ("thinking", "Thinking (not sent)", False),
 )
+
+# /think-history: which of the model's own past reasoning goes back to it.
+# "turn": since the last user message (the current tool loop), as Qwen3.5 and
+# Gemma 4 templates render it; "all": every turn still in history (Qwen3.8's
+# default); "off": none.
+THINK_HISTORY = ("off", "turn", "all")
 
 
 def _split_summary(text: str) -> tuple[str, str]:
@@ -243,6 +251,7 @@ class Harness:
         # /think, --think, prefs "think": off | on | low | medium | high.  What is
         # actually sent depends on the model (effective_think / thinking_caps).
         self.think_level: str = "on"
+        self.think_history: str = "turn"    # /think-history, see THINK_HISTORY
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
         # Per-role tool choices: mode -> names the user turned off (/tools <name>
@@ -1070,9 +1079,10 @@ class Harness:
 
     def _context_categories(self) -> dict[str, int]:
         """Estimated tokens per context category (chars/4, see _text_tokens).
-        Thinking is kept in the transcript but filtered before every API call, so
-        it is reported but never counted as sent."""
+        Thinking is kept in the transcript; what /think-history sends back counts
+        as "reasoning", the rest as "thinking" (reported, never sent)."""
         cats = {key: 0 for key, _, _ in _CTX_CATEGORIES}
+        sent = self._sent_thinking()
         # Kept apart as well as counted under "tools", so _estimate can leave it out.
         cats["schemas"] = self._schema_tokens()
         cats["tools"] += cats["schemas"]
@@ -1099,7 +1109,7 @@ class Harness:
             elif role == "tool":
                 cats["tool_results"] += _text_tokens(text)
             elif role == "thinking":
-                cats["thinking"] += _text_tokens(text)
+                cats["reasoning" if id(m) in sent else "thinking"] += _text_tokens(text)
         cats["generating"] = self._stream_tokens
         return cats
 
@@ -1158,7 +1168,8 @@ class Harness:
             guides_notice = ""
         msgs = self.messages
         before = self._token_estimate or self._estimate(schemas=True)
-        costs = [_msg_tokens(m) for m in msgs]
+        sent = self._sent_thinking()
+        costs = [_msg_tokens(m, sent) for m in msgs]
         fixed = costs[0] if msgs else 0
         if fixed >= self.context_limit:
             return False, (f"Context not compacted: the system prompt and tool reference alone are "
@@ -1182,6 +1193,17 @@ class Harness:
             nonlocal total
             drop.add(idx)
             total -= costs[idx]
+
+        # Pass 0: stop sending back the reasoning of earlier turns (/think-history
+        # all) — the cheapest thing to lose; it stays in the transcript.
+        unsend: list[int] = []
+        for k in range(1, anchor):
+            if total <= target:
+                break
+            if id(msgs[k]) in sent:
+                unsend.append(k)
+                total -= costs[k]
+                costs[k] = 0       # a later pass dropping it saves nothing more
 
         # Pass 1: tool-call groups, oldest first.
         i = 1
@@ -1234,7 +1256,7 @@ class Harness:
                             f"{text[len(text) - tail_chars:]}")
                 total -= costs[k] - _text_tokens(trims[k])
 
-        if not drop and not trims:
+        if not drop and not trims and not unsend:
             return False, (f"Context not compacted: nothing left to remove "
                            f"(~{total:,} of {self.context_limit:,} tokens).")
 
@@ -1256,6 +1278,8 @@ class Harness:
         # (In place: _turn_user tracks the running turn's message by identity.)
         for k, text in trims.items():
             msgs[k]["content"] = text
+        for k in unsend:
+            msgs[k]["unsent"] = True
         if summary and first_user is not None:
             msgs[first_user]["content"] = f"{_SUMMARY_OPEN}{summary}{_SUMMARY_CLOSE}{first_body}"
         self.messages = [msgs[k] for k in keep_idx]
@@ -1265,6 +1289,9 @@ class Harness:
         self._measured_tokens = None
         action = "summarised" if summary else "removed"
         notice = f"Context compacted: {action} {len(drop)} messages"
+        if unsend:
+            notice += (f", stopped sending back {len(unsend)} earlier reasoning "
+                       f"block{'s' if len(unsend) > 1 else ''}")
         if trims:
             notice += f", trimmed {len(trims)} tool result{'s' if len(trims) > 1 else ''}"
         notice += f" (was ~{before:,} tokens, now ~{after:,} tokens)"
@@ -1397,9 +1424,48 @@ class Harness:
         finally:
             self.event_queue.put(DoneEvent())
 
+    def _sent_thinking(self) -> set[int]:
+        """ids of the stored thinking messages the next request sends back: each
+        goes with the assistant message right after it (reasoning that ended a
+        reply on its own has none), within the /think-history window, unless it
+        is marked unsent (cut off, shown as the answer, or dropped by compaction)."""
+        if self.think_history == "off":
+            return set()
+        msgs = self.messages
+        start = 0
+        if self.think_history == "turn":
+            start = next((i for i in range(len(msgs) - 1, -1, -1)
+                          if msgs[i].get("role") == "user"), 0)
+        return {id(m) for m, nxt in zip(msgs[start:], msgs[start + 1:])
+                if m.get("role") == "thinking" and not m.get("unsent")
+                and nxt.get("role") == "assistant"}
+
+    def _api_messages(self) -> list[dict]:
+        """The history as the next request sends it: role="thinking" is harness-
+        internal, so it is dropped, and what /think-history sends back rides on
+        the following assistant message as `reasoning` (on a copy — the stored
+        history is unchanged).  The adapters map `reasoning` onto their wire
+        field (llama.cpp reasoning_content, Ollama thinking)."""
+        sent = self._sent_thinking()
+        out, reasoning = [], None
+        for m in self.messages:
+            if m.get("role") == "thinking":
+                reasoning = m.get("content") if id(m) in sent else None
+                continue
+            if reasoning and m.get("role") == "assistant":
+                m = {**m, "reasoning": reasoning}
+            reasoning = None
+            out.append(m)
+        return out
+
+    def _preserve_thinking(self) -> bool | None:
+        """chat_template_kwargs.preserve_thinking for the setting: templates that
+        take it (Qwen3.8, Gemma 4) otherwise render old turns their own way."""
+        return {"turn": False, "all": True}.get(self.think_history)
+
     def _estimate(self, schemas: bool = False) -> int:
         """Estimated tokens of the messages the next request sends (stored thinking
-        is never sent).  With ``schemas`` the tool schemas are included too — the
+        counts only where /think-history sends it back).  With ``schemas`` the tool schemas are included too — the
         full request, as the status bar shows it.  Compaction measures without
         them: they are fixed per mode, so compacting cannot shrink them."""
         cats = self._context_categories()
@@ -1418,6 +1484,10 @@ class Harness:
         """End a turn whose reply came only as reasoning by showing that
         reasoning as the answer, instead of ending with nothing."""
         text = thinking.strip()
+        # It is the answer now; sending it back as reasoning too would double it.
+        last = next((m for m in reversed(self.messages) if m.get("role") == "thinking"), None)
+        if last is not None:
+            last["unsent"] = True
         self.messages.append({"role": "assistant", "content": text})
         self.event_queue.put(ChatEvent("system",
             "The model replied only in its reasoning; showing that as its answer."))
@@ -1520,7 +1590,8 @@ class Harness:
                 # before handing the canonical history to the provider adapter.
                 # Provider-specific outbound transforms (e.g. Ollama's Qwen XML
                 # escaping) happen inside the adapter's chat().
-                api_messages = [m for m in self.messages if m.get("role") != "thinking"]
+                api_messages = self._api_messages()
+                self.client.preserve_thinking = self._preserve_thinking()
                 think_this_turn = False if _suppress_think_next else self._think_arg()
                 _suppress_think_next = False
                 # num_ctx is the model's real window when known, so the model can
@@ -1568,7 +1639,10 @@ class Harness:
                 raw_thinking = thinking_from_content
 
             if raw_thinking:
-                self.messages.append({"role": "thinking", "content": raw_thinking})
+                thought = {"role": "thinking", "content": raw_thinking}
+                if done_reason == "length":
+                    thought["unsent"] = True    # cut off mid-thought: never send it back
+                self.messages.append(thought)
                 self.event_queue.put(ThinkEvent(raw_thinking))
 
             # Native tool calls the adapter parsed from the API response.
@@ -2144,6 +2218,7 @@ class Harness:
             think_effective=self.effective_think(),
             think_choices=self.think_choices(),
             think_known=self.client.thinking_caps().known,
+            think_history=self.think_history,
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
             **self._index_status_fields(),
         )

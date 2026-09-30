@@ -125,6 +125,10 @@
     <div class="menu-title">Thinking <kbd>/think</kbd></div>
     <div id="think-levels"></div>
     <div id="think-note" class="muted menu-note"></div>
+    <div class="menu-sub">Send reasoning back <kbd>/think-history</kbd></div>
+    <label title="The model never sees its earlier reasoning"><input type="radio" name="think-history" value="off"> off</label>
+    <label title="The model sees its reasoning since your last message — its current tool loop"><input type="radio" name="think-history" value="turn"> this turn</label>
+    <label title="The model sees its reasoning from every turn still in history — uses more context"><input type="radio" name="think-history" value="all"> all turns</label>
   </div>
 </header>
 

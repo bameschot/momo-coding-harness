@@ -103,6 +103,11 @@ class LLMClient(ABC):
     # its whole lifetime, so switching is not possible there.
     can_switch_model: bool = True
 
+    # chat_template_kwargs.preserve_thinking for templates that take it (Qwen3.8,
+    # Gemma 4): whether past turns' reasoning is rendered.  None: not sent.  The
+    # harness sets it per request from /think-history.
+    preserve_thinking: bool | None = None
+
     def thinking_caps(self) -> ThinkingCaps:
         """What the served model accepts for `think`, read from the server once
         per model (an unanswered probe too — the status bar reads this, so it

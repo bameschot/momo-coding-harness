@@ -398,6 +398,17 @@ class LlamaCppThinking(_Base):
         self.assertIsNone(self.kwargs(True, tpl, effort=True))         # thinks by default
         self.assertEqual(self.kwargs(False, tpl, effort=True), {"reasoning_effort": "low"})
 
+    def test_preserve_thinking_sent_when_set(self):
+        Stub.props = {"chat_template": self.QWEN38}
+        c = make_client("llamacpp", self.url, "m")
+        c.preserve_thinking = False
+        c.chat([{"role": "user", "content": "hi"}], [], think=True)
+        self.assertEqual(Stub.requests[-1]["body"]["chat_template_kwargs"],
+                         {"enable_thinking": True, "preserve_thinking": False})
+        c.preserve_thinking = None
+        c.chat([{"role": "user", "content": "hi"}], [], think=True)
+        self.assertNotIn("preserve_thinking", Stub.requests[-1]["body"]["chat_template_kwargs"])
+
     def test_template_without_switch_gets_nothing(self):
         self.assertIsNone(self.kwargs(True, "{{ messages }}"))
 

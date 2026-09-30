@@ -94,6 +94,8 @@ class OllamaClient(LLMClient):
         out = []
         for m in messages:
             w = {k: m[k] for k in _MESSAGE_FIELDS if m.get(k)}
+            if m.get("reasoning"):          # the model's own reasoning, sent back
+                w["thinking"] = m["reasoning"]
             if "tool_calls" in w:
                 w["tool_calls"] = [{"function": {"name": (tc.get("function") or {}).get("name", ""),
                                                  "arguments": (tc.get("function") or {}).get("arguments", {})}}
