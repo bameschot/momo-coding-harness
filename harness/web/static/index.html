@@ -64,6 +64,7 @@
       <span class="meter"><span id="ctx-fill"></span></span>
       <span id="ctx-pct" class="mono">0%</span>
     </button>
+    <button id="think-badge" class="chip button" type="button" title="Thinking level (/think)" aria-haspopup="true" aria-expanded="false">THINK: on</button>
     <button id="tools-badge" class="chip button warn" type="button" title="Tools are disabled — click to enable" hidden>TOOLS: off</button>
     <button id="run-badge" class="chip button" type="button" title="Toggle run_command confirmation (Shift+P)">RUN: auto</button>
     <button id="net-badge" class="chip button" type="button" title="Internet access is off — click to turn it on">NET: off</button>
@@ -106,8 +107,6 @@
       <button type="button" id="index-load" class="menu-link">Load</button>
       <button type="button" id="index-filter-open" class="menu-link">Filter…</button>
     </div>
-    <div class="menu-sub">Model</div>
-    <label><input type="checkbox" id="think-mode" data-cmd="/think"> Thinking mode <kbd>/think</kbd></label>
     <div class="menu-sub">Skills</div>
     <div id="skills-list" class="skills-list"><span class="muted">No skills found.</span></div>
     <div class="menu-sub">Notifications</div>
@@ -122,6 +121,11 @@
   <div id="model-menu" class="menu model-menu" role="menu" hidden></div>
   <div id="ctx-menu" class="menu ctx-menu" role="dialog" aria-label="Context usage" hidden></div>
   <div id="index-menu" class="menu ctx-menu" role="dialog" aria-label="Code index composition" hidden></div>
+  <div id="think-menu" class="menu think-menu" role="menu" aria-label="Thinking level" hidden>
+    <div class="menu-title">Thinking <kbd>/think</kbd></div>
+    <div id="think-levels"></div>
+    <div id="think-note" class="muted menu-note"></div>
+  </div>
 </header>
 
 <main id="transcript" tabindex="-1" aria-live="polite" aria-label="Conversation"></main>

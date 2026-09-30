@@ -532,8 +532,43 @@ function applyStatus(s) {
   if (document.activeElement !== mc) mc.value = s.net_max_chars ?? "";
   mc.disabled = !netOn;
   applyIndexStatus(s);
+  applyThinkStatus(s);
   updateTitle();
   if (planChanged) refreshState();
+}
+
+// The THINK badge and its menu: the chosen level, what the model is actually
+// sent when that differs, and one radio per value this model takes (plus the
+// chosen one, kept for a model that does take it).
+function applyThinkStatus(s) {
+  const level = s.think_level || "on", eff = s.think_effective || level;
+  const choices = s.think_choices || [];
+  const badge = $("#think-badge");
+  const clamped = eff !== level && eff !== "n/a";
+  badge.textContent = eff === "n/a" ? "THINK: n/a" : clamped ? `THINK: ${level}→${eff}` : `THINK: ${level}`;
+  badge.classList.toggle("warn", clamped);
+  badge.classList.toggle("muted", eff === "n/a");
+  const levels = choices.filter((c) => !["off", "on"].includes(c));
+  const note = !s.think_known ? `The server doesn't say what ${s.model} takes, so on/off is sent.`
+    : eff === "n/a" ? `${s.model} doesn't take a thinking setting.`
+    : clamped ? `${s.model} gets ${eff}: it ${level === "off" ? "can't turn thinking off"
+        : levels.length ? "takes " + levels.join("/") : "takes on/off only"}.`
+    : `${s.model} takes: ${choices.join(", ")}.`;
+  badge.title = `Thinking level (/think) — ${note}`;
+  $("#think-note").textContent = note;
+  const values = choices.includes(level) ? choices : [...choices, level];
+  $("#think-levels").replaceChildren(...values.map((v) => {
+    const r = el("input");
+    r.type = "radio"; r.name = "think-level"; r.value = v; r.checked = v === level;
+    r.onchange = () => send(`/think ${v}`);
+    const label = el("label");
+    label.append(r, ` ${v}`);
+    if (!choices.includes(v)) {
+      label.classList.add("unavailable");
+      label.title = `${s.model} doesn't take ${v}; it gets ${eff}`;
+    }
+    return label;
+  }));
 }
 
 // The INDEX badge and the View → Code index section, mirroring the NET ones.
@@ -919,7 +954,6 @@ async function refreshState() {
   if (histIdx === -1) history = [...state.history];
   applyStatus(state.status);
   applyBusy(state.busy, state.waiting);
-  $("#think-mode").checked = state.think;
   $("#plan-btn").hidden = !state.plan;
   $("#plan-body").innerHTML = state.plan ? renderMarkdown(state.plan) : "<p class='muted'>No active plan.</p>";
   addCopyButtons($("#plan-body"));
@@ -1314,6 +1348,7 @@ $("#tools-badge").onclick = () => send("/tools on");
 $("#net-badge").onclick = () => send(`/net ${status.net_access !== "off" ? "off" : "on"}`);
 $("#net-on").onchange = (e) => send(`/net ${e.target.checked ? "on" : "off"}`);
 $("#net-local").onchange = (e) => send(`/net ${e.target.checked ? "local" : "on"}`);
+$("#think-badge").onclick = (e) => toggleMenu(e, "#think-menu");
 $("#index-badge").onclick = (e) => {
   if (!status.index_enabled) { e.stopPropagation(); return send("/index on"); }
   toggleMenu(e, "#index-menu", "Code index", refreshIndexMenu);
@@ -1416,7 +1451,7 @@ function syncViewMenu() {
 // Popover menus: [button, menu].  One is open at a time; a click outside closes it.
 const MENUS = [["#view-btn", "#view-menu"], ["#model-btn", "#model-menu"],
                ["#ctx-btn", "#ctx-menu"], ["#index-badge", "#index-menu"],
-               ["#tools-btn", "#tools-menu"]];
+               ["#tools-btn", "#tools-menu"], ["#think-badge", "#think-menu"]];
 function closeMenu() {
   hideToolTip();
   for (const [b, m] of MENUS) {

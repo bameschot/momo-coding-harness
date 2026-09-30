@@ -42,6 +42,16 @@ class Stub(BaseHTTPRequestHandler):
     server_version = "stub"
     requests: list = []
     stall = threading.Event()
+    props: dict = {}          # extra /props fields (chat template, its caps)
+    # /api/show "capabilities"/"details"/"template" per model (absent: older server)
+    shows = {
+        "qwen3:8b": {"capabilities": ["completion", "tools", "thinking"],
+                     "details": {"family": "qwen3"}},
+        "llama3:8b": {"capabilities": ["completion", "tools"], "details": {"family": "llama"}},
+        "gpt-oss:20b": {"capabilities": ["completion", "tools", "thinking"],
+                        "details": {"family": "gptoss"},
+                        "template": "{{ if .ThinkLevel }}Reasoning: {{ .ThinkLevel }}{{ end }}"},
+    }
 
     def log_message(self, *a):
         pass
@@ -68,7 +78,7 @@ class Stub(BaseHTTPRequestHandler):
             self._json({"models": [{"name": "qwen3.5:9b", "model": "qwen3.5:9b"},
                                    {"name": "llama3:8b", "model": "llama3:8b"}]})
         elif self.path == "/props":
-            self._json({"default_generation_settings": {"n_ctx": 8192}})
+            self._json({"default_generation_settings": {"n_ctx": 8192}, **Stub.props})
         elif self.path == "/v1/models":
             self._json({"data": [{"id": "Qwen3.5-9B"}]})
         elif self.path == "/old":
@@ -86,7 +96,8 @@ class Stub(BaseHTTPRequestHandler):
             if body.get("model") == "missing":
                 self._json({"error": "model 'missing' not found"}, 404)
             else:
-                self._json({"model_info": {"qwen35.context_length": 262144, "general.x": 1}})
+                self._json({"model_info": {"qwen35.context_length": 262144, "general.x": 1},
+                            **Stub.shows.get(body.get("model"), {})})
         elif self.path == "/api/chat":
             if body["model"] == "broken":
                 self._json({"error": "model runner crashed"}, 500)
@@ -149,6 +160,7 @@ class _Base(unittest.TestCase):
     def setUp(self):
         Stub.requests.clear()
         Stub.stall.clear()
+        Stub.props = {}
 
     def _abort_mid_stream(self, client):
         deltas = []
@@ -296,6 +308,105 @@ class LlamaCpp(_Base):
 
     def test_abort_mid_stream(self):
         self._abort_mid_stream(self.client("stall"))
+
+
+class OllamaThinking(_Base):
+    """What `think` is sent, per model capability (read from /api/show)."""
+
+    def sent(self, model, think):
+        c = make_client("ollama", self.url, model)
+        c.chat([{"role": "user", "content": "hi"}], [], think=think)
+        return c, Stub.requests[-1]["body"].get("think", "absent")
+
+    def test_caps(self):
+        caps = lambda m: make_client("ollama", self.url, m).thinking_caps()
+        self.assertEqual(caps("qwen3:8b").choices(), ["off", "on"])
+        self.assertEqual(caps("gpt-oss:20b").choices(), ["on", "low", "medium", "high"])
+        self.assertEqual(caps("llama3:8b").choices(), [])
+        self.assertFalse(caps("qwen3.5:9b").known)     # server didn't say
+
+    def test_on_off_model(self):
+        self.assertIs(self.sent("qwen3:8b", "high")[1], True)
+        self.assertIs(self.sent("qwen3:8b", False)[1], False)
+
+    def test_graded_model(self):
+        self.assertEqual(self.sent("gpt-oss:20b", "high")[1], "high")
+        self.assertIs(self.sent("gpt-oss:20b", True)[1], True)          # its own default
+        self.assertEqual(self.sent("gpt-oss:20b", "xhigh")[1], "high")  # nearest it takes
+        self.assertEqual(self.sent("gpt-oss:20b", False)[1], "low")    # it can't stop
+
+    def test_non_thinking_model_gets_nothing(self):
+        self.assertEqual(self.sent("llama3:8b", True)[1], "absent")
+
+    def test_unknown_keeps_old_behaviour(self):
+        self.assertIs(self.sent("qwen3.5:9b", "high")[1], True)
+        self.assertIs(self.sent("qwen3.5:9b", False)[1], False)
+
+    def test_probed_once_per_model(self):
+        c, _ = self.sent("qwen3:8b", True)
+        c.chat([{"role": "user", "content": "hi"}], [], think=True)
+        shows = [r for r in Stub.requests if r["path"] == "/api/show"]
+        self.assertEqual(len(shows), 1)
+        c.set_model("gpt-oss:20b")
+        self.assertEqual(c.thinking_caps().levels, ("low", "medium", "high"))
+
+
+class LlamaCppThinking(_Base):
+    """chat_template_kwargs per what /props says the template takes."""
+
+    def kwargs(self, think, template="", effort=False):
+        Stub.props = {"chat_template": template,
+                      "chat_template_caps": {"supports_reasoning_effort": effort}}
+        c = make_client("llamacpp", self.url, "m")
+        c.chat([{"role": "user", "content": "hi"}], [], think=think)
+        return Stub.requests[-1]["body"].get("chat_template_kwargs")
+
+    def test_enable_thinking_template(self):
+        qwen = "{% if enable_thinking %}<think>{% endif %}"
+        self.assertEqual(self.kwargs("high", qwen), {"enable_thinking": True})
+        self.assertEqual(self.kwargs(False, qwen), {"enable_thinking": False})
+
+    def test_reasoning_effort_template(self):
+        self.assertEqual(self.kwargs("high", "x", effort=True), {"reasoning_effort": "high"})
+        self.assertEqual(self.kwargs(False, "x", effort=True), {"reasoning_effort": "low"})
+        both = self.kwargs("low", "{{ enable_thinking }}", effort=True)
+        self.assertEqual(both, {"enable_thinking": True, "reasoning_effort": "low"})
+
+    # Trimmed from Qwen3.8-27B's GGUF chat template: an allow-list, 'high' as an
+    # alias, and an exception for anything else.
+    QWEN38 = """{%- if enable_thinking is undefined or enable_thinking is true %}
+    {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
+    {%- if resolved_reasoning_effort == 'high' %}{%- set resolved_reasoning_effort = 'xhigh' %}{%- endif %}
+    {%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}
+        {{- raise_exception('Unexpected reasoning effort') }}
+    {%- endif %}{%- endif %}"""
+
+    def test_levels_read_from_template(self):
+        Stub.props = {"chat_template": self.QWEN38,
+                      "chat_template_caps": {"supports_reasoning_effort": True}}
+        caps = make_client("llamacpp", self.url, "m").thinking_caps()
+        self.assertEqual(caps.choices(), ["off", "on", "low", "medium", "xhigh"])
+        self.assertEqual(self.kwargs("high", self.QWEN38, effort=True),
+                         {"enable_thinking": True, "reasoning_effort": "xhigh"})
+        self.assertEqual(self.kwargs(True, self.QWEN38, effort=True), {"enable_thinking": True})
+
+    def test_gpt_oss_template_without_a_list_gets_defaults(self):
+        tpl = '{%- set reasoning_effort = reasoning_effort | default("medium") %}Reasoning: {{ reasoning_effort }}'
+        Stub.props = {"chat_template": tpl, "chat_template_caps": {"supports_reasoning_effort": True}}
+        caps = make_client("llamacpp", self.url, "m").thinking_caps()
+        self.assertEqual((caps.levels, caps.can_disable), (("low", "medium", "high"), False))
+        self.assertIsNone(self.kwargs(True, tpl, effort=True))         # thinks by default
+        self.assertEqual(self.kwargs(False, tpl, effort=True), {"reasoning_effort": "low"})
+
+    def test_template_without_switch_gets_nothing(self):
+        self.assertIsNone(self.kwargs(True, "{{ messages }}"))
+
+    def test_no_template_reported_keeps_old_behaviour(self):
+        Stub.props = {}
+        c = make_client("llamacpp", self.url, "m")
+        self.assertFalse(c.thinking_caps().known)
+        c.chat([{"role": "user", "content": "hi"}], [], think="high")
+        self.assertEqual(Stub.requests[-1]["body"]["chat_template_kwargs"], {"enable_thinking": True})
 
 
 class BaseURL(unittest.TestCase):

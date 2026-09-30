@@ -47,7 +47,8 @@ Options:
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--run-mode` | last `/run-mode`, else `new` | `new`: `run_command` saves its output to a log and returns a view of it; `classic`: returns all of it (see [Command output](#command-output)) |
 | `--run-output-limit` | last setting, else `5000` | Characters in `run_command`'s default view in run mode `new` |
-| `--no-think` | off | Disable model thinking/reasoning mode (on by default) |
+| `--think` | last used / `on` | Thinking level: `off`, `on`, or an effort level (`low`, `medium`, `high`, `xhigh`, …) for models that take one. See [Thinking level](#thinking-level) |
+| `--no-think` | off | Same as `--think off` |
 | `--no-stream` | off | Wait for complete replies instead of streaming them as they are generated (streaming is on by default, in the TUI and the web UI) |
 | `--web` / `--no-web` | on | Serve the browser chat UI alongside the TUI |
 | `--web-host` | `127.0.0.1` | Interface for the web UI (a non-loopback host requires an access token) |
@@ -168,6 +169,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - Clicking the **model name** opens a model picker listing the models on the backend, like `/model`. llama.cpp serves a single model, so there the list is informational.
   - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
   - The **CTX meter** turns yellow at ≥ 75% and red at ≥ 90%, as in the TUI.
+  - The **`THINK`** badge shows the [thinking level](#thinking-level). Clicking it opens a menu of the values the current model takes (e.g. off / on / low / medium / xhigh for Qwen3.8), plus your current choice, greyed out if the model can't take it. When the model gets something other than your choice, the badge shows both (`THINK: high→on`) and turns yellow. It shows `THINK: n/a` for a model that takes no thinking setting.
   - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on. A **`NET: on`** / **`NET: local`** badge appears when internet access is on; click it to turn it off. Both are also in View → Network. The **`INDEX`** badge shows the [code index](#code-index): `off`, build progress (`building 812/1873`), or files and memory against the budget (`312 files · 4MB/100MB`). While the index is off, clicking it turns it on. While it is on, clicking it opens a popover like the CTX one: a meter of memory against the budget, a stacked bar and one row per part of the index (file records, definitions, imports, identifiers, text signatures), the same split per language, and Rebuild / Save now / Turn off. It turns yellow when the index is over its memory budget and has dropped a part.
   - **Tools** (wrench icon) opens the [tool picker](#turning-tools-on-and-off) for the current mode: one checkbox per tool, grouped, with the **Tool calls** master switch on top. Hovering a tool shows its description. A small count on the icon says how many tools are off in this mode.
   - **View options** (sliders icon, far right) opens the view options (below).
@@ -263,7 +265,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Companion | `/companion on\|off`, Shift+Q | Show or hide momo |
 | Idle recap | `/companion-idle-recap on\|off\|<secs>` | View → Companion: a checkbox and the idle time. Shared with the TUI |
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
-| Thinking mode | `/think on\|off` | Whether the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
+| Thinking level | `/think off\|on\|<level>` | The `THINK` badge in the status bar, not the View menu: how much the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
 | Command output | `/run-mode`, `/run-output-limit` | View → Context: save command output to a log and return a view, and the view's size in characters. Shared with the TUI |
 | Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index-max-files`, `/index-workers`, `/index-filter`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, the file limit, build workers, Save now / Load, and Filter… (edit which files are indexed). Shared with the TUI |
@@ -425,6 +427,7 @@ curl -sN localhost:8765/api/events          # watch the live event stream
 - **Streaming** — replies appear as they are generated, ending in a `▍` cursor, and are replaced by the fully rendered message when complete. Disable with `--no-stream`.
 - **Status bar** — current mode, model, Ollama host, context usage %, and working directory. When the line is too narrow to fit, the working directory is shortened from the front (`…/tail`) so its most specific part stays visible.
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
+  - Shows `THINK: <level>` when the [thinking level](#thinking-level) isn't the default `on`, or `THINK: high→on` when the model gets something other than your choice.
   - Shows `⠋ thinking` (spinner) while the model is working.
   - Shows `? waiting for input` when the model has called `ask_user` and is waiting for your reply. Type your answer and press Enter — the model resumes from where it paused.
   - Top rule turns green when the chat pane has focus; bottom rule turns green when the input pane has focus.
@@ -1095,8 +1098,8 @@ Type any command in the input bar:
 | `/clear-token` | Remove the current auth token |
 | `/workspace` | Show the current working directory (alias: `/workdir`) |
 | `/workspace <path>` | Change the working directory. If the path does not exist, prompts for confirmation before creating it. |
-| `/think` | Show thinking mode state (on/off) |
-| `/think on\|off` | Enable or disable model thinking/reasoning mode |
+| `/think` | Show the thinking level and what the current model takes |
+| `/think off\|on\|low\|medium\|high\|xhigh` | Set the model's thinking/reasoning level (saved). See [Thinking level](#thinking-level) |
 | `/companion-idle-recap on\|off` | When you've been idle, momo recaps the last turns in its speech bubble (at most once per turn, 5-minute cooldown; lines are kept in the session). Off by default; also `--companion-idle-recap` |
 | `/companion-idle-recap <secs>` | How long you must be idle before momo recaps (default 90, also `--companion-idle-recap-secs`) |
 | `/tools` | Pick the current mode's tools: a checklist in the TUI, the Tools menu in the web UI — see [Turning tools on and off](#turning-tools-on-and-off) |
@@ -1161,6 +1164,42 @@ Type any command in the input bar:
 | `/read <path> [start] [end]` | Read a file directly, with optional line range |
 | `/grep <pattern> [path_or_dir]` | Regex search in a file or across a directory directly |
 | `/exit` or `/quit` | Save session and exit |
+
+## Thinking level
+
+`/think` sets how much the model reasons before it answers:
+
+```
+/think              # the level, and what the current model takes
+/think off          # no reasoning
+/think on           # reasoning, at the model's own default effort (the default)
+/think low|medium|high|xhigh   # effort level, for models that take one (gpt-oss, Qwen3.8)
+```
+
+`minimal` and `max` are accepted too, for templates that use them.
+
+The level is saved in `prefs.json`, and `--think <level>` sets it at startup. In the web UI it is the `THINK` badge in the status bar.
+
+Models differ in what they take, so momo asks the server once per model and sends only what that model understands:
+
+| Backend | How momo finds out | What is sent |
+|---|---|---|
+| Ollama | `/api/show`: the model's `thinking` capability; effort levels for gpt-oss (its template reads `ThinkLevel`) | `think: true/false`, or `think: "low"\|"medium"\|"high"` |
+| llama.cpp | `/props`: whether the chat template uses `enable_thinking`, and the server's `supports_reasoning_effort`. The effort words are read from the template itself | `chat_template_kwargs.enable_thinking`, and `chat_template_kwargs.reasoning_effort` when efforts are supported |
+
+What each model takes differs. Qwen3.5 and Gemma 4 take on/off only. gpt-oss takes low/medium/high. Qwen3.8 takes low/medium/**xhigh**, and its template raises an error for any other word. So momo reads the allowed words from the template (Qwen3.8 lists them in a `not in ('xhigh', 'medium', 'low')` check). When a template doesn't list them, as gpt-oss's doesn't, momo assumes low/medium/high.
+
+- **Your choice is kept when the model can't honour it.** momo sends the nearest level the model takes, and says so. On a tie it goes up, so `high` on Qwen3.8 becomes `Thinking: high → xhigh (… takes low/medium/xhigh)`. On an on/off model any level becomes `on`. Switching to a model that takes the level applies it again.
+- **`on` sends no level**, so the model uses its own default (xhigh for Qwen3.8, medium for gpt-oss).
+- **gpt-oss can't turn reasoning off**, so `off` sends its lowest level, `low`.
+- **A model without thinking gets nothing sent.** It used to receive `think: true` regardless.
+- **If the server doesn't say** (an older build, or one still loading), momo sends on/off as before and says so: `the server doesn't say which levels it takes`.
+- **It's re-read at every message you send, and on `/think`.** A llama.cpp server relaunched with another model, or one that was still loading when momo started, is picked up without restarting momo.
+- **Token budgets aren't a setting.** llama.cpp's `--reasoning-budget` is fixed when the server starts, like the context size, and Ollama has none.
+
+The startup check reports what the model takes (`thinking: off/on`). The check runs again when you switch model or host.
+
+Compaction summaries and the companion's recaps always ask for no reasoning, whatever the level, and so does the retry after a reply that was cut off. Higher levels produce longer reasoning, which takes time and output tokens. It doesn't fill the context, because reasoning is never sent back to the model.
 
 ## Context Management
 
@@ -1242,7 +1281,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 
 | Path | What | Notes |
 |---|---|---|
-| `prefs.json` | Provider, model, code index settings, guides, companion idle recap, run mode | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
+| `prefs.json` | Provider, model, thinking level, code index settings, guides, companion idle recap, run mode | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
 | `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |

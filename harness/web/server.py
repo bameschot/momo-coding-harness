@@ -254,7 +254,6 @@ class WebServer:
             "status": asdict(h.status_event()),
             "busy": c.busy,
             "waiting": c.waiting,
-            "think": h.think,
             "context_limit": h.context_limit,
             "pdf_support": _pdf_support(),
             "max_upload": attach_mod.MAX_UPLOAD_BYTES,

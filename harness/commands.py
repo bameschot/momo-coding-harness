@@ -13,6 +13,7 @@ from . import search as search_mod
 from . import session as session_mod
 from . import tools as tools_mod
 from .harness import Harness
+from .llm.base import THINK_LEVELS
 from .tools import dispatch
 
 
@@ -119,7 +120,7 @@ def _bad_choice(arg: str, choices: str = "'on' or 'off'") -> CommandResult:
 
 def _toggle(harness, attr: str, arg: str, label: str,
             on_note: str = "", off_note: str = "") -> CommandResult:
-    """/think, /tools, /run-confirm, /net-confirm: show or set a boolean setting."""
+    """/tools, /run-confirm, /net-confirm: show or set a boolean setting."""
     if not arg:
         return CommandResult(handled=True,
                              output=f"{label}: {'on' if getattr(harness, attr) else 'off'}")
@@ -130,6 +131,30 @@ def _toggle(harness, attr: str, arg: str, label: str,
     harness.emit_status()
     return CommandResult(handled=True,
                          output=f"{label}: {'on' if on else 'off'}{on_note if on else off_note}")
+
+
+def _think(harness, arg: str) -> CommandResult:
+    """/think [off|on|<effort>]: show or set the thinking level."""
+    if harness.refresh_thinking():      # the server may have changed since startup
+        harness.emit_status()
+    caps, model = harness.client.thinking_caps(), harness.client.model
+    choices = harness.think_choices()
+    offers = (f"the server doesn't say what {model} takes; on/off is sent" if not caps.known
+              else f"{model} takes: {', '.join(choices)}" if choices
+              else f"{model} doesn't take a thinking setting")
+    if not arg:
+        note = harness.think_note()
+        return CommandResult(handled=True, output=f"Thinking: {harness.think_level} ({offers})"
+                                                  + (f"\n{note}" if note else ""))
+    level = {"true": "on", "yes": "on", "1": "on",
+             "false": "off", "no": "off", "0": "off"}.get(arg.lower(), arg.lower())
+    if level not in THINK_LEVELS:
+        return _bad_choice(arg, " | ".join(THINK_LEVELS))
+    harness.think_level = level
+    session_mod.save_prefs(think=level)
+    harness.emit_status()
+    note = harness.think_note()
+    return CommandResult(handled=True, output=note or f"Thinking: {level}")
 
 
 def _tool_listing(harness) -> str:
@@ -446,7 +471,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
 
     if cmd == "/think":
-        return _toggle(harness, "think", arg, "Thinking mode")
+        return _think(harness, arg)
 
     if cmd == "/companion-idle-recap":
         def _state() -> str:
@@ -1005,8 +1030,10 @@ Available commands:
   /context <n>%       Set context limit as % of model max (e.g. /context 75%); saved in session
   /tool-result        Show current tool result character cap
   /tool-result <n>    Set cap (e.g. /tool-result 8000); 0 = unlimited
-  /think              Show thinking mode state (on/off)
-  /think on|off       Enable or disable model thinking/reasoning mode
+  /think              Show the thinking level and what the model takes
+  /think off|on|low|medium|high|xhigh  Set the model's thinking/reasoning level
+                      (saved); levels need a model that takes them (gpt-oss,
+                      Qwen3.8); the nearest one it takes is sent
   /run-confirm        Show run_command confirmation state (on/off)
   /run-confirm on|off Ask y/N before each run_command  (Shift+P toggles)
   /run-mode [new|classic]  new: save command output to a log, return a view

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-from .base import ChatResponse, LLMClient, ToolCall
+from .base import DEFAULT_EFFORTS, ChatResponse, LLMClient, ThinkingCaps, ToolCall
 from .http import HTTPClient, LLMHTTPError, normalize_base_url
 
 # Message fields Ollama's /api/chat understands (the ollama SDK kept exactly these).
@@ -76,6 +76,7 @@ class OllamaClient(LLMClient):
         self.host = host
         self._client.close()
         self._client = self._make_client()
+        self.forget_thinking_caps()
 
     def set_auth_token(self, token: str | None):
         self._auth_token = token
@@ -100,8 +101,26 @@ class OllamaClient(LLMClient):
             out.append(w)
         return out
 
+    def _probe_thinking(self) -> ThinkingCaps:
+        """/api/show: the `thinking` capability says `think` is accepted; effort
+        words only where the template reads .ThinkLevel (gpt-oss), which also
+        can't be told not to think."""
+        try:
+            info = self._client.request_json("POST", "/api/show", {"model": self.model})
+        except Exception:
+            return ThinkingCaps()
+        capabilities = info.get("capabilities")
+        if not isinstance(capabilities, list):
+            return ThinkingCaps()      # an older server that doesn't say
+        if "thinking" not in capabilities:
+            return ThinkingCaps(toggle=False, known=True)
+        family = ((info.get("details") or {}).get("family") or "").lower()
+        graded = "ThinkLevel" in (info.get("template") or "") or family == "gptoss"
+        return ThinkingCaps(toggle=True, levels=DEFAULT_EFFORTS if graded else (),
+                            can_disable=not graded, known=True)
+
     def chat(self, messages: list[dict], tools: list[dict],
-             think: bool | None = None, num_ctx: int | None = None,
+             think=None, num_ctx: int | None = None,
              on_delta=None) -> ChatResponse:
         # Qwen3's Ollama chat template embeds message content into XML; escape the
         # copy we send so tool results/args with < > & don't break its parser.
@@ -113,6 +132,7 @@ class OllamaClient(LLMClient):
             body["tools"] = tools
         if num_ctx is not None:
             body["options"] = {"num_ctx": num_ctx}
+        think = self.wire_think(think)
         if think is not None:
             body["think"] = think
         client = self._client   # abort() swaps in a fresh one; keep reading this one

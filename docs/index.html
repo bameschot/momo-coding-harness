@@ -631,7 +631,7 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <tr><td><code>--max-tool-result</code></td><td><code>0</code></td><td class="wrap">Max characters per tool result (0 = unlimited)</td></tr>
       <tr><td><code>--run-mode</code></td><td>last used / <code>new</code></td><td class="wrap"><code>new</code>: <code>run_command</code> saves its output to a log and returns a view; <code>classic</code>: all of it. See <a href="#run-output">Command output</a>. <code>--run-output-limit</code> sets the view's size.</td></tr>
       <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
-      <tr><td><code>--no-think</code></td><td>off</td><td class="wrap">Turn off the model's thinking/reasoning mode</td></tr>
+      <tr><td><code>--think</code></td><td>last used / <code>on</code></td><td class="wrap">Thinking level: <code>off</code>, <code>on</code>, or an effort level (<code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, …) for models that take one. See <a href="#thinking">Thinking level</a>. <code>--no-think</code> is <code>--think off</code>.</td></tr>
       <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
       <tr><td><code>--web</code> / <code>--no-web</code></td><td>on</td><td class="wrap">Serve the browser UI alongside the TUI</td></tr>
       <tr><td><code>--web-host</code></td><td><code>127.0.0.1</code></td><td class="wrap">Interface to bind. Any non-loopback host requires a token.</td></tr>
@@ -698,11 +698,22 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <tr><td>Models</td><td class="wrap"><code>/model</code> lists every pulled model and switches between them at runtime</td><td class="wrap">One model, fixed when <code>llama-server</code> starts. <code>/model</code> shows it but can't switch.</td></tr>
       <tr><td>Context window</td><td class="wrap">Read from the model's info. The full window is sent as <code>num_ctx</code> on every request.</td><td class="wrap">Read from <code>/props</code> (<code>n_ctx</code>). Fixed at launch with <code>-c</code>.</td></tr>
       <tr><td>Tool calling</td><td class="wrap">Needs a model with tool support (e.g. <code>qwen3.5:9b</code>, <code>qwen2.5-coder</code>, <code>mistral-nemo</code>)</td><td class="wrap">Needs Jinja chat templates (the default in current builds; <code>--jinja</code> on older ones, never <code>--no-jinja</code>), plus a model whose template supports tools</td></tr>
-      <tr><td>Thinking</td><td class="wrap">Toggled with Ollama's <code>think</code> option</td><td class="wrap">Toggled via <code>chat_template_kwargs.enable_thinking</code> (Qwen3-style templates). The server's default <code>--reasoning-format auto</code> returns reasoning as a separate stream. With <code>none</code>, momo recovers it from <code>&lt;think&gt;</code> tags instead.</td></tr>
+      <tr><td>Thinking</td><td class="wrap">Ollama's <code>think</code> option: <code>true</code>/<code>false</code>, or <code>"low"</code>/<code>"medium"</code>/<code>"high"</code> for gpt-oss. What a model takes is read from <code>/api/show</code> (its <code>thinking</code> capability).</td><td class="wrap"><code>chat_template_kwargs.enable_thinking</code> (Qwen3-style templates), plus <code>reasoning_effort</code> when <code>/props</code> reports <code>supports_reasoning_effort</code>. The allowed words are read from the template (Qwen3.8: low/medium/xhigh). The server's default <code>--reasoning-format auto</code> returns reasoning as a separate stream. With <code>none</code>, momo recovers it from <code>&lt;think&gt;</code> tags instead.</td></tr>
       <tr><td>Streaming</td><td class="wrap">Yes</td><td class="wrap">Yes (Server-Sent Events)</td></tr>
       <tr><td>Auth</td><td class="wrap" colspan="2"><code>/token &lt;key&gt;</code> sends <code>Authorization: Bearer &lt;key&gt;</code> to either backend. It's kept in memory only. For Ollama, an <code>OLLAMA_API_KEY</code> environment variable is used when no token is set.</td></tr>
     </table></div>
     <p>By default the compaction threshold is half the detected window. Change it with <code>/context 75%</code>, or set an absolute number with <code>/context 16384</code> or <code>--context</code>.</p>
+    <h3 id="thinking">Thinking level</h3>
+    <p><code>/think off|on|low|medium|high|xhigh</code> sets how much the model reasons before it answers. The web UI's <code>THINK</code> badge does the same. The level is remembered, and <code>--think</code> sets it at startup. momo asks the server once per model what it takes and sends only that:</p>
+    <ul>
+      <li><strong>Each model has its own levels.</strong> Qwen3.5 and Gemma 4 take on/off only. gpt-oss takes low/medium/high. Qwen3.8 takes low/medium/xhigh and rejects anything else, so momo reads the list from the model's chat template.</li>
+      <li><strong>The nearest level is sent</strong> when the model doesn't take yours, and momo says so (<code>THINK: high→xhigh</code>, or <code>high→on</code> on an on/off model). Your choice is kept, so a model that takes it gets it.</li>
+      <li><strong><code>on</code> sends no level,</strong> so the model uses its own default. gpt-oss always reasons, so <code>off</code> sends <code>low</code>.</li>
+      <li><strong>Re-read at every message and on <code>/think</code>,</strong> so a relaunched or still-loading llama.cpp server is picked up.</li>
+      <li><strong>A model without thinking gets nothing sent</strong> (badge: <code>THINK: n/a</code>).</li>
+      <li><strong>No token budget:</strong> llama.cpp's <code>--reasoning-budget</code> is fixed when the server starts, and Ollama has none.</li>
+    </ul>
+    <p>Compaction summaries, companion recaps and the retry after a cut-off reply always ask for no reasoning. Reasoning is never sent back to the model, so a higher level costs time, not context.</p>
     <h3>Local or remote</h3>
     <p>"Remote" just means <code>--host</code> points somewhere other than <code>localhost</code>. It can be another machine on your LAN, a GPU box, or a hosted endpoint behind a reverse proxy. The harness, the tools and your files always stay on the machine where you run momo; only the chat requests go to the model server. Always give the full URL, including the scheme: <code>http://192.168.1.10:11434</code>, not <code>192.168.1.10:11434</code>.</p>
     <p>The host is saved with the session and restored when you start again. The token is not saved and has to be entered again.</p>
@@ -1110,7 +1121,7 @@ FAILED (failures=2)
     </ul>
     <h3>What's in it</h3>
     <ul>
-      <li><strong>Status bar:</strong> the session drawer (load, start or delete sessions), a workspace file browser, mode and model pickers, a CTX meter with a per-category breakdown (with a link to the <a href="#system-prompt">system prompt</a>), <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges, and a wrench button for <a href="#tool-choices">this mode's tools</a>.</li>
+      <li><strong>Status bar:</strong> the session drawer (load, start or delete sessions), a workspace file browser, mode and model pickers, a CTX meter with a per-category breakdown (with a link to the <a href="#system-prompt">system prompt</a>), <code>THINK</code> / <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges (THINK opens a level menu), and a wrench button for <a href="#tool-choices">this mode's tools</a>.</li>
       <li><strong>Transcript:</strong> streamed markdown replies, collapsible thinking, one-line tool calls that expand to show arguments and results, coloured diffs and question cards with Yes/No buttons.</li>
       <li><strong>Input:</strong> <kbd>/</kbd> command autocomplete, <kbd>@</kbd> fuzzy path search, a queue for messages sent while the model is busy, and Retry / Edit on your last message.</li>
       <li><strong>Attachments:</strong> drag, paste or pick files. Text and PDFs are converted to text. Chips show a token estimate and turn amber when a file would use more than a quarter of the context.</li>
@@ -1265,7 +1276,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
 
   <section id="tui" data-voice="tui">
     <h2>Terminal UI</h2>
-    <p>The chat pane is at the top, with tool calls in yellow and thinking in orange. The status bar shows the mode, backend, model, host, CTX % and working directory, and below it is a five-row multi-line input.</p>
+    <p>The chat pane is at the top, with tool calls in yellow and thinking in orange. The status bar shows the mode, backend, model, host, CTX % and working directory (plus <code>THINK</code>, <code>NET</code>, <code>IDX</code> when they aren't at their defaults), and below it is a five-row multi-line input.</p>
     <div class="table-scroll"><table>
       <tr><th>Key</th><th>Action</th></tr>
       <tr><td><kbd>Enter</kbd></td><td class="wrap">Send</td></tr>
@@ -1296,7 +1307,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/host [url]</code></td><td class="wrap">Show the backend, or connect to another</td></tr>
       <tr><td><code>/token [key]</code>, <code>/clear-token</code></td><td class="wrap">Set, show (masked) or remove the Bearer token</td></tr>
       <tr><td><code>/workspace [path]</code></td><td class="wrap">Show or change the working directory (alias <code>/workdir</code>)</td></tr>
-      <tr><td><code>/think on|off</code></td><td class="wrap">The model's reasoning mode</td></tr>
+      <tr><td><code>/think [off|on|&lt;level&gt;]</code></td><td class="wrap">Show or set the model's <a href="#thinking">thinking level</a> (remembered)</td></tr>
       <tr><td><code>/tools</code>, <code>/tools list</code></td><td class="wrap">Pick or list the current mode's tools. See <a href="#tool-choices">Turning tools on and off</a></td></tr>
       <tr><td><code>/tools &lt;name&gt;</code></td><td class="wrap">What a tool does, its parameters, and whether it's on</td></tr>
       <tr><td><code>/tools &lt;name&gt;… on|off</code></td><td class="wrap">Turn tools on or off for the current mode (saved in the session)</td></tr>
@@ -1389,7 +1400,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     └── server.json       <span class="com"># the names it covers, and its expiry</span></code></pre></div>
     <div class="table-scroll"><table>
       <tr><th>Path</th><th>What</th><th>Notes</th></tr>
-      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, code index settings, guides, companion idle recap, run mode</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools on|off</code>, <code>/run-confirm</code>) are never saved and reset at every start. Per-mode tool choices are kept in the session instead.</td></tr>
+      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, thinking level, code index settings, guides, companion idle recap, run mode</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools on|off</code>, <code>/run-confirm</code>) are never saved and reset at every start. Per-mode tool choices are kept in the session instead.</td></tr>
       <tr><td><code>sessions/*.json</code></td><td class="wrap">Each conversation: messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history</td><td class="wrap">Saved after every reply. <code>/sessions</code> lists them and <code>/session &lt;name&gt;</code> loads one. The auth token is never stored. Delete them from the session drawer in the web UI.</td></tr>
       <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line</td><td class="wrap">For auditing what the model did. Secret request headers are masked.</td></tr>
       <tr><td><code>index/*.pickle</code></td><td class="wrap">The code index, named by a hash of the workdir</td><td class="wrap">Written by <code>/index save</code>, and automatically with <code>/index-persist</code> (on by default). Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>

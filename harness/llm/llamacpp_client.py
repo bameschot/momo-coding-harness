@@ -1,9 +1,30 @@
 from __future__ import annotations
 
 import json
+import re
 
-from .base import ChatResponse, LLMClient, ToolCall
+from .base import DEFAULT_EFFORTS, EFFORT_LEVELS, ChatResponse, LLMClient, ThinkingCaps, ToolCall
 from .http import HTTPClient, normalize_base_url
+
+
+def _template_efforts(template: str) -> tuple[str, ...]:
+    """The effort words a chat template checks reasoning_effort against, least
+    to most; () when it names fewer than two (gpt-oss only names its default).
+    Qwen3.8 lists them in a `not in ('xhigh', 'medium', 'low')` guard and
+    raises on anything else, so an allow-list like that wins over every word
+    the template happens to mention (it also maps 'high' to 'xhigh')."""
+    words = "|".join(EFFORT_LEVELS)
+    found: set[str] = set()
+    for m in re.finditer(r"\bin\s*[\(\[]([^\)\]]*)[\)\]]", template):
+        listed = set(re.findall(rf"['\"]({words})['\"]", m.group(1)))
+        if len(listed) >= 2:
+            found = listed
+            break
+    else:
+        for line in template.splitlines():
+            if "effort" in line:
+                found |= set(re.findall(rf"['\"]({words})['\"]", line))
+    return tuple(lv for lv in EFFORT_LEVELS if lv in found) if len(found) >= 2 else ()
 
 
 class LlamaCppClient(LLMClient):
@@ -37,6 +58,7 @@ class LlamaCppClient(LLMClient):
         self.host = host
         self._client.close()
         self._client = self._make_client()
+        self.forget_thinking_caps()
 
     def set_auth_token(self, token: str | None):
         self._auth_token = token
@@ -95,8 +117,26 @@ class LlamaCppClient(LLMClient):
                 out.append(m)
         return out
 
+    def _probe_thinking(self) -> ThinkingCaps:
+        """/props: the template's `enable_thinking` switch (Qwen3-style) and
+        the server's own `supports_reasoning_effort` (gpt-oss, Qwen3.8), with
+        the effort words read from the template itself."""
+        try:
+            props = self._client.request_json("GET", "/props")
+        except Exception:
+            return ThinkingCaps()
+        template = props.get("chat_template") or ""
+        if not template:
+            return ThinkingCaps()      # an older server that doesn't say
+        caps = props.get("chat_template_caps") or {}
+        levels = ()
+        if caps.get("supports_reasoning_effort") or "reasoning_effort" in template:
+            levels = _template_efforts(template) or DEFAULT_EFFORTS
+        toggle = "enable_thinking" in template
+        return ThinkingCaps(toggle=toggle, levels=levels, can_disable=toggle, known=True)
+
     def chat(self, messages: list[dict], tools: list[dict],
-             think: bool | None = None, num_ctx: int | None = None,
+             think=None, num_ctx: int | None = None,
              on_delta=None) -> ChatResponse:
         payload: dict = {
             "model": self.model,
@@ -108,11 +148,16 @@ class LlamaCppClient(LLMClient):
             payload["tool_choice"] = "auto"
         # llama.cpp fixes the context window at server launch, so num_ctx is not
         # applicable and is intentionally ignored here.
-        if think is False:
-            # Qwen3-style templates honor this to suppress reasoning output.
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
-        elif think is True:
-            payload["chat_template_kwargs"] = {"enable_thinking": True}
+        # Both go to the chat template: Qwen3-style templates read
+        # enable_thinking, gpt-oss-style ones reasoning_effort.
+        think = self.wire_think(think)
+        toggle = self.thinking_caps().toggle or not self.thinking_caps().known
+        if isinstance(think, bool):
+            if toggle:   # True without a switch: the template's default is thinking
+                payload["chat_template_kwargs"] = {"enable_thinking": think}
+        elif think:
+            payload["chat_template_kwargs"] = ({"enable_thinking": True} if toggle else {}) \
+                | {"reasoning_effort": think}
 
         client = self._client   # abort() swaps in a fresh one; keep reading this one
         if on_delta is None:

@@ -240,7 +240,9 @@ class Harness:
         self._user_input_queue: queue.Queue[str] = queue.Queue()
         self.awaiting_input: bool = False  # True while the worker blocks in _ask_user
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
-        self.think: bool = True    # enable model thinking/reasoning mode; configurable via /think or --think
+        # /think, --think, prefs "think": off | on | low | medium | high.  What is
+        # actually sent depends on the model (effective_think / thinking_caps).
+        self.think_level: str = "on"
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
         # Per-role tool choices: mode -> names the user turned off (/tools <name>
@@ -527,12 +529,19 @@ class Harness:
         else:
             ctx = (f"context window not reported, compaction at {self.context_limit:,} tokens "
                    f"({'set by you' if self.context_fixed else 'default'})")
+        c.forget_thinking_caps()
+        caps = c.thinking_caps()
+        if caps.known:
+            ctx += ("; thinking: " + ("/".join(caps.choices()) if caps.choices()
+                                      else "not settable for this model"))
         if c.model != want_model:
             session_mod.save_prefs(model=c.model, provider=self.provider)
         self.emit_status()
         msg = f"Model: {c.model} ({where}) — {ctx}."
         if changes:
             msg += "\nUpdated from the saved settings: " + "; ".join(changes) + "."
+        if (note := self.think_note()):
+            msg += "\n" + note
         return msg
 
     def switch_backend(self, provider: str, host: str, model: str):
@@ -548,13 +557,68 @@ class Harness:
             self.client.set_model(model)
         self._reconcile_fixed_model()
         self._sync_context_limit()
+        self.client.forget_thinking_caps()
         self.emit_status()
 
     def set_model(self, model: str):
         """Switch model and re-sync context limit from the new model's capabilities."""
         self.client.set_model(model)
         self._sync_context_limit(emit=True)
+        self.client.forget_thinking_caps()
+        if (note := self.think_note()):
+            self.event_queue.put(ChatEvent("system", note))
         self.emit_status()
+
+    # ── thinking level ────────────────────────────────────────────────────────
+
+    @property
+    def think(self) -> bool:
+        """Whether thinking is asked for at all (old bool view of think_level)."""
+        return self.think_level != "off"
+
+    @think.setter
+    def think(self, value: bool | str):
+        self.think_level = value if isinstance(value, str) else ("on" if value else "off")
+
+    def _think_arg(self):
+        """think_level as chat() takes it; the adapter maps it onto the model."""
+        return {"off": False, "on": True}.get(self.think_level, self.think_level)
+
+    def effective_think(self) -> str:
+        """What the current model is actually sent for think_level:
+        off | on | low | medium | high, or n/a when it can't be set."""
+        sent = self.client.wire_think(self._think_arg())
+        return "n/a" if sent is None else ("on" if sent else "off") if isinstance(sent, bool) else sent
+
+    def think_choices(self) -> list[str]:
+        """The /think values the current model honours (all when unknown)."""
+        caps = self.client.thinking_caps()
+        return caps.choices() if caps.known else ["off", "on"]
+
+    def think_note(self) -> str:
+        """Why the model gets something other than think_level; "" when it doesn't."""
+        eff = self.effective_think()
+        if eff == self.think_level:
+            return ""
+        model = self.client.model
+        if eff == "n/a":
+            return (f"Thinking: {self.think_level} is kept, but {model} "
+                    f"doesn't take a thinking setting — nothing is sent.")
+        caps = self.client.thinking_caps()
+        why = ("the server doesn't say which levels it takes" if not caps.known
+               else "can't turn thinking off" if self.think_level == "off"
+               else "takes on/off only" if not caps.levels
+               else "takes " + "/".join(caps.levels))
+        return f"Thinking: {self.think_level} → {eff} ({model} {why})."
+
+    def refresh_thinking(self) -> bool:
+        """Re-read what the served model takes (a llama.cpp server may have been
+        relaunched with another model, or was still loading at startup).
+        True when anything the status bar shows changed."""
+        before = (self.client.model, self.client.thinking_caps())
+        self._reconcile_fixed_model()
+        caps = self.client.refresh_thinking_caps()
+        return (self.client.model, caps) != before
 
     # ── mode switching ────────────────────────────────────────────────────────
 
@@ -1379,6 +1443,10 @@ class Harness:
                 return
             self.messages.append({"role": "user", "content": text})
             self._turn_user = self.messages[-1]
+            if self.refresh_thinking():
+                self.emit_status()
+                if (note := self.think_note()):
+                    self.event_queue.put(ChatEvent("system", note))
             tools = [] if not self.tools_enabled else self._current_tools()
             outcome = self._run_loop(tools, 40 if self.mode == "design" else 100)
             if outcome == "plan_approved":
@@ -1453,7 +1521,7 @@ class Harness:
                 # Provider-specific outbound transforms (e.g. Ollama's Qwen XML
                 # escaping) happen inside the adapter's chat().
                 api_messages = [m for m in self.messages if m.get("role") != "thinking"]
-                think_this_turn = False if _suppress_think_next else self.think
+                think_this_turn = False if _suppress_think_next else self._think_arg()
                 _suppress_think_next = False
                 # num_ctx is the model's real window when known, so the model can
                 # use its full context; context_limit governs compaction separately.
@@ -2072,6 +2140,10 @@ class Harness:
             provider=self.provider,
             plan_progress=self._plan_progress(),
             guides=self.guides,
+            think_level=self.think_level,
+            think_effective=self.effective_think(),
+            think_choices=self.think_choices(),
+            think_known=self.client.thinking_caps().known,
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
             **self._index_status_fields(),
         )
@@ -2187,6 +2259,7 @@ class Harness:
         if self.context_fixed:
             self.context_limit = data.get("context_limit", self.context_limit)
         self._sync_context_limit()      # num_ctx still needs the model's real window
+        self.client.forget_thinking_caps()
         self.active_skills = data.get("active_skills", [])
         self.disabled_tools = {m: set(n) for m, n in (data.get("disabled_tools") or {}).items() if n}
         saved_plan = data.get("plan")

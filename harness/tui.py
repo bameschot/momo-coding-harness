@@ -1153,6 +1153,11 @@ class TUI:
             parts.append(idx)
         if ev.guides:
             parts.append("GUIDES")
+        # Only a non-default level, or one the model can't honour, earns a slot.
+        eff = ev.think_effective
+        if ev.think_level != "on" or eff != "on":
+            parts.append(f"THINK: {ev.think_level}"
+                         + ("" if eff == ev.think_level else f"→{eff}"))
         self._st_extra = "".join(f" | {p}" for p in parts)
         self._st_mode  = f"{ev.mode} [{ev.plan_progress}]" if ev.plan_progress else ev.mode
         self._st_model = ev.model

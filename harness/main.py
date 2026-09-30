@@ -13,6 +13,7 @@ from . import session as session_mod
 from .controller import Controller
 from .events import ChatEvent
 from .harness import Harness
+from .llm.base import THINK_LEVELS
 from .prompts import _MODE_TOOLS
 from .tui import run_tui
 from .web import tls as tls_mod
@@ -61,8 +62,11 @@ def main():
                              "(default: last /run-output-limit setting, else 5000)")
     parser.add_argument("--fresh", action="store_true", default=False,
                         help="Start a new session instead of restoring the last one")
+    parser.add_argument("--think", choices=THINK_LEVELS, default=None,
+                        help="Thinking/reasoning level: off, on, or low/medium/high for "
+                             "models that take one (default: last /think setting, else on)")
     parser.add_argument("--no-think", action="store_true", default=False,
-                        help="Disable model thinking/reasoning mode (default: on)")
+                        help="Same as --think off")
     parser.add_argument("--net", choices=("off", "on", "local"), default="off",
                         help="Let the model fetch URLs with fetch_url: 'on' reaches the "
                              "public internet, 'local' also allows localhost and the LAN "
@@ -158,8 +162,8 @@ def main():
     if args.context is not None and args.context < 256:
         parser.error("--context: expected at least 256")
     harness.max_tool_result = args.max_tool_result
-    if args.no_think:
-        harness.think = False
+    think = "off" if args.no_think else args.think or prefs.get("think")
+    harness.think_level = think if think in THINK_LEVELS else "on"
     if args.no_stream:
         harness.stream = False
     harness.net_access = args.net
