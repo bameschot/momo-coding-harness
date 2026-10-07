@@ -134,6 +134,8 @@ class OllamaClient(LLMClient):
             body["tools"] = tools
         if num_ctx is not None:
             body["options"] = {"num_ctx": num_ctx}
+        if self.max_output_tokens:
+            body.setdefault("options", {})["num_predict"] = self.max_output_tokens
         think = self.wire_think(think)
         if think is not None:
             body["think"] = think

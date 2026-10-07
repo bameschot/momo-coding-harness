@@ -12,7 +12,7 @@ from . import run_store as run_store_mod
 from . import session as session_mod
 from .controller import Controller
 from .events import ChatEvent
-from .harness import THINK_HISTORY, Harness
+from .harness import DEFAULT_MAX_OUTPUT_TOKENS, MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness
 from .llm.base import THINK_LEVELS
 from .prompts import _MODE_TOOLS
 from .tui import run_tui
@@ -57,6 +57,9 @@ def main():
     parser.add_argument("--tool-ref", choices=("full", "compact"), default=None,
                         help="System prompt tool reference: 'full' or 'compact' (one line per "
                              "tool) (default: last /tool-ref setting, else compact)")
+    parser.add_argument("--max-output-tokens", type=int, default=None, metavar="N",
+                        help="most tokens one model reply may take, 0 = no cap "
+                             "(default: last /max-output-tokens setting, else 25000)")
     parser.add_argument("--run-output-limit", type=int, default=None, metavar="N",
                         help="Chars in run_command's default view in run mode new "
                              "(default: last /run-output-limit setting, else 5000)")
@@ -222,6 +225,14 @@ def main():
             parser.error(f"--run-output-limit: expected at least {run_store_mod.MIN_LIMIT}")
         limit = run_store_mod.DEFAULT_LIMIT
     harness.run_output_limit = limit
+    cap = args.max_output_tokens if args.max_output_tokens is not None \
+        else prefs.get("max_output_tokens", harness.max_output_tokens)
+    if not isinstance(cap, int) or (cap and cap < MIN_MAX_OUTPUT_TOKENS) or cap < 0:
+        if args.max_output_tokens is not None:
+            parser.error(f"--max-output-tokens: expected 0 (no cap) or at least "
+                         f"{MIN_MAX_OUTPUT_TOKENS}")
+        cap = DEFAULT_MAX_OUTPUT_TOKENS
+    harness.max_output_tokens = cap
     harness.rebuild_system_prompt()     # the run_command schema depends on run_mode
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 

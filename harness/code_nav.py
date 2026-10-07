@@ -2226,6 +2226,34 @@ def find_symbol(name: str, directory: str = ".", kind: str | None = None, *, wor
     return "\n".join(hits) + (f"\n{note}" if note else "")
 
 
+def resolve_symbol(parsed: _Parsed, name: str, path: str, rel: str | None = None,
+                   fallback: str = "use read_file with start_line/end_line") -> Symbol | str:
+    """The one definition `name` means in a parsed file — a name, 'Class.method'
+    or a line number inside it — or the message saying why there is not one
+    (read_symbol and replace_symbol share it)."""
+    # A line number instead of a name: the definition containing that line.
+    # Closes the loop after a grep_files hit, a find_references hit or a
+    # traceback, all of which hand the model `file:line`.
+    line = line_query(name)
+    if line is not None:
+        if not 1 <= line <= max(len(parsed.lines), 1):
+            return f"ERROR: line {line} is outside {path} (1-{len(parsed.lines)})"
+        owner = _enclosing(parsed.symbols, line)
+        if owner is None:
+            return (f"(line {line} of {rel or path} is not inside any definition — "
+                    f"{fallback})")
+        return owner
+    found = [s for s in parsed.symbols if _matches(s, name)]
+    if not found:
+        known = ", ".join(s.qualname for s in parsed.symbols[:40]) or "(none)"
+        return f"ERROR: no definition named '{name}' in {path}. Definitions in this file: {known}"
+    if len(found) > 1:
+        cands = "\n".join(f"  L{s.start}-{s.end}  {s.kind} {s.qualname}" for s in found)
+        return (f"'{name}' matches {len(found)} definitions in {path} — pass a qualified name "
+                f"(e.g. Class.method) or {fallback}:\n{cands}")
+    return found[0]
+
+
 def read_symbol(path: str, name: str, *, workdir: Path) -> str:
     p = safe_path(path, workdir)
     if isinstance(p, str):
@@ -2238,28 +2266,9 @@ def read_symbol(path: str, name: str, *, workdir: Path) -> str:
         return f"ERROR: {e}"
     if parsed is None:
         return _unsupported(path)
-    # A line number instead of a name: read the definition containing that line.
-    # Closes the loop after a grep_files hit, a find_references hit or a
-    # traceback, all of which hand the model `file:line`.
-    line = line_query(name)
-    if line is not None:
-        if not 1 <= line <= max(len(parsed.lines), 1):
-            return f"ERROR: line {line} is outside {path} (1-{len(parsed.lines)})"
-        owner = _enclosing(parsed.symbols, line)
-        if owner is None:
-            return (f"(line {line} of {_rel(p, workdir)} is not inside any definition — "
-                    "use read_file with start_line/end_line)")
-        found = [owner]
-    else:
-        found = [s for s in parsed.symbols if _matches(s, name)]
-    if not found:
-        known = ", ".join(s.qualname for s in parsed.symbols[:40]) or "(none)"
-        return f"ERROR: no definition named '{name}' in {path}. Definitions in this file: {known}"
-    if len(found) > 1:
-        cands = "\n".join(f"  L{s.start}-{s.end}  {s.kind} {s.qualname}" for s in found)
-        return (f"'{name}' matches {len(found)} definitions in {path} — pass a qualified name "
-                f"(e.g. Class.method) or use read_file with start_line/end_line:\n{cands}")
-    s = found[0]
+    s = resolve_symbol(parsed, name, path, _rel(p, workdir))
+    if isinstance(s, str):
+        return s
     end = min(s.end, s.start + _MAX_SYMBOL_LINES - 1)
     body = "\n".join(f"{i:4}: {parsed.lines[i - 1]}" for i in range(s.start, end + 1)
                      if i - 1 < len(parsed.lines))

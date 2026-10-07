@@ -1761,23 +1761,9 @@ def _line_owner(index: ProjectIndex, line: int, path: str | None, workdir: Path)
             f'(next: read_symbol("{e.path}", "{owner.qualname}") reads it)')
 
 
-def index_text(query: str, path: str | None = None, regex: bool = False, *, workdir: Path,
-               index: ProjectIndex | None = None, cancel=None) -> str:
-    if (err := _ready(index, cancel)):
-        return err
-    if not query:
-        return "ERROR: query is empty"
-    if regex:
-        try:
-            rx = re.compile(query)
-        except re.error as e:
-            return f"ERROR: invalid regex: {e}"
-        lits = _regex_literals(query)
-    else:
-        rx = re.compile(re.escape(query), re.IGNORECASE)
-        lits = _WORD_STR.findall(query.lower())
-    ids = _trigram_ids(lits)
-    keep = _path_filter(path)
+def _text_candidates(index: ProjectIndex, ids, keep) -> tuple[list[tuple[str, list]], bool]:
+    """([(path, symbols)] of the files that can contain every trigram in ids,
+    whether every file had to be taken)."""
     with index._lock:
         use_sig = bool(ids) and index.components["trigrams"]
         cands = []
@@ -1794,7 +1780,54 @@ def index_text(query: str, path: str | None = None, regex: bool = False, *, work
             elif use_sig and not e.sig_bits:
                 continue     # no [a-z0-9_] trigram at all in this file
             cands.append((e.path, e.symbols))
-        scanned_all = not use_sig
+    return cands, not use_sig
+
+
+def find_line_text(index: ProjectIndex, text: str, skip: str | None = None, limit: int = 3,
+                   cancel=None) -> list[tuple[str, int]]:
+    """[(path, line)] of indexed files with a line containing `text` exactly,
+    other than `skip` — for edit_file's "this text is in another file".  The
+    caller has waited for the index to be fresh."""
+    ids = _trigram_ids(_WORD_STR.findall(text.lower()))
+    if not ids:
+        return []           # without a trigram every file would be read
+    cands, _ = _text_candidates(index, ids, lambda p: p != skip)
+    out: list[tuple[str, int]] = []
+    for i, (rel, _symbols) in enumerate(cands):
+        if cancel is not None and i % 50 == 0 and cancel.is_set():
+            break
+        try:
+            src = _read_source(index.root / rel)
+        except OSError:
+            continue
+        if text not in src:
+            continue
+        ln = next((n for n, line in enumerate(split_lines(src), 1) if text in line), None)
+        if ln is None:
+            continue
+        out.append((rel, ln))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def index_text(query: str, path: str | None = None, regex: bool = False, *, workdir: Path,
+               index: ProjectIndex | None = None, cancel=None) -> str:
+    if (err := _ready(index, cancel)):
+        return err
+    if not query:
+        return "ERROR: query is empty"
+    if regex:
+        try:
+            rx = re.compile(query)
+        except re.error as e:
+            return f"ERROR: invalid regex: {e}"
+        lits = _regex_literals(query)
+    else:
+        rx = re.compile(re.escape(query), re.IGNORECASE)
+        lits = _WORD_STR.findall(query.lower())
+    ids = _trigram_ids(lits)
+    cands, scanned_all = _text_candidates(index, ids, _path_filter(path))
     hits: list[tuple[str, int, str, object]] = []
     total = 0
     files_hit: dict[str, int] = {}

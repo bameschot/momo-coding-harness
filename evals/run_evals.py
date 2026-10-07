@@ -14,6 +14,10 @@ are statistical rather than pass/fail.  It lives outside tests/ so
                                                     # command output: /run-mode A/B
     python evals/run_evals.py --cache evals/.cache/runs.jsonl --runs 5
                                                     # reuse runs whose inputs did not change
+    python evals/run_evals.py --suite edit          # change requests, checked by running
+                                                    # the result (evals/edit/checks.py)
+    python evals/run_evals.py --suite edit --edit-features none
+                                                    # the edit tools without their extras
 
 --cache keeps every run under a fingerprint of everything that can change its
 outcome: the task, the files of the project it runs in, the model and settings,
@@ -51,7 +55,8 @@ sys.path.insert(0, str(REPO))
 if not os.environ.get("MOMO_EVAL_KEEP_HOME"):
     os.environ["HOME"] = tempfile.mkdtemp(prefix="momo_eval_home_")
 
-from evals.tasks import INDEX_TASKS, LANG_TASKS, SHELL_TASKS, TASKS  # noqa: E402
+from evals.edit.checks import run_check  # noqa: E402
+from evals.tasks import EDIT_TASKS, INDEX_TASKS, LANG_TASKS, SHELL_TASKS, TASKS  # noqa: E402
 from harness.harness import (Harness, ChatEvent, DoneEvent, ErrorEvent,  # noqa: E402
                              ToolCallEvent, ToolResultEvent)
 
@@ -60,14 +65,20 @@ _SHELL_SEARCH = re.compile(r"^\s*(grep|rg|ag|find|fd|ack)\b")
 # Modes whose tools can change files, and those tools.  Every eval task is a
 # question, so any file change is a behaviour failure (see "file changes").
 _WRITE_MODES = ("coding", "momo", "design")
-_WRITE_TOOLS = {"write_file", "edit_file", "append_to_file", "move_file", "delete_file"}
+_WRITE_TOOLS = {"write_file", "edit_file", "append_to_file", "move_file", "delete_file",
+                "replace_symbol", "edit_files"}
+_EDIT_TOOLS = {"edit_file", "replace_symbol", "write_file", "append_to_file", "edit_files"}
+# Tools that read a file back: after a successful edit of that file, a re-read
+# is what post-edit feedback is meant to save.
+_READ_BACK = {"read_file", "read_symbol", "grep_file", "code_outline", "index_file"}
+_EDIT_FEATURE_NAMES = ("feedback", "match", "symbol", "checks", "batch")
 # A command filtered through the shell: the model trimming output itself, which
 # /run-mode new's tail=/grep= are meant to replace (a pipe also hides the exit code).
 _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
 
 
 def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True,
-             run_mode="new", tool_ref="compact", think_history="off"):
+             run_mode="new", tool_ref="compact", think_history="off", edit_features=None):
     """One task, one fresh conversation.  Returns what the model did."""
     workdir = REPO / task.workdir
     scratch = None
@@ -87,6 +98,8 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     h.stream = False          # deltas would just duplicate the final ChatEvent
     h.think = think
     h.think_history = think_history
+    if edit_features is not None:
+        h.edit_features = frozenset(edit_features)   # ignored by a harness without them
     # Nobody is there to answer: without this a run that calls ask_user blocks forever.
     # The model mostly asks "want me to look into X too?" once it has answered, so
     # decline — an open-ended reply sent it exploring and its last message then
@@ -140,6 +153,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     t.join(timeout=timeout + 30)
     sub.close()
     h.shutdown_index()
+    edit = _edit_outcome(task, workdir, h.messages) if task.check else {}
     if scratch is not None:
         scratch.cleanup()
 
@@ -202,6 +216,85 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         "n_must": len(task.must),
         "err": err,
         "answer": answer,
+        **({"edit_features": sorted(edit_features)} if edit_features is not None else {}),
+        **edit,
+    }
+
+
+def _tool_pairs(messages) -> list[tuple[str, dict, str]]:
+    """(name, args, result) for every tool call in the conversation, from the
+    history itself: a successful write emits a diff event, not a result event,
+    so the event stream cannot pair them."""
+    out, pending = [], []
+    for m in messages:
+        if m.get("role") == "assistant":
+            pending = [(c["function"]["name"], c["function"].get("arguments") or {})
+                       for c in m.get("tool_calls") or []]
+        elif m.get("role") == "tool" and pending:
+            name, args = pending.pop(0)
+            out.append((name, args if isinstance(args, dict) else {}, str(m.get("content") or "")))
+    return out
+
+
+# What running the project leaves behind: not a change the model made.
+_TOOL_CACHES = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".momo"}
+
+
+def _files(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*")
+            if p.is_file() and not _TOOL_CACHES & set(p.parts)}
+
+
+def _edit_outcome(task, workdir: Path, messages) -> dict:
+    """An edit task's result: does the change work (the hidden check), what
+    else changed, and how the edit tools went."""
+    passed, detail = run_check(task.check, workdir)
+    before, after = _files(REPO / task.workdir), _files(workdir)
+    changed = sorted(f for f in set(before) | set(after) if before.get(f) != after.get(f))
+    syntax_ok = True
+    for f in changed:
+        if f.endswith(".py") and f in after:
+            try:
+                compile(after[f], f, "exec", dont_inherit=True)
+            except (SyntaxError, ValueError):
+                syntax_ok = False
+
+    def rel(path) -> str:
+        try:
+            return (workdir / str(path)).resolve().relative_to(workdir.resolve()).as_posix()
+        except (ValueError, OSError):
+            return str(path)
+
+    pairs = _tool_pairs(messages)
+    edits = [(n, a, r) for n, a, r in pairs if n in _EDIT_TOOLS]
+    turns = sum(1 for m in messages if m.get("role") == "assistant" and m.get("tool_calls"))
+    edited: set[str] = set()
+    rereads = 0
+    for n, a, r in pairs:
+        path = a.get("path")
+        if n in _EDIT_TOOLS and not r.startswith("ERROR") and path:
+            edited.add(rel(path))
+        elif n in _READ_BACK and path and rel(path) in edited:
+            rereads += 1
+    return {
+        "passed": passed, "check_detail": detail,
+        "changed": changed,
+        "collateral": [f for f in changed if f not in task.allowed],
+        "syntax_ok": syntax_ok,
+        "edit_calls": len(edits),
+        "edit_errors": sum(r.startswith("ERROR") for _, _, r in edits),
+        "not_found": sum("old_string not found" in r for _, _, r in edits),
+        "multi_match": sum("must match exactly once" in r for _, _, r in edits),
+        "tolerant": sum("(matched " in r for _, _, r in edits),
+        "full_rewrites": sum(n == "write_file" and rel(a.get("path", "")) in before
+                             for n, a, _ in edits),
+        "replace_symbol_calls": sum(n == "replace_symbol" for n, _, _ in edits),
+        "syntax_warnings": sum("no longer parses" in r for _, _, r in edits),
+        "use_warnings": sum("no longer defined" in r or "parameters changed" in r
+                            for _, _, r in edits),
+        "rereads_after_edit": rereads,
+        "turns": turns,
+        "edit_files_calls": sum(n == "edit_files" for n, _, _ in edits),
     }
 
 
@@ -221,7 +314,7 @@ def _reruns(calls) -> int:
 # Harness code whose behaviour reaches the model's tool results; the prompt and
 # tool schemas are fingerprinted separately, as rendered.
 _CODE_FILES = ("harness/tools.py", "harness/code_nav.py", "harness/harness.py",
-               "harness/net.py", "harness/run_store.py")
+               "harness/net.py", "harness/run_store.py", "harness/editing.py")
 _INDEX_CODE_FILES = ("harness/code_index.py",)
 
 
@@ -246,15 +339,19 @@ _env_cache: dict = {}
 
 
 def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
-                run_mode="new", tool_ref="compact", think_history="off") -> str:
+                run_mode="new", tool_ref="compact", think_history="off",
+                edit_features=None) -> str:
     """Everything that can change a run's outcome, hashed."""
-    key = (task.workdir, mode, index, route, run_mode, tool_ref)
+    key = (task.workdir, mode, index, route, run_mode, tool_ref,
+           None if edit_features is None else tuple(sorted(edit_features)))
     if key not in _env_cache:
         h = Harness(host=host, model=model, workdir=REPO / task.workdir, provider=provider)
         h.mode = mode
         h.index_route = route
         h.run_mode = run_mode
         h.tool_ref = tool_ref
+        if edit_features is not None:
+            h.edit_features = frozenset(edit_features)
         if index:
             h.set_index(True)
         prompt = h._build_system_prompt()
@@ -264,11 +361,14 @@ def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
         h.logger.close()
         code = hashlib.sha256()
         for f in _CODE_FILES + (_INDEX_CODE_FILES if index else ()):
-            code.update((REPO / f).read_bytes())
+            if (REPO / f).exists():          # a baseline worktree may predate a file
+                code.update((REPO / f).read_bytes())
         _env_cache[key] = hashlib.sha256("\0".join([
             prompt, schemas, served, code.hexdigest(), _project_hash(REPO / task.workdir),
         ]).encode()).hexdigest()
     spec = json.dumps({"id": task.id, "prompt": task.prompt, "must": list(task.must),
+                       **({"check": task.check, "allowed": list(task.allowed)} if task.check else {}),
+                       **({} if edit_features is None else {"edit_features": sorted(edit_features)}),
                        "ideal": sorted(task.ideal), "max_calls": task.max_calls,
                        "mode": mode, "think": think, "index": index, "provider": provider,
                        **({} if route else {"route": False}),
@@ -338,9 +438,10 @@ def summarise(rows):
         out.append(f"  first tool is index_*  {sum(t.startswith('index_') for t in firsts)}/{len(firsts)}")
     out.append(f"  ideal tool used  {sum(r['used_ideal'] for r in rows)}/{total}")
     out.append(f"  over call budget {sum(r['over_budget'] for r in rows)}/{total}")
-    changed = [r for r in rows if r.get("file_changes")]
-    out.append(f"  file changes     {sum(r['file_changes'] for r in changed)} in {len(changed)} runs  "
-               "(every task is a question — should be 0)")
+    changed = [r for r in rows if r.get("file_changes") and "passed" not in r]
+    if any("passed" not in r for r in rows):
+        out.append(f"  file changes     {sum(r['file_changes'] for r in changed)} in {len(changed)} "
+                   "runs  (every question task — should be 0)")
     out.append(f"  rejected calls   {sum(r['rejected_calls'] for r in rows)}  "
                "(malformed args — should be 0)")
     out.append(f"  coached calls    {sum(r['coached_calls'] for r in rows)}  "
@@ -356,6 +457,10 @@ def summarise(rows):
                    f"command_output {sum(r['command_output_calls'] for r in runs)}, "
                    f"self-piped {sum(r['self_piped'] for r in runs)}, "
                    f"reruns {sum(r['reruns'] for r in runs)}")
+    edit_rows = [r for r in rows if "passed" in r]
+    if edit_rows:
+        out.append("")
+        out.append(_summarise_edits(edit_rows))
     errs = [r for r in rows if r["err"]]
     if errs:
         out.append(f"  runs with errors {len(errs)}: " +
@@ -363,6 +468,47 @@ def summarise(rows):
     out.append("")
     out.append("Full tool-call census: " +
                ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1])))
+    return "\n".join(out)
+
+
+def _summarise_edits(rows) -> str:
+    """The edit suite: does the change work, and what did it take."""
+    out = [f"{'edit task':18s} {'idx':>3s} {'n':>2s} {'pass':>5s} {'collat':>6s} {'calls':>11s} "
+           f"{'edits':>5s} {'err':>4s} {'reread':>6s} {'rewr':>4s} {'secs':>6s}",
+           "-" * 80]
+    by: dict[tuple[str, bool], list] = {}
+    for r in rows:
+        by.setdefault((r["task"], r["index"]), []).append(r)
+    for (task, index), ds in by.items():
+        calls = [d["n_calls"] for d in ds]
+        out.append(f"{task:18s} {'on' if index else 'off':>3s} {len(ds):2d} "
+                   f"{sum(d['passed'] for d in ds):2d}/{len(ds):<2d} "
+                   f"{sum(bool(d['collateral']) for d in ds):6d} "
+                   f"{statistics.mean(calls):5.1f} ({min(calls)}-{max(calls)}) "
+                   f"{sum(d['edit_calls'] for d in ds):5d} {sum(d['edit_errors'] for d in ds):4d} "
+                   f"{sum(d['rereads_after_edit'] for d in ds):6d} "
+                   f"{sum(d['full_rewrites'] for d in ds):4d} "
+                   f"{statistics.mean(d['secs'] for d in ds):6.1f}")
+    n = len(rows)
+    tot = lambda k: sum(r.get(k, 0) for r in rows)
+    out.append("")
+    out.append(f"  passed           {sum(r['passed'] for r in rows)}/{n}")
+    out.append(f"  collateral       {sum(bool(r['collateral']) for r in rows)} runs changed files "
+               f"outside the task's")
+    out.append(f"  syntax broken    {sum(not r['syntax_ok'] for r in rows)} runs left a .py that "
+               f"does not compile")
+    out.append(f"  edit calls       {tot('edit_calls')}  errors {tot('edit_errors')} "
+               f"(not found {tot('not_found')}, several matches {tot('multi_match')})")
+    out.append(f"  tolerant matches {tot('tolerant')}   replace_symbol "
+               f"{tot('replace_symbol_calls')}")
+    out.append(f"  re-reads after an edit {tot('rereads_after_edit')}   whole-file rewrites "
+               f"{tot('full_rewrites')}")
+    out.append(f"  syntax warnings  {tot('syntax_warnings')}   leftover-use warnings "
+               f"{tot('use_warnings')}")
+    out.append(f"  model turns      {tot('turns')}   edit_files {tot('edit_files_calls')}")
+    fails = [f"{r['task']}: {r['check_detail']}" for r in rows if not r["passed"]]
+    if fails:
+        out.append("  failed checks:  " + "; ".join(sorted(set(f[:120] for f in fails)))[:1500])
     return "\n".join(out)
 
 
@@ -390,10 +536,14 @@ def main():
                     help="/run-mode for every run: new (saved log + views) or classic")
     ap.add_argument("--tool-ref", choices=("full", "compact"), default="compact",
                     help="system prompt tool reference style (/tool-ref A/B)")
-    ap.add_argument("--suite", choices=("nav", "index", "lang", "shell", "all"), default="nav",
+    ap.add_argument("--suite", choices=("nav", "index", "lang", "shell", "edit", "all"),
+                    default="nav",
                     help="nav = the code-navigation tasks (default), index = the code-index "
                          "use cases, lang = 3 tasks per language on evals/lang/<lang>/project, "
-                         "all = every task")
+                         "edit = change requests on evals/edit/project, all = every task")
+    ap.add_argument("--edit-features", default=None, metavar="LIST",
+                    help="what the edit tools add: 'all', 'none', or a comma list of "
+                         f"{', '.join(_EDIT_FEATURE_NAMES)} (default: the harness default)")
     ap.add_argument("--index", action="store_true",
                     help="turn the code index on, so the model gets the index_* tools")
     ap.add_argument("--no-index-route", dest="route", action="store_false", default=True,
@@ -410,12 +560,20 @@ def main():
     if "://" not in args.host:
         ap.error(f"--host needs a scheme, e.g. http://{args.host}")
 
+    every = TASKS + INDEX_TASKS + LANG_TASKS + SHELL_TASKS + EDIT_TASKS
     pool = {"nav": TASKS, "index": INDEX_TASKS, "lang": LANG_TASKS, "shell": SHELL_TASKS,
-            "all": TASKS + INDEX_TASKS + LANG_TASKS + SHELL_TASKS}[args.suite]
+            "edit": EDIT_TASKS, "all": every}[args.suite]
     tasks = pool
+    edit_features = None
+    if args.edit_features is not None:
+        ef = args.edit_features.strip().lower()
+        edit_features = (set(_EDIT_FEATURE_NAMES) if ef == "all" else set() if ef == "none"
+                         else {f.strip() for f in ef.split(",") if f.strip()})
+        if edit_features - set(_EDIT_FEATURE_NAMES):
+            ap.error(f"unknown edit feature(s): {', '.join(sorted(edit_features - set(_EDIT_FEATURE_NAMES)))}")
     if args.tasks:
         want = set(args.tasks)
-        pool = TASKS + INDEX_TASKS + LANG_TASKS + SHELL_TASKS
+        pool = every
         tasks = [t for t in pool if t.id in want]
         missing = want - {t.id for t in tasks}
         if missing:
@@ -435,7 +593,8 @@ def main():
                 fp = fingerprint(task, mode=mode, think=args.think, index=args.index,
                                  model=args.model, provider=args.provider, host=args.host,
                                  route=args.route, run_mode=args.run_mode,
-                                 tool_ref=args.tool_ref, think_history=args.think_history)
+                                 tool_ref=args.tool_ref, think_history=args.think_history,
+                                 edit_features=edit_features)
                 stored = [] if args.refresh else cache.get(fp, [])
             for i in range(args.runs):
                 if i < len(stored):
@@ -446,13 +605,17 @@ def main():
                                  provider=args.provider, mode=mode,
                                  think=args.think, timeout=args.timeout, index=args.index,
                                  route=args.route, run_mode=args.run_mode,
-                                 tool_ref=args.tool_ref, think_history=args.think_history)
+                                 tool_ref=args.tool_ref, think_history=args.think_history,
+                                 edit_features=edit_features)
                     source = ""
                     if cache_path and not r.get("err"):
                         with cache_path.open("a") as f:
                             f.write(json.dumps({"fp": fp, "record": r}) + "\n")
                 rows.append(r)
                 flag = "" if r["used_ideal"] else "  <- ideal tool not used"
+                if "passed" in r:
+                    flag = ("  PASS" if r["passed"] else f"  FAIL: {r['check_detail'][:80]}") + (
+                        f"  collateral: {', '.join(r['collateral'])}" if r["collateral"] else "")
                 print(f"[{len(rows):3d}] {task.id:22s} {mode:6s} run{i} "
                       f"{r['secs']:6.1f}s {r['n_calls']:2d} calls "
                       f"{len(r['hits'])}/{r['n_must']} facts{flag}"

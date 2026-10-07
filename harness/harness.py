@@ -14,7 +14,9 @@ from .llm import make_client
 from .logger import Logger
 from .plan import Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file, delete_plan_file
 from .tools import (ALL_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, NET_TOOLS,
-                    PLAN_EXECUTE_TOOLS, PLAN_INVESTIGATE_TOOLS, dispatch, render_tool_reference, with_index_tools, with_run_mode)
+                    PLAN_EXECUTE_TOOLS, PLAN_INVESTIGATE_TOOLS, dispatch, render_tool_reference,
+                    with_edit_features, with_index_tools, with_run_mode)
+from .editing import EDIT_FEATURES
 from . import run_store as run_store_mod
 from . import net as net_mod
 from . import search as search_mod
@@ -32,7 +34,7 @@ from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
 # after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
 # affected path ("move_file" uses src/dst and is handled separately).
 _MUTATING_TOOLS = {
-    "edit_file", "append_to_file",
+    "edit_file", "append_to_file", "replace_symbol",
     "write_file", "delete_file", "move_file",
 }
 
@@ -162,6 +164,9 @@ _CTX_CATEGORIES = (
 # Gemma 4 templates render it; "all": every turn still in history (Qwen3.8's
 # default); "off": none.
 THINK_HISTORY = ("off", "turn", "all")
+# /max-output-tokens: the most tokens one model reply may take (0 = no cap).
+DEFAULT_MAX_OUTPUT_TOKENS = 25_000
+MIN_MAX_OUTPUT_TOKENS = 256
 
 
 def _split_summary(text: str) -> tuple[str, str]:
@@ -268,6 +273,7 @@ class Harness:
         # actually sent depends on the model (effective_think / thinking_caps).
         self.think_level: str = "on"
         self.think_history: str = "turn"    # /think-history, see THINK_HISTORY
+        self.max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS   # /max-output-tokens, 0 = off
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
         # Per-role tool choices: mode -> names the user turned off (/tools <name>
@@ -277,6 +283,9 @@ class Harness:
         # /run-mode: "new" saves run_command output to a log and returns a view of
         # it (tail / grep / head+tail) plus command_output; "classic" returns it all.
         self.run_mode: str = "new"
+        # What the edit tools add to a plain edit (editing.EDIT_FEATURES); a set
+        # for A/B evals (evals/run_evals.py --edit-features), not a user setting.
+        self.edit_features: frozenset[str] = EDIT_FEATURES
         self.run_output_limit: int = run_store_mod.DEFAULT_LIMIT   # /run-output-limit
         self._run_store: run_store_mod.RunStore | None = None
         # Internet access for fetch_url: "off" | "on" (public hosts only) |
@@ -472,7 +481,7 @@ class Harness:
         if not body:
             return False  # no visible change — fall back to the plain result line
         op_map = {
-            "edit_file": "edit",
+            "edit_file": "edit", "replace_symbol": "edit",
             "append_to_file": "append", "write_file": "write",
             "delete_file": "delete",
         }
@@ -669,7 +678,7 @@ class Harness:
             tools = PLAN_EXECUTE_TOOLS
         else:
             tools = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
-        tools = with_run_mode(tools, self.run_mode)
+        tools = with_edit_features(with_run_mode(tools, self.run_mode), self.edit_features)
         if self.net_access != "off":
             # web_search's schema lists the loaded sources, so it is built per call.
             tools = tools + [search_mod.web_search_tool(t, self.search_sources)
@@ -691,7 +700,8 @@ class Harness:
                                              if t not in PLAN_INVESTIGATE_TOOLS]
         else:
             base = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
-        return with_run_mode(base, self.run_mode) + NET_TOOLS + INDEX_TOOLS
+        return (with_edit_features(with_run_mode(base, self.run_mode), self.edit_features)
+                + NET_TOOLS + INDEX_TOOLS)
 
     def tool_choices(self) -> list[dict]:
         """The current role's tools for the frontends' pickers:
@@ -915,7 +925,8 @@ class Harness:
                             index_route=self.index_route, read_budget=self._read_budget(),
                             run_mode=self.run_mode, run_store=self.run_store,
                             run_output_limit=self.run_output_limit,
-                            search_sources=self.search_sources)
+                            search_sources=self.search_sources,
+                            edit_features=self.edit_features)
         except Exception as e:
             return f"ERROR: {name} failed: {type(e).__name__}: {e}"
 
@@ -1405,6 +1416,7 @@ class Harness:
                                         "different moment."},
         ]
         try:
+            client.max_output_tokens = self.max_output_tokens or None
             reply = client.chat(msgs, [], think=False, num_ctx=num_ctx).content or ""
         except Exception:
             return []
@@ -1448,6 +1460,7 @@ class Harness:
                                         "(at most 6 words). Reply with the title only."},
         ]
         try:
+            client.max_output_tokens = self.max_output_tokens or None
             reply = client.chat(msgs, [], think=False, num_ctx=num_ctx).content or ""
         except Exception:
             return ""
@@ -1638,6 +1651,7 @@ class Harness:
                 # escaping) happen inside the adapter's chat().
                 api_messages = self._api_messages()
                 self.client.preserve_thinking = self._preserve_thinking()
+                self.client.max_output_tokens = self.max_output_tokens or None
                 think_this_turn = False if _suppress_think_next else self._think_arg()
                 _suppress_think_next = False
                 # num_ctx is the model's real window when known, so the model can
@@ -1743,7 +1757,8 @@ class Harness:
                                 # Disable thinking for the retry so it has budget to respond.
                                 _suppress_think_next = True
                                 self.event_queue.put(ChatEvent("system",
-                                    "Response cut off (context limit). Retrying without thinking."))
+                                    "Response cut off (context or /max-output-tokens limit). "
+                                    "Retrying without thinking."))
                                 reason = "cut_off"
                             elif raw_thinking:
                                 # Model reasoned but produced no output or tool call.
@@ -1850,6 +1865,10 @@ class Harness:
                 # post-edit diff can be built against its previous contents.
                 diff_old: str | None = None
                 diff_existed = False
+                # edit_files changes several files: one diff each.
+                multi_snaps = ({pth: self._read_text_safe(pth)
+                                for pth in tools_mod._edit_paths(args)}
+                               if name == "edit_files" and isinstance(args, dict) else None)
                 if name in _MUTATING_TOOLS:
                     snap_path = args.get("src") if name == "move_file" else args.get("path")
                     if snap_path:
@@ -1916,7 +1935,15 @@ class Harness:
                 # For mutating tools, show a diff of what changed on disk instead
                 # of the terse "OK" result. Falls back to ToolResultEvent on errors
                 # or no-op edits so failures stay visible.
-                if not self._emit_diff(name, args, result, diff_old, diff_existed):
+                shown = False
+                if multi_snaps is not None:
+                    if not result.startswith("ERROR"):
+                        for pth, (old_text, existed) in multi_snaps.items():
+                            shown = self._emit_diff("edit_file", {"path": pth}, result,
+                                                    old_text, existed) or shown
+                else:
+                    shown = self._emit_diff(name, args, result, diff_old, diff_existed)
+                if not shown:
                     self.event_queue.put(ToolResultEvent(name, result))
                 self.logger.log_tool_result(self.mode, self.client.model, name, len(result))
 
@@ -2252,6 +2279,7 @@ class Harness:
             run_confirm=self.run_confirm,
             run_mode=self.run_mode,
             run_output_limit=self.run_output_limit,
+            max_output_tokens=self.max_output_tokens,
             net_access=self.net_access,
             net_confirm=self.net_confirm,
             net_max_bytes=self.net_max_bytes,

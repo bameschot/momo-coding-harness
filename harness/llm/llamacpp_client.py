@@ -166,6 +166,8 @@ class LlamaCppClient(LLMClient):
                 | {"reasoning_effort": think}
         if self.preserve_thinking is not None:
             payload.setdefault("chat_template_kwargs", {})["preserve_thinking"] = self.preserve_thinking
+        if self.max_output_tokens:
+            payload["max_tokens"] = self.max_output_tokens
 
         client = self._client   # abort() swaps in a fresh one; keep reading this one
         if on_delta is None:

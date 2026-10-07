@@ -1,8 +1,8 @@
-import difflib
 import fnmatch
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import code_index, code_nav, net, search
+from . import code_index, code_nav, editing, net, search
 from . import run_store as run_store_mod
 from .paths import (BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, SKIP_DIRS, safe_entry_path,
                     safe_path, split_lines, walk_files)
@@ -21,6 +21,10 @@ from .paths import (BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, SKIP_DIRS, safe_ent
 _MAX_FIND_RESULTS    = 100
 _MAX_GREP_RESULTS    = 200
 _MAX_COMMAND_TIMEOUT = 900   # 15 minutes — upper bound for a single run_command
+# Without timeout= a command gets this long.  The model never passes timeout=, so a
+# default at the ceiling let its own infinite loop block a turn for 15 minutes
+# (edit evals, 2026-10-07); a build that needs longer is told how to ask for it.
+_DEFAULT_COMMAND_TIMEOUT = 120
 _MAX_SCAN_MB = MAX_SCAN_FILE_BYTES // 1_000_000
 
 
@@ -302,7 +306,7 @@ _RUN_COMMAND_CLASSIC = _fn("run_command",
     "each stream); exit code is appended when non-zero. A command that times out or is "
     "interrupted returns the end of its output so far.",
     {"command": {"type": "string", "description": "Shell command to execute (runs in the working directory)"},
-     "timeout": {"type": "integer", "description": f"Timeout in seconds (default and maximum: {_MAX_COMMAND_TIMEOUT} = {_MAX_COMMAND_TIMEOUT // 60} minutes)"}},
+     "timeout": {"type": "integer", "description": f"Timeout in seconds (default {_DEFAULT_COMMAND_TIMEOUT}, maximum {_MAX_COMMAND_TIMEOUT} = {_MAX_COMMAND_TIMEOUT // 60} minutes) — pass a longer one for a full build or test suite"}},
     ["command"])
 
 _RUN_COMMAND_NOTES = (
@@ -324,7 +328,7 @@ _RUN_COMMAND_FILE = _fn(
      "tail":    {"type": "integer", "description": "Only the last N lines (e.g. 30 for a test summary)"},
      "grep":    {"type": "string", "description": "Case-insensitive regex; only matching lines, numbered (e.g. \"error|fail\")"},
      "context": {"type": "integer", "description": "With grep: lines around each match"},
-     "timeout": {"type": "integer", "description": f"Seconds (default and maximum {_MAX_COMMAND_TIMEOUT})"}},
+     "timeout": {"type": "integer", "description": f"Seconds (default {_DEFAULT_COMMAND_TIMEOUT}, maximum {_MAX_COMMAND_TIMEOUT}); longer for a full build or test suite"}},
     ["command"])
 
 _COMMAND_OUTPUT = _fn(
@@ -362,6 +366,90 @@ def with_run_mode(tools: list[dict], mode: str) -> list[dict]:
     return out
 
 
+# edit_file comes in two variants, switched by the session's edit_features
+# (see with_edit_features): with "match" its description names what the extras do.
+_EDIT_FILE_CLASSIC = _fn("edit_file",
+    "Change text INSIDE an existing file: replace old_string with new_string. "
+    "Use this tool (not write_file) whenever you are modifying part of a file you have read. "
+    "By default it replaces exactly one occurrence and fails if old_string is not found "
+    "exactly once; set replace_all=true to replace every occurrence (e.g. renaming a symbol "
+    "throughout the file). "
+    "Copy old_string verbatim from read_file output; a leading line-number prefix (e.g. "
+    "'  12: ') is stripped automatically if you include it by mistake, and a single-occurrence "
+    "edit still matches when only indentation or surrounding whitespace differs. If old_string "
+    "is already absent because new_string is present, the tool reports the edit as already "
+    "applied rather than erroring — do not blindly retry. "
+    "Takes path, old_string, new_string, and optional replace_all — it does NOT take a "
+    "'content' argument (that is write_file).",
+    {"path": {"type": "string", "description": "File to modify"},
+     "old_string": {"type": "string", "description": "Exact text to find (copy it verbatim from read_file output)"},
+     "new_string": {"type": "string", "description": "Replacement text"},
+     "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default: false)"}},
+    ["path", "old_string", "new_string"])
+
+_EDIT_FILE = _fn("edit_file",
+    "Change text INSIDE an existing file: replace old_string with new_string. "
+    "Use this tool (not write_file) whenever you are modifying part of a file you have read. "
+    "By default it replaces exactly one occurrence and fails if old_string is not found "
+    "exactly once (the error lists where each occurrence is); set replace_all=true to replace "
+    "every occurrence (e.g. renaming a symbol throughout the file). "
+    "Copy old_string verbatim from read_file output; a leading line-number prefix (e.g. "
+    "'  12: ') is stripped automatically, and the edit still matches when only indentation, "
+    "spacing or quote style differs. The result shows the changed lines with their new line "
+    "numbers, so you do not need to read the file again to check the edit. If old_string "
+    "is already absent because new_string is present, the tool reports the edit as already "
+    "applied rather than erroring — do not blindly retry. "
+    "Takes path, old_string, new_string, and optional replace_all — it does NOT take a "
+    "'content' argument (that is write_file).",
+    {"path": {"type": "string", "description": "File to modify"},
+     "old_string": {"type": "string", "description": "Exact text to find (copy it verbatim from read_file output)"},
+     "new_string": {"type": "string", "description": "Replacement text"},
+     "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default: false)"}},
+    ["path", "old_string", "new_string"])
+
+_REPLACE_SYMBOL = [_fn("replace_symbol",
+    "Replace ONE whole function, method or class with new source, found by name — no "
+    "old_string to copy. new_source replaces exactly the lines read_symbol shows for that "
+    "name (decorators included); its indentation is adjusted to fit, so a method keeps its "
+    "place in the class. Use it to rewrite a definition; for a change of a few lines use "
+    "edit_file. An empty new_source deletes the definition. The result shows the new lines "
+    "with their line numbers.",
+    {"path":       {"type": "string", "description": "Source file containing the definition"},
+     "name":       {"type": "string", "description": "The definition to replace: 'parse', a qualified 'Parser.parse', or a line number inside it like '120'"},
+     "new_source": {"type": "string", "description": "The complete new definition, from its first line (decorator or signature) to its last"}},
+    ["path", "name", "new_source"])] if code_nav.AVAILABLE else []
+_EDIT_FILES = _fn("edit_files",
+    "Make several edits — in one file or across files — in ONE call: edits is a list of "
+    "{path, old_string, new_string} (add replace_all=true to an edit to replace every "
+    "occurrence), applied in order. Use it whenever you already know more than one change: "
+    "updating every caller after a signature change, the imports and uses of a renamed name, "
+    "two changes in one function. Each old_string must match like edit_file's; if any edit "
+    "fails, nothing is written and the error says which one, so fix it and send all the "
+    "edits again. The result lists every changed line with its new line number.",
+    {"edits": {"type": "array", "description": "The edits, in order: [{\"path\": ..., \"old_string\": ..., \"new_string\": ...}, ...]",
+               "items": {"type": "object",
+                         "properties": {"path": {"type": "string"},
+                                        "old_string": {"type": "string"},
+                                        "new_string": {"type": "string"},
+                                        "replace_all": {"type": "boolean"}},
+                         "required": ["path", "old_string", "new_string"]}}},
+    ["edits"])
+
+_EDIT_GROUP_TOOLS = {"replace_symbol": "symbol", "edit_files": "batch"}
+
+
+def with_edit_features(tools: list[dict], features) -> list[dict]:
+    """The tool list for the session's edit_features: edit_file described with
+    its extras when "match" is on, replace_symbol only with "symbol"."""
+    out = []
+    for t in tools:
+        name = t["function"]["name"]
+        if name in _EDIT_GROUP_TOOLS and _EDIT_GROUP_TOOLS[name] not in features:
+            continue
+        out.append(_EDIT_FILE if name == "edit_file" and "match" in features else t)
+    return out
+
+
 CODING_ONLY_TOOLS = [
     _fn("move_file",
         "Move or rename a file or directory. Both source and destination must be inside the "
@@ -380,24 +468,9 @@ CODING_ONLY_TOOLS = [
          "content": {"type": "string", "description": "Text to add at the end of the file."}},
         ["path", "content"]),
 
-    _fn("edit_file",
-        "Change text INSIDE an existing file: replace old_string with new_string. "
-        "Use this tool (not write_file) whenever you are modifying part of a file you have read. "
-        "By default it replaces exactly one occurrence and fails if old_string is not found "
-        "exactly once; set replace_all=true to replace every occurrence (e.g. renaming a symbol "
-        "throughout the file). "
-        "Copy old_string verbatim from read_file output; a leading line-number prefix (e.g. "
-        "'  12: ') is stripped automatically if you include it by mistake, and a single-occurrence "
-        "edit still matches when only indentation or surrounding whitespace differs. If old_string "
-        "is already absent because new_string is present, the tool reports the edit as already "
-        "applied rather than erroring — do not blindly retry. "
-        "Takes path, old_string, new_string, and optional replace_all — it does NOT take a "
-        "'content' argument (that is write_file).",
-        {"path": {"type": "string", "description": "File to modify"},
-         "old_string": {"type": "string", "description": "Exact text to find (copy it verbatim from read_file output)"},
-         "new_string": {"type": "string", "description": "Replacement text"},
-         "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default: false)"}},
-        ["path", "old_string", "new_string"]),
+    _EDIT_FILE_CLASSIC,
+    *_REPLACE_SYMBOL,
+    _EDIT_FILES,
 
     _fn("delete_file",
         "Permanently delete a single file (this cannot be undone). Works on files only — it "
@@ -905,233 +978,6 @@ def _move_file(src: str, dst: str, *, workdir: Path) -> str:
     return "OK"
 
 
-def _append_to_file(path: str, content: str, *, workdir: Path) -> str:
-    p = safe_path(path, workdir)
-    if isinstance(p, str):
-        return p
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as f:
-            f.write(content)
-    except OSError as e:
-        return f"ERROR: {e}"
-    return f"OK — appended {_size_note(content)} to {path}"
-
-
-# Leading "  12: " line-number prefix as emitted by read_file — models often copy
-# it into old_string even though it is not part of the file.
-_LINENO_PREFIX = re.compile(r'^\s*(\d+):(?:\s|$)')
-
-
-def _lineno_start(s: str) -> int | None:
-    """The first line number when every non-blank line of s carries read_file's
-    prefix, numbered consecutively; else None.  Real text like a dict entry
-    `    1: "one",` or a YAML `  200: OK` rarely passes that."""
-    first = None
-    for i, ln in enumerate(s.split("\n")):
-        if not ln.strip():
-            continue
-        m = _LINENO_PREFIX.match(ln)
-        if m is None:
-            return None
-        n = int(m.group(1)) - i
-        if first is None:
-            first = n
-        elif n != first:
-            return None
-    return first
-
-
-def _strip_lineno_prefixes(s: str, start: int | None = None) -> str:
-    """s without read_file's line-number prefixes, or s unchanged when they are
-    not there — or, with start, when they do not begin at that line (new_string
-    copied from the same read as old_string starts where it does)."""
-    first = _lineno_start(s)
-    if first is None or (start is not None and first != start):
-        return s
-    return "\n".join(_LINENO_PREFIX.sub("", ln, count=1) for ln in s.split("\n"))
-
-
-def _leading_ws(line: str) -> str:
-    return line[:len(line) - len(line.lstrip())]
-
-
-def _tolerant_replace(content: str, old_string: str, new_string: str) -> str | None:
-    """Whitespace-tolerant block replacement. Matches old_string against the file
-    line-by-line ignoring each line's leading/trailing whitespace, and only acts when
-    exactly one block matches (so it can never edit the wrong location).
-
-    Requires a 1:1 line edit (new_string has the same number of lines as old_string)
-    so each new line inherits the matched file line's actual leading whitespace — this
-    fixes the common case where the model reproduced the code but with wrong or missing
-    indentation.  An indentation change between an old and a new line is applied on
-    top of the file's indentation.  Returns the new file content, or None if there
-    is no safe unique match."""
-    file_lines = content.splitlines(keepends=True)
-    old_lines = old_string.strip("\n").split("\n")
-    new_lines = new_string.strip("\n").split("\n")
-    k = len(old_lines)
-    if k > len(file_lines) or len(new_lines) != k:
-        return None
-    old_sig = [ln.strip() for ln in old_lines]
-    file_sig = [ln.strip() for ln in file_lines]
-    matches = [i for i in range(len(file_lines) - k + 1) if file_sig[i:i + k] == old_sig]
-    if len(matches) != 1:
-        return None
-    i0 = matches[0]
-    rebuilt = []
-    for j in range(k):
-        raw = file_lines[i0 + j]
-        nl = raw[len(raw.rstrip("\r\n")):]        # preserve the original line ending
-        indent = _leading_ws(raw)                 # transfer the file's real indentation
-        old_ws, new_ws = _leading_ws(old_lines[j]), _leading_ws(new_lines[j])
-        if new_ws.startswith(old_ws):             # the edit indents this line further
-            indent += new_ws[len(old_ws):]
-        elif old_ws.startswith(new_ws):           # the edit dedents it
-            indent = indent[:max(0, len(indent) - (len(old_ws) - len(new_ws)))]
-        code = new_lines[j].strip()
-        rebuilt.append(indent + code + nl if code else nl)
-    return "".join(file_lines[:i0]) + "".join(rebuilt) + "".join(file_lines[i0 + k:])
-
-
-def _closest_lines_hint(content: str, old_string: str) -> str:
-    """Find the file lines most similar to old_string and return them verbatim so
-    the model can copy the exact text on its next attempt. Returns '' if nothing is
-    close enough."""
-    file_lines = content.splitlines()
-    old_nonblank = [ln for ln in old_string.split("\n") if ln.strip()]
-    if not old_nonblank or not file_lines:
-        return ""
-    # Match on the most distinctive (longest) line of old_string.
-    query = max(old_nonblank, key=lambda ln: len(ln.strip())).strip()
-    # get_close_matches runs the cheap quick_ratio filters before the full
-    # ratio, so a long file costs little; map back to the lines as written.
-    as_written: dict[str, str] = {}
-    for ln in file_lines:
-        as_written.setdefault(ln.strip(), ln)
-    best = [as_written[m][:200]
-            for m in difflib.get_close_matches(query, list(as_written), n=3, cutoff=0.6)]
-    if not best:
-        return ""
-    return (
-        " The closest lines in the file are below — copy old_string exactly from these, "
-        "including leading whitespace and WITHOUT the read_file line-number prefix:\n"
-        + "\n".join(best)
-    )
-
-
-def _edit_file(path: str, old_string: str, new_string: str,
-               replace_all: bool = False, *, workdir: Path) -> str:
-    p = safe_path(path, workdir)
-    if isinstance(p, str):
-        return p
-    try:
-        raw = p.read_bytes()
-    except FileNotFoundError:
-        return f"ERROR: file not found: {path}"
-    except OSError as e:
-        return f"ERROR: {e}"
-    # Decoding with errors="replace" and writing back would turn every non-UTF-8
-    # byte in the file into U+FFFD, not just the edited text.
-    try:
-        content = raw.decode("utf-8")
-    except UnicodeDecodeError as e:
-        return (f"ERROR: {path} is not valid UTF-8 (byte {e.start}), so edit_file cannot "
-                f"change it without corrupting it. Nothing was written.")
-    # A CRLF file is matched as LF (old_string from the model has LF) and written
-    # back as CRLF.  Mixed endings are matched as they are.
-    crlf = "\r\n" in content and content.count("\r\n") == content.count("\n")
-    if crlf:
-        content = content.replace("\r\n", "\n")
-        old_string, new_string = old_string.replace("\r\n", "\n"), new_string.replace("\r\n", "\n")
-
-    def save(text: str) -> str:
-        try:
-            p.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
-        except OSError as e:
-            return f"ERROR: {e}"
-        return ""
-
-    # An empty old_string "occurs" between every character: replace_all would
-    # splice new_string in everywhere.  Only an empty file may be filled this way.
-    if not old_string and content:
-        return ("ERROR: old_string is empty. Copy the text to replace from read_file; "
-                "to add text at the end use append_to_file, to replace the whole file "
-                "use write_file. Nothing was written.")
-
-    old, new = old_string, new_string
-    count = content.count(old)
-    # Fix 1: models often copy read_file's "  12: " line-number prefix into
-    # old_string. If the exact match fails, strip the prefix and retry.
-    # new_string loses a prefix only when it is numbered from the same line.
-    start = _lineno_start(old_string)
-    s_old = _strip_lineno_prefixes(old_string)
-    s_new = new_string if start is None else _strip_lineno_prefixes(new_string, start)
-    if count == 0:
-        if s_old != old and content.count(s_old) > 0:
-            old, new, count = s_old, s_new, content.count(s_old)
-
-    if count == 0:
-        # Fix 2: whitespace-tolerant unique block match (single-edit path only).
-        # Try the raw strings first, then the prefix-stripped variants.
-        if not replace_all:
-            for o, n in ((old_string, new_string), (s_old, s_new)):
-                nc = _tolerant_replace(content, o, n)
-                if nc == content:
-                    return ("No change: old_string matched only after ignoring whitespace, and "
-                            "new_string applied that way leaves the file as it is. To change "
-                            "indentation, copy old_string exactly from read_file.")
-                if nc is not None:
-                    return save(nc) or "OK — 1 change applied (matched with whitespace tolerance)"
-        # Already-applied detection: if old_string is gone but a substantial
-        # new_string is already present, the edit was very likely made on an
-        # earlier turn. Report that as a non-error so the model stops re-trying
-        # the same change (a common cause of repeated "not found" errors).  A
-        # short or repeated new_string proves nothing — `return None` sits in
-        # many places — so it must be distinctive, and the line is named.
-        for cand in (new_string, s_new):
-            if (cand and cand != old_string and content.count(cand) == 1
-                    and (cand.strip().count("\n") >= 1 or len("".join(cand.split())) >= 30)):
-                line = content[:content.index(cand)].count("\n") + 1
-                return (f"No change needed: the file already contains new_string at line "
-                        f"{line} — this edit appears to have been applied already.")
-        return "ERROR: old_string not found in file." + _closest_lines_hint(content, old_string)
-
-    if replace_all:
-        return save(content.replace(old, new)) or f"Replaced {count} occurrence(s)"
-    # Default: require exactly one match so the model can't accidentally replace
-    # the wrong occurrence when the same string appears multiple times.
-    if count > 1:
-        return f"ERROR: old_string found {count} times; must match exactly once (set replace_all=true to replace all)"
-    return save(content.replace(old, new, 1)) or "OK — 1 change applied"
-
-
-def _size_note(content: str) -> str:
-    lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-    return f"{lines} line{'s' if lines != 1 else ''}, {len(content.encode('utf-8'))} bytes"
-
-
-def _write_file(path: str, content: str, *, workdir: Path) -> str:
-    p = safe_path(path, workdir)
-    if isinstance(p, str):
-        return p
-    # A small model that doubts its write landed rewrites the same file again and
-    # again; say so plainly rather than silently writing identical bytes.
-    try:
-        if p.is_file() and p.read_text(encoding="utf-8") == content:
-            return f"No change: {path} already contains exactly this content."
-    except (OSError, UnicodeDecodeError):
-        pass
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-    except OSError as e:
-        return f"ERROR: {e}"
-    # The harness inspects last_tool by name (not return value), but the model
-    # uses this confirmation — with concrete size — to know the write landed.
-    return f"Written: {path} ({_size_note(content)})"
-
-
 def _delete_file(path: str, *, workdir: Path) -> str:
     p = safe_entry_path(path, workdir)
     if isinstance(p, str):
@@ -1223,13 +1069,15 @@ def _web_refusal(command: str, net_access: str) -> tuple[str | None, str]:
 
 
 def _clamp_timeout(timeout) -> int:
-    """Clamp to the 15-minute ceiling; fall back to the ceiling for missing/invalid
-    values so a hung command can never block the worker thread indefinitely."""
+    """Clamp to the 15-minute ceiling; missing or invalid values get the
+    default, so a hung command can never block the worker thread for long."""
     try:
         timeout = int(timeout)
     except (TypeError, ValueError):
-        return _MAX_COMMAND_TIMEOUT
-    return _MAX_COMMAND_TIMEOUT if timeout <= 0 or timeout > _MAX_COMMAND_TIMEOUT else timeout
+        return _DEFAULT_COMMAND_TIMEOUT
+    if timeout <= 0:
+        return _DEFAULT_COMMAND_TIMEOUT
+    return min(timeout, _MAX_COMMAND_TIMEOUT)
 
 
 def _exec(command: str, timeout: int, workdir: Path, cancel, out, err):
@@ -1271,7 +1119,7 @@ def _exec(command: str, timeout: int, workdir: Path, cancel, out, err):
             return proc, stopped
 
 
-def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, tail: int | None = None,
+def _run_command(command: str, timeout: int | None = None, tail: int | None = None,
                  grep: str | None = None, context: int = 0, *, workdir: Path,
                  net_access: str = "off", cancel=None, run_mode: str = "classic",
                  run_store: "run_store_mod.RunStore | None" = None,
@@ -1279,10 +1127,11 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, tail: int | 
     refusal, note = _web_refusal(command, net_access)
     if refusal:
         return refusal
+    defaulted = timeout is None
     timeout = _clamp_timeout(timeout)
     if run_mode != "classic" and run_store is not None:
         return note + _run_to_log(command, timeout, workdir, cancel, run_store,
-                                  run_output_limit, tail, grep, context)
+                                  run_output_limit, tail, grep, context, defaulted)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         proc, stopped = _exec(command, timeout, workdir, cancel, out, err)
         if proc is None:
@@ -1298,10 +1147,20 @@ def _run_command(command: str, timeout: int = _MAX_COMMAND_TIMEOUT, tail: int | 
         tail_text = "\n".join(parts)
         if len(tail_text) > _STOPPED_TAIL_CHARS:
             tail_text = "…" + tail_text[-_STOPPED_TAIL_CHARS:]
-        return f"ERROR: {stopped}" + (f"\n[output before it stopped]\n{tail_text}" if tail_text else "")
+        return (f"ERROR: {stopped}" + _longer(stopped, defaulted)
+                + (f"\n[output before it stopped]\n{tail_text}" if tail_text else ""))
     if proc.returncode != 0:
         parts.append(f"[exit code: {proc.returncode}]")
     return note + ("\n".join(parts) or "(no output)")
+
+
+def _longer(stopped: str, defaulted: bool) -> str:
+    """For a command the default timeout stopped: how to give it longer."""
+    if not (defaulted and stopped.startswith("command timed out")):
+        return ""
+    return (f"\n(it ran with the default {_DEFAULT_COMMAND_TIMEOUT}s limit — if it really "
+            f"needs longer, e.g. a full build or test suite, run it again with timeout= up to "
+            f"{_MAX_COMMAND_TIMEOUT}; a quick check that hangs is stuck, not slow)")
 
 
 def _read_log(path: Path) -> str:
@@ -1319,7 +1178,8 @@ def _log_view(text: str, limit: int, tail, grep, context, start_line=None, end_l
     return body, default and len(text) > limit
 
 
-def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, context) -> str:
+def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, context,
+                defaulted=False) -> str:
     """/run-mode new: stdout and stderr in order in one log file, and a bounded
     view of it back, ending with the log's full path for command_output."""
     run_id, path = store.new_log()
@@ -1332,8 +1192,8 @@ def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, con
     body, hint = _log_view(text, limit, tail, grep, context)
     foot = run_store_mod.footer(path, text, proc.returncode, hint or bool(stopped), stopped)
     if stopped:
-        return f"ERROR: {stopped}\n[output before it stopped]\n{body}\n{foot}" if text \
-            else f"ERROR: {stopped}\n{foot}"
+        head = f"ERROR: {stopped}" + _longer(stopped, defaulted)    # the log path stays last
+        return f"{head}\n[output before it stopped]\n{body}\n{foot}" if text else f"{head}\n{foot}"
     return f"{body or '(no output)'}\n{foot}"
 
 
@@ -1365,7 +1225,8 @@ def _command_output(path: str, grep: str | None = None, context: int = 0,
 # clear error messages before Python's TypeError exposes internal function names.
 _SCHEMAS = {t["function"]["name"]: t["function"]["parameters"]
             for t in (READ_ONLY_TOOLS + CODE_NAV_TOOLS + INDEX_TOOLS + SHARED_TOOLS
-                      + CODING_ONLY_TOOLS + NET_TOOLS + [_RUN_COMMAND_FILE, _COMMAND_OUTPUT])}
+                      + CODING_ONLY_TOOLS + NET_TOOLS + [_RUN_COMMAND_FILE, _COMMAND_OUTPUT,
+                                                         _EDIT_FILE])}
 _REQUIRED_ARGS: dict[str, list[str]] = {n: p["required"] for n, p in _SCHEMAS.items()}
 _KNOWN_ARGS: dict[str, set[str]] = {n: set(p["properties"]) for n, p in _SCHEMAS.items()}
 _ARG_TYPES: dict[str, dict[str, str]] = {      # tool -> {arg: JSON schema type}
@@ -1380,10 +1241,11 @@ _EXECUTORS = {
     "grep_file":          _grep_file,
     "grep_files":         _grep_files,
     "grep_extract":       _grep_extract,
-    "write_file":          _write_file,
+    "write_file":         editing.write_file,
     "move_file":          _move_file,
-    "append_to_file":     _append_to_file,
-    "edit_file":          _edit_file,
+    "append_to_file":     editing.append_to_file,
+    "edit_file":          editing.edit_file,
+    "edit_files":         editing.edit_files,
     "delete_file":        _delete_file,
     "run_command":        _run_command,
     "command_output":     _command_output,
@@ -1396,6 +1258,7 @@ if code_nav.AVAILABLE:
         "code_outline":       code_nav.code_outline,
         "find_symbol":        code_nav.find_symbol,
         "read_symbol":        code_nav.read_symbol,
+        "replace_symbol":     editing.replace_symbol,
         "find_references":    code_nav.find_references,
         "file_dependencies":  code_nav.file_dependencies,
         "index_search":       code_index.index_search,
@@ -1413,6 +1276,8 @@ if code_nav.AVAILABLE:
 # run_command needs to know whether /net is off, to steer curl/wget; cancel
 # lets Esc stop a long command or scan; the index tools get the live index.
 _INJECTED = {
+    **{n: ("index", "cancel", "edit_features")
+       for n in ("edit_file", "replace_symbol", "write_file", "edit_files")},
     "fetch_url":   ("net_access", "net_max_bytes", "net_max_chars", "cancel"),
     "web_search":  ("net_access", "net_max_bytes", "net_max_chars", "cancel", "search_sources"),
     "add_search_source": ("net_access", "net_max_bytes", "cancel", "search_sources"),
@@ -1425,6 +1290,7 @@ _INJECTED = {
 # Tools that change files: their paths are re-indexed right away, so the next
 # index query does not depend on the stat-diff throttle to see the change.
 _WRITES_PATHS = {"write_file": ("path",), "edit_file": ("path",), "append_to_file": ("path",),
+                 "replace_symbol": ("path",),
                  "delete_file": ("path",), "move_file": ("src", "dst")}
 
 
@@ -1449,13 +1315,29 @@ def _coerce_args(name: str, args: dict) -> dict:
 
 
 # The argument that carries text headed for the disk.
-_BODY_ARG = {"write_file": "content", "append_to_file": "content", "edit_file": "new_string"}
+_BODY_ARG = {"write_file": "content", "append_to_file": "content", "edit_file": "new_string",
+             "replace_symbol": "new_source"}
 _PLACEHOLDER_RE = re.compile(r"^\s*\[written to [^\]]*\]\s*$")
 # Notes the harness splices into tool results (compaction trim, size cutoff).
 # Content carrying one was rebuilt from a shortened result: writing it would
 # silently replace the missing middle of the file with the note.
 _CUT_MARKER_RE = re.compile(r"\[… [\d,]+ chars removed by context compaction …\]"
                             r"|\.\.\. \(truncated after \d+ chars of \d+ — ")
+
+
+def _edit_list(edits) -> list:
+    """edit_files' edits as a list, also when they came as a JSON string."""
+    if isinstance(edits, str):
+        try:
+            edits = json.loads(edits)
+        except ValueError:
+            return []
+    return edits if isinstance(edits, list) else [edits] if isinstance(edits, dict) else []
+
+
+def _edit_paths(args: dict) -> list[str]:
+    return [e["path"] for e in _edit_list(args.get("edits"))
+            if isinstance(e, dict) and isinstance(e.get("path"), str)]
 
 
 def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
@@ -1465,18 +1347,23 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              index_route: bool = True, read_budget: int | None = None,
              run_mode: str = "classic", run_store: "run_store_mod.RunStore | None" = None,
              run_output_limit: int = run_store_mod.DEFAULT_LIMIT,
-             search_sources: "search.SourceRegistry | None" = None) -> str:
+             search_sources: "search.SourceRegistry | None" = None,
+             edit_features=editing.EDIT_FEATURES) -> str:
     """read_budget: characters one read_file may return (None = no limit).
     run_mode "new" with a run_store saves run_command output to a log (/run-mode).
-    search_sources: the session's web_search sources (None = the default set)."""
+    search_sources: the session's web_search sources (None = the default set).
+    edit_features: what the edit tools add to a plain edit (editing.EDIT_FEATURES)."""
     more = {"read_budget": read_budget, "run_mode": run_mode, "run_store": run_store,
-            "run_output_limit": run_output_limit, "search_sources": search_sources}
+            "run_output_limit": run_output_limit, "search_sources": search_sources,
+            "edit_features": edit_features}
     if index is not None and index_route and name in _ROUTED:
         routed = _route_to_index(name, args, workdir, index, cancel)
         if routed is not None:
             return routed
     result = _dispatch(name, args, workdir, net_access, net_max_bytes, net_max_chars, index,
                        cancel, more)
+    if name == "run_command" and _NO_PYTHON_RE.search(result) and shutil.which("python3"):
+        result += "\n(note: there is no `python` command here — use python3)"
     if index is not None and name == "grep_files" and not result.startswith("ERROR"):
         result = _index_note_for_grep(result, index)     # a hint, routing or not
     if index is not None and not result.startswith("ERROR"):
@@ -1484,6 +1371,8 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
     if index is not None:
         if name in _WRITES_PATHS:
             index.invalidate([args.get(k) for k in _WRITES_PATHS[name] if isinstance(args.get(k), str)])
+        elif name == "edit_files":
+            index.invalidate(_edit_paths(args))
         elif name == "run_command":
             index.mark_dirty()
     return result
@@ -1496,6 +1385,8 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
 # line that says so and names the index tool to call next time.  Regex searches,
 # and anything the index has no answer for (git-ignored, binary, not indexed),
 # still go to the disk.
+
+_NO_PYTHON_RE = re.compile(r"\bpython: (?:command )?not found")
 
 _ROUTED = {"grep_files", "find_files"}
 _REGEX_ONLY = set("^$*+?{}[]|()")
@@ -1617,7 +1508,7 @@ def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_byt
               net_max_chars: int, index, cancel, more: dict | None = None) -> str:
     more = {"read_budget": None, "run_mode": "classic", "run_store": None,
             "run_output_limit": run_store_mod.DEFAULT_LIMIT, "search_sources": None,
-            **(more or {})}
+            "edit_features": editing.EDIT_FEATURES, **(more or {})}
     fn = _EXECUTORS.get(name)
     if fn is None:
         return f"ERROR: unknown tool '{name}'"
@@ -1631,11 +1522,18 @@ def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_byt
                   if k in args}
         # dispatch() invalidates the index for this path under write_file's name.
         return "(note: routed write_file to edit_file) " + _dispatch(
-            "edit_file", routed, workdir, net_access, net_max_bytes, net_max_chars, index, cancel)
+            "edit_file", routed, workdir, net_access, net_max_bytes, net_max_chars, index, cancel,
+            more)
 
     # Sessions saved before the harness stopped eliding write content hold
     # "[written to <path>]" in place of past file bodies, and a model reading that
     # history copies it.  Never let the placeholder reach the disk.
+    if name == "edit_files":
+        for i, e in enumerate(_edit_list(args.get("edits")), 1):
+            body = e.get("new_string") if isinstance(e, dict) else None
+            if isinstance(body, str) and (_PLACEHOLDER_RE.match(body) or _CUT_MARKER_RE.search(body)):
+                return (f"ERROR: edit {i}'s new_string holds a harness note or history placeholder, "
+                        f"not file text — nothing was written. Copy the real text from read_file.")
     field = _BODY_ARG.get(name)
     body = args.get(field) if field else None
     if isinstance(body, str) and _PLACEHOLDER_RE.match(body):
@@ -1727,6 +1625,10 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "index_status":   {},
     "write_file":     {"path": "hello.py", "content": "print('hello!')"},
     "edit_file":      {"path": "main.py", "old_string": "existing line", "new_string": "replacement line"},
+    "edit_files":     {"edits": [{"path": "src/api.py", "old_string": "load(path)", "new_string": "load(path, strict=True)"},
+                                 {"path": "src/cli.py", "old_string": "load(args.file)", "new_string": "load(args.file, strict=True)"}]},
+    "replace_symbol": {"path": "src/parser.py", "name": "Parser.parse",
+                       "new_source": "    def parse(self, text):\n        return self._parse(text.strip())\n"},
     "append_to_file": {"path": "notes.md", "content": "\n## New section\n"},
     "move_file":      {"src": "old/path.py", "dst": "new/path.py"},
     "delete_file":    {"path": "old-file.py"},

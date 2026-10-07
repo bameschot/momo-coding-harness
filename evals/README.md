@@ -306,3 +306,219 @@ its own store's file).
 In the first attempt it fixed the fixture's planted bugs, and every later run
 chased failures that no longer existed (100 and 81 calls). Isolated tasks run in
 a fresh temp copy of their workdir.
+
+## Editing (`harness/editing.py`, `edit_bench.py`, `--suite edit`)
+
+The edit tools add four things to a plain replace, each named in
+`Harness.edit_features` so it can be switched off (`--edit-features none|all|a,b`):
+**feedback** (the changed lines with their new numbers, a syntax warning, "No change"
+for an edit that changes nothing), **match** (tolerant matching for a changed line count, quotes and spacing;
+errors that list each occurrence or show the closest block), **symbol** (`replace_symbol`,
+and a pointer to it when an edit_file copied most of a definition) and **checks** (uses
+left behind by a rename or signature change, from the index or a bounded scan;
+old_string found in another file; definitions dropped by `write_file`).
+
+**Without a model**: `python evals/edit_bench.py` puts 8 real edits through 10
+copying slips and checks 4 must-refuse cases (gate: `tests/test_edit_bench.py`):
+
+| | features off (= before) | on |
+|---|---|---|
+| correct | 45/66 | 63/66 |
+| written wrongly | 0 | 0 |
+| refused (all with the block to copy) | 21 | 3 |
+| must-refuse cases edited | 0 | 0 |
+
+The first version wrote 6 edits wrongly. In those cases the model's strings had lost
+their indentation (every line flat), or it indented in 2-space steps in a 4-space or
+tab file. Now the indentation ratio is read from the matched lines (or each side's
+indent unit), and strings with no indentation structure are refused rather than guessed.
+
+**With the model** (Qwen3.5-9B-Q4_0, llama.cpp, `--think-history turn`, 3 runs per
+cell, 2026-10-07). Both arms ran in clean worktrees of HEAD; *new* = HEAD + this change.
+Six change requests on `evals/edit/project`, each checked by hidden tests
+(`evals/edit/checks.py`). The index only matters for the cross-file tasks, so they
+also ran with `--index`:
+
+```bash
+python evals/run_evals.py --suite edit --runs 3 --think-history turn
+python evals/run_evals.py --suite edit --index --tasks rename-across signature-change --runs 3 --think-history turn
+```
+
+| task | index | before: pass, calls (min-max) | after: pass, calls (min-max) |
+|---|---|---|---|
+| ambiguous-edit | off | 3/3, 9.0 (8-10) | 3/3, 6.0 (5-7) |
+| nested-branch | off | 3/3, 9.3 (9-10) | 2/3, 7.3 (5-9) |
+| two-edits | off | 3/3, 10.7 (8-12) | 3/3, 12.0 (11-14) |
+| rewrite-function | off | **0/3**, 19.3 (9-29) | **2/3**, 19.7 (9-33) |
+| rename-across | off | 3/3, 25.3 (24-26) | 3/3, 29.3 (23-36) |
+| signature-change | off | 3/3, 22.7 (16-32) | 3/3, 23.7 (17-34) |
+| rename-across | on | 3/3, 26.7 (25-30) | 3/3, 22.7 (20-25) |
+| signature-change | on | 2/3, 26.7 (17-46) | 3/3, 22.7 (18-27) |
+
+| totals | index off: before → after | index on: before → after |
+|---|---|---|
+| passed | 15/18 → 16/18 | 5/6 → 6/6 |
+| tool calls | 289 → 294 | 160 → 136 |
+| wall time | 1,704 s → 1,574 s | 726 s → 550 s |
+| tool output | 121 KB → 127 KB | 74 KB → 59 KB |
+| edit errors | 2 → 0 | 0 → 0 |
+| re-reads of a file after editing it | 40 → 36 | 33 → 16 |
+| whole-file rewrites of an existing file | 0 → 0 | 4 → 1 |
+| collateral changes / broken .py left | 0 / 0 → 0 / 0 | 0 / 0 → 0 / 0 |
+
+What the sessions show (every message, result and reasoning was kept in the eval HOME)
+— more modest than the totals suggest:
+- **replace_symbol did not cause the rewrite passes.** The failing runs also replaced
+  the whole function, through a 28-line edit_file old_string. Whether `'h'` raised
+  ValueError was the model's logic, i.e. sampling. What replace_symbol saves is
+  copying the old text (output tokens): 5 of the 6 edit_file rewrites did that copy.
+- **The index-on "−15% calls" is one outlier.** A 46-call baseline run (which
+  failed) is a third of that arm's total; without it both arms average ≈22.7
+  calls/run. What does hold with the index on: whole-file read_file 59 → 33 and
+  read_symbol 3 → 11, and the leftover-use list fired in every rename/signature run.
+- **Edit errors 2 → 0** (both arms index off), and no collateral changes anywhere.
+- **The index-off warning was misleading.** It listed only the edited file's own uses
+  (`gross` in pricing.py), and because that list was non-empty the find_references
+  pointer was dropped. In one rename run the model then updated only the imports
+  and found the missed call sites through failing tests (29 calls vs 23–25).
+- **The index-on list included a false positive**: `ledger.calc_tax()` — the
+  `Ledger.calc_tax` method the task says to leave alone — was listed as a use of the
+  removed function in all three runs. The model left it alone only because the
+  prompt said so.
+- **Re-reads after an edit are a final check after the tests pass** ("Let me verify
+  the final file content"). The post-edit snippet does not replace that.
+- **`within=` was never used, and no edit hit "found N times"**: the model always
+  copied enough context. (Removed in the follow-up.)
+- **21% of all run_command calls (40/191) were `python: command not found`**, about
+  one per run, in both arms: this Mac has only `python3`.
+- The one new failure (nested-branch) was an exact-match edit whose new_string dropped
+  the `else:` branch; the result showed only the new lines, so nothing said so.
+
+Three runs per cell moves a pass rate by a third with one run, so read the per-run
+tool use above, not just the pass counts. Collateral excludes tool caches
+(`.pytest_cache`, `__pycache__`). The model runs pytest and leaves them behind.
+
+### Follow-up (2026-10-07): fixes from the sessions, measured by replay
+
+Changes:
+- The leftover-use list without the index comes from a bounded scan of the project
+  (≤1 s / 5,000 files; it says when it stopped early). It is never the edited file's
+  uses alone.
+- A removed top-level function no longer counts `obj.name()` calls on an object; a
+  call on an imported module (`pricing.calc_tax()`, aliases included) still counts.
+- The environment section says `run it as python3` when there is no `python`, and a
+  `python: command not found` result gets a one-line note.
+- Edit results listed the old lines the edit removed — dropped again after R1 below
+  showed no effect.
+- run_command's default timeout is 120 s (was the 900 s maximum); a command the default
+  stops is told it can pass `timeout=` up to 900.
+- An edit_file that copied most of a definition points at replace_symbol.
+- `within=` was removed.
+
+**Replay A/B** (`python evals/replay.py`). A real session is cut right after one tool
+result. The project is rebuilt as it was at that point, and the model continues
+from the same prefix with the recorded result (A) or the current code's result (B).
+Scored by the hidden check; 10 samples per variant:
+
+| replay | A | B |
+|---|---|---|
+| R1: the edit result lists the removed `else:` branch | 0/10 pass, 2.5 calls | 0/10 pass, 3.1 calls |
+| R2: index off, leftover uses from the whole project (not just the file) | 10/10, 15.5 calls (9-18) | 10/10, 13.5 calls (11-18) |
+
+R1: no effect. The model runs the visible tests (which do not cover the other zones),
+sees them pass and stops, whether or not the result names the deleted lines. R2:
+about 2 calls fewer after the rename; the bigger gain is that the list is complete
+and no longer includes the `Ledger.calc_tax` trap.
+
+**Short rerun** (current code, 3 runs per cell; compare with the A/B above):
+
+| | baseline | A/B new arm | follow-up |
+|---|---|---|---|
+| index off: passed | 15/18 | 16/18 | 17/18 |
+| index off: calls | 289 | 294 | 277 |
+| index off: `python ...` commands (command not found) | 18 | 16 | **2** |
+| index off: run_command calls | 64 | 83 | 53 |
+| index on: passed | 5/6 | 6/6 | 6/6 |
+| index on: calls | 160 | 136 | 160 |
+| index on: `python ...` commands | 6 | 6 | **0** |
+| collateral changes / broken .py left | 0 | 0 | 0 |
+
+The index-on calls went back up because of a bug the rerun exposed. Two
+signature-change runs sent an edit_file whose new_string equalled old_string (the
+model meant to add a missing `}`). The tool answered "OK — 1 change applied — lines
+removed", and with the file already broken there was no syntax warning. The model
+concluded its edits were not landing and fell back to write_file (6 whole-file
+rewrites, 29 and 35 calls). Fixed: an identical edit answers "No change … Line N still
+reads: …", and an error still sitting next to the changed lines is reported as
+"still does not parse — Nothing here fixed it yet". Replay R3
+(`evals/edit/replays/signature-noop-edit.json`, cut at that edit, 10 samples per variant):
+
+| R3 | A: "OK — lines removed" | B: "No change" + "still does not parse" |
+|---|---|---|
+| passed | 9/10 | 9/10 |
+| calls | mean 23.2, median 18.5 (13-41) | mean 22.5, median 19 (9-41) |
+| fell back to write_file | 7/10 samples (20 calls) | **3/10 samples (12 calls)** |
+
+The truthful result cuts the write_file fallback it was aimed at by more than half. Pass
+rate and calls are unchanged: what remains is the model's own trouble with nested quotes
+in `f"Pay {format_price(total, "EUR")}"`, which no tool message fixes.
+
+**Runaway replies.** A replay sample stalled for 80 minutes: llama.cpp was
+generating one reply at 125,641 tokens and counting. The harness sent no output limit
+and waits on a non-streamed reply with no read timeout. Every request now carries a
+reply cap, `/max-output-tokens` (default 25,000, `max_tokens` for llama.cpp,
+`num_predict` for Ollama). A capped reply ends with `done_reason: length`, which the
+loop already retries without thinking.
+
+Wall time is not compared here. The Mac slept twice during the run, freezing the
+model server mid-request (600–1,700 s "responses" with 64 output tokens). One
+rewrite run also spent 15 minutes on its own infinite loop: run_command's default
+timeout is its maximum, 900 s, and the model never passes `timeout=`.
+
+### Fewer turns per edit (2026-10-07): edit_files, rename_symbol, the test command
+
+Sessions showed one edit per model turn: 662 of 746 turns carried a single tool call. A
+rename took 8 sequential edit_file calls and a signature change 5–8, and 2.8 calls per
+run went to finding the tests. Added:
+- `edit_files`: many edits, in any files, in one call, all or nothing
+- `rename_symbol`: a definition and all its uses in one call, syntax-aware
+- a `Tests:` line in the Environment section with the project's test command
+
+**Same-code A/B** (Qwen3.5-9B, N=3, `--think-history turn`, under caffeinate):
+A = `--edit-features feedback,match,symbol,checks --no-test-command`, B = `--edit-features all`.
+
+| index off | A turns / calls | B turns / calls |
+|---|---|---|
+| ambiguous-edit | 6.0 / 6.0 | 3.7 / 3.7 |
+| nested-branch | 7.0 / 7.7 | 6.0 / 6.0 |
+| two-edits | 8.3 / 8.3 | 7.7 / 7.7 |
+| rewrite-function | 11.3 / 11.3 | 16.0 / 16.3 (one 26-call run) |
+| rename-across | 18.3 / 22.3 | **10.7 / 13.0** |
+| signature-change | 12.0 / 18.3 | **7.0 / 10.7** |
+
+| totals | index off: A → B | index on (rename + signature): A → B |
+|---|---|---|
+| passed | 16/18 → 15/18 | 6/6 → 6/6 |
+| model turns | 189 → **153 (−19%)** | 85 → **62 (−27%)** |
+| tool calls | 222 → **172 (−23%)** | 122 → **89 (−27%)** |
+| edit calls | 54 → 28 | 43 → 18 |
+| re-reads of an edited file | 25 → 7 | 15 → 10 |
+| wall time | 1,350 s → 1,440 s | 597 s → 522 s |
+| collateral / broken files / edit errors | 0 / 0 / 0 → 0 / 0 / 0 | 0 / 0 / 0 → 0 / 0 / 0 |
+
+- **edit_files did the work.** It was used in 11 of the 12 B rename/signature runs.
+  rename_symbol was used once: the model renames with edit_files (the leftover-use
+  warning points there).
+- **Every B failure is the model's own logic.** Two rewrite-function runs left `'h'`
+  parseable (as in A); one signature run gave `currency` a default although the task
+  says required — the same failure as a baseline run earlier.
+- **The test line was adopted but did not cut discovery.** 31 of 33 B test runs used
+  the suggested `python3 -m unittest discover -s tests -t .` (A ran pytest). But calls
+  that look at the tests barely moved (47 → 41 index off, 6 → 0 index on): the model
+  still lists `tests/` and reads the test file to see what is covered.
+- Wall time with the index off went up despite fewer turns. One 26-call rewrite run
+  accounts for it.
+
+After this A/B **rename_symbol and the test-command line were removed** (user's call).
+rename_symbol was used once in 12 runs, for a job edit_files already did; the test line
+changed which command ran, not how many calls it took. edit_files stays.

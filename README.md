@@ -50,6 +50,7 @@ Options:
 | `--think` | last used / `on` | Thinking level: `off`, `on`, or an effort level (`low`, `medium`, `high`, `xhigh`, …) for models that take one. See [Thinking level](#thinking-level) |
 | `--no-think` | off | Same as `--think off` |
 | `--think-history` | last used / `turn` | Send the model's own reasoning back to it: `off`, `turn` (since your last message) or `all`. See [Sending reasoning back](#sending-reasoning-back) |
+| `--max-output-tokens` | last setting, else `25000` | Most tokens one model reply may take, reasoning included; `0` = no cap. See `/max-output-tokens` |
 | `--no-stream` | off | Wait for complete replies instead of streaming them as they are generated (streaming is on by default, in the TUI and the web UI) |
 | `--web` / `--no-web` | on | Serve the browser chat UI alongside the TUI |
 | `--web-host` | `127.0.0.1` | Interface for the web UI (a non-loopback host requires an access token) |
@@ -270,6 +271,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Send reasoning back | `/think-history off\|turn\|all` | In the same `THINK` menu: whether the model sees its own earlier reasoning. Shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
 | Command output | `/run-mode`, `/run-output-limit` | View → Context: save command output to a log and return a view, and the view's size in characters. Shared with the TUI |
+| Reply cap | `/max-output-tokens` | View → Context → Reply cap: the most tokens one model reply may take (default 25000, `off` for none). Shared with the TUI |
 | Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index-max-files`, `/index-workers`, `/index-filter`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, the file limit, build workers, Save now / Load, and Filter… (edit which files are indexed). Shared with the TUI |
 | Play a sound | — | An audible cue (a synthesised kitten mew), focused or not, see [Notifications](#notifications) |
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
@@ -473,7 +475,7 @@ Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep
 
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
-Available tools: all design tools + `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`, and the code-navigation tools (`code_outline`, `find_symbol`, `read_symbol`, `find_references`)
+Available tools: all design tools + `edit_file`, `edit_files`, `replace_symbol`, `delete_file`, `move_file`, `append_to_file`, `run_command`, and the code-navigation tools (`code_outline`, `find_symbol`, `read_symbol`, `find_references`)
 
 ### Plan mode
 
@@ -643,12 +645,26 @@ Offered only while internet access is on (`/net on`), so the model never sees a 
 |---|---|
 | `move_file` | Move or rename a file (parent dirs created automatically) |
 | `append_to_file` | Append text to a file (creates if missing) |
-| `edit_file` | Change text inside a file: replace `old_string` with `new_string`. One occurrence by default (errors if it matches zero or multiple times); pass `replace_all: true` to replace every occurrence. |
+| `edit_file` | Change text inside a file: replace `old_string` with `new_string`. One occurrence by default (errors if it matches zero or multiple times, and lists where each match is); pass `replace_all: true` to replace every occurrence. See [Editing files](#editing-files). |
+| `edit_files` | Several edits — in one file or across files — in ONE call: `edits` is a list of `{path, old_string, new_string}` applied in order. All are written or none (the error names the edit that failed); the result lists every changed line. Turns a signature change's 5–8 edit calls into one. |
+| `replace_symbol` | Replace one whole function, method or class, found by name (or a line number inside it) — no `old_string` to copy. The new source replaces exactly the lines `read_symbol` shows, decorators included, and is re-indented to fit; an empty `new_source` deletes the definition. Needs tree-sitter. |
 | `delete_file` | Delete a file |
-| `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 15 minutes (900s) by default; the model may request a shorter timeout, and 900s is the hard cap. In run mode `new` (the default) the output is saved to a log and the model gets a view of it: `tail=N` for the last N lines, `grep="regex"` for the matching lines, or by default the whole output when it is short and its beginning and end when it is long. See [Command output](#command-output). |
+| `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 2 minutes (120s) unless the model passes `timeout=` (up to 900s, the hard cap); a command the default stopped is told how to ask for longer. In run mode `new` (the default) the output is saved to a log and the model gets a view of it: `tail=N` for the last N lines, `grep="regex"` for the matching lines, or by default the whole output when it is short and its beginning and end when it is long. See [Command output](#command-output). |
 | `command_output` | Search or page through the saved output of an earlier `run_command` without running it again: `grep=`, `tail=`, `start_line=`/`end_line=`. Takes the log path printed at the end of that result. Only in run mode `new`. |
 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
+
+### Editing files
+
+A small model copies `old_string` with slips, edits blind, and forgets the other places a change has to reach. So the edit tools (`harness/editing.py`) do more than replace text:
+
+- **They show the result.** A successful `edit_file` / `replace_symbol` returns the changed lines with three lines of context and their *new* line numbers, in `read_file`'s format, plus the definition they are in. An edit whose new text equals the old says "No change" with the line as it reads now, instead of "OK". The model can check the edit and copy from it without reading the file again.
+- **They warn about broken syntax.** If the file parsed before the edit and does not after it, the result says which line (Python is compiled; other languages use tree-sitter). An error that is still there next to the lines an edit touched is reported too — an attempted fix that did not fix it. The edit stays written, so a change made in two steps still works. `write_file` checks too.
+- **They find what the model meant.** `old_string` still matches when only indentation, spacing or quote style differs, and when the replacement has a different number of lines. Lines the edit keeps are written back from the file, not from the model's copy. A match must be unique. If the model's text has lost its indentation, the edit is refused rather than guessed. A miss shows the closest block of the file with the first differing line; several matches are listed with the definition each is in.
+- **They point at what else must change.** If an edit removes or renames a definition, or changes its parameter list, the result lists the uses still left. With the code index on, that comes from the index; without it, from a scan of the project's files (1 s / 5,000 files at most, and the result says when it stopped early). A call on another object that only shares the name (`ledger.calc_tax()` after removing the function `calc_tax`) is not counted. An `edit_file` that copied most of a definition to rewrite it points at `replace_symbol`. An `old_string` that is in a different file says which one. A `write_file` that drops definitions the file had says so.
+- **They batch.** A small model makes one edit per turn, and each turn is a full model round-trip. `edit_files` takes every edit of a change (any files) in one call and writes all of them or none, and the leftover-use list points at it. In the eval it cut model turns by 19% with the index off and 27% with it on, and a rename from 22 tool calls to 13.
+
+`evals/edit_bench.py` scores the matcher without a model, and `python evals/run_evals.py --suite edit` runs change requests against one. See `evals/README.md`.
 
 `grep_files` returns at most 200 matches; `find_files` returns at most 100 files. Results over the cap include a trailer explaining how many were omitted.
 
@@ -916,6 +932,17 @@ never collects it. Sampling is not pinned — the harness sends no `temperature`
 `seed` — so use `--runs 3` and read the `(min-max)` spread, not the mean.
 `evals/README.md` records the baseline.
 
+Edits have two measures as well. `python evals/edit_bench.py` needs no model: it puts real
+edits through typical copying slips (line numbers, lost or halved indentation, tabs as spaces,
+curly quotes, spacing) and counts how many come out exactly right, how many are refused, and
+how many are written wrongly (gated at zero by `tests/test_edit_bench.py`). `python
+evals/run_evals.py --suite edit` asks the model for six changes on `evals/edit/project`. Each
+change is checked by running hidden tests on the result (`evals/edit/checks.py`). The run also
+records collateral changes, edit errors, re-reads after an edit and whole-file rewrites.
+`--edit-features none` switches the edit tools' extras off for an A/B. `python evals/replay.py` tests one tool
+result in isolation: it takes a saved eval session (`evals/edit/replays/`), rebuilds the project at that
+result, and lets the model continue with the result worded the old and the new way, ten times each.
+
 Command output has its own two measures. `python evals/run_output_bench.py` needs no
 model: it replays generated outputs (a pytest run with failures, a build, git log,
 pip, find) through the real `run_command` and reports, per view, how many
@@ -1003,7 +1030,7 @@ The system message is assembled by `Harness.system_prompt_sections()` (`harness/
 |---|---|---|---|
 | 1 | Code index banner | While the code index is on | `_index_banner` in `harness/prompts.py`: one line steering to the `index_*` tools |
 | 2 | Role | Always | `roles/<mode>.md` with `{workdir}` filled in; in plan mode also the draft plan, or, while executing, the coder role + plan-execution rules + the live plan with `▶` on the current step |
-| 3 | Environment | Always | `_environment`: working directory, today's date, OS/shell and git branch (when `run_command` is offered), and whether internet access is on or off |
+| 3 | Environment | Always | `_environment`: working directory, today's date, OS/shell and git branch (when `run_command` is offered), how to run Python when there is no `python` command, and whether internet access is on or off |
 | 4 | Project guides | With `/guides on` and a guide file | `AGENTS.md`, `CLAUDE.md`, `MOMO.md`, … from the workdir |
 | 5 | Skill: &lt;name&gt; | One per loaded skill | `skills/<name>.md` |
 | 6 | Tool reference (N tools) | Always | Generated from the tool schemas; `/tool-ref full\|compact` picks the style |
@@ -1150,6 +1177,7 @@ Type any command in the input bar:
 | `/tool-result <n>` | Set the cap (e.g. `/tool-result 8000`); `0` = unlimited |
 | `/run-mode [new\|classic]` | How `run_command` returns output: saved to a log with a view (`new`, default) or all of it (`classic`). See [Command output](#command-output) |
 | `/run-output-limit [n]` | Characters in `run_command`'s default view (default 5000) |
+| `/max-output-tokens [n\|off]` | Most tokens one model reply may take, reasoning included (default 25000, saved; `--max-output-tokens N`, 0 = off). A model caught in a repetition loop is cut off there; the harness then retries without thinking. Without a cap, one eval reply ran to 125k tokens and held the turn for 80 minutes |
 | `/compact` | Compact context — removes old messages and summarises them with the LLM |
 | `/fast-compact` | Compact context without LLM summarisation (instant) |
 | `/clear` | Clear conversation history and discard any active plan (removes `.momo-plan.md`, like `/plan cancel`) |
@@ -1198,7 +1226,7 @@ What each model takes differs. Qwen3.5 and Gemma 4 take on/off only. gpt-oss tak
 - **A model without thinking gets nothing sent.** It used to receive `think: true` regardless.
 - **If the server doesn't say** (an older build, or one still loading), momo sends on/off as before and says so: `the server doesn't say which levels it takes`.
 - **It's re-read at every message you send, and on `/think`.** A llama.cpp server relaunched with another model, or one that was still loading when momo started, is picked up without restarting momo.
-- **Token budgets aren't a setting.** llama.cpp's `--reasoning-budget` is fixed when the server starts, like the context size, and Ollama has none.
+- **There's no separate reasoning budget.** llama.cpp's `--reasoning-budget` is fixed when the server starts, like the context size, and Ollama has none. `/max-output-tokens` (default 25000) caps reasoning and answer together, per reply.
 
 The startup check reports what the model takes (`thinking: off/on`). The check runs again when you switch model or host.
 
@@ -1324,7 +1352,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 
 | Path | What | Notes |
 |---|---|---|
-| `prefs.json` | Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
+| `prefs.json` | Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode and output view, reply cap (`/max-output-tokens`) | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
 | `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |

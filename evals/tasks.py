@@ -26,6 +26,10 @@ class Task:
     # (it fixed the fixture's planted bugs, and every later run then chased a
     # failure that no longer existed), and runs must not see each other's changes.
     isolate: bool = False
+    # Edit tasks: the hidden check (evals/edit/checks.py SCRIPTS) that decides
+    # whether the change works, and the files the change may touch.
+    check: str = ""
+    allowed: tuple[str, ...] = ()
 
 
 TASKS: list[Task] = [
@@ -348,4 +352,61 @@ SHELL_TASKS: list[Task] = [
                 "in inventory.py is wrong, and what does it do wrong? Don't change any files.",
          ideal=_RUN, must=("value",), max_calls=3, modes=("coding",), workdir=_SHELL, isolate=True,
          note="run, then read the function; a rerun of the suite is waste"),
+]
+
+
+# Edits (evals/edit/project, a small stdlib shop package): each task asks for
+# one change aimed at one way an edit goes wrong, and a hidden check
+# (evals/edit/checks.py) runs the result.  Run in coding mode on a fresh copy.
+# The index only matters for the cross-file tasks, so the A/B runs all six
+# with the index off and rename-across / signature-change also with --index:
+#     python evals/run_evals.py --suite edit
+#     python evals/run_evals.py --suite edit --index --tasks rename-across signature-change
+_EDIT = "evals/edit/project"
+_NO_TESTS = " Don't change the tests."
+
+
+def _edit(id, prompt, check, allowed, max_calls, note=""):
+    return Task(id=id, prompt=prompt + _NO_TESTS, ideal=frozenset({"edit_file", "replace_symbol"}),
+                must=(), note=note, max_calls=max_calls, modes=("coding",), workdir=_EDIT,
+                isolate=True, check=check, allowed=allowed)
+
+
+EDIT_TASKS: list[Task] = [
+    _edit("ambiguous-edit",
+          "In shop/inventory.py, make Inventory.items_with_tag return an empty list instead of "
+          "None when no item has the tag. The other methods must keep returning None.",
+          "ambiguous_edit", ("shop/inventory.py",), 4,
+          note="`return None` appears in four methods: the edit must pick the right one"),
+    _edit("nested-branch",
+          "Add a 'uk' zone to shipping_cost in shop/shipping.py: a base fee of 7.0 plus 1.5 per "
+          "kg, and a parcel to the uk heavier than 20 kg costs an extra 10.0.",
+          "nested_branch", ("shop/shipping.py",), 4,
+          note="an elif with nested lines, three levels deep: the line count changes"),
+    _edit("two-edits",
+          "Change apply_discount in shop/checkout.py so that it raises ValueError when the total "
+          "is negative, and so that the result is never below 0.",
+          "two_edits", ("shop/checkout.py",), 5,
+          note="one change at the top, one at the bottom of the same function"),
+    _edit("rewrite-function",
+          "Rewrite parse_duration in shop/util.py: it must return the duration in SECONDS and "
+          "accept days, hours, minutes and seconds in that order, e.g. '2d', '1h30m', '45s', "
+          "'1d2h3m4s' (case and spaces ignored). Empty or malformed input, or a number without "
+          "a unit, must raise ValueError.",
+          "rewrite_function", ("shop/util.py",), 5,
+          note="a 30-line function rewritten whole"),
+    _edit("rename-across",
+          "Rename the function calc_tax in shop/pricing.py to compute_tax and update every use "
+          "of it in the project. Ledger.calc_tax in shop/reports.py is a different method: "
+          "leave it as it is.",
+          "rename_across", ("shop/pricing.py", "shop/cart.py", "shop/checkout.py",
+                            "shop/reports.py"), 10,
+          note="uses in 3 other files, and a same-named method that must not change"),
+    _edit("signature-change",
+          "Give format_price in shop/pricing.py a second, required parameter currency, and make "
+          "it return the amount with two decimals, a space and the currency, e.g. '12.50 EUR'. "
+          "Update every caller in the project to pass \"EUR\".",
+          "signature_change", ("shop/pricing.py", "shop/cart.py", "shop/checkout.py",
+                               "shop/reports.py"), 10,
+          note="callers in 3 files, one of them calling it twice on a line"),
 ]

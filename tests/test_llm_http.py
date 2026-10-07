@@ -207,6 +207,15 @@ class Ollama(_Base):
         self.assertIs(body["stream"], True)
         self.assertEqual(body["tools"], [{"type": "function"}])
 
+    def test_reply_cap_sent_as_num_predict(self):
+        c = self.client()
+        c.max_output_tokens = 25000
+        c.chat([{"role": "user", "content": "hi"}], [], num_ctx=4096)
+        self.assertEqual(Stub.requests[-1]["body"]["options"], {"num_ctx": 4096, "num_predict": 25000})
+        c.max_output_tokens = None
+        c.chat([{"role": "user", "content": "hi"}], [])
+        self.assertNotIn("options", Stub.requests[-1]["body"])
+
     def test_non_stream(self):
         r = self.client().chat([{"role": "user", "content": "hi"}], [])
         self.assertEqual((r.content, r.thinking), ("Hello", "hmm"))
@@ -408,6 +417,16 @@ class LlamaCppThinking(_Base):
         c.preserve_thinking = None
         c.chat([{"role": "user", "content": "hi"}], [], think=True)
         self.assertNotIn("preserve_thinking", Stub.requests[-1]["body"]["chat_template_kwargs"])
+
+    def test_reply_cap_sent_as_max_tokens(self):
+        Stub.props = {"chat_template": self.QWEN38}
+        c = make_client("llamacpp", self.url, "m")
+        c.max_output_tokens = 25000
+        c.chat([{"role": "user", "content": "hi"}], [], think=True)
+        self.assertEqual(Stub.requests[-1]["body"]["max_tokens"], 25000)
+        c.max_output_tokens = None
+        c.chat([{"role": "user", "content": "hi"}], [], think=True)
+        self.assertNotIn("max_tokens", Stub.requests[-1]["body"])
 
     def test_template_without_switch_gets_nothing(self):
         self.assertIsNone(self.kwargs(True, "{{ messages }}"))

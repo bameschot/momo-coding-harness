@@ -524,6 +524,9 @@ function applyStatus(s) {
   $("#run-mode").checked = s.run_mode !== "classic";
   const rl = $("#run-output-limit");
   if (document.activeElement !== rl && s.run_output_limit) rl.value = String(s.run_output_limit);
+  const mo = $("#max-output-tokens");
+  if (document.activeElement !== mo && s.max_output_tokens != null)
+    mo.value = s.max_output_tokens ? String(s.max_output_tokens) : "off";
   $("#net-confirm").disabled = !netOn;
   const mb = $("#net-max-bytes");
   if (document.activeElement !== mb) mb.value = formatSize(s.net_max_bytes);

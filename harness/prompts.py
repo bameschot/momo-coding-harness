@@ -3,6 +3,7 @@ harness appends (code index rules, plan execution rules)."""
 from __future__ import annotations
 
 import platform
+import shutil
 from datetime import date
 from pathlib import Path
 
@@ -169,6 +170,15 @@ def _nav_rules(role: str, tool_names: set[str], index: bool) -> str:
                    "you actually need. Once a search has answered the question, stop searching — "
                    "put any doubt (\"this is a test fixture\") in your answer instead of hunting "
                    "for a better match.")
+    if has("edit_file") and (has("replace_symbol") or has("edit_files")):
+        parts = ["`edit_file` changes a few lines"]
+        if has("edit_files"):
+            parts.append("`edit_files` makes several changes — in any files — in ONE call (every "
+                         "caller after a signature change, two changes in one function)")
+        if has("replace_symbol"):
+            parts.append("`replace_symbol` rewrites a whole definition by name")
+        bullets.append("**Editing code:** " + "; ".join(parts) + ". They show the changed lines "
+                       "with their new line numbers — no need to read the files again to check.")
     if has("run_command"):
         bullets.append(_NO_SHELL_SEARCH)
     return "\n\n".join(out) + "\n\n" + "\n".join(f"- {b}" for b in bullets)
@@ -241,12 +251,23 @@ def _system_line() -> str:
     return f"{system}; run_command uses the system shell"
 
 
+def _python_line() -> str | None:
+    """How to run Python here, when it is not the obvious `python`: in evals
+    a fifth of all commands were `python: command not found` on a Mac that
+    only has python3."""
+    if shutil.which("python") or not shutil.which("python3"):
+        return None
+    return "run it as `python3` (there is no `python` command)"
+
+
 def _environment(workdir: Path, tool_names: set[str], net_access: str) -> str:
     lines = [f"- Working directory: `{workdir}`. Every path is relative to it; a path that "
              "escapes it with `..` is rejected.",
              f"- Today: {date.today().isoformat()}"]
     if "run_command" in tool_names:
         lines.append(f"- System: {_system_line()}")
+        if (py := _python_line()):
+            lines.append(f"- Python: {py}")
         lines.append(f"- Git: {_git_state(workdir)}")
     if net_access != "off" and "fetch_url" in tool_names:
         lines.append("- Internet: on — use fetch_url / web_search for documentation, APIs and "

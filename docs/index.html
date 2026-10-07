@@ -633,6 +633,7 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
       <tr><td><code>--think</code></td><td>last used / <code>on</code></td><td class="wrap">Thinking level: <code>off</code>, <code>on</code>, or an effort level (<code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, …) for models that take one. See <a href="#thinking">Thinking level</a>. <code>--no-think</code> is <code>--think off</code>.</td></tr>
       <tr><td><code>--think-history</code></td><td>last used / <code>turn</code></td><td class="wrap">Send the model's own reasoning back: <code>off</code>, <code>turn</code> (since your last message) or <code>all</code>. See <a href="#think-history">Sending reasoning back</a>.</td></tr>
+      <tr><td><code>--max-output-tokens</code></td><td>last used / <code>25000</code></td><td class="wrap">Most tokens one model reply may take, reasoning included; <code>0</code> = no cap. See <a href="#reply-cap">Reply cap</a>.</td></tr>
       <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
       <tr><td><code>--web</code> / <code>--no-web</code></td><td>on</td><td class="wrap">Serve the browser UI alongside the TUI</td></tr>
       <tr><td><code>--web-host</code></td><td><code>127.0.0.1</code></td><td class="wrap">Interface to bind. Any non-loopback host requires a token.</td></tr>
@@ -712,9 +713,16 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <li><strong><code>on</code> sends no level,</strong> so the model uses its own default. gpt-oss always reasons, so <code>off</code> sends <code>low</code>.</li>
       <li><strong>Re-read at every message and on <code>/think</code>,</strong> so a relaunched or still-loading llama.cpp server is picked up.</li>
       <li><strong>A model without thinking gets nothing sent</strong> (badge: <code>THINK: n/a</code>).</li>
-      <li><strong>No token budget:</strong> llama.cpp's <code>--reasoning-budget</code> is fixed when the server starts, and Ollama has none.</li>
+      <li><strong>No separate reasoning budget:</strong> llama.cpp's <code>--reasoning-budget</code> is fixed when the server starts, and Ollama has none. The <a href="#reply-cap">reply cap</a> bounds reasoning and answer together.</li>
     </ul>
     <p>Compaction summaries, companion recaps and the retry after a cut-off reply always ask for no reasoning.</p>
+    <h3 id="reply-cap">Reply cap</h3>
+    <p>Every request carries a limit on how long one reply may be, reasoning included: <code>/max-output-tokens</code>, default <strong>25,000</strong> tokens. It goes to llama.cpp as <code>max_tokens</code> and to Ollama as <code>options.num_predict</code>, and applies to companion recaps and session titles too.</p>
+    <ul>
+      <li><strong>Why:</strong> a model caught in a repetition loop otherwise generates until the context is full. In an eval, one reply ran to 125,000 tokens and held the turn for 80 minutes.</li>
+      <li><strong>What happens at the cap:</strong> the reply ends with <code>done_reason: length</code>. The harness then retries without thinking, and says so in the chat ("Response cut off (context or /max-output-tokens limit)").</li>
+      <li><strong>Setting it:</strong> <code>/max-output-tokens 30000</code>, <code>/max-output-tokens off</code> for no cap, or <code>/max-output-tokens</code> to show it (minimum 256). It's remembered; <code>--max-output-tokens N</code> sets it at startup (0 = off), and in the web UI it's View → Context → <em>Reply cap</em>.</li>
+    </ul>
     <h3 id="think-history">Sending reasoning back</h3>
     <p><code>/think-history off|turn|all</code> decides whether the model sees its own earlier reasoning. <code>turn</code> (the default) sends it back for the current tool loop, since your last message. <code>all</code> also sends earlier turns, and <code>off</code> sends none. It is remembered, and in the web UI it is under the <code>THINK</code> menu.</p>
     <ul>
@@ -819,7 +827,7 @@ ollama serve</code></pre></div>
       <tr><td><code>design</code></td><td class="wrap">A design partner. It explores the codebase, asks questions grounded in what it finds and writes the design document once it knows enough. It never edits code.</td><td class="wrap">read-only + code nav + <code>write_file</code>, <code>ask_user</code></td></tr>
       <tr><td><code>chat</code></td><td class="wrap">A conversation partner for understanding code and documents. It reads, explains and asks follow-up questions, and never writes.</td><td class="wrap">read-only + code nav + <code>ask_user</code></td></tr>
       <tr><td><code>plan</code></td><td class="wrap">Think it through before touching anything. See <a href="#plan">Plan mode</a>.</td><td class="wrap">investigating: read-only + <code>run_command</code>, <code>create_plan</code><br>executing: coding + <code>complete_step</code>, <code>revise_plan</code></td></tr>
-      <tr><td><code>coding</code></td><td class="wrap">An engineer. It makes targeted edits, runs tests and uses git.</td><td class="wrap">everything in design + <code>edit_file</code>, <code>delete_file</code>, <code>move_file</code>, <code>append_to_file</code>, <code>run_command</code></td></tr>
+      <tr><td><code>coding</code></td><td class="wrap">An engineer. It makes targeted edits, runs tests and uses git.</td><td class="wrap">everything in design + <code>edit_file</code>, <code>edit_files</code>, <code>replace_symbol</code>, <code>delete_file</code>, <code>move_file</code>, <code>append_to_file</code>, <code>run_command</code></td></tr>
       <tr><td><code>momo</code></td><td class="wrap">Talk to the cat. Replies are short, warm and lowercase. It's a companion first, but it still does the work when asked.</td><td class="wrap">same as coding</td></tr>
     </table></div>
   </section>
@@ -900,14 +908,26 @@ ollama serve</code></pre></div>
     <h3>Writing &amp; running</h3>
     <div class="table-scroll"><table>
       <tr><th>Tool</th><th>Modes</th><th>Description</th></tr>
-      <tr><td><code>write_file</code></td><td>design, coding, momo</td><td class="wrap">Write a file. Reports line and byte counts, or <code>No change:</code> if the content is identical.</td></tr>
+      <tr><td><code>write_file</code></td><td>design, coding, momo</td><td class="wrap">Write a file. Reports line and byte counts, or <code>No change:</code> if the content is identical. Warns when the new content doesn't parse or drops definitions the file had.</td></tr>
       <tr><td><code>ask_user</code></td><td>all modes</td><td class="wrap">Pause and ask you a focused question. The status bar shows <code>? waiting for input</code>.</td></tr>
-      <tr><td><code>edit_file</code></td><td>coding, momo</td><td class="wrap">Replace <code>old_string</code> with <code>new_string</code>. It must match exactly once unless <code>replace_all</code> is set.</td></tr>
+      <tr><td><code>edit_file</code></td><td>design, coding, momo</td><td class="wrap">Replace <code>old_string</code> with <code>new_string</code>. It must match exactly once unless <code>replace_all</code> is set; the error lists where each match is. The result shows the changed lines with their new line numbers. See <a href="#editing">Editing files</a>.</td></tr>
+      <tr><td><code>edit_files</code></td><td>coding, momo</td><td class="wrap">Several edits, in one file or across files, in <strong>one</strong> call: a list of <code>{path, old_string, new_string}</code>, applied in order. All are written or none; the error names the edit that failed.</td></tr>
+      <tr><td><code>replace_symbol</code></td><td>coding, momo</td><td class="wrap">Replace one whole function, method or class, found by name or a line number inside it, with no <code>old_string</code> to copy. Re-indented to fit; an empty <code>new_source</code> deletes it. Needs tree-sitter.</td></tr>
       <tr><td><code>append_to_file</code></td><td>coding, momo</td><td class="wrap">Append, creating the file if it's missing</td></tr>
       <tr><td><code>move_file</code> / <code>delete_file</code></td><td>coding, momo</td><td class="wrap">Rename or move (creates parent folders), or delete</td></tr>
-      <tr><td><code>run_command</code></td><td>coding, momo, plan</td><td class="wrap">Any shell command. 900 s timeout. <code>/run-confirm on</code> asks before each one. The output is saved to a log, and the model gets <code>tail=</code>, <code>grep=</code> or a short head-and-tail view of it. See <a href="#run-output">Command output</a>.</td></tr>
+      <tr><td><code>run_command</code></td><td>coding, momo, plan</td><td class="wrap">Any shell command. Stopped after 120 s unless the model passes <code>timeout=</code> (up to 900 s); a command the default stopped is told how to ask for longer. <code>/run-confirm on</code> asks before each one. The output is saved to a log, and the model gets <code>tail=</code>, <code>grep=</code> or a short head-and-tail view of it. See <a href="#run-output">Command output</a>.</td></tr>
       <tr><td><code>command_output</code></td><td>coding, momo, plan</td><td class="wrap">Search a saved command log again without rerunning it: <code>grep=</code>, <code>tail=</code> or a line range. Only in run mode <code>new</code>.</td></tr>
     </table></div>
+    <h3 id="editing">Editing files</h3>
+    <p>A small model copies <code>old_string</code> with slips, edits without seeing the result, makes one edit per turn and forgets the other places a change has to reach. The edit tools (<code>harness/editing.py</code>) are built around that:</p>
+    <ul>
+      <li><strong>They show the result.</strong> A successful <code>edit_file</code> or <code>replace_symbol</code> returns the changed lines with three lines of context, their <em>new</em> line numbers in <code>read_file</code>'s format, and the definition they're in. An edit whose new text equals the old says <code>No change</code>, with the line as it reads now.</li>
+      <li><strong>They catch broken syntax.</strong> If the file parsed before the edit and doesn't after it, the result names the line (Python is compiled; other languages use tree-sitter). An error still sitting next to the lines an edit touched is reported too, so an attempted fix that didn't work says so. The edit stays written, so a change made in two steps still works.</li>
+      <li><strong>They find what the model meant.</strong> <code>old_string</code> still matches when only indentation, spacing or quote style differs, or when the replacement has a different number of lines. Lines the edit keeps are written back from the file, not from the model's copy. A match must be unique, and text that has lost its indentation is refused rather than guessed. A miss shows the closest block of the file and its first differing line; several matches are listed with the definition each is in.</li>
+      <li><strong>They point at what else must change.</strong> When an edit removes or renames a definition, or changes its parameters, the result lists the uses still left. With the code index on, the list comes from the index; without it, from a scan of the project (at most 1 s or 5,000 files, and it says when it stopped early). A same-named method on another object isn't counted. Text from <code>old_string</code> that's in a different file is named, and a <code>write_file</code> that drops definitions says so.</li>
+      <li><strong>They batch.</strong> <code>edit_files</code> takes every edit of a change in one call, so a signature change with five callers is one model turn instead of five.</li>
+    </ul>
+    <p class="note">Measured on Qwen3.5-9B with six change requests checked by hidden tests (<code>--suite edit</code>, three runs each). Against the harness before this work, tool calls went from 289 to 172 with the index off and from 160 to 89 with it on. Edit errors, whole-file rewrites and re-reads of an edited file dropped. Pass rate stayed the same: the failures that are left are the model's own logic. <code>edit_files</code> alone cut model turns by 19% (index off) and 27% (index on). Without a model, <code>evals/edit_bench.py</code> puts 66 real edits through typical copying slips: 63 come out exactly right (45 before), and none are written to the wrong place.</p>
     <h3>Internet (all modes, only with <code>/net on</code>)</h3>
     <div class="table-scroll"><table>
       <tr><th>Tool</th><th>Description</th></tr>
@@ -946,6 +966,7 @@ FAILED (failures=2)
 [output saved: /Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log — 323 lines, 20 KB, exit code 1]
 [7 lines mention error/fail/warning — command_output(path="/Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log", grep="error|fail|warning|traceback") lists them]</code></pre></div>
     <p>The model passes that path to <code>command_output</code> to search the same output again (<code>grep=</code>, <code>tail=</code>, <code>start_line=</code>/<code>end_line=</code>) instead of running the suite twice. A command that timed out or was interrupted keeps its log too.</p>
+    <p><strong>Timeout:</strong> a command runs for at most 120 seconds unless the model passes <code>timeout=</code>, up to 900. Small models never pass one, and a quick check script stuck in a loop used to block the turn for the full 15 minutes. A command stopped by the default gets a note saying it can run again with a longer <code>timeout=</code> if it really needs one, like a full build or test suite.</p>
     <p>Logs live in <code>~/.momo-harness/runs/&lt;session&gt;/</code>, outside the workdir, so they never show up in <code>git status</code> or the code index. momo keeps the last 20 per session and deletes them on <code>/clear</code>, <code>/new</code> and when a session loads. <code>command_output</code> only ever opens those files, whatever path it is given.</p>
     <div class="table-scroll"><table>
       <tr><th>Setting</th><th>Description</th></tr>
@@ -1349,6 +1370,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/tool-result [n]</code></td><td class="wrap">Character cap per tool result (0 = unlimited)</td></tr>
       <tr><td><code>/run-mode new|classic</code></td><td class="wrap">Save <code>run_command</code> output to a log and return a view (default), or return all of it</td></tr>
       <tr><td><code>/run-output-limit [n]</code></td><td class="wrap">Characters in <code>run_command</code>'s default view</td></tr>
+      <tr><td><code>/max-output-tokens [n|off]</code></td><td class="wrap">Most tokens one model reply may take, reasoning included (default 25000, remembered). See <a href="#reply-cap">Reply cap</a></td></tr>
       <tr><td><code>/cost</code></td><td class="wrap">Token usage by mode and model</td></tr>
     </table></div>
     <h3>Display</h3>
@@ -1424,7 +1446,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     └── server.json       <span class="com"># the names it covers, and its expiry</span></code></pre></div>
     <div class="table-scroll"><table>
       <tr><th>Path</th><th>What</th><th>Notes</th></tr>
-      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools on|off</code>, <code>/run-confirm</code>) are never saved and reset at every start. Per-mode tool choices are kept in the session instead.</td></tr>
+      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode and output view, reply cap</td><td class="wrap">Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools on|off</code>, <code>/run-confirm</code>) are never saved and reset at every start. Per-mode tool choices are kept in the session instead.</td></tr>
       <tr><td><code>sessions/*.json</code></td><td class="wrap">Each conversation: messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history</td><td class="wrap">Saved after every reply. <code>/sessions</code> lists them and <code>/session &lt;name&gt;</code> loads one. The auth token is never stored. Delete them from the session drawer in the web UI.</td></tr>
       <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line</td><td class="wrap">For auditing what the model did. Secret request headers are masked.</td></tr>
       <tr><td><code>index/*.pickle</code></td><td class="wrap">The code index, named by a hash of the workdir</td><td class="wrap">Written by <code>/index save</code>, and automatically with <code>/index-persist</code> (on by default). Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
@@ -1472,7 +1494,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><th>Part</th><th>When</th><th>What it says</th></tr>
       <tr><td>Code index banner</td><td class="wrap">Index on</td><td class="wrap">One line: find code with the <code>index_*</code> tools, not grep or find</td></tr>
       <tr><td>Role</td><td class="wrap">Always</td><td class="wrap"><code>roles/&lt;mode&gt;.md</code>; in plan mode also the draft plan, or the execution rules and the live plan</td></tr>
-      <tr><td>Environment</td><td class="wrap">Always</td><td class="wrap">Working directory, today's date, OS/shell and git branch (with <code>run_command</code>), internet on or off</td></tr>
+      <tr><td>Environment</td><td class="wrap">Always</td><td class="wrap">Working directory, today's date, OS/shell and git branch (with <code>run_command</code>), "run it as <code>python3</code>" when there's no <code>python</code> command, internet on or off</td></tr>
       <tr><td>Project guides</td><td class="wrap">With <code>/guides on</code></td><td class="wrap">The workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, …</td></tr>
       <tr><td>Skill: &lt;name&gt;</td><td class="wrap">One per loaded skill</td><td class="wrap"><code>skills/&lt;name&gt;.md</code></td></tr>
       <tr><td>Tool reference</td><td class="wrap">Always</td><td class="wrap">Generated from the tool schemas, <code>/tool-ref full|compact</code></td></tr>
@@ -1497,6 +1519,10 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python -m unittest discover tests                 <span class="com"># do the tools work?</span>
 python evals/run_evals.py --runs 3                <span class="com"># does the model use them? (needs a server)</span></code></pre></div>
     <p><code>tests/</code> uses the standard-library <code>unittest</code>. It includes one fixture per tree-sitter grammar, so a grammar upgrade that renames a node fails a test instead of silently emptying a tool's output. <code>evals/</code> asks questions with known answers and scores whether the model reached the right tool, how many calls it took and how much output it pulled into context. <code>--suite shell --run-mode new|classic</code> compares the two ways <code>run_command</code> returns output. Sampling isn't pinned, so read the min–max spread, not a single run.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python evals/edit_bench.py                        <span class="com"># edit_file's matcher, no model</span>
+python evals/run_evals.py --suite edit            <span class="com"># change requests, checked by running them</span>
+python evals/replay.py --exp R2 --n 10            <span class="com"># one tool result, two wordings, same conversation</span></code></pre></div>
+    <p>The edit evals measure the write tools. <code>edit_bench.py</code> puts real edits through the slips a model makes when it copies <code>old_string</code> (line numbers, lost indentation, tabs as spaces, curly quotes). It counts how many come out exactly right and how many are written to the wrong place; a unit test keeps that at zero. <code>--suite edit</code> asks the model for six changes on a small project. Each one is checked by hidden tests that run the result, and the run also counts files changed outside the task, edit errors, re-reads and model turns. <code>--edit-features</code> switches the edit tools' extras off for a same-code A/B. <code>replay.py</code> takes a real session, rebuilds the project at one tool result and lets the model continue with that result worded two ways. It isolates the effect of one message, which a whole-suite run at three samples per cell can't see.</p>
   </section>
 
   </article>

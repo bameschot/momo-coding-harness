@@ -108,6 +108,12 @@ class LLMClient(ABC):
     # harness sets it per request from /think-history.
     preserve_thinking: bool | None = None
 
+    # The most tokens one reply may have (reasoning included); None/0 = no cap.
+    # Without it a model caught in a repetition loop generated 125k tokens for
+    # one reply and held the turn for 80 minutes (edit evals, 2026-10-07).  The
+    # harness sets it per request from /max-output-tokens.
+    max_output_tokens: int | None = None
+
     def thinking_caps(self) -> ThinkingCaps:
         """What the served model accepts for `think`, read from the server once
         per model (an unanswered probe too — the status bar reads this, so it

@@ -137,6 +137,18 @@ class RunCommand(Base):
         self.assertLess(time.monotonic() - t0, 10)
 
 
+    def test_default_timeout_is_short_and_says_how_to_ask_for_longer(self):
+        self.assertEqual(tools._clamp_timeout(None), tools._DEFAULT_COMMAND_TIMEOUT)
+        self.assertEqual(tools._clamp_timeout(0), tools._DEFAULT_COMMAND_TIMEOUT)
+        self.assertEqual(tools._clamp_timeout(5000), tools._MAX_COMMAND_TIMEOUT)
+        self.assertEqual(tools._clamp_timeout("300"), 300)
+        with mock.patch.object(tools, "_DEFAULT_COMMAND_TIMEOUT", 1):
+            out = self.run_tool("run_command", command="sleep 30")
+            self.assertIn("timed out after 1s", out)
+            self.assertIn("run it again with timeout= up to 900", out)
+            out = self.run_tool("run_command", command="sleep 30", timeout=1)
+            self.assertNotIn("run it again", out)       # a limit the model chose itself
+
     def test_timeout_keeps_the_output_so_far(self):
         out = self.run_tool("run_command", command="echo before; sleep 30", timeout=1)
         self.assertTrue(out.startswith("ERROR: command timed out"), out)
@@ -227,6 +239,7 @@ class HarnessDispatch(Base):
             net_access, net_max_bytes, index, index_route = "off", 0, None, True
             run_mode, run_store, run_output_limit = "classic", None, 5000
             search_sources = None
+            edit_features = frozenset()
             _cancel = threading.Event()
 
             def _read_budget(self):

@@ -12,7 +12,7 @@ from . import run_store as run_store_mod
 from . import search as search_mod
 from . import session as session_mod
 from . import tools as tools_mod
-from .harness import THINK_HISTORY, Harness
+from .harness import MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness
 from .llm.base import THINK_LEVELS
 from .tools import dispatch
 
@@ -589,6 +589,28 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.refresh_status()
         return CommandResult(handled=True, output=_ref_state())
 
+    if cmd == "/max-output-tokens":
+        def _cap() -> str:
+            n = harness.max_output_tokens
+            return (f"model reply cap: {n:,} tokens per reply, reasoning included"
+                    if n else "model reply cap: off (a reply can run until the context is full)")
+        if not arg:
+            return CommandResult(handled=True, output=_cap())
+        if arg.lower() in ("off", "0", "none"):
+            n = 0
+        else:
+            try:
+                n = int(arg.replace(",", "").replace("_", ""))
+            except ValueError:
+                return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
+            if n < MIN_MAX_OUTPUT_TOKENS:
+                return CommandResult(handled=True, output=(
+                    f"ERROR: the cap must be at least {MIN_MAX_OUTPUT_TOKENS} tokens, or off"))
+        harness.max_output_tokens = n
+        session_mod.save_prefs(max_output_tokens=n)
+        harness.emit_status()
+        return CommandResult(handled=True, output=_cap())
+
     if cmd == "/run-output-limit":
         if not arg:
             return CommandResult(handled=True, output=(
@@ -1083,6 +1105,8 @@ Available commands:
   /run-mode [new|classic]  new: save command output to a log, return a view
                       (tail=/grep=, command_output); classic: return it all
   /run-output-limit [n]    Chars in run_command's default view (default 5000)
+  /max-output-tokens [n|off]  Most tokens one model reply may take, reasoning
+                      included (default 25000; stops a model stuck in a loop)
   /tool-ref [full|compact]  How the system prompt describes the tools: full, or
                       one line per tool (the tool schemas carry the rest)
   /system-prompt      Show the composed system prompt: role, tools, guides, skills (alias: /prompt)
