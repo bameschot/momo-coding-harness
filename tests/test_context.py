@@ -114,7 +114,10 @@ class Breakdown(Base):
 class Streaming(Base):
     def setUp(self):
         super().setUp()
-        self.h.context_limit = 20_000  # the ~2.5k-token reply spans many whole percents
+        # the ~2.5k-token reply spans many whole percents; send() re-reads the
+        # server's window, so the fake server reports the one that gives this limit
+        self.h.client.context_length = lambda: 40_000
+        self.h.context_limit = 20_000
 
     def run_turn(self):
         self.h.send("hello")

@@ -358,6 +358,10 @@ class Harness:
         self._stream_chars = 0      # chars of the reply currently streaming in
         self._measured_tokens: int | None = None  # last prompt+eval the server reported
         self._cancel = threading.Event()
+        self._backend_lock = threading.Lock()   # refresh_backend: idle poll vs send()
+        # Whether the server answered the last check (None: not checked yet).  While
+        # it is False the model and context shown are the last known, unverified.
+        self.backend_reachable: bool | None = None
         # What the saved prefs / session asked for; check_backend reports how the
         # server's answer differs from it.
         self._expected_backend: tuple[str, int | None] = (self.client.model, None)
@@ -513,6 +517,15 @@ class Harness:
             self.event_queue.put(ChatEvent("system", msg))
         return reported or None
 
+    def _fit_fixed_limit(self, reported: int | None) -> bool:
+        """A limit the user set above the model's window can't be honoured: fall
+        back to the percentage of the window.  True when it did."""
+        if self.context_fixed and reported and self.context_limit > reported:
+            self.context_fixed = False
+            self._sync_context_limit()
+            return True
+        return False
+
     def _reconcile_fixed_model(self):
         """For a backend that can't switch models at runtime (llama.cpp serves the
         single model it was launched with and ignores the request's `model` field),
@@ -535,7 +548,9 @@ class Harness:
         want_model, want_limit = self._expected_backend
         where = f"{c.provider_name} at {c.host}"
         available = c.list_models()
+        self.backend_reachable = bool(available)
         if not available:
+            self.emit_status()
             return (f"Model: {c.model} — {where} is not reachable, so the model and its "
                     f"context size are unchecked (compaction at {self.context_limit:,} tokens). "
                     f"/model lists the server's models once it is up.")
@@ -554,11 +569,10 @@ class Harness:
                    else f"{want_model} is not on the server; {c.model} is loaded")
             changes.append(f"model {want_model} → {c.model} ({why})")
         reported = self._sync_context_limit()
-        if self.context_fixed and reported and self.context_limit > reported:
-            changes.append(f"your {self.context_limit:,}-token context limit is over the "
+        fixed_limit = self.context_limit
+        if self._fit_fixed_limit(reported):
+            changes.append(f"your {fixed_limit:,}-token context limit is over the "
                            f"model's {reported:,}-token window; now its default half")
-            self.context_fixed = False
-            self._sync_context_limit()
         if want_limit is not None and want_limit != self.context_limit:
             changes.append(f"context limit {want_limit:,} → {self.context_limit:,} tokens")
         if reported:
@@ -651,14 +665,39 @@ class Harness:
                else "takes " + "/".join(caps.levels))
         return f"Thinking: {self.think_level} → {eff} ({model} {why})."
 
-    def refresh_thinking(self) -> bool:
-        """Re-read what the served model takes (a llama.cpp server may have been
-        relaunched with another model, or was still loading at startup).
-        True when anything the status bar shows changed."""
-        before = (self.client.model, self.client.thinking_caps())
-        self._reconcile_fixed_model()
-        caps = self.client.refresh_thinking_caps()
-        return (self.client.model, caps) != before
+    def refresh_backend(self) -> bool:
+        """Re-read what the server serves: a llama.cpp server may have been
+        relaunched with another model or context size (-c), or was still loading
+        at startup.  Adopts the model, its context window and thinking caps, and
+        notes a model/window change in the chat.  True when anything the status
+        bar shows changed.  An unreachable (or still loading) server only flips
+        backend_reachable, so the last-known values survive a restart."""
+        with self._backend_lock:
+            c = self.client
+            before = (c.model, self.model_max_ctx, self.context_limit, c.thinking_caps(),
+                      self.backend_reachable)
+            if not c.list_models():
+                was, self.backend_reachable = self.backend_reachable, False
+                return was is not False
+            self.backend_reachable = True
+            self._reconcile_fixed_model()
+            self._fit_fixed_limit(self._sync_context_limit())
+            caps = c.refresh_thinking_caps()
+            after = (c.model, self.model_max_ctx, self.context_limit, caps, True)
+            old_model, old_window = before[:2]
+            changes = []
+            if c.model != old_model:
+                changes.append(f"model {old_model} → {c.model}")
+                session_mod.save_prefs(model=c.model, provider=self.provider)
+            if self.model_max_ctx != old_window:
+                fmt = lambda n: f"{n:,}" if n else "unknown"
+                changes.append(f"context window {fmt(old_window)} → "
+                               f"{fmt(self.model_max_ctx)} tokens")
+            if changes:
+                self.event_queue.put(ChatEvent(
+                    "system", "Server changed: " + "; ".join(changes)
+                    + f" (compaction at {self.context_limit:,} tokens)."))
+            return after != before
 
     # ── mode switching ────────────────────────────────────────────────────────
 
@@ -1572,7 +1611,7 @@ class Harness:
                 return
             self.messages.append({"role": "user", "content": text})
             self._turn_user = self.messages[-1]
-            if self.refresh_thinking():
+            if self.refresh_backend():
                 self.emit_status()
                 if (note := self.think_note()):
                     self.event_queue.put(ChatEvent("system", note))
@@ -2272,6 +2311,8 @@ class Harness:
         return StatusEvent(
             mode=self.mode,
             model=self.client.model,
+            context_limit=self.context_limit,
+            backend_reachable=self.backend_reachable,
             workdir=str(self.workdir),
             ctx_pct=pct,
             ctx_color=self._ctx_color(pct),

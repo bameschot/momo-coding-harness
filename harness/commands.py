@@ -135,7 +135,7 @@ def _toggle(harness, attr: str, arg: str, label: str,
 
 def _think(harness, arg: str) -> CommandResult:
     """/think [off|on|<effort>]: show or set the thinking level."""
-    if harness.refresh_thinking():      # the server may have changed since startup
+    if harness.refresh_backend():      # the server may have changed since startup
         harness.emit_status()
     caps, model = harness.client.thinking_caps(), harness.client.model
     choices = harness.think_choices()
@@ -296,10 +296,11 @@ def handle(line: str, harness: Harness) -> CommandResult:
         # A new host may be a different server serving a different model and context
         # window — adopt the server's loaded model (fixed-model backends) and re-read
         # its context size so the display matches reality.
-        harness._reconcile_fixed_model()
+        harness.refresh_backend()
         harness._sync_context_limit(emit=True)
         harness.emit_status()
-        return CommandResult(handled=True, output=f"Host set to: {arg}")
+        return CommandResult(handled=True, output=f"Host set to: {arg}"
+                             + ("" if harness.backend_reachable else " (not reachable)"))
 
     if cmd == "/token":
         if not arg:

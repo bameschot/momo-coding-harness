@@ -483,6 +483,19 @@ function rerenderAll() {
 const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 let spinI = 0;
 
+// Green: connected to momo and momo reaches the model server; orange: connected
+// but the model server is not reachable; red: the connection to momo is down.
+let connected = false;
+function updateConnDot() {
+  const dot = $("#conn-dot");
+  const offline = connected && status.backend_reachable === false;
+  dot.classList.toggle("on", connected);
+  dot.classList.toggle("offline", offline);
+  dot.title = !connected ? "Disconnected — retrying"
+    : offline ? `Connected — model server not reachable at ${status.host}`
+    : "Connected";
+}
+
 function applyStatus(s) {
   const planChanged = s.plan_progress !== status.plan_progress;
   status = s;
@@ -491,8 +504,14 @@ function applyStatus(s) {
   const pp = $("#plan-progress");
   pp.hidden = !s.plan_progress;
   pp.textContent = s.plan_progress;
-  $("#model").textContent = s.model;
+  const offline = s.backend_reachable === false;
+  $("#model").textContent = offline ? `${s.model} · offline` : s.model;
+  $("#model-btn").classList.toggle("offline", offline);
+  $("#model-btn").title = offline
+    ? `Server not reachable at ${s.host} — showing the last known model. /host <url> points momo elsewhere.`
+    : "Switch model";
   $("#host").textContent = `${s.provider}@${s.host.replace(/^https?:\/\//, "")}`;
+  updateConnDot();
   $("#workdir").textContent = s.workdir;
   $("#workdir").title = s.workdir;
   $("#ctx-pct").textContent = `${s.ctx_pct}%`;
@@ -848,13 +867,13 @@ function connect() {
     connectedAt = Date.now();
     events = [];
     rerenderAll();
-    $("#conn-dot").classList.add("on");
-    $("#conn-dot").title = "Connected";
+    connected = true;
+    updateConnDot();
     refreshState();
   };
   es.onerror = () => {
-    $("#conn-dot").classList.remove("on");
-    $("#conn-dot").title = "Disconnected — retrying";
+    connected = false;
+    updateConnDot();
   };
   let batch = [];
   let scheduled = false;
@@ -1164,7 +1183,7 @@ function renderChips() {
     else {
       const tokens = Math.ceil(a.chars / 4);  // rough estimate, same heuristic as the harness
       meta = `${a.pages ? `${a.pages} pages · ` : ""}${fmtCount(a.chars)} chars · ~${fmtCount(tokens)} tokens${a.truncated ? " · truncated" : ""}`;
-      const limit = state?.context_limit || 0;
+      const limit = status.context_limit || state?.context_limit || 0;
       if (limit && tokens > limit * 0.25) {
         chip.classList.add("warn");
         chip.title = `Large attachment: about ${Math.round((tokens / limit) * 100)}% of the context window`;

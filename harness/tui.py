@@ -438,6 +438,7 @@ class TUI:
         self._st_mode  = harness.mode
         self._st_model = harness.client.model
         self._st_host  = harness.client.host
+        self._st_offline = harness.backend_reachable is False
         self._st_provider = harness.provider
         self._st_ctx   = 0
         self._st_dir   = str(harness.workdir)
@@ -580,7 +581,7 @@ class TUI:
             line_attr = curses.color_pair(_C_BUSY)
         else:
             prefix = " "
-            line_attr = curses.color_pair(self._ctx_color)
+            line_attr = curses.color_pair(_C_WARN if self._st_offline else self._ctx_color)
         # Compose the status text into the space left after the prefix, shortening
         # the working directory from the front so its tail (the important part)
         # stays visible instead of being clipped off the right edge.
@@ -598,8 +599,8 @@ class TUI:
 
     def _compose_status(self, avail: int) -> str:
         """Build the status text, shortening DIR from the front to fit `avail` cols."""
-        head = (f"MODE: {self._st_mode} | VIA: {self._st_provider} | MODEL: {self._st_model} | "
-                f"HOST: {self._st_host} | CTX: {self._st_ctx}% | DIR: ")
+        head = (f"MODE: {self._st_mode} | VIA: {self._st_provider} | MODEL: {self._st_model}"
+                f"{' (offline)' if self._st_offline else ''} | HOST: {self._st_host} | CTX: {self._st_ctx}% | DIR: ")
         tail = self._st_extra + (" | ▼ NEW (PgDn)" if self._new_below else "")
         budget = avail - len(head) - len(tail)
         return head + _shorten_path_left(self._st_dir, budget) + tail
@@ -1164,6 +1165,7 @@ class TUI:
         self._st_mode  = f"{ev.mode} [{ev.plan_progress}]" if ev.plan_progress else ev.mode
         self._st_model = ev.model
         self._st_host  = ev.host
+        self._st_offline = ev.backend_reachable is False
         self._st_provider = ev.provider or self._st_provider
         self._st_ctx   = ev.ctx_pct
         if ev.workdir != self._st_dir:

@@ -165,6 +165,19 @@ class Streaming(unittest.TestCase):
         self.assertFalse(any(line.startswith("[assistant]") for line, _, _ in t._chat_buf._lines))
 
 
+class StatusLine(unittest.TestCase):
+    def compose(self, offline):
+        t = make_tui()
+        t._st_mode, t._st_provider, t._st_model = "coding", "llama.cpp", "Qwen3.5-9B"
+        t._st_host, t._st_ctx, t._st_dir, t._st_extra = "http://localhost:8080", 3, "/w", ""
+        t._st_offline = offline
+        return t._compose_status(200)
+
+    def test_unreachable_server_marks_the_model_offline(self):
+        self.assertIn("MODEL: Qwen3.5-9B (offline) | HOST", self.compose(True))
+        self.assertIn("MODEL: Qwen3.5-9B | HOST", self.compose(False))
+
+
 class ToolArgs(unittest.TestCase):
     def test_long_values_are_cut(self):
         out = T._brief_args({"path": "a.py", "content": "x" * 5000})

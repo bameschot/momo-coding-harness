@@ -120,6 +120,7 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
 .brand { font-weight: 700; display: flex; align-items: center; gap: 6px; font-size: 14px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); display: inline-block; }
 .dot.on { background: var(--ok); }
+.dot.on.offline { background: var(--warn); }
 .field { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 #workdir { max-width: 60%; text-align: left; unicode-bidi: plaintext; }
 #mode {
@@ -461,6 +462,7 @@ body.is-busy .user-actions { display: none; }
 .model-btn #model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-btn .icon { color: var(--muted); }
 .model-btn:hover { border-color: var(--border); background: var(--surface-2); }
+.model-btn.offline #model { color: var(--warn); }
 .model-menu { left: 12px; right: auto; max-height: 60vh; overflow-y: auto; }
 
 /* Context breakdown popover: a stacked bar (share of the limit) + one row per category. */

@@ -43,6 +43,8 @@ class StatusEvent:
     workdir: str
     ctx_pct: int
     ctx_color: str  # "normal" | "yellow" | "red"
+    context_limit: int = 0        # compaction threshold (tokens) ctx_pct is measured against
+    backend_reachable: bool | None = None  # False: server down, model/ctx are the last known
     tools_enabled: bool = True
     run_confirm: bool = False
     run_mode: str = "new"         # /run-mode: "new" (saved log + view) | "classic"

@@ -45,7 +45,7 @@ class FixedClient(FakeClient):
     models = ["Qwen3.5-9B"]
 
 
-class CheckBackend(unittest.TestCase):
+class _Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name)
@@ -80,6 +80,8 @@ class CheckBackend(unittest.TestCase):
                                  "context_limit": 4096, **data}))
         return p
 
+
+class CheckBackend(_Base):
     def test_up_to_date_reports_model_and_context(self):
         h = self.make()
         msg = h.check_backend()
@@ -154,6 +156,107 @@ class CheckBackend(unittest.TestCase):
         commands.handle("/context 25%", h)
         self.assertFalse(h.context_fixed)
         self.assertEqual(h.context_limit, 2048)
+
+
+class ServerRelaunch(_Base):
+    """A llama.cpp server relaunched mid-session with another model or -c size:
+    refresh_backend (run by send() and the controller's idle poll) adopts both."""
+
+    def drain(self, sub) -> list:
+        events = []
+        while True:
+            try:
+                events.append(sub.get_nowait())
+            except Exception:
+                return events
+
+    def relaunch(self, **attrs):
+        for k, v in attrs.items():
+            setattr(self.cls, k, v)
+
+    def test_model_and_window_change_are_adopted(self):
+        h = self.make(model="Qwen3.5-9B", cls=FixedClient, ctx=8192)
+        sub = h.event_queue.subscribe(replay=False)
+        self.relaunch(models=["Gemma-4"], ctx=32768)
+        self.assertTrue(h.refresh_backend())
+        self.assertEqual((h.client.model, h.model_max_ctx, h.context_limit),
+                         ("Gemma-4", 32768, 16384))
+        notes = [e.text for e in self.drain(sub) if isinstance(e, hmod.ChatEvent)]
+        self.assertEqual(notes, ["Server changed: model Qwen3.5-9B → Gemma-4; context window "
+                                 "8,192 → 32,768 tokens (compaction at 16,384 tokens)."])
+        self.assertEqual(h.status_event().context_limit, 16384)
+        self.assertEqual(json.loads((self.home / "prefs.json").read_text())["model"], "Gemma-4")
+        self.assertFalse(h.refresh_backend())               # nothing new the second time
+
+    def test_unreachable_server_keeps_the_last_known_values(self):
+        h = self.make(model="Qwen3.5-9B", cls=FixedClient, ctx=8192)
+        self.relaunch(models=[], ctx=None)                   # down / still loading
+        self.assertTrue(h.refresh_backend())                # reachability flipped
+        self.assertFalse(h.refresh_backend())               # ... only once
+        self.assertEqual((h.client.model, h.model_max_ctx, h.context_limit),
+                         ("Qwen3.5-9B", 8192, 4096))
+        self.assertIs(h.status_event().backend_reachable, False)
+
+    def test_server_back_up_with_another_model(self):
+        h = self.make(model="Qwen3.5-9B", cls=FixedClient, ctx=8192)
+        self.relaunch(models=[], ctx=None)
+        h.refresh_backend()
+        self.relaunch(models=["Ornith-1.5-9B"], ctx=238848)
+        self.assertTrue(h.refresh_backend())
+        self.assertIs(h.backend_reachable, True)
+        self.assertEqual((h.client.model, h.model_max_ctx), ("Ornith-1.5-9B", 238848))
+
+    def test_startup_check_records_reachability(self):
+        h = self.make(models=[])
+        h.check_backend()
+        self.assertIs(h.status_event().backend_reachable, False)
+        self.relaunch(models=["qwen3.5:9b"])
+        h.check_backend()
+        self.assertIs(h.backend_reachable, True)
+
+    def test_host_command_reports_an_unreachable_server(self):
+        h = self.make(model="Qwen3.5-9B", cls=FixedClient, models=[])
+        out = commands.handle("/host http://localhost:9931", h).output
+        self.assertIn("(not reachable)", out)
+        self.relaunch(models=["Ornith-1.5-9B"])
+        out = commands.handle("/host http://localhost:9931", h).output
+        self.assertNotIn("not reachable", out)
+        self.assertEqual(h.client.model, "Ornith-1.5-9B")
+
+    def test_user_set_limit_over_a_smaller_window_falls_back(self):
+        h = self.make(model="Qwen3.5-9B", cls=FixedClient, ctx=32768)
+        commands.handle("/context 20000", h)
+        self.relaunch(ctx=8192)
+        self.assertTrue(h.refresh_backend())
+        self.assertFalse(h.context_fixed)
+        self.assertEqual(h.context_limit, 4096)
+
+    def test_send_picks_up_a_new_window(self):
+        h = self.make(model="Qwen3.5-9B", cls=FixedClient, ctx=8192)
+        self.relaunch(ctx=65536)
+        h.send("hi")
+        self.assertEqual((h.model_max_ctx, h.context_limit), (65536, 32768))
+
+    def test_idle_poll_refreshes_only_when_idle(self):
+        from harness import controller as cmod
+        h = self.make(model="Qwen3.5-9B", cls=FixedClient, ctx=8192)
+        h.idle_recap = False
+        h.session_titles = False
+        c = cmod.Controller(h)
+        sub = h.event_queue.subscribe(replay=False)
+        self.relaunch(ctx=16384)
+        c._last_backend_check -= cmod._BACKEND_POLL + 1
+        c._busy = True
+        c._idle_tick()
+        self.assertEqual(h.model_max_ctx, 8192)
+        c._busy = False
+        c._idle_tick()
+        self.assertEqual(h.model_max_ctx, 16384)
+        statuses = [e for e in self.drain(sub) if isinstance(e, hmod.StatusEvent)]
+        self.assertEqual(statuses[-1].context_limit, 8192)
+        self.relaunch(ctx=4096)
+        c._idle_tick()                                        # within _BACKEND_POLL: no check
+        self.assertEqual(h.model_max_ctx, 16384)
 
 
 if __name__ == "__main__":

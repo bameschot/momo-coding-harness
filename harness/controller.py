@@ -50,6 +50,9 @@ _RECAP_COOLDOWN = 300.0
 # then refreshed every _TITLE_EVERY user turns.
 _TITLE_IDLE = 15.0
 _TITLE_EVERY = 5
+# A llama.cpp server can be relaunched with another model or context size while
+# momo runs; re-read it this often while idle so both UIs follow without a turn.
+_BACKEND_POLL = 10.0
 
 
 @dataclass
@@ -113,6 +116,7 @@ class Controller:
         self._recap_client = None   # set while a recap is generating
         self._title_client = None   # set while a session title is generating
         self._activity_gen = 0      # bumped on user input; a recap from an older gen is stale
+        self._last_backend_check = time.monotonic()
         if len(harness.messages) > 1:
             self.replay_transcript(reset=False)
         self._emit_busy()
@@ -224,7 +228,24 @@ class Controller:
                  or now - self._last_recap_ts >= max(h.idle_recap_secs, _RECAP_COOLDOWN))
         )
 
+    def _backend_tick(self):
+        """Pick up a relaunched fixed-model server (llama.cpp) between turns;
+        send() re-reads it anyway, so a busy controller just skips."""
+        h = self.harness
+        with self._lock:
+            now = time.monotonic()
+            if (h.client.can_switch_model or now - self._last_backend_check < _BACKEND_POLL
+                    or self._busy or self._pending_confirm is not None or h._plan_executing()):
+                return
+            self._last_backend_check = now
+        if h.refresh_backend():
+            h.emit_status()
+
     def _idle_tick(self):
+        try:
+            self._backend_tick()
+        except Exception:
+            pass
         try:
             self._title_tick()
         except Exception:
