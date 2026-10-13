@@ -211,7 +211,10 @@ section { scroll-margin-top: 64px; }
 .docs-intro { border-top: 1px solid var(--border); margin-top: 56px; padding-top: 8px; }
 .docs { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 36px; align-items: start; }
 .toc { position: sticky; top: 64px; max-height: calc(100vh - 150px); overflow-y: auto; font-size: 13.5px; padding: 4px 0; }
-.toc .menu-sub { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 4px 0 6px 10px; }
+.toc .menu-sub, .toc-drawer nav .menu-sub { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 4px 0 6px 10px; }
+.toc .menu-sub:not(:first-child) { margin-top: 16px; }
+.toc-drawer nav .menu-sub { margin: 14px 16px 4px; }
+.toc-drawer nav .menu-sub:first-child { margin-top: 6px; }
 .toc a { display: block; padding: 3px 10px; border-left: 2px solid transparent; color: var(--muted); text-decoration: none; }
 .toc a:hover { color: var(--text); }
 .toc a.on { color: var(--text); border-left-color: var(--user); font-weight: 600; }
@@ -556,7 +559,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     </div>
     <div class="card" style="--c: var(--user)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-feather"/></svg>Lightweight by design</h3>
-      <p>momo runs on the Python standard library alone: it talks to Ollama and llama.cpp with Python's own HTTP client. The only packages are optional: tree-sitter with its grammars for code navigation and the index, and pypdf for PDF attachments, about 22 MB together. The terminal UI is <code>curses</code> and the web UI is Python's own HTTP server, so there's no Node, no build step, no database and no background daemon. It uses about <strong>40 MB of RAM</strong> idle, and 90–130 MB with the code index built for projects of 180 to 2,100 files. The model's memory lives in Ollama or llama.cpp, not in momo.</p>
+      <p>Python standard library only, with no Node, build step, database or daemon. Two optional packages (tree-sitter grammars for code navigation, pypdf for PDFs) take about 22 MB. momo uses about <strong>40 MB of RAM</strong> idle and 90–130 MB with the code index on; the model's memory lives in Ollama or llama.cpp.</p>
       <a class="more" href="#requirements">Requirements &amp; footprint →</a>
     </div>
   </div>
@@ -637,20 +640,20 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
 <!-- ═══════════════════════════ DOCUMENTATION ═══════════════════════════ -->
 <div id="docs" class="docs-intro" data-voice="docs">
   <div class="section-head"><span class="eyebrow">documentation</span><h2>Reference</h2></div>
-  <p class="section-sub">Commands, flags, tools and behaviour in detail. The repository's README is the canonical source; this page is a condensed tour of it.</p>
+  <p class="section-sub">Setup, everyday use, how it works inside, and reference tables. The repository's README has the full detail.</p>
 </div>
 
 <div class="docs">
-  <nav class="toc" id="toc" aria-label="Documentation contents"><div class="menu-sub">Contents</div></nav>
+  <nav class="toc" id="toc" aria-label="Documentation contents"></nav>
 
   <article class="doc">
 
-  <section id="start" data-voice="start">
+  <section id="start" data-group="Start" data-voice="start">
     <h2>Getting started</h2>
     <h3>Requirements</h3>
     <ul>
       <li><strong>macOS or Linux.</strong> The terminal UI uses Python's built-in <code>curses</code>, which Windows lacks; on Windows, use WSL.</li>
-      <li><strong>Python 3.14+.</strong> No packages are required; <code>requirements.txt</code> only adds features (see <a href="#requirements">Footprint</a>).</li>
+      <li><strong>Python 3.14+.</strong> No packages are required; <code>requirements.txt</code> only adds features (see <a href="#requirements">Requirements &amp; footprint</a>).</li>
       <li><strong>A model server</strong> on this machine or another: either <strong>Ollama</strong>, or a <strong>llama.cpp</strong> <code>llama-server</code> with Jinja chat templates enabled, which tool calling needs. Current builds enable them by default; on older builds, pass <code>--jinja</code>.</li>
       <li><strong>A model that can call tools.</strong> A 9B model such as <code>qwen3.5:9b</code> with a context window of 32k tokens or more is a good start; the evals on this page were run on it. Bigger models (<code>qwen3-coder:30b</code>) follow multi-step tasks more reliably. Models without tool support can only chat.</li>
     </ul>
@@ -669,7 +672,7 @@ python momo-coding-harness.py --workdir ~/projects/myapp \
 
 <span class="com"># a local llama.cpp server</span>
 python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</code></pre></div>
-    <p>The chosen provider is remembered for the next launch, and the status bar shows it as <code>VIA: &lt;provider&gt;</code>. See <a href="#running">Running against a backend</a> for step-by-step setups for local and remote Ollama and llama.cpp.</p>
+    <p>The provider and host are remembered for the next launch. <a href="#running">Running against a backend</a> has step-by-step setups for local and remote Ollama and llama.cpp; <a href="#flags">Command-line flags</a> lists every option.</p>
 
     <h3 id="first-session">Your first session</h3>
     <ol>
@@ -678,135 +681,11 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <li><strong>Switch mode to act on it.</strong> <kbd>Shift+Tab</kbd> or <code>/code</code> for a direct change, or <code>/plan</code> to have momo plan it first and wait for your <code>y</code>. See <a href="#modes">Modes</a>.</li>
       <li><strong>Pick it up later.</strong> The session is saved after every reply, and the next launch restores it. <code>--fresh</code> or <code>/new</code> starts over.</li>
     </ol>
-
-    <h3 id="flags">Command-line flags</h3>
-    <div class="table-scroll"><table>
-      <tr><th>Flag</th><th>Default</th><th>Description</th></tr>
-      <tr><td><code>--provider</code></td><td>last used / <code>ollama</code></td><td class="wrap"><code>ollama</code> or <code>llamacpp</code></td></tr>
-      <tr><td><code>--host</code></td><td>:11434 / :8080</td><td class="wrap">Backend base URL, including the scheme</td></tr>
-      <tr><td><code>--model</code></td><td><code>qwen3.5:9b</code></td><td class="wrap">Model name. llama.cpp serves whatever model it was started with.</td></tr>
-      <tr><td><code>--workdir</code></td><td><code>.</code></td><td class="wrap">Root for all file operations (alias <code>--workspace</code>)</td></tr>
-      <tr><td><code>--context</code></td><td>auto</td><td class="wrap">Context token limit. The default is half the model's maximum.</td></tr>
-      <tr><td><code>--mode</code></td><td><code>design</code></td><td class="wrap">Starting mode: <code>design</code>, <code>chat</code>, <code>plan</code>, <code>coding</code> or <code>momo</code></td></tr>
-      <tr><td><code>--max-tool-result</code></td><td><code>0</code></td><td class="wrap">Max characters per tool result (0 = unlimited)</td></tr>
-      <tr><td><code>--run-mode</code></td><td>last used / <code>new</code></td><td class="wrap"><code>new</code>: <code>run_command</code> saves its output to a log and returns a view; <code>classic</code>: all of it. See <a href="#run-output">Command output</a>. <code>--run-output-limit</code> sets the view's size.</td></tr>
-      <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
-      <tr><td><code>--think</code></td><td>last used / <code>on</code></td><td class="wrap">Thinking level: <code>off</code>, <code>on</code>, or an effort level (<code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, …) for models that take one. See <a href="#thinking">Thinking level</a>. <code>--no-think</code> is <code>--think off</code>.</td></tr>
-      <tr><td><code>--think-history</code></td><td>last used / <code>turn</code></td><td class="wrap">Send the model's own reasoning back: <code>off</code>, <code>turn</code> (since your last message) or <code>all</code>. See <a href="#think-history">Sending reasoning back</a>.</td></tr>
-      <tr><td><code>--max-output-tokens</code></td><td>last used / <code>25000</code></td><td class="wrap">Most tokens one model reply may take, reasoning included; <code>0</code> = no cap. See <a href="#reply-cap">Reply cap</a>.</td></tr>
-      <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
-      <tr><td><code>--web</code> / <code>--no-web</code></td><td>on</td><td class="wrap">Serve the browser UI alongside the TUI</td></tr>
-      <tr><td><code>--web-host</code></td><td><code>127.0.0.1</code></td><td class="wrap">Interface to bind. Any non-loopback host requires a token.</td></tr>
-      <tr><td><code>--web-port</code></td><td><code>8765</code></td><td class="wrap">Port for the web UI</td></tr>
-      <tr><td><code>--web-token</code></td><td>generated</td><td class="wrap">A fixed access token instead of a random one</td></tr>
-      <tr><td><code>--web-tls auto</code></td><td>off</td><td class="wrap">Serve the web UI over HTTPS with momo's own local CA (needs <code>openssl</code>). <code>--web-tls-name</code> adds names. See <a href="#https">HTTPS</a>.</td></tr>
-      <tr><td><code>--web-cert</code> / <code>--web-key</code></td><td>—</td><td class="wrap">Serve HTTPS with your own certificate</td></tr>
-      <tr><td><code>--web-insecure</code></td><td>off</td><td class="wrap">Plain HTTP with <strong>no</strong> token, even off loopback. Trusted networks only.</td></tr>
-      <tr><td><code>--headless</code></td><td>off</td><td class="wrap">Web UI only, with no terminal UI</td></tr>
-      <tr><td><code>--no-index</code></td><td>index on</td><td class="wrap">Start with the code index off. <code>--index-max-mem</code>, <code>--index-max-files</code>, <code>--index-workers</code> and <code>--index-persist</code> set its budget, file limit, build processes and persistence.</td></tr>
-      <tr><td><code>--net</code></td><td><code>off</code></td><td class="wrap"><code>off</code>, <code>on</code> or <code>local</code> at startup (<code>--net-confirm</code>, <code>--net-max-bytes</code> and <code>--net-max-chars</code> go with it)</td></tr>
-      <tr><td><code>--guides</code></td><td>off</td><td class="wrap">Load the project's guide files into the system prompt</td></tr>
-      <tr><td><code>--companion-idle-recap</code></td><td>off</td><td class="wrap">Let momo recap recent turns when you're idle (<code>--companion-idle-recap-secs</code>)</td></tr>
-    </table></div>
-
-    <h3>Remote hosts with a token</h3>
-<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/host https://my-remote-ollama.example.com
-/token sk-your-api-key-here</code></pre></div>
-    <p>The token is sent as <code>Authorization: Bearer …</code>. It is <strong>never written to disk</strong>: not to the session, the log or the input history, so it has to be entered again after a restart. On screen it is masked as <code>sk***ere</code>.</p>
-  </section>
-
-  <section id="requirements" data-voice="requirements">
-    <h2>Requirements &amp; footprint</h2>
-    <p>momo is meant to sit beside your editor and use very little of the machine. Nearly all the memory and compute goes to the model, which runs in Ollama or llama.cpp, not in momo. For what you need to run it, see <a href="#start">Getting started</a>.</p>
-    <h3>Dependencies</h3>
-    <p><strong>None are required.</strong> momo starts and works in a virtualenv with nothing installed; <code>requirements.txt</code> only adds features:</p>
-    <div class="table-scroll"><table>
-      <tr><th>Package</th><th>Used for</th><th>Needed?</th></tr>
-      <tr><td><code>tree-sitter</code> + 16 grammars</td><td class="wrap">Code navigation and the code index. The grammar wheels are prebuilt and work offline.</td><td class="wrap">optional: without them, the code-navigation tools aren't offered</td></tr>
-      <tr><td><code>pypdf</code></td><td class="wrap">Turning PDF attachments into text in the web UI (pure Python)</td><td class="wrap">optional</td></tr>
-    </table></div>
-    <p>Everything else is Python's standard library: <code>curses</code> for the TUI, <code>http.server</code> for the web UI, <code>http.client</code> for Ollama and llama.cpp, <code>urllib</code> for <code>fetch_url</code> and <code>web_search</code>, and <code>threading</code> for the background work. The optional HTTPS mode (<code>--web-tls auto</code>) uses the <code>openssl</code> command that macOS and Linux already ship. The web UI is hand-written HTML, CSS and JavaScript with no npm, bundler or CDN. On disk, the optional packages take about <strong>22 MB</strong> (18 MB of that is grammars) and the harness itself about 1 MB.</p>
-    <h3 id="memory">Memory while running</h3>
-    <p>Measured on 2026-09-23 on an Apple Silicon Mac with Python 3.14.7. Each figure is the resident memory of the momo process run with <code>--headless</code>, after the index had finished building. The model server isn't included.</p>
-    <div class="table-scroll"><table>
-      <tr><th>Setup</th><th>Files indexed</th><th>Index build</th><th>Index size</th><th>momo process</th></tr>
-      <tr><td>Idle, index off</td><td>—</td><td>—</td><td>—</td><td><strong>42 MB</strong></td></tr>
-      <tr><td>Index on: this repository</td><td>186</td><td>0.5 s</td><td>4 MB</td><td>88 MB</td></tr>
-      <tr><td>Index on: Maestro (Kotlin)</td><td>1,462</td><td>~1 s</td><td>17 MB</td><td>87 MB</td></tr>
-      <tr><td>Index on: mgba (C emulator)</td><td>2,087</td><td>~7.5 s</td><td>42 MB</td><td>129 MB</td></tr>
-    </table></div>
-    <ul>
-      <li>Turning the index on costs about 40 MB before the index itself, for the loaded grammars and parser caches. After that it grows with the project: here, 4 to 42 MB.</li>
-      <li>The index never grows past its budget (<code>/index-max-mem</code>, default 100 MB). Over budget it drops optional parts instead; see <a href="#index">Code index</a>. On a tight machine, lower the budget or start with <code>--no-index</code>.</li>
-      <li>The model is what needs real memory. A 9B model quantised to 4 bits typically needs several gigabytes of RAM or VRAM in Ollama or llama.cpp. momo adds only the figures above, and nothing at all if the model runs on another machine.</li>
-      <li>No database, no language server and no file watcher run in the background. The index checks file times and sizes when a tool asks, which takes about 20 ms per 1,500 files.</li>
-    </ul>
-  </section>
-
-  <section id="backends" data-voice="backends">
-    <h2>Backends</h2>
-    <p>The harness talks to the model through a small adapter layer (<code>harness/llm/</code>), with one adapter per backend. Both speak their backend's HTTP API with Python's own <code>http.client</code>, so no client library is installed. Both adapters return the same response shape, so modes, tools, streaming, thinking, compaction and both UIs work the same whichever backend you pick. Choose one with <code>--provider ollama</code> or <code>--provider llamacpp</code>. The choice is remembered for the next launch and saved with each session.</p>
-    <div class="table-scroll"><table>
-      <tr><th></th><th>Ollama</th><th>llama.cpp</th></tr>
-      <tr><td>Provider</td><td class="wrap"><code>--provider ollama</code> (default)</td><td class="wrap"><code>--provider llamacpp</code></td></tr>
-      <tr><td>API used</td><td class="wrap">Native Ollama API (<code>/api/chat</code>, <code>/api/show</code>, <code>/api/tags</code>)</td><td class="wrap">OpenAI-compatible <code>/v1/chat/completions</code>, <code>/props</code>, <code>/v1/models</code></td></tr>
-      <tr><td>Default host</td><td class="wrap"><code>http://localhost:11434</code></td><td class="wrap"><code>http://localhost:8080</code></td></tr>
-      <tr><td>Models</td><td class="wrap"><code>/model</code> lists every pulled model and switches between them at runtime</td><td class="wrap">One model, fixed when <code>llama-server</code> starts. <code>/model</code> shows it but can't switch.</td></tr>
-      <tr><td>Context window</td><td class="wrap">Read from the model's info. The model's full native window is sent as <code>num_ctx</code> on every request, and Ollama reserves memory for all of it (see <a href="#context">Context</a>).</td><td class="wrap">Read from <code>/props</code> (<code>n_ctx</code>). Fixed at launch with <code>-c</code>.</td></tr>
-      <tr><td>Tool calling</td><td class="wrap">Needs a model with tool support (e.g. <code>qwen3.5:9b</code>, <code>qwen2.5-coder</code>, <code>mistral-nemo</code>)</td><td class="wrap">Needs Jinja chat templates (the default in current builds; <code>--jinja</code> on older ones, never <code>--no-jinja</code>), plus a model whose template supports tools</td></tr>
-      <tr><td>Thinking</td><td class="wrap">Ollama's <code>think</code> option, read from <code>/api/show</code>. See <a href="#thinking">Thinking level</a>.</td><td class="wrap"><code>enable_thinking</code> and <code>reasoning_effort</code>, read from <code>/props</code>. With <code>--reasoning-format none</code>, momo recovers reasoning from <code>&lt;think&gt;</code> tags.</td></tr>
-      <tr><td>Streaming</td><td class="wrap">Yes</td><td class="wrap">Yes (Server-Sent Events)</td></tr>
-      <tr><td>Auth</td><td class="wrap" colspan="2"><code>/token &lt;key&gt;</code> sends <code>Authorization: Bearer &lt;key&gt;</code> to either backend. For Ollama, an <code>OLLAMA_API_KEY</code> environment variable is used when no token is set.</td></tr>
-    </table></div>
-    <p>By default compaction starts at half the detected window; <a href="#context">Context &amp; compaction</a> explains why and how to change it.</p>
-    <h3 id="thinking">Thinking level</h3>
-    <p><code>/think off|on|low|medium|high|xhigh</code> sets how much the model reasons before it answers. The web UI's <code>THINK</code> badge does the same. The level is remembered, and <code>--think</code> sets it at startup. momo asks the server which levels the model takes and sends only those:</p>
-    <ul>
-      <li><strong>Each model has its own levels.</strong> Qwen3.5 and Gemma 4 take on/off only. gpt-oss takes low/medium/high. Qwen3.8 takes low/medium/xhigh and rejects anything else. On llama.cpp momo reads the list from the model's chat template; on Ollama, from the model's capabilities.</li>
-      <li><strong>The nearest level is sent</strong> when the model doesn't take yours, and momo says so (<code>THINK: high→xhigh</code>, or <code>high→on</code> on an on/off model). Your choice is kept, so a model that takes it gets it.</li>
-      <li><strong><code>on</code> sends no level,</strong> so the model uses its own default. gpt-oss always reasons, so <code>off</code> sends <code>low</code>.</li>
-      <li><strong>Checked again at every message and on <code>/think</code>.</strong> A llama.cpp server may have been relaunched with another model or was still loading, so momo re-reads the model, its window and its levels each time.</li>
-      <li><strong>A model without thinking gets nothing sent</strong> (badge: <code>THINK: n/a</code>).</li>
-      <li><strong>No separate reasoning budget:</strong> llama.cpp's <code>--reasoning-budget</code> is fixed when the server starts, and Ollama has none. The <a href="#reply-cap">reply cap</a> bounds reasoning and answer together.</li>
-    </ul>
-    <p>Compaction summaries, companion recaps and the retry after a cut-off reply always ask for no reasoning.</p>
-    <h3 id="reply-cap">Reply cap</h3>
-    <p>Every request carries a limit on how long one reply may be, reasoning included: <code>/max-output-tokens</code>, default <strong>25,000</strong> tokens. It goes to llama.cpp as <code>max_tokens</code> and to Ollama as <code>options.num_predict</code>, and applies to companion recaps and session titles too.</p>
-    <ul>
-      <li><strong>Why:</strong> a model caught in a repetition loop otherwise generates until the context is full. In an eval, one reply ran to 125,000 tokens and held the turn for 80 minutes.</li>
-      <li><strong>What happens at the cap:</strong> the reply ends with <code>done_reason: length</code>. If it was cut off before it said anything or called a tool (usually because the reasoning used the whole budget), momo asks once more with thinking off and says so in the chat: "Response cut off (context or /max-output-tokens limit). Retrying without thinking."</li>
-      <li><strong>Setting it:</strong> <code>/max-output-tokens 30000</code>, <code>/max-output-tokens off</code> for no cap, or <code>/max-output-tokens</code> to show it (minimum 256). It's remembered; <code>--max-output-tokens N</code> sets it at startup (0 = off), and in the web UI it's View → Context → <em>Reply cap</em>.</li>
-    </ul>
-    <h3 id="think-history">Sending reasoning back</h3>
-    <p><code>/think-history off|turn|all</code> decides whether the model sees its own earlier reasoning. <code>turn</code> (the default) sends it back for the current tool loop, since your last message. <code>all</code> also sends earlier turns, and <code>off</code> sends none. It is remembered, and in the web UI it is under the <code>THINK</code> menu.</p>
-    <ul>
-      <li><strong>Why:</strong> models are trained to see their reasoning from the earlier steps of a tool loop, and their chat templates are written for that. With <code>off</code>, the model sees its earlier tool calls without the reasoning behind them, and tends to plan again from scratch after every tool result.</li>
-      <li><strong>How:</strong> the reasoning goes on the assistant message it led to (<code>reasoning_content</code> for llama.cpp, <code>thinking</code> for Ollama), and <code>preserve_thinking</code> is passed to templates that read it. A cut-off reply's reasoning is never sent back.</li>
-      <li><strong>Cost:</strong> sent reasoning counts toward the context (<em>Reasoning sent back</em> in the CTX breakdown). With <code>all</code>, compaction stops sending earlier turns' reasoning before it removes any messages.</li>
-    </ul>
-    <div class="table-scroll"><table>
-      <tr><th>Model</th><th>Earlier reasoning its template shows the model</th></tr>
-      <tr><td>Qwen3.5</td><td class="wrap">Since the last user message (the current tool loop). Older turns are dropped even when sent.</td></tr>
-      <tr><td>Qwen3.8</td><td class="wrap">Every turn by default (<code>preserve_thinking</code>), or only the current one</td></tr>
-      <tr><td>Gemma 4</td><td class="wrap">Since the last user message; with <code>preserve_thinking</code>, also earlier turns' tool calls</td></tr>
-    </table></div>
-    <p class="note"><strong>Measured</strong> with the code-navigation evals on Qwen3.5-9B: <code>turn</code> was as accurate as <code>off</code>, made a quarter fewer tool calls and took about 40% less time, because the model stops re-planning after every tool result. <code>all</code> hasn't been measured.</p>
-    <details><summary>Eval details</summary>
-    <p>llama.cpp, 39 runs per side, 2026-09-30.</p>
-    <div class="table-scroll"><table>
-      <tr><th></th><th><code>off</code></th><th><code>turn</code></th></tr>
-      <tr><td>Facts in the answers</td><td>101/105</td><td>100/105</td></tr>
-      <tr><td>Tool calls</td><td>78</td><td>58</td></tr>
-      <tr><td>Runs over their call budget</td><td>14/39</td><td>6/39</td></tr>
-      <tr><td>Total time</td><td>~22 min</td><td>~13.5 min</td></tr>
-    </table></div>
-    <p>Accuracy was the same, within the noise of three runs per task. The slowest task went from 117 s to 39 s.</p>
-    </details>
   </section>
 
   <section id="running" data-voice="running">
     <h2>Running against a backend</h2>
-    <p>Pick the recipe that matches where your model runs. Every recipe starts both the TUI and the web UI. Add <code>--workdir ~/projects/myapp</code> to point momo at a project, or <code>--headless</code> to run only the web UI.</p>
+    <p>momo works the same with Ollama and llama.cpp: every mode, tool and UI behaves identically. Pick one with <code>--provider ollama</code> (the default) or <code>--provider llamacpp</code>; the choice is remembered. Then pick the recipe for where your model runs. Each starts both the TUI and the web UI; add <code>--workdir ~/projects/myapp</code> to point momo at a project, or <code>--headless</code> for the web UI only.</p>
 
     <div class="recipes">
       <div class="recipe">
@@ -853,6 +732,18 @@ ollama serve</code></pre></div>
       </div>
     </div>
 
+    <h3 id="backends">Ollama or llama.cpp</h3>
+    <div class="table-scroll"><table>
+      <tr><th></th><th>Ollama</th><th>llama.cpp</th></tr>
+      <tr><td>API used</td><td class="wrap">Native Ollama API (<code>/api/chat</code>, <code>/api/show</code>, <code>/api/tags</code>)</td><td class="wrap">OpenAI-compatible <code>/v1/chat/completions</code>, <code>/props</code>, <code>/v1/models</code></td></tr>
+      <tr><td>Default host</td><td class="wrap"><code>http://localhost:11434</code></td><td class="wrap"><code>http://localhost:8080</code></td></tr>
+      <tr><td>Models</td><td class="wrap"><code>/model</code> lists every pulled model and switches between them at runtime</td><td class="wrap">One model, fixed when <code>llama-server</code> starts. <code>/model</code> shows it but can't switch.</td></tr>
+      <tr><td>Context window</td><td class="wrap">Read from the model's info. The model's full native window is sent as <code>num_ctx</code> on every request, and Ollama reserves memory for all of it (see <a href="#context">Context</a>).</td><td class="wrap">Read from <code>/props</code> (<code>n_ctx</code>). Fixed at launch with <code>-c</code>.</td></tr>
+      <tr><td>Tool calling</td><td class="wrap">Needs a model with tool support (e.g. <code>qwen3.5:9b</code>, <code>qwen2.5-coder</code>, <code>mistral-nemo</code>)</td><td class="wrap">Needs Jinja chat templates (default in current builds; <code>--jinja</code> on older ones) and a model whose template supports tools</td></tr>
+      <tr><td>Thinking</td><td class="wrap">Ollama's <code>think</code> option, read from <code>/api/show</code>. See <a href="#thinking">Thinking</a>.</td><td class="wrap"><code>enable_thinking</code> and <code>reasoning_effort</code>, read from <code>/props</code>. With <code>--reasoning-format none</code>, momo recovers reasoning from <code>&lt;think&gt;</code> tags.</td></tr>
+      <tr><td>Auth</td><td class="wrap" colspan="2"><code>/token &lt;key&gt;</code> sends <code>Authorization: Bearer &lt;key&gt;</code> to either backend. For Ollama, an <code>OLLAMA_API_KEY</code> environment variable is used when no token is set.</td></tr>
+    </table></div>
+
     <h3>Switching while running</h3>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Effect</th></tr>
@@ -861,70 +752,54 @@ ollama serve</code></pre></div>
       <tr><td><code>/model [name]</code></td><td class="wrap">List or switch models (Ollama). On llama.cpp this only shows the loaded model.</td></tr>
       <tr><td><code>/token &lt;key&gt;</code>, <code>/clear-token</code></td><td class="wrap">Set or remove the Bearer token for the current host</td></tr>
     </table></div>
-    <p>To change the <em>provider</em>, restart with <code>--provider</code>. The host is saved with the session; passing <code>--provider</code>, <code>--host</code> or <code>--model</code> at launch overrides whatever the restored session had.</p>
+    <p>To change the <em>provider</em>, restart with <code>--provider</code>. Passing <code>--provider</code>, <code>--host</code> or <code>--model</code> at launch overrides whatever the restored session had. The token is sent as <code>Authorization: Bearer …</code> and is <strong>never written to disk</strong> (not to the session, the log or the input history), so enter it again after a restart. On screen it is masked as <code>sk***ere</code>.</p>
 
     <h3 id="remote">Remote servers</h3>
-    <p>"Remote" just means <code>--host</code> points somewhere other than <code>localhost</code>: another machine on your LAN, a GPU box, or a hosted endpoint behind a reverse proxy. The harness, the tools and your files stay on the machine where you run momo. What goes to the server is each request: your messages, the system prompt, and whatever the model has read or run, including file contents and command output. Use a server you trust with your code.</p>
+    <p>"Remote" means <code>--host</code> points somewhere other than <code>localhost</code>: a machine on your LAN, a GPU box, or a hosted endpoint behind a reverse proxy. The tools and your files stay on the machine running momo, but each request goes to the server: your messages, the system prompt, and whatever the model has read or run, including file contents and command output. Use a server you trust with your code.</p>
     <ul>
       <li><strong>Give the full URL,</strong> including the scheme: <code>http://192.168.1.10:11434</code>, not <code>192.168.1.10:11434</code>.</li>
-      <li><strong>HTTPS servers</strong> are verified against the system's certificate store. Proxy environment variables (<code>HTTP_PROXY</code> and so on) are not used for the model connection; for a server behind a proxy or jump host, use an SSH tunnel.</li>
+      <li><strong>Prefer an SSH tunnel to exposing the model port.</strong> <code>ssh -L 11434:127.0.0.1:11434 gpu-box</code> (or <code>8080</code> for llama.cpp) lets momo use the default <code>localhost</code> host, and the server stays unreachable from the network. Proxy environment variables (<code>HTTP_PROXY</code> …) aren't used, so a tunnel is also the way through a jump host.</li>
+      <li><strong>Plain HTTP unless the URL is <code>https://</code>.</strong> HTTPS servers are verified against the system's certificate store. Put a TLS-terminating proxy in front of a server you reach over an untrusted network, especially if you send a token.</li>
     </ul>
 
-    <h3>Tips</h3>
+    <h3>When it doesn't connect</h3>
     <ul>
-      <li><strong>Prefer an SSH tunnel to exposing the model port.</strong> <code>ssh -L 11434:127.0.0.1:11434 gpu-box</code> (or <code>8080</code> for llama.cpp) lets momo use the default <code>localhost</code> host, and the server stays unreachable from the network.</li>
-      <li><strong>Traffic to the model is plain HTTP</strong> unless your URL is <code>https://</code>. Put a TLS-terminating proxy in front of a remote server you reach over an untrusted network, especially if you send a token.</li>
-      <li><strong>Check the status bar.</strong> <code>VIA: ollama</code> or <code>VIA: llamacpp</code>, the host and the model are always visible. The startup message also says which context window was detected.</li>
-      <li><strong>Server down?</strong> When momo can't reach it, the TUI status bar shows <code>(offline)</code> after the model, the web UI shows <code>· offline</code> and an orange connection dot, and <code>/host &lt;url&gt;</code> answers "(not reachable)". momo checks again before every message, so restarting the server is enough.</li>
-      <li><strong>Nothing detected?</strong> If the server can't report its window, set one with <code>--context 16384</code>.</li>
+      <li><strong>Check the status bar.</strong> It always shows the provider (<code>VIA: ollama</code>), host and model, and the startup line says which context window was detected.</li>
+      <li><strong>Server down?</strong> The TUI shows <code>(offline)</code> after the model, the web UI shows <code>· offline</code> and an orange connection dot, and <code>/host &lt;url&gt;</code> answers "(not reachable)". momo checks again before every message, so restarting the server is enough.</li>
+      <li><strong>No context window detected?</strong> Set one with <code>--context 16384</code>.</li>
     </ul>
   </section>
 
-  <section id="modes" data-voice="modes">
-    <h2>Modes</h2>
-    <p>Cycle with <kbd>Shift+Tab</kbd> (design → chat → plan → coding → momo), or switch directly with <code>/design</code>, <code>/chat</code>, <code>/plan</code>, <code>/code</code> or <code>/momo</code>. Each mode swaps the role prompt and the set of tools offered to the model.</p>
-    <p><strong>Which one?</strong> Not sure yet what to build: <code>design</code>. Questions about code or documents: <code>chat</code>. A change that touches several files, or one you want to review before it happens: <code>plan</code>. A change you can describe in a sentence: <code>coding</code>. momo starts in <code>design</code> because it can't change your code, which makes it a safe default in a project it hasn't seen.</p>
+  <section id="requirements" data-voice="requirements">
+    <h2>Requirements &amp; footprint</h2>
+    <p>momo is meant to sit beside your editor and use very little of the machine. The model is what needs real memory: a 9B model quantised to 4 bits typically takes several gigabytes of RAM or VRAM in Ollama or llama.cpp. momo adds only the figures below, and nothing at all for the model if it runs on another machine.</p>
+    <h3>Dependencies</h3>
+    <p><strong>None are required.</strong> momo starts and works in a virtualenv with nothing installed; <code>requirements.txt</code> only adds features:</p>
     <div class="table-scroll"><table>
-      <tr><th>Mode</th><th>What it's for</th><th>Tools</th></tr>
-      <tr><td><code>design</code></td><td class="wrap">A design partner. It explores the codebase, asks questions grounded in what it finds and writes the design document once it knows enough. It never edits code.</td><td class="wrap">read-only + code nav + <code>write_file</code>, <code>edit_file</code> (for its document), <code>ask_user</code></td></tr>
-      <tr><td><code>chat</code></td><td class="wrap">A conversation partner for understanding code and documents. It reads, explains and asks follow-up questions, and never writes.</td><td class="wrap">read-only + code nav + <code>ask_user</code></td></tr>
-      <tr><td><code>plan</code></td><td class="wrap">Think it through before touching anything. See <a href="#plan">Plan mode</a>.</td><td class="wrap">investigating: read-only + <code>run_command</code>, <code>create_plan</code><br>executing: coding + <code>complete_step</code>, <code>revise_plan</code></td></tr>
-      <tr><td><code>coding</code></td><td class="wrap">An engineer. It makes targeted edits, runs tests and uses git.</td><td class="wrap">everything in design + <code>edit_files</code>, <code>replace_symbol</code>, <code>delete_file</code>, <code>move_file</code>, <code>append_to_file</code>, <code>run_command</code></td></tr>
-      <tr><td><code>momo</code></td><td class="wrap">Talk to the cat. Replies are short, warm and lowercase. It's a companion first, but it still does the work when asked.</td><td class="wrap">same as coding</td></tr>
+      <tr><th>Package</th><th>Used for</th><th>Needed?</th></tr>
+      <tr><td><code>tree-sitter</code> + 16 grammars</td><td class="wrap">Code navigation and the code index. The grammar wheels are prebuilt and work offline.</td><td class="wrap">optional: without them, the code-navigation tools aren't offered</td></tr>
+      <tr><td><code>pypdf</code></td><td class="wrap">Turning PDF attachments into text in the web UI (pure Python)</td><td class="wrap">optional</td></tr>
     </table></div>
+    <p>Everything else is Python's standard library (<code>curses</code>, <code>http.server</code>, <code>http.client</code>, <code>urllib</code>), plus the <code>openssl</code> command for the optional HTTPS mode. The web UI is hand-written HTML, CSS and JavaScript with no npm, bundler or CDN. On disk, the optional packages take about <strong>22 MB</strong> (18 MB of it grammars) and momo itself about 1 MB.</p>
+    <h3 id="memory">Memory while running</h3>
+    <p>Measured on 2026-09-23 on an Apple Silicon Mac with Python 3.14.7. Each figure is the resident memory of the momo process run with <code>--headless</code>, after the index had finished building. The model server isn't included.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Setup</th><th>Files indexed</th><th>Index build</th><th>Index size</th><th>momo process</th></tr>
+      <tr><td>Idle, index off</td><td>—</td><td>—</td><td>—</td><td><strong>42 MB</strong></td></tr>
+      <tr><td>Index on: this repository</td><td>186</td><td>0.5 s</td><td>4 MB</td><td>88 MB</td></tr>
+      <tr><td>Index on: Maestro (Kotlin)</td><td>1,462</td><td>~1 s</td><td>17 MB</td><td>87 MB</td></tr>
+      <tr><td>Index on: mgba (C emulator)</td><td>2,087</td><td>~7.5 s</td><td>42 MB</td><td>129 MB</td></tr>
+    </table></div>
+    <ul>
+      <li>Turning the index on costs about 40 MB before the index itself, for the loaded grammars and parser caches. After that it grows with the project: here, 4 to 42 MB.</li>
+      <li>The index never grows past its budget (<code>/index-max-mem</code>, default 100 MB). Over budget it drops optional parts instead; see <a href="#index">Code index</a>. On a tight machine, lower the budget or start with <code>--no-index</code>.</li>
+      <li>No database, no language server and no file watcher run in the background. The index checks file times and sizes when a tool asks, which takes about 20 ms per 1,500 files.</li>
+    </ul>
   </section>
 
-  <section id="plan" data-voice="plan">
-    <h2>Plan mode</h2>
-    <figure class="flow" aria-label="Plan mode lifecycle">
-      <div class="flow-row"><div class="box model">1 Investigate<small>read the code, reproduce, <code>ask_user</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">2 Plan<small><code>create_plan</code> writes <code>.momo-plan.md</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">3 Confirm<small><code>y</code> runs it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">4 Execute<small>one step at a time, ▶ in the prompt</small></div><span class="arrow" aria-hidden="true">→</span><div class="box end">Done<small>the plan file is deleted</small></div></div>
-      <ul class="flow-edges">
-        <li><span class="from">Confirm</span><span class="via">— any other reply (feedback) →</span><span class="to">Plan, revised</span></li>
-        <li><span class="from">Confirm</span><span class="via">— <code>n</code> →</span><span class="to">Kept — <code>/plan run</code> → Execute</span></li>
-        <li><span class="from">Execute</span><span class="via">— interrupt, backend error or iteration cap →</span><span class="to">Paused — <code>/plan resume</code> or any message → Execute</span></li>
-        <li><span class="from">Execute</span><span class="via">— <code>revise_plan</code> →</span><span class="to">the remaining steps are replaced</span></li>
-        <li><span class="from">Any</span><span class="via">— <code>/plan cancel</code> →</span><span class="to">the plan and its file are discarded</span></li>
-      </ul>
-      <figcaption>Step checkboxes in <code>.momo-plan.md</code>: <code>[ ]</code> pending · <code>[~]</code> in progress · <code>[x]</code> done · <code>[-]</code> skipped.</figcaption>
-    </figure>
-    <ol>
-      <li><strong>Investigate.</strong> The model follows the code path the change touches, tries to reproduce a bug with <code>run_command</code> and finds out how the project is tested. It uses <code>ask_user</code> for questions that would change the plan, one at a time.</li>
-      <li><strong>Plan.</strong> It calls <code>create_plan</code> with a title, a goal and ordered steps. Each step names the file and function it changes, the change itself and how to verify it. The harness writes this to <code>.momo-plan.md</code>.</li>
-      <li><strong>Confirm.</strong> Answer <code>y</code> to run the plan now, or <code>n</code> to keep it for <code>/plan run</code>. Anything else counts as feedback, and the model revises the plan. You can edit <code>.momo-plan.md</code> by hand first. It's re-read on approval, and <code>[-]</code> skips a step.</li>
-      <li><strong>Execute.</strong> The harness runs one step at a time. The plan, with <code>▶</code> on the current step, is in the system prompt, so the model knows where it is even after compaction. A step ends with <code>complete_step</code> or a text-only reply. <code>revise_plan</code> replaces the remaining steps and reports any it dropped. A paused plan carries on with <code>/plan resume</code> or any message you type, even after a restart.</li>
-    </ol>
-    <div class="table-scroll"><table>
-      <tr><th>Command</th><th>Effect</th></tr>
-      <tr><td><code>/plan</code></td><td class="wrap">Switch to plan mode, showing the current plan's state if there is one</td></tr>
-      <tr><td><code>/plan show</code></td><td class="wrap">The plan with the status of each step</td></tr>
-      <tr><td><code>/plan run</code></td><td class="wrap">Approve a kept plan and execute it (re-reads the file)</td></tr>
-      <tr><td><code>/plan resume</code></td><td class="wrap">Continue a paused plan from its current step</td></tr>
-      <tr><td><code>/plan cancel</code></td><td class="wrap">Discard the plan and delete <code>.momo-plan.md</code></td></tr>
-    </table></div>
-  </section>
-
-  <section id="tools" data-voice="tools">
-    <h2>Tools</h2>
+  <section id="how" data-group="Using momo" data-voice="how">
+    <h2>How momo works</h2>
+    <p>There are three parts: <strong>you</strong>, <strong>momo</strong> (the harness, running on your machine) and the <strong>model server</strong>. You send a message; momo sends it to the model together with a <em>system prompt</em> (instructions for the current mode) and the <em>tool schemas</em> (what the model may call). The model answers in text, or asks for tools: read a file, search, edit, run a command. momo runs those in your working directory and sends the results back, until the model answers in text.</p>
     <figure class="flow" aria-label="One turn of the agent loop">
       <div class="flow-col">
         <div class="box you"><div class="flow-who">you</div>Send a message</div>
@@ -938,14 +813,145 @@ ollama serve</code></pre></div>
         <div class="box harness cond"><div class="flow-who">harness</div>Ask you first<small><code>run_command</code> with <code>/run-confirm on</code>, <code>fetch_url</code> writes, <code>ask_user</code> questions</small></div>
         <div class="side"><b>declined</b> → the model gets “declined” as the result</div>
         <div class="down" aria-hidden="true">↓</div>
-        <div class="box harness"><div class="flow-who">harness</div>Run the tools, add the results to the history<small>sandboxed to the working directory</small></div>
+        <div class="box harness"><div class="flow-who">harness</div>Run the tools, add the results to the history<small>in your working directory</small></div>
         <div class="side"><b>100 rounds</b> (40 in design mode) → stop; a running plan pauses</div>
         <div class="back">↺ back to compact, then the model</div>
       </div>
       <div class="flow-legend"><span class="you">you</span><span class="model">model</span><span class="harness">harness</span><span class="harness cond">only in some cases</span></div>
       <figcaption>One turn. Every tool result goes back to the model until it answers in text.</figcaption>
     </figure>
-    <p>The tool reference in each system prompt is generated from the tool schemas, so the model always sees exactly the tools its current mode offers. File tools are confined to the working directory, and <code>..</code> escapes are rejected. <code>run_command</code> is a shell, so it isn't; turn on <code>/run-confirm</code> to approve each command.</p>
+    <ul>
+      <li><strong>Modes</strong> decide which tools are offered and what the system prompt says. See <a href="#modes">Modes</a>.</li>
+      <li><strong>Context</strong> is everything sent in one request. The CTX meter shows how full it is, and old parts are summarised when it fills up. See <a href="#context">Context &amp; compaction</a>.</li>
+      <li><strong>"momo"</strong> is the app, one of its modes and the cat on the input bar.</li>
+    </ul>
+  </section>
+
+  <section id="modes" data-voice="modes">
+    <h2>Modes</h2>
+    <p>Cycle with <kbd>Shift+Tab</kbd> (design → chat → plan → coding → momo), or switch directly with <code>/design</code>, <code>/chat</code>, <code>/plan</code>, <code>/code</code> or <code>/momo</code>. Each mode swaps the role prompt and the set of tools offered to the model.</p>
+    <p><strong>Which one?</strong> Not sure yet what to build: <code>design</code>. Questions about code or documents: <code>chat</code>. A change that touches several files, or one you want to review before it happens: <code>plan</code>. A change you can describe in a sentence: <code>coding</code>. momo starts in <code>design</code> because it can't change your code, which makes it a safe default in a project it hasn't seen.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Mode</th><th>What it's for</th><th>Can change</th></tr>
+      <tr><td><code>design</code></td><td class="wrap">A design partner. It explores the codebase, asks questions grounded in what it finds and writes the design document once it knows enough.</td><td class="wrap">only the design document it writes</td></tr>
+      <tr><td><code>chat</code></td><td class="wrap">A conversation partner for understanding code and documents. It reads, explains and asks follow-up questions.</td><td class="wrap">nothing</td></tr>
+      <tr><td><code>plan</code></td><td class="wrap">Think it through before touching anything. See <a href="#plan">Plan mode</a>.</td><td class="wrap">nothing until you approve the plan; then everything</td></tr>
+      <tr><td><code>coding</code></td><td class="wrap">An engineer. It makes targeted edits, runs tests and uses git.</td><td class="wrap">everything: files and shell commands</td></tr>
+      <tr><td><code>momo</code></td><td class="wrap">Talk to the cat. Replies are short, warm and lowercase. It's a companion first, but it still does the work when asked.</td><td class="wrap">everything, like coding</td></tr>
+    </table></div>
+    <p>The exact tools per mode are in the <a href="#tools">Tools</a> tables, and you can switch any of them off per mode with <a href="#tool-choices"><code>/tools</code></a>.</p>
+  </section>
+
+  <section id="plan" data-voice="plan">
+    <h2>Plan mode</h2>
+    <p>For changes you want to see before they happen. momo investigates, writes a step-by-step plan to <code>.momo-plan.md</code>, and changes nothing until you approve it.</p>
+    <figure class="flow" aria-label="Plan mode lifecycle">
+      <div class="flow-row"><div class="box model">1 Investigate<small>read the code, reproduce, <code>ask_user</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">2 Plan<small><code>create_plan</code> writes <code>.momo-plan.md</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">3 Confirm<small><code>y</code> runs it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">4 Execute<small>one step at a time, ▶ in the prompt</small></div><span class="arrow" aria-hidden="true">→</span><div class="box end">Done<small>the plan file is deleted</small></div></div>
+      <ul class="flow-edges">
+        <li><span class="from">Confirm</span><span class="via">— any other reply (feedback) →</span><span class="to">Plan, revised</span></li>
+        <li><span class="from">Confirm</span><span class="via">— <code>n</code> →</span><span class="to">Kept — <code>/plan run</code> → Execute</span></li>
+        <li><span class="from">Execute</span><span class="via">— interrupt, backend error or iteration cap →</span><span class="to">Paused — <code>/plan resume</code> or any message → Execute</span></li>
+        <li><span class="from">Execute</span><span class="via">— <code>revise_plan</code> →</span><span class="to">the remaining steps are replaced</span></li>
+        <li><span class="from">Any</span><span class="via">— <code>/plan cancel</code> →</span><span class="to">the plan and its file are discarded</span></li>
+      </ul>
+      <figcaption>Step checkboxes in <code>.momo-plan.md</code>: <code>[ ]</code> pending · <code>[~]</code> in progress · <code>[x]</code> done · <code>[-]</code> skipped.</figcaption>
+    </figure>
+    <ol>
+      <li><strong>Investigate.</strong> The model follows the code the change touches, reproduces a bug if there is one, finds out how the project is tested, and asks you only what would change the plan.</li>
+      <li><strong>Plan.</strong> <code>create_plan</code> writes a goal and ordered steps to <code>.momo-plan.md</code>; each step names the file and function, the change and how to verify it.</li>
+      <li><strong>Confirm.</strong> <code>y</code> runs it, <code>n</code> keeps it for <code>/plan run</code>, and anything else is feedback the model revises it with. You can edit the file by hand first; <code>[-]</code> skips a step.</li>
+      <li><strong>Execute.</strong> One step at a time, with the plan (<code>▶</code> on the current step) in the system prompt so the model keeps its place even after compaction. <code>revise_plan</code> replaces the remaining steps. A paused plan carries on with <code>/plan resume</code> or any message, even after a restart.</li>
+    </ol>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Effect</th></tr>
+      <tr><td><code>/plan</code></td><td class="wrap">Switch to plan mode, showing the current plan's state if there is one</td></tr>
+      <tr><td><code>/plan show</code></td><td class="wrap">The plan with the status of each step</td></tr>
+      <tr><td><code>/plan run</code></td><td class="wrap">Approve a kept plan and execute it (re-reads the file)</td></tr>
+      <tr><td><code>/plan resume</code></td><td class="wrap">Continue a paused plan from its current step</td></tr>
+      <tr><td><code>/plan cancel</code></td><td class="wrap">Discard the plan and delete <code>.momo-plan.md</code></td></tr>
+    </table></div>
+  </section>
+
+  <section id="tui" data-voice="tui">
+    <h2>Terminal UI</h2>
+    <p>The chat pane is at the top, with tool calls in yellow and thinking in orange. The status bar shows the mode, backend, model, host, CTX % and working directory (plus <code>THINK</code>, <code>NET</code>, <code>IDX</code> when they aren't at their defaults), and below it is a five-row input. <kbd>Tab</kbd> moves focus between the chat and the input: the Shift+letter shortcuts only work with the <strong>chat</strong> focused, so typing capitals in the input still works.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Key</th><th>Where</th><th>Action</th></tr>
+      <tr><td><kbd>Enter</kbd></td><td>input</td><td class="wrap">Send</td></tr>
+      <tr><td><kbd>Ctrl+J</kbd></td><td>input</td><td class="wrap">New line (works in every terminal; <kbd>Shift+Enter</kbd> works with CSI-u)</td></tr>
+      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>input</td><td class="wrap">Move between lines. At the top or bottom edge, browse history.</td></tr>
+      <tr><td><kbd>Shift+↑</kbd> / <kbd>Shift+↓</kbd></td><td>input</td><td class="wrap">History, wherever the cursor is</td></tr>
+      <tr><td><kbd>Ctrl+A</kbd> <kbd>Ctrl+E</kbd> <kbd>Ctrl+K</kbd> <kbd>Ctrl+U</kbd></td><td>input</td><td class="wrap">Start of line, end of line, delete to end, delete to start</td></tr>
+      <tr><td><kbd>@</kbd> / <kbd>/</kbd></td><td>input</td><td class="wrap">Path autocomplete, command autocomplete</td></tr>
+      <tr><td><kbd>Tab</kbd></td><td>anywhere</td><td class="wrap">Switch focus between chat and input</td></tr>
+      <tr><td><kbd>Shift+Tab</kbd></td><td>anywhere</td><td class="wrap">Cycle mode</td></tr>
+      <tr><td><kbd>PgUp</kbd> / <kbd>PgDn</kbd></td><td>anywhere</td><td class="wrap">Scroll the chat by a page</td></tr>
+      <tr><td><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></td><td>chat</td><td class="wrap">Scroll the chat by a line, and wide tables sideways</td></tr>
+      <tr><td><kbd>Shift+T</kbd> / <kbd>M</kbd> / <kbd>D</kbd> / <kbd>Q</kbd></td><td>chat</td><td class="wrap">Toggle thinking, markdown, diffs or the companion</td></tr>
+      <tr><td><kbd>Shift+P</kbd></td><td>chat</td><td class="wrap">Toggle <code>run_command</code> confirmation</td></tr>
+      <tr><td><kbd>Shift+C</kbd></td><td>chat</td><td class="wrap">Interrupt the running response</td></tr>
+    </table></div>
+  </section>
+
+  <section id="web" data-voice="web">
+    <h2>Web UI</h2>
+    <p>It starts with the TUI at <code>http://127.0.0.1:8765</code>, reachable from this machine only (<code>--headless</code> runs it alone, <code>--no-web</code> turns it off). It loads nothing from the internet, so it works fully offline. To open it from another device, see <a href="#security">Access &amp; security</a>.</p>
+    <h3>One session, two windows</h3>
+    <ul>
+      <li>Messages, replies, tool calls and diffs appear in both the browser and the terminal.</li>
+      <li>A question from the model can be answered in either window.</li>
+      <li>Mode, model, host, context and plan progress are shared. View options, such as hiding thinking, are per window.</li>
+      <li>Reloading the page replays the conversation so far.</li>
+    </ul>
+    <h3>What's in it</h3>
+    <ul>
+      <li><strong>Status bar:</strong>
+        <ul>
+          <li>the session drawer (load, start or delete sessions) and a workspace file browser;</li>
+          <li>mode and model pickers;</li>
+          <li>the CTX meter: click it for the per-category breakdown and a link to the <a href="#system-prompt">system prompt</a>;</li>
+          <li><code>THINK</code> / <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges for those settings;</li>
+          <li>a wrench button for <a href="#tool-choices">this mode's tools</a>.</li>
+        </ul></li>
+      <li><strong>Transcript:</strong> streamed markdown replies, collapsible thinking, one-line tool calls that expand to show arguments and results, coloured diffs and question cards with Yes/No buttons.</li>
+      <li><strong>Input:</strong> <kbd>/</kbd> command autocomplete, <kbd>@</kbd> fuzzy path search, a queue for messages sent while the model is busy, and Retry / Edit on your last message.</li>
+      <li><strong>Attachments:</strong> drag, paste or pick files. Text and PDFs are converted to text. Chips show a token estimate and turn amber when a file would use more than a quarter of the context.</li>
+      <li><strong>Notifications:</strong> a synthesised kitten mew (rising for a question, falling when a turn ends) and an optional desktop notification when the window isn't focused.</li>
+      <li>Syntax highlighting for about 20 languages, copy buttons on code blocks, and light and dark themes.</li>
+    </ul>
+    <h3>Keys</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Key</th><th>Where</th><th>Action</th></tr>
+      <tr><td><kbd>Enter</kbd> / <kbd>Shift+Enter</kbd></td><td>input</td><td class="wrap">Send / new line</td></tr>
+      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>input</td><td class="wrap">History, with the cursor at the start or end</td></tr>
+      <tr><td><kbd>Cmd/Ctrl+V</kbd></td><td>input</td><td class="wrap">Paste copied files as attachments</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>anywhere</td><td class="wrap">Interrupt the running response; also closes menus and drawers</td></tr>
+      <tr><td><kbd>Shift+Tab</kbd></td><td>anywhere</td><td class="wrap">Cycle mode</td></tr>
+      <tr><td><kbd>Shift+T</kbd> / <kbd>M</kbd> / <kbd>D</kbd> / <kbd>Q</kbd> / <kbd>P</kbd> / <kbd>C</kbd></td><td>outside the input</td><td class="wrap">Same as in the <a href="#tui">TUI</a></td></tr>
+    </table></div>
+    <p><strong>What differs from the TUI:</strong> <code>/exit</code> and <code>/quit</code> don't work from the browser (close the tab, or quit in the terminal). <code>/copy</code> copies to the clipboard of the machine running momo; use a code block's <strong>Copy</strong> button for your own. <code>/export</code> writes into the workspace on that machine; the View menu's <strong>Download conversation</strong> saves it in your browser instead.</p>
+  </section>
+
+  <section id="skills" data-voice="skills">
+    <h2>Skills &amp; project guides</h2>
+    <p>Skills are Markdown files in <code>skills/</code> that are added to the <a href="#system-prompt">system prompt</a>. They stack, are saved with the session and survive mode switches.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/list-skills
+/load-skill python
+/unload-skill python</code></pre></div>
+    <p>Built in: <code>bash</code>, <code>c</code>, <code>code-review</code>, <code>data-analysis</code>, <code>document-editing</code>, <code>html-javascript</code>, <code>java</code>, <code>kotlin</code>, <code>maven-dependency-updates</code>, <code>python</code>, <code>rust</code>, <code>software-design</code>, <code>sql</code>, <code>storytelling</code>, <code>tdd</code>, <code>text-based-game-design</code>, <code>typescript</code>. To add your own, drop a <code>.md</code> file into the folder.</p>
+    <p><strong>Project guides</strong> (<code>/guides on</code>) load the workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>MOMO.md</code>, <code>GEMINI.md</code>, <code>.github/copilot-instructions.md</code> or <code>.cursorrules</code> into the system prompt, where compaction can't drop them. They're re-read on a new session, <code>/clear</code>, compaction and workdir changes.</p>
+  </section>
+
+  <section id="companion-docs" data-voice="companion">
+    <h2>The companion</h2>
+    <p>momo is the ASCII cat walking along the top of the input box, in both the TUI and the browser. It walks, sits, blinks and mews lines that fit the current mode and whether the model is busy. <kbd>Shift+Q</kbd> or <code>/companion off</code> hides it.</p>
+    <p>With <code>/companion-idle-recap on</code>, a companion left alone for 90 seconds (configurable) recaps what you just did instead of saying its canned lines. It does this at most once per turn, with a cooldown.</p>
+    <p class="note sys">The cat at the bottom of this page is a standalone copy of it. On this page it quotes whichever section you're reading. Click it to make it talk.</p>
+  </section>
+
+  <section id="tools" data-group="How it works" data-voice="tools">
+    <h2>Tools</h2>
+    <p>What the model can call, by group. The system prompt's tool reference is generated from these schemas, so the model only ever sees the tools its current mode offers. File tools are confined to the working directory, and <code>..</code> escapes are rejected; <code>run_command</code> is a shell, so it isn't, and <code>/run-confirm on</code> has you approve each command. With the <a href="#index">code index</a> on, its <code>index_*</code> tools join these.</p>
     <h3>Read-only (all modes)</h3>
     <div class="table-scroll"><table>
       <tr><th>Tool</th><th>Description</th></tr>
@@ -979,16 +985,6 @@ ollama serve</code></pre></div>
       <tr><td><code>run_command</code></td><td>coding, momo, plan</td><td class="wrap">Any shell command, in the working directory but <strong>not confined to it</strong>. <code>/run-confirm on</code> asks before each one. 120 s timeout by default; the output is saved to a log and the model gets a view of it. See <a href="#run-output">Command output</a>.</td></tr>
       <tr><td><code>command_output</code></td><td>coding, momo, plan</td><td class="wrap">Search a saved command log again without rerunning it: <code>grep=</code>, <code>tail=</code> or a line range. Only in run mode <code>new</code>.</td></tr>
     </table></div>
-    <h3 id="editing">Editing files</h3>
-    <p>A small model copies <code>old_string</code> with slips, edits without seeing the result, makes one edit per turn and forgets the other places a change has to reach. The edit tools (<code>harness/editing.py</code>) are built around that:</p>
-    <ul>
-      <li><strong>They show the result.</strong> A successful <code>edit_file</code> or <code>replace_symbol</code> returns the changed lines with three lines of context, their <em>new</em> line numbers in <code>read_file</code>'s format, and the definition they're in. An edit whose new text equals the old says <code>No change</code>, with the line as it reads now.</li>
-      <li><strong>They catch broken syntax.</strong> If the file parsed before the edit and doesn't after it, the result names the line (Python is compiled; other languages use tree-sitter). An error still sitting next to the lines an edit touched is reported too, so an attempted fix that didn't work says so. The edit stays written, so a change made in two steps still works.</li>
-      <li><strong>They find what the model meant.</strong> <code>old_string</code> still matches when only indentation, spacing or quote style differs, or when the replacement has a different number of lines. Lines the edit keeps are written back from the file, not from the model's copy. A match must be unique, and text that has lost its indentation is refused rather than guessed. A miss shows the closest block of the file and its first differing line; several matches are listed with the definition each is in.</li>
-      <li><strong>They point at what else must change.</strong> When an edit removes or renames a definition, or changes its parameters, the result lists the uses still left. With the code index on, the list comes from the index; without it, from a scan of the project (at most 1 s or 5,000 files, and it says when it stopped early). A same-named method on another object isn't counted. Text from <code>old_string</code> that's in a different file is named, and a <code>write_file</code> that drops definitions says so.</li>
-      <li><strong>They batch.</strong> <code>edit_files</code> takes every edit of a change in one call, so a signature change with five callers is one model turn instead of five.</li>
-    </ul>
-    <p class="note">Measured on Qwen3.5-9B with six change requests checked by hidden tests (<code>--suite edit</code>, three runs each). Compared with the same tools with these features switched off, tool calls went from 289 to 172 with the index off and from 160 to 89 with it on. Edit errors, whole-file rewrites and re-reads of an edited file dropped. Pass rate stayed the same: the failures that are left are the model's own logic. <code>edit_files</code> alone cut model turns by 19% (index off) and 27% (index on). Without a model, <code>evals/edit_bench.py</code> puts 66 real edits through typical copying slips: 63 come out exactly right (45 before), and none are written to the wrong place.</p>
     <h3>Internet (all modes, only with <code>/net on</code>)</h3>
     <div class="table-scroll"><table>
       <tr><th>Tool</th><th>Description</th></tr>
@@ -997,19 +993,35 @@ ollama serve</code></pre></div>
       <tr><td><code>add_search_source</code></td><td class="wrap">Add a source that fits the project. It's dry-run first, then usable for the session; keeping it is your call.</td></tr>
     </table></div>
     <h3 id="tool-choices">Turning tools on and off per mode</h3>
-    <p>Each mode keeps its own tool choices. A tool you turn off disappears from that mode's tool schemas and from the tool reference in its system prompt; the other modes keep it. If the model calls it anyway, it gets an error and nothing runs.</p>
+    <p>Each mode keeps its own choices. A tool you turn off disappears from that mode's schemas and system prompt; if the model calls it anyway, nothing runs.</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/tools                     <span class="com"># pick this mode's tools: TUI checklist, web Tools menu</span>
 /tools list                <span class="com"># grouped, ✓ on / ✗ off</span>
 /tools run_command         <span class="com"># what it does, its parameters, whether it's on</span>
 /tools run_command off     <span class="com"># one or more names, then on|off</span>
 /tools off                 <span class="com"># all tool calls off, as before</span></code></pre></div>
     <ul>
-      <li><strong>TUI:</strong> <code>/tools</code> opens a checklist over the chat pane. <kbd>↑</kbd>/<kbd>↓</kbd> move, <kbd>Space</kbd> or <kbd>Enter</kbd> toggles, <kbd>?</kbd> prints the full description and parameters, <kbd>Esc</kbd> closes. The highlighted tool's description is shown under the list, and the status bar reads <code>TOOLS: N off</code>.</li>
-      <li><strong>Web UI:</strong> the wrench button in the status bar opens the same list, grouped, with the <em>Tool calls</em> master switch on top. Hover a tool for its description. A small count on the wrench says how many are off.</li>
-      <li><strong>Saved in the session,</strong> restored when you load it. <code>/new</code> starts with every tool on. Nothing goes into <code>prefs.json</code>.</li>
-      <li><strong>Internet and index tools follow their toggles.</strong> <code>/net on</code> or <code>/index on</code> turns every tool of that group on in every mode; turning it off shows them off but keeps your choices. Ticking one of them while its toggle is off turns the toggle on, with only that tool of the group on for this mode. Unticking the last one leaves the toggle on.</li>
-      <li><code>create_plan</code>, <code>complete_step</code> and <code>revise_plan</code> are locked, since plan mode needs them. Plan mode's choices hold while investigating and while executing.</li>
+      <li><strong>TUI:</strong> <code>/tools</code> opens a checklist (<kbd>Space</kbd> toggles, <kbd>?</kbd> shows details, <kbd>Esc</kbd> closes); the status bar reads <code>TOOLS: N off</code>. <strong>Web UI:</strong> the wrench button opens the same list, with a count of tools off.</li>
+      <li><strong>Saved in the session,</strong> not in <code>prefs.json</code>; <code>/new</code> starts with every tool on.</li>
+      <li><strong><code>/net</code> and <code>/index</code> switch their tool groups</strong> on or off in every mode, and your per-tool choices are kept for when they're back on. Ticking one of those tools while its group is off turns the group on, with just that tool on in this mode.</li>
+      <li>Plan mode's own tools (<code>create_plan</code>, <code>complete_step</code>, <code>revise_plan</code>) can't be switched off.</li>
     </ul>
+  </section>
+
+  <section id="editing" data-voice="editing">
+    <h2>Editing files</h2>
+    <p>A small model copies <code>old_string</code> with slips, edits without seeing the result, makes one edit per turn and forgets the other places a change has to reach. The edit tools are built around that:</p>
+    <ul>
+      <li><strong>They show the result:</strong> the changed lines with three lines of context, their <em>new</em> line numbers and the definition they're in. An edit that changes nothing says <code>No change</code>.</li>
+      <li><strong>They catch broken syntax:</strong> if the file parsed before the edit and doesn't after, the result names the line, also when an attempted fix left the error in place. The edit stays written, so a change made in two steps still works.</li>
+      <li><strong>They find what the model meant:</strong> <code>old_string</code> still matches when only indentation, spacing, quote style or the number of lines differs, and lines the edit keeps are copied from the file, not the model. Ambiguous text is refused rather than guessed, and a miss shows the closest block of the file.</li>
+      <li><strong>They point at what else must change:</strong> after a definition is removed, renamed or given new parameters, the result lists the uses still left, from the code index or a bounded scan of the project.</li>
+      <li><strong>They batch:</strong> <code>edit_files</code> takes every edit of a change in one call, so a signature change with five callers is one model turn instead of five.</li>
+    </ul>
+    <p class="note"><strong>Measured</strong> on Qwen3.5-9B with six change requests checked by hidden tests: about 40% fewer tool calls than the same tools with these features off, fewer edit errors and rewrites, and the same pass rate. The failures left are the model's own logic.</p>
+    <details><summary>Eval details</summary>
+    <p><code>--suite edit</code>, three runs each. Tool calls went from 289 to 172 with the index off and from 160 to 89 with it on. Edit errors, whole-file rewrites and re-reads of an edited file dropped. <code>edit_files</code> alone cut model turns by 19% (index off) and 27% (index on). Without a model, <code>evals/edit_bench.py</code> puts 66 real edits through typical copying slips: 63 come out exactly right (45 before), and none are written to the wrong place.</p>
+    <p>The leftover-uses scan without the index stops at 1 s or 5,000 files and says so; a same-named method on another object isn't counted. Syntax is checked by compiling Python and with tree-sitter for other languages.</p>
+    </details>
   </section>
 
   <section id="run-output" data-voice="run-output">
@@ -1020,26 +1032,26 @@ ollama serve</code></pre></div>
       <li><strong><code>grep="regex"</code></strong>: the matching lines, numbered. The regex is case-insensitive, <code>context=N</code> adds lines around each match, and with <code>tail=N</code> as well you get the last N matches.</li>
       <li><strong>Neither</strong>: all of it when it fits in 5000 characters. Otherwise its first quarter and last three quarters, cut on line boundaries, with a note of what was left out in between.</li>
     </ul>
-    <p>stdout and stderr share one log, in the order they were written. Every result ends with the log's full path, its size and the exit code. When the default view hid lines, it also names how many mention an error and how to list them:</p>
+    <p>stdout and stderr share one log. Every result ends with its path, size and exit code, and when the view hid lines, how many mention an error:</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">tool result</span></div><pre><code>Ran 300 tests in 0.004s
 
 FAILED (failures=2)
 [output saved: /Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log — 323 lines, 20 KB, exit code 1]
 [7 lines mention error/fail/warning — command_output(path="/Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log", grep="error|fail|warning|traceback") lists them]</code></pre></div>
-    <p>The model passes that path to <code>command_output</code> to search the same output again (<code>grep=</code>, <code>tail=</code>, <code>start_line=</code>/<code>end_line=</code>) instead of running the suite twice. A command that timed out or was interrupted keeps its log too.</p>
-    <p><strong>Timeout:</strong> a command runs for at most 120 seconds unless the model passes <code>timeout=</code>, up to 900. Small models never pass one, and a quick check script stuck in a loop used to block the turn for the full 15 minutes. A command stopped by the default gets a note saying it can run again with a longer <code>timeout=</code> if it really needs one, like a full build or test suite.</p>
-    <p>Logs live in <code>~/.momo-harness/runs/&lt;session&gt;/</code>, outside the workdir, so they never show up in <code>git status</code> or the code index. momo keeps the last 20 per session and deletes them on <code>/clear</code>, <code>/new</code> and when a session loads. <code>command_output</code> only ever opens those files, whatever path it is given.</p>
+    <p><code>command_output</code> searches that log again (<code>grep=</code>, <code>tail=</code>, a line range) instead of running the suite twice, also after a timeout or interrupt.</p>
+    <p><strong>Timeout:</strong> 120 seconds unless the model passes <code>timeout=</code>, up to 900. Small models rarely pass one, so the default keeps a script stuck in a loop from holding the turn; a command it stops is told how to ask for longer.</p>
+    <p>Logs live in <code>~/.momo-harness/runs/&lt;session&gt;/</code>, outside the workdir, so they never show up in <code>git status</code>; see <a href="#storage">storage</a> for cleanup. <code>command_output</code> only ever opens those files.</p>
     <div class="table-scroll"><table>
       <tr><th>Setting</th><th>Description</th></tr>
       <tr><td><code>/run-mode new|classic</code></td><td class="wrap"><code>new</code> (default): log, views and <code>command_output</code>. <code>classic</code>: return the whole output, as before. Remembered between runs; also <code>--run-mode</code> and View → Context.</td></tr>
       <tr><td><code>/run-output-limit [n]</code></td><td class="wrap">Size of the default view in characters (default 5000, minimum 500)</td></tr>
     </table></div>
-    <p class="note">Measured against Qwen3.5-9B on five command tasks, 3 runs per mode: both modes found every fact, but <code>new</code> sent 62 KB of command output to the model instead of 436 KB and finished 35% sooner. The call count stayed about the same, because a fact in the middle of a long log still takes a second look. The two tool descriptions cost about 640 more tokens per request. <code>evals/run_output_bench.py</code> measures the views without a model.</p>
+    <p class="note"><strong>Measured</strong> on Qwen3.5-9B with five command tasks: both modes found every fact, but <code>new</code> sent 62 KB of command output to the model instead of 436 KB and finished 35% sooner. <code>evals/run_output_bench.py</code> measures the views without a model.</p>
   </section>
 
   <section id="index" data-voice="index">
     <h2>Code index</h2>
-    <p>An in-memory index of the working directory, <strong>on by default</strong>. While it's on, <code>index_callers</code> and <code>index_file</code> replace <code>find_references</code> and <code>file_dependencies</code>, so the model never has to choose between two tools that answer the same question. With <code>/index-route on</code> (the default), plain-text <code>grep_files</code> and <code>find_files</code> calls are answered from the index too, so a model that reaches for grep out of habit still gets the fast, current answer.</p>
+    <p>An in-memory index of the working directory, <strong>on by default</strong>. While it's on, <code>index_callers</code> and <code>index_file</code> replace <code>find_references</code> and <code>file_dependencies</code>, and plain-text <code>grep_files</code> and <code>find_files</code> calls are answered from it too (<code>/index-route</code>), so the model gets fast, current answers whichever tool it reaches for.</p>
     <div class="table-scroll"><table>
       <tr><th>Tool</th><th>Description</th></tr>
       <tr><td><code>index_search</code></td><td class="wrap">Find a definition by exact, partial or approximate name, or by words from its docstring. <code>config parse</code> finds <code>parse_config</code>, and <code>database</code> finds <code>db</code>.</td></tr>
@@ -1060,27 +1072,23 @@ FAILED (failures=2)
 /index-filter         <span class="com"># which files are indexed; add|remove &lt;pattern&gt;, edit, reset</span>
 /index-route on|off</code></pre></div>
     <ul>
-      <li><strong>What is indexed:</strong> whatever the <a href="#index-parsing">index filter</a> lets in, created once from the project's <code>.gitignore</code> files. Binary files and files over 2 MB are skipped.</li>
-      <li><strong>Always current:</strong> before answering, it waits for changed files to be re-indexed, so it never answers from a stale index.</li>
-      <li><strong>Memory budget</strong> (default 100 MB): when it's over budget, the index drops the text signatures first, then the identifier index, then stops adding files. It says so in every affected result.</li>
+      <li><strong>What is indexed:</strong> whatever the <em>index filter</em> lets in. It's a gitignore-style file (<code>~/.momo-harness/index/&lt;hash&gt;.filter</code>) created on the first start from the noise folders (<code>node_modules/</code>, <code>.venv/</code>, …), every <code>.gitignore</code> and <code>.git/info/exclude</code>; outside git, hidden files are left out too. After that only the filter decides: edit it with <code>/index-filter add|remove|edit</code> or View → Code index → Filter…, and <code>/index-filter reset</code> rebuilds it from <code>.gitignore</code>. <code>.git/</code>, binary files and files over 2 MB are always skipped, and at most 100,000 files are indexed (<code>/index-max-files</code>).</li>
+      <li><strong>Always current:</strong> before every answer it compares file times and sizes and waits for changes to be re-indexed. Files momo edits are re-indexed at once, and <code>run_command</code> triggers a full re-check.</li>
+      <li><strong>Memory budget</strong> (default 100 MB): over budget, it drops the text signatures, then the identifier index, then stops adding files, and says so in every affected result.</li>
       <li><strong>Safe loading:</strong> the pickle loader only accepts the index's own classes, and refuses files that aren't yours or are writable by others.</li>
     </ul>
-  </section>
 
-  <section id="index-parsing" data-voice="index-parsing">
-    <h2>How the index parses a project</h2>
-    <p>The index is built once in a background thread when you start momo, or when you run <code>/index on</code>. After that it's kept current file by file. Every <code>index_*</code> tool reads from memory; nothing is re-parsed per question except the handful of files a caller search needs.</p>
-    <div class="pipeline"><span class="step">list files</span><span class="arrow">→</span><span class="step">skip binary &amp; large</span><span class="arrow">→</span><span class="step">parse (tree-sitter)</span><span class="arrow">→</span><span class="step">definitions &amp; imports</span><span class="arrow">→</span><span class="step">identifier occurrences</span><span class="arrow">→</span><span class="step">text signature</span><span class="arrow">→</span><span class="step">keep fresh</span></div>
+    <h3 id="index-parsing">How it's built</h3>
+    <p>The index is built once in the background when momo starts (or on <code>/index on</code>) and then kept current file by file. Every <code>index_*</code> tool reads from memory; only a caller search re-parses the handful of files it needs.</p>
+    <div class="pipeline"><span class="step">list &amp; skip</span><span class="arrow">→</span><span class="step">parse (tree-sitter)</span><span class="arrow">→</span><span class="step">definitions &amp; imports</span><span class="arrow">→</span><span class="step">identifier occurrences</span><span class="arrow">→</span><span class="step">text signature</span></div>
     <ol>
-      <li><strong>List.</strong> It walks the tree and keeps what the <em>index filter</em> lets in: <code>~/.momo-harness/index/&lt;hash&gt;.filter</code>, in gitignore syntax, where the last matching line wins and <code>!pattern</code> re-includes. The first start creates it from the noise folders (<code>node_modules/</code>, <code>.venv/</code>, …), every <code>.gitignore</code> in the tree and <code>.git/info/exclude</code>. Outside git, hidden files are excluded too. That's why a repo with a virtualenv indexes hundreds of files, not thousands. After that only the filter decides, and <code>.gitignore</code> edits are ignored until <code>/index-filter reset</code>. Edit the filter with <code>/index-filter add|remove</code>, <code>/index-filter edit</code> ($EDITOR, in the TUI) or View → Code index → Filter…; changes apply immediately. <code>.git/</code> is always excluded. The cap is 100,000 files by default; change it with <code>/index-max-files</code>, <code>--index-max-files</code> or View → Code index → Max files. A first build or rebuild parses files in worker processes (<code>/index-workers</code>, default one less than the CPU count, at most 8), because tree-sitter holds Python's GIL and threads would not run in parallel.</li>
-      <li><strong>Skip.</strong> The first 4 KB of each file are checked for binary content, and files over 2 MB are left out. Skipped files are remembered by size and modification time, so they aren't read again on every query.</li>
-      <li><strong>Parse.</strong> The file extension picks a tree-sitter grammar, and each file is parsed once. Inline <code>&lt;script&gt;</code> blocks in HTML are parsed as JavaScript at their real line numbers. A file with syntax errors is still indexed, but marked incomplete in results, so a missing hit there isn't taken as proof.</li>
-      <li><strong>Definitions &amp; imports.</strong> The same extractor as <code>code_outline</code> records each definition's kind, qualified name (<code>Class.method</code>), line range, signature and the first line of its docstring or doc comment. It also records the file's imports.</li>
-      <li><strong>Identifier occurrences.</strong> A single tree-sitter query collects every identifier in the file. Each occurrence is stored as a packed (file, line) pair in 8 bytes, and names are shared rather than copied. What a use <em>is</em> (call, definition, import, type or local) is only worked out at question time, and only in the files that contain the name.</li>
-      <li><strong>Text signature.</strong> Each file gets a compact set of the three-letter sequences in its text. <code>index_text</code> uses it to open only the files that could contain the query.</li>
-      <li><strong>Keep fresh.</strong> Before every <code>index_*</code> answer, file times and sizes are compared with the index, and the answer waits until any changes are re-indexed. Files momo edits itself are re-indexed immediately, and <code>run_command</code> triggers a full re-check.</li>
+      <li><strong>List &amp; skip.</strong> It walks the tree, keeps what the filter lets in, and skips binary files (the first 4 KB are checked) and files over 2 MB, remembering them so they aren't read again. A first build parses in worker processes (<code>/index-workers</code>, default one less than the CPU count, at most 8), since tree-sitter holds Python's GIL.</li>
+      <li><strong>Parse.</strong> The extension picks a tree-sitter grammar; HTML's inline <code>&lt;script&gt;</code> is parsed as JavaScript at its real line numbers. A file with syntax errors is still indexed but marked incomplete, so a missing hit there isn't taken as proof.</li>
+      <li><strong>Definitions &amp; imports.</strong> <code>code_outline</code>'s extractor records each definition's kind, qualified name (<code>Class.method</code>), line range, signature and first docstring line, plus the file's imports.</li>
+      <li><strong>Identifier occurrences.</strong> One query collects every identifier, stored as 8-byte (file, line) pairs. Whether a use is a call, definition, import or type is worked out only when asked, and only in the files that contain the name.</li>
+      <li><strong>Text signature.</strong> Each file's set of three-letter sequences lets <code>index_text</code> open only the files that could contain the query.</li>
     </ol>
-    <p><strong>Imports</strong> are matched only within a language family (JavaScript/TypeScript/TSX/HTML, C/C++, Java/Kotlin), so <code>java.util.List</code> never resolves to a <code>util.c</code>. <strong>Callers</strong> come from syntax, not types. Receiver and scope rules remove the usual false hits (<code>self.x</code> in another class, a local that shares the name), but it isn't a type checker and there's no language server. Where it can't be sure, it keeps the hit and labels it.</p>
+    <p><strong>Imports</strong> are matched only within a language family (JavaScript/TypeScript/TSX/HTML, C/C++, Java/Kotlin), so <code>java.util.List</code> never resolves to a <code>util.c</code>. <strong>Callers</strong> come from syntax, not types. Receiver and scope rules remove the usual false hits (<code>self.x</code> in another class, a local that shares the name), but it isn't a type checker; where it can't be sure, it keeps the hit and labels it.</p>
 
     <h3 id="languages">Supported languages</h3>
     <div class="table-scroll"><table>
@@ -1108,15 +1116,151 @@ FAILED (failures=2)
     <p class="note">Accuracy figures come from <code>evals/oracle_bench.py</code> (2026-09-23), which compares the index with tools it has no say in, run on real code: the Python interpreter, clang, the Kotlin compiler, each grammar's own tag queries and Ruby's YAML parser. <code>evals/lang_bench.py</code> scores one fixture project per language in about a second, and a unit test gates on it.</p>
   </section>
 
-  <section id="net" data-voice="net">
+  <section id="context" data-voice="context">
+    <h2>Context &amp; compaction</h2>
+    <p>A small model only knows what is in its context window, and every request sends the whole conversation again. momo decides what goes into each request, shows you how full it is, and drops the least useful parts before the window runs out.</p>
+
+    <h3 id="context-contents">What each request contains</h3>
+    <figure class="ctx-fig" aria-label="What one request fills of the model's context window">
+      <div class="ctx-wrap">
+        <div class="ctx-bar"><span class="sys"></span><span class="sch"></span><span class="conv"></span><span class="free"></span><span class="reply"></span></div>
+        <div class="ctx-mark" aria-hidden="true"></div>
+      </div>
+      <div class="ctx-scale"><span>0</span><span>compaction limit · 50%</span><span>model window</span></div>
+      <div class="ctx-legend"><span class="sys">system prompt</span><span class="sch">tool schemas</span><span class="conv">conversation</span><span>free</span><span class="reply">room for the reply</span></div>
+      <figcaption>One request against the model's window. Compaction keeps the first three under the limit; the rest is left for the reply.</figcaption>
+    </figure>
+    <ul>
+      <li><strong>The <a href="#system-prompt">system prompt</a>:</strong> role, environment, guides, skills, a running plan and the tool reference.</li>
+      <li><strong>The tool schemas:</strong> this mode's tools as JSON. Compaction can't shrink them; switching off unused tools with <a href="#tool-choices"><code>/tools</code></a> does.</li>
+      <li><strong>The conversation:</strong> your messages (attachments included), the model's replies, its tool calls and their results.</li>
+      <li><strong>The model's earlier reasoning,</strong> only as far as <a href="#think-history"><code>/think-history</code></a> sends it back. The rest stays in the transcript for you and costs no context.</li>
+    </ul>
+    <p>momo asks the server for the model's <strong>full</strong> window, and the limit you set (<code>/context</code>) is only the point where compaction starts. By default that is <strong>half the window</strong>. The other half is room for one reply with its reasoning (up to the <a href="#reply-cap">reply cap</a>) and for the tool results a single step adds before the next check. Raise it with <code>/context 75%</code>, or set an absolute number with <code>/context 16384</code> or <code>--context</code>.</p>
+    <p class="note">On Ollama, the full window goes out as <code>num_ctx</code> with every request, and Ollama reserves memory for all of it. A model with a very large native window can need much more RAM or VRAM than its weights alone. On llama.cpp the window is whatever <code>-c</code> set when the server started.</p>
+
+    <h3 id="context-meter">Measuring it</h3>
+    <ul>
+      <li><strong>The CTX meter</strong> in both UIs shows how full the context is against the limit. It turns yellow at 75% and red at 90%. Before a reply the figure is an estimate (about 4 characters per token); after it, the server's own count replaces it.</li>
+      <li><strong>The breakdown,</strong> from <code>/context</code> or by clicking the web UI's CTX meter, splits it by category, from system prompt to tool results and reasoning sent back.</li>
+      <li><strong>Big results are kept in check before they arrive.</strong> <code>read_file</code> returns at most what the context has free, less 10% of the window. <code>run_command</code> returns a <a href="#run-output">view of its log</a>, <code>fetch_url</code> pages its text by <code>/net-max-chars</code>, and <code>index_map</code> fits a token budget. <code>/tool-result &lt;n&gt;</code> caps every other result too.</li>
+    </ul>
+
+    <h3 id="compaction">Compaction</h3>
+    <p>Before <strong>every</strong> model call, including each step of a tool loop, momo checks the size of the request. When it's over the limit, momo cuts it down to the system prompt plus <strong>a third</strong> of the remaining limit, so the next few steps have room before it has to compact again. It works through these steps and stops as soon as the request is small enough:</p>
+    <ol>
+      <li><strong>Stop sending back earlier reasoning</strong> (only with <code>/think-history all</code>). It stays in the transcript.</li>
+      <li><strong>Drop old tool calls,</strong> oldest first. Each call goes together with its results and its reasoning. Your questions and the model's answers stay, so the thread of the conversation survives.</li>
+      <li><strong>Drop whole old turns,</strong> oldest first.</li>
+      <li><strong>Trim the largest tool results that are left</strong> to their first two thirds and last third, with a <code>[… N chars removed by context compaction …]</code> marker in between.</li>
+    </ol>
+    <p><strong>Never dropped:</strong> the system prompt, so guides, skills and a running plan survive; the question being worked on; and its latest tool calls and results. A model that loses the result it just asked for asks for it again.</p>
+    <p><strong>The summary.</strong> One extra model call (thinking off) summarises what was dropped, keeping decisions, file names, code entities and outcomes, and places it at the top of the oldest remaining message as <code>[Earlier context summary: …]</code>. The next compaction folds it into the new one, so there's only ever one. Nothing changes until the summary is in, so <kbd>Esc</kbd> leaves the history intact. <code>/fast-compact</code> skips the summary.</p>
+    <p>A line in the chat reports each compaction, with the size before and after: <code>Context compacted: summarised 14 messages, trimmed 1 tool result (was ~68,210 tokens, now ~24,880 tokens)</code>. <code>/compact</code> runs one by hand.</p>
+    <ul>
+      <li><strong>The model forgets earlier work?</strong> Raise the limit with <code>/context 75%</code> if the machine has the memory, or do long jobs in <a href="#plan">plan mode</a>, whose plan lives in the system prompt.</li>
+      <li><strong>Starting something unrelated?</strong> <code>/new</code> is better than letting compaction summarise the old task into the new one.</li>
+      <li><strong>"Context not compacted: the system prompt and tool reference alone are …"</strong> means the limit is too small for the fixed part. Raise it, or switch off tools, skills or guides.</li>
+    </ul>
+  </section>
+
+  <section id="thinking" data-voice="thinking">
+    <h2>Thinking &amp; reply length</h2>
+    <p>Three settings shape how a reasoning model works: how much it thinks, how long one reply may run, and whether it sees its own earlier reasoning. All three are remembered between runs and sit under the web UI's <code>THINK</code> badge.</p>
+
+    <h3 id="think-level">Thinking level</h3>
+    <p><code>/think off|on|low|medium|high|xhigh</code> (or <code>--think</code>) sets how much the model reasons before it answers. Models take different levels (see the table below), so momo asks the server which ones this model takes and sends only those. It checks again at every message and on <code>/think</code>, because a llama.cpp server may have been relaunched with another model.</p>
+    <ul>
+      <li><strong>The nearest level is sent</strong> when the model doesn't take yours, and momo says so (<code>THINK: high→xhigh</code>, or <code>high→on</code> on an on/off model). Your choice is kept, so a model that takes it gets it.</li>
+      <li><strong><code>on</code> sends no level,</strong> so the model uses its own default. A model without thinking gets nothing (badge: <code>THINK: n/a</code>).</li>
+      <li><strong>No separate reasoning budget:</strong> llama.cpp's <code>--reasoning-budget</code> is fixed when the server starts, and Ollama has none. The <a href="#reply-cap">reply cap</a> bounds reasoning and answer together.</li>
+    </ul>
+    <p>Compaction summaries, companion recaps and the retry after a cut-off reply always ask for no reasoning.</p>
+
+    <h3 id="reply-cap">Reply cap</h3>
+    <p>Every request limits how long one reply may be, reasoning included: <code>/max-output-tokens</code>, default <strong>25,000</strong> tokens (<code>max_tokens</code> on llama.cpp, <code>num_predict</code> on Ollama).</p>
+    <ul>
+      <li><strong>Why:</strong> a model caught in a repetition loop otherwise runs until the context is full; in one eval, a reply ran to 125,000 tokens and 80 minutes.</li>
+      <li><strong>At the cap:</strong> if the reply was cut off before it said anything or called a tool (usually the reasoning used it all), momo asks once more with thinking off and says so: "Response cut off … Retrying without thinking."</li>
+      <li><strong>Setting it:</strong> <code>/max-output-tokens 30000</code>, <code>off</code> for no cap (minimum 256), <code>--max-output-tokens</code>, or View → Context → <em>Reply cap</em>.</li>
+    </ul>
+
+    <h3 id="think-history">Sending reasoning back</h3>
+    <p><code>/think-history off|turn|all</code> decides whether the model sees its own earlier reasoning. <code>turn</code> (the default) sends it back for the current tool loop, since your last message. <code>all</code> also sends earlier turns, and <code>off</code> sends none. It is remembered, and in the web UI it is under the <code>THINK</code> menu.</p>
+    <ul>
+      <li><strong>Why:</strong> models are trained to see their reasoning from the earlier steps of a tool loop. With <code>off</code>, the model sees its earlier tool calls without the reasoning behind them, and tends to plan again from scratch after every result.</li>
+      <li><strong>Cost:</strong> sent reasoning counts toward the context (<em>Reasoning sent back</em> in the CTX breakdown). With <code>all</code>, compaction stops sending earlier turns' reasoning before it removes any messages.</li>
+    </ul>
+    <p class="note"><strong>Measured</strong> with the code-navigation evals on Qwen3.5-9B: <code>turn</code> was as accurate as <code>off</code>, made a quarter fewer tool calls and took about 40% less time. <code>all</code> hasn't been measured.</p>
+    <details><summary>Eval details</summary>
+    <p>llama.cpp, 39 runs per side, 2026-09-30.</p>
+    <div class="table-scroll"><table>
+      <tr><th></th><th><code>off</code></th><th><code>turn</code></th></tr>
+      <tr><td>Facts in the answers</td><td>101/105</td><td>100/105</td></tr>
+      <tr><td>Tool calls</td><td>78</td><td>58</td></tr>
+      <tr><td>Runs over their call budget</td><td>14/39</td><td>6/39</td></tr>
+      <tr><td>Total time</td><td>~22 min</td><td>~13.5 min</td></tr>
+    </table></div>
+    <p>Accuracy was the same, within the noise of three runs per task. The slowest task went from 117 s to 39 s.</p>
+    <p>The reasoning goes on the assistant message it led to (<code>reasoning_content</code> for llama.cpp, <code>thinking</code> for Ollama), and <code>preserve_thinking</code> is passed to templates that read it. A cut-off reply's reasoning is never sent back.</p>
+    </details>
+
+    <h3 id="model-notes">Model notes</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Model</th><th>Thinking levels</th><th>Earlier reasoning its template shows</th></tr>
+      <tr><td>Qwen3.5</td><td class="wrap">on / off</td><td class="wrap">Since your last message (the current tool loop); older turns are dropped even when sent</td></tr>
+      <tr><td>Qwen3.8</td><td class="wrap">low / medium / xhigh, nothing else</td><td class="wrap">Every turn by default (<code>preserve_thinking</code>), or only the current one</td></tr>
+      <tr><td>Gemma 4</td><td class="wrap">on / off</td><td class="wrap">Since your last message; with <code>preserve_thinking</code>, also earlier turns' tool calls</td></tr>
+      <tr><td>gpt-oss</td><td class="wrap">low / medium / high; it always reasons, so <code>off</code> sends <code>low</code></td><td class="wrap">—</td></tr>
+    </table></div>
+    <p>On llama.cpp momo reads the levels from the model's chat template; on Ollama, from the model's capabilities.</p>
+  </section>
+
+  <section id="system-prompt" data-voice="system-prompt">
+    <h2>The system prompt</h2>
+    <p>The system message is built from parts, in the order the model reads them. Each part is generated for the current mode and exactly the tools that are on, so the prompt never names a tool the model can't call. Role files describe behaviour; everything about tools lives in the generated parts.</p>
+    <figure class="prompt-diagram" aria-label="How the system prompt is built">
+      <div class="pd-grid">
+      <div class="pd-head in">Inputs</div><div></div><div class="pd-head">System message, top to bottom</div>
+        <div class="pd-row"><div class="pd-in"><code>/index</code> on</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Code index banner</span><span class="pd-tag">if index</span></div></div>
+        <div class="pd-row"><div class="pd-in">mode · <code>roles/&lt;mode&gt;.md</code> · plan</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file"><span>Role</span></div></div>
+        <div class="pd-row"><div class="pd-in">workdir · date · OS · git · <code>/net</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Environment</span></div></div>
+        <div class="pd-row"><div class="pd-in"><code>/guides on</code> · <code>AGENTS.md</code>, …</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Project guides</span><span class="pd-tag">if guides</span></div></div>
+        <div class="pd-row"><div class="pd-in"><code>/load-skill</code> · <code>skills/&lt;name&gt;.md</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Skill: &lt;name&gt;</span><span class="pd-tag">each skill</span></div></div>
+        <div class="pd-row"><div class="pd-in">tools on in this mode · <code>/tool-ref</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Tool reference</span></div></div>
+        <div class="pd-row"><div class="pd-in"><code>fetch_url</code> / <code>web_search</code> on</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Using the internet</span><span class="pd-tag">if net</span></div></div>
+        <div class="pd-row"><div class="pd-in">tools on · index on or off</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Navigating code</span></div></div>
+        <div class="pd-row"><div class="pd-in">the same tools, as JSON</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part aside"><span>Tool schemas</span><span class="pd-tag">sent alongside</span></div></div>
+      </div>
+      <div class="pd-legend"><span>generated by the harness</span><span class="file">from a file</span><span class="cond">only when its input is on</span></div>
+      <figcaption>Parts are joined by <code>---</code> rules and rebuilt in place whenever an input changes.</figcaption>
+    </figure>
+    <p>The index banner comes first and the navigation rules last on purpose: small models weigh the start and end of a prompt most.</p>
+    <details><summary>What each part says</summary>
+    <div class="table-scroll"><table>
+      <tr><th>Part</th><th>When</th><th>What it says</th></tr>
+      <tr><td>Code index banner</td><td class="wrap">Index on</td><td class="wrap">One line: find code with the <code>index_*</code> tools, not grep or find</td></tr>
+      <tr><td>Role</td><td class="wrap">Always</td><td class="wrap"><code>roles/&lt;mode&gt;.md</code>; in plan mode also the draft plan, or the execution rules and the live plan</td></tr>
+      <tr><td>Environment</td><td class="wrap">Always</td><td class="wrap">Working directory, today's date, OS/shell and git branch (with <code>run_command</code>), "run it as <code>python3</code>" when there's no <code>python</code> command, internet on or off</td></tr>
+      <tr><td>Project guides</td><td class="wrap">With <code>/guides on</code></td><td class="wrap">The workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, …</td></tr>
+      <tr><td>Skill: &lt;name&gt;</td><td class="wrap">One per loaded skill</td><td class="wrap"><code>skills/&lt;name&gt;.md</code></td></tr>
+      <tr><td>Tool reference</td><td class="wrap">Always</td><td class="wrap">Generated from the tool schemas, <code>/tool-ref full|compact</code></td></tr>
+      <tr><td>Using the internet</td><td class="wrap">While <code>fetch_url</code> or <code>web_search</code> is on</td><td class="wrap">Check versions and APIs instead of recalling them; read the project's manifests first; look up general facts (e.g. Wikipedia) when the topic is recent, the model is unsure or you ask; stop once answered; cite URLs</td></tr>
+      <tr><td>Navigating code</td><td class="wrap">Always</td><td class="wrap">How to find code with this mode's tools; with the index on, a table of the <code>index_*</code> tools</td></tr>
+      <tr><td>Tool schemas</td><td class="wrap">Always</td><td class="wrap">The JSON tool definitions sent <em>alongside</em> the prompt: they use context but aren't prompt text</td></tr>
+    </table></div>
+    </details>
+    <p><code>/system-prompt</code> (alias <code>/prompt</code>) shows exactly what the model gets, part by part, with an estimated token count for each; <code>/system-prompt list</code> prints just the parts and sizes. The TUI opens it in <code>$PAGER</code> (<code>less -R</code> by default). The web UI shows it in a side panel (View → <strong>System prompt…</strong>, or the link in the CTX popover) that refreshes while open.</p>
+  </section>
+
+  <section id="net" data-group="Network &amp; security" data-voice="net">
     <h2>Internet access</h2>
-    <p><code>fetch_url</code> and <code>web_search</code> are the only tools that send anything off your machine, so they're <strong>off by default</strong> and the model isn't even offered them until you turn them on. Neither setting is saved: both reset to the safe default at every launch. Everything below applies to both tools.</p>
+    <p><code>fetch_url</code> and <code>web_search</code> are the only tools that reach anything but your model server, so they're <strong>off by default</strong>: the model isn't offered them until you turn them on, and they switch off again at every launch. Everything below applies to both.</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/net on | local | off     <span class="com"># public only · also localhost + LAN · blocked</span>
 /net-confirm on|off       <span class="com"># ask before POST/PUT/PATCH/DELETE (default on)</span>
 /net-max-bytes 2mb        <span class="com"># download cap</span>
 /net-max-chars 24000      <span class="com"># text returned per call; the rest is paged</span></code></pre></div>
-    <p>HTML is converted to readable text, keeping link targets, and JSON is pretty-printed. The model can page through long pages with <code>offset=</code>, jump to a section with <code>find=</code> or pick part of a JSON response with <code>json_path=</code>. Those follow-up calls are served from a short cache.</p>
-    <p>While it's on, the system prompt gains a short <a href="#system-prompt">Using the internet</a> part: check versions and APIs rather than recall them, read the project's manifests first, stop once answered, and cite URLs.</p>
+    <p>While it's on, the <a href="#system-prompt">system prompt</a> tells the model to check versions and APIs rather than recall them, read the project's manifests first, stop once answered, and cite URLs.</p>
     <figure class="flow" aria-label="The path of a fetch_url call">
       <div class="flow-col">
         <div class="box inline harness cond"><b>Confirm</b><small>writes (POST, PUT, PATCH, DELETE) with <code>/net-confirm</code>; always for a private target</small></div>
@@ -1160,13 +1304,13 @@ FAILED (failures=2)
 
   <section id="search" data-voice="search">
     <h2>Web search</h2>
-    <p><code>fetch_url</code> only helps when the model already knows the URL, and small models guess URLs and loop on 404s. <code>web_search</code> gives them a way to find things without a search engine, an API key or Docker. It asks keyless JSON APIs directly and checks URLs the model proposes. It uses the same guard, pinning, size cap and untrusted-content fence as <code>fetch_url</code>.</p>
+    <p>Small models guess URLs and loop on 404s. <code>web_search</code> lets them find things without a search engine, API key or Docker: it asks keyless JSON APIs directly and checks URLs the model proposes, behind the same guards as <code>fetch_url</code>.</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">tool call</span></div><pre><code>web_search(query="python asyncio wait_for timeout", read=true,
            urls=["https://docs.python.org/3/library/asyncio-task.html"])</code></pre></div>
     <ul>
-      <li><strong><code>query</code> + <code>source</code>:</strong> with no source, the query goes in parallel to the defaults (Stack Overflow, Wikipedia, GitHub, MDN). Name one or more (<code>source="npm,crates"</code>) to search others. Six results with title, URL, a one-line snippet and fields such as the latest version take about 1.5k characters.</li>
-      <li><strong><code>urls</code>:</strong> up to five pages the model thinks hold the answer. A dead URL costs one line (<code>✗ … — HTTP 404</code>) instead of a whole <code>fetch_url</code> turn. A live one is listed first, with its best-matching passage as the snippet.</li>
-      <li><strong><code>read=true</code>:</strong> also fetches the top three pages and returns only the passages that match the query, ranked with BM25 over paragraphs and code blocks and kept within <code>/net-max-chars</code>. For Stack Overflow it uses the accepted and top-voted answers from the API. Pages land in the <code>fetch_url</code> cache, so a follow-up <code>find=</code> costs nothing.</li>
+      <li><strong><code>query</code> + <code>source</code>:</strong> with no source, the query goes in parallel to the defaults (Stack Overflow, Wikipedia, GitHub, MDN). Name one or more (<code>source="npm,crates"</code>) to search others. Six results take about 1.5k characters.</li>
+      <li><strong><code>urls</code>:</strong> up to five pages the model thinks hold the answer. A dead one costs one line (<code>✗ … — HTTP 404</code>) instead of a whole turn; a live one is listed first with its best-matching passage.</li>
+      <li><strong><code>read=true</code>:</strong> also fetches the top three pages and returns only the passages that match the query (BM25-ranked, within <code>/net-max-chars</code>; for Stack Overflow, the top answers). The pages are cached, so a follow-up <code>fetch_url</code> costs nothing.</li>
     </ul>
     <div class="table-scroll"><table>
       <tr><th>Source</th><th>Finds</th></tr>
@@ -1185,25 +1329,20 @@ FAILED (failures=2)
  "results": "crates",
  "title": "name", "link": "https://docs.rs/{name}", "snippet": "description",
  "extra": {"version": "max_stable_version"}}</code></pre></div>
-    <ul>
-      <li><code>url</code>: an <code>https://</code> template with <code>{query}</code> and, optionally, <code>{n}</code>.</li>
-      <li><code>results</code>: the dotted path to the list of hits (<code>""</code> for the top level).</li>
-      <li><code>title</code>, <code>link</code>, <code>snippet</code>, <code>extra</code>: dotted paths within one hit. <code>link</code> may be a template such as <code>https://docs.rs/{name}</code>.</li>
-      <li>Optional: <code>headers</code> (no credentials), <code>"default": true</code> to include it in plain searches, and <code>"hook"</code> for the few APIs a template can't express.</li>
-    </ul>
-    <p>The model can add sources too, with <code>add_search_source</code>. Each one is dry-run with a test query. A wrong path returns the keys that are there, and a test that finds nothing is refused. A source that passes works for the rest of the session. Model-proposed sources can't use hooks, can't become a default, can't carry credential headers, and are limited to 10 per session.</p>
+    <p><code>url</code> is an <code>https://</code> template with <code>{query}</code> (and optionally <code>{n}</code>); <code>results</code> is the dotted path to the list of hits (<code>""</code> for the top level); <code>title</code>, <code>link</code>, <code>snippet</code> and <code>extra</code> are dotted paths within one hit, and <code>link</code> may be a template. Optional: <code>headers</code> (no credentials), <code>"default": true</code> to include it in plain searches, and <code>"hook"</code> for the few APIs a template can't express.</p>
+    <p>The model can add sources too, with <code>add_search_source</code>. Each is dry-run with a test query (one that finds nothing is refused) and then works for the session. Model-proposed sources can't use hooks, become a default or carry credential headers, and are limited to 10 per session.</p>
     <h3>Let the model propose sources</h3>
 <div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/net on
 /search-sources suggest                  <span class="com"># analyse this project, add fitting sources</span>
 /search-sources suggest papers on tides  <span class="com"># …with a focus</span>
 /search-sources save all                 <span class="com"># keep what it added (or save &lt;name&gt;)</span></code></pre></div>
     <ol>
-      <li><strong>momo scans the working directory:</strong> file types, layout, the README, other documents' headings, package manifests, and any custom package repository they name. Passwords, tokens and query strings are stripped from those URLs before the model sees them.</li>
-      <li><strong>The model gives its view of the project</strong>: what it is, who it's for, and what someone working on it would look up. That covers libraries and registries, and also subject matter like terminology, reference works and papers.</li>
-      <li><strong>It adds 3 to 6 sources.</strong> The ones the project's files call for are recommended up front: docs.rs for a <code>Cargo.toml</code>, Docker Hub for a <code>Dockerfile</code>, a search spec for your company's Nexus or Artifactory, and Wikidata, a thesaurus and Open Library for a project with no code. A dozen verified keyless APIs are offered as further options.</li>
-      <li><strong>It ends with a table</strong> of what it added. Nothing is kept until you run <code>/search-sources save</code>.</li>
+      <li><strong>momo scans the project:</strong> file types, layout, README, document headings, package manifests and any custom package repository they name (credentials stripped).</li>
+      <li><strong>The model says what someone working on it would look up:</strong> libraries and registries, but also terminology, reference works and papers.</li>
+      <li><strong>It adds 3 to 6 sources,</strong> starting with the ones the files call for: docs.rs for a <code>Cargo.toml</code>, Docker Hub for a <code>Dockerfile</code>, your company's Nexus or Artifactory, or Wikidata and a thesaurus for a project with no code.</li>
+      <li><strong>It lists what it added.</strong> Nothing is kept until you run <code>/search-sources save</code>.</li>
     </ol>
-    <p class="note">In a test with Qwen3.5 9B, a folder of novel chapters about a volcanic archipelago got Wikidata, a thesaurus, Open Library and Crossref papers. A Rust + Spring Boot tile server got docs.rs, Docker Hub, Wikidata and OpenAlex; the unreachable internal Nexus was tried once and skipped.</p>
+    <p class="note">In a test with Qwen3.5 9B, a folder of novel chapters got Wikidata, a thesaurus, Open Library and Crossref; a Rust + Spring Boot tile server got docs.rs, Docker Hub, Wikidata and OpenAlex.</p>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Description</th></tr>
       <tr><td><code>/search-sources</code></td><td class="wrap">List sources and where each comes from: shipped, user or session</td></tr>
@@ -1214,55 +1353,9 @@ FAILED (failures=2)
     </table></div>
   </section>
 
-  <section id="web" data-voice="web">
-    <h2>Web UI</h2>
-    <p>This starts automatically at <code>http://127.0.0.1:8765</code>. It loads nothing from the internet, so it works fully offline.</p>
-    <h3>One session, two windows</h3>
-    <ul>
-      <li>Messages, replies, tool calls and diffs appear in both the browser and the terminal.</li>
-      <li>A question from the model can be answered in either window.</li>
-      <li>Mode, model, host, context and plan progress are shared. View options, such as hiding thinking, are per window.</li>
-      <li>Reloading the page replays the conversation so far.</li>
-    </ul>
-    <h3>What's in it</h3>
-    <ul>
-      <li><strong>Status bar:</strong> the session drawer (load, start or delete sessions), a workspace file browser, mode and model pickers, a CTX meter with a per-category breakdown (with a link to the <a href="#system-prompt">system prompt</a>), <code>THINK</code> / <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges (THINK opens the thinking level and whether reasoning is sent back), and a wrench button for <a href="#tool-choices">this mode's tools</a>.</li>
-      <li><strong>Transcript:</strong> streamed markdown replies, collapsible thinking, one-line tool calls that expand to show arguments and results, coloured diffs and question cards with Yes/No buttons.</li>
-      <li><strong>Input:</strong> <kbd>/</kbd> command autocomplete, <kbd>@</kbd> fuzzy path search, a queue for messages sent while the model is busy, and Retry / Edit on your last message.</li>
-      <li><strong>Attachments:</strong> drag, paste or pick files. Text and PDFs are converted to text. Chips show a token estimate and turn amber when a file would use more than a quarter of the context.</li>
-      <li><strong>Notifications:</strong> a synthesised kitten mew (rising for a question, falling when a turn ends) and an optional desktop notification when the window isn't focused.</li>
-      <li>Syntax highlighting for about 20 languages, copy buttons on code blocks, and light and dark themes.</li>
-    </ul>
-    <h3>Starting and stopping</h3>
-    <div class="table-scroll"><table>
-      <tr><th>Command</th><th>Result</th></tr>
-      <tr><td><code>python momo-coding-harness.py</code></td><td class="wrap">TUI <em>and</em> web UI at <code>http://127.0.0.1:8765</code>, reachable from this machine only</td></tr>
-      <tr><td><code>… --no-web</code></td><td class="wrap">TUI only</td></tr>
-      <tr><td><code>… --headless</code></td><td class="wrap">Web UI only. <kbd>Ctrl+C</kbd> saves the session and stops.</td></tr>
-      <tr><td><code>… --web-port 9000</code></td><td class="wrap">Another port</td></tr>
-    </table></div>
-    <p>To open the web UI from another machine, over HTTPS or behind a proxy, see <a href="#security">Access &amp; security</a>.</p>
-    <h3>HTTP API</h3>
-    <p>The page talks to the harness through a small JSON API that you can script too. From another machine, add the token as <code>Authorization: Bearer …</code> (see <a href="#remote-access">the access token</a>).</p>
-    <div class="table-scroll"><table>
-      <tr><th>Endpoint</th><th>Description</th></tr>
-      <tr><td><code>GET /api/state</code></td><td class="wrap">Snapshot of status, busy/waiting flags, modes, commands, skills and plan</td></tr>
-      <tr><td><code>GET /api/events</code></td><td class="wrap">Server-Sent Events: replays the conversation, then streams live events</td></tr>
-      <tr><td><code>POST /api/submit</code></td><td class="wrap"><code>{"text": "…"}</code>, exactly like typing in the input box</td></tr>
-      <tr><td><code>POST /api/cancel</code></td><td class="wrap">Interrupt the running response</td></tr>
-      <tr><td><code>POST /api/mode</code></td><td class="wrap"><code>{"mode": "coding"}</code></td></tr>
-      <tr><td><code>GET /api/sessions</code></td><td class="wrap">Recent sessions</td></tr>
-      <tr><td><code>POST /api/sessions/delete</code></td><td class="wrap"><code>{"names": [...]}</code>: delete saved sessions and their logs. The current one is always kept.</td></tr>
-      <tr><td><code>GET /api/export</code></td><td class="wrap">The conversation as a Markdown download</td></tr>
-    </table></div>
-<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>curl -s localhost:8765/api/state | jq .status
-curl -s -X POST localhost:8765/api/submit -H 'Content-Type: application/json' -d '{"text": "/context"}'
-curl -sN localhost:8765/api/events</code></pre></div>
-  </section>
-
   <section id="security" data-voice="security">
     <h2>Access &amp; security</h2>
-    <p>The web UI can do everything momo can, including editing files and running commands in your workspace. So the question is who can reach it. By default the answer is <strong>only this computer</strong>, and every other setup is something you opt into at startup.</p>
+    <p>The web UI can do everything momo can, including editing files and running commands, so what matters is who can reach it. By default that's <strong>only this computer</strong>; every other setup is opt-in at startup.</p>
 
     <h3 id="access-modes">Choose how to start</h3>
     <p>Pick the first row that fits what you need.</p>
@@ -1276,43 +1369,22 @@ curl -sN localhost:8765/api/events</code></pre></div>
       <tr><td class="wrap">Other devices on your LAN, plain HTTP</td><td class="wrap"><code>--web-host 0.0.0.0</code></td><td>yes</td><td class="wrap"><strong>no</strong>: the token is visible on the network</td></tr>
       <tr><td class="wrap">A fully trusted network, no login</td><td class="wrap"><code>--web-host 0.0.0.0 --web-insecure</code></td><td><strong>none</strong></td><td class="wrap"><strong>no</strong>: anyone who can reach it controls momo</td></tr>
     </table></div>
-    <p>Add <code>--headless</code> to any row to run without the terminal UI, and <code>--web-port</code> to change the port. <code>--web-token</code> fixes the token so it survives restarts; otherwise a new one is generated at each start.</p>
+    <p>Add <code>--headless</code> or <code>--web-port</code> to any row. <code>--web-token</code> fixes the token so it survives restarts; otherwise each start makes a new one.</p>
 
     <h3 id="protections">What protects it</h3>
     <ul>
-      <li><strong>Loopback by default.</strong> momo binds to <code>127.0.0.1</code> and rejects any request whose <code>Host</code> header isn't a loopback name. That stops a website you visit from reaching it by pointing its own domain at your machine (DNS rebinding).</li>
-      <li><strong>Same-origin writes.</strong> Anything that changes state must be a JSON request from the page itself. Requests from other websites are refused.</li>
-      <li><strong>A token off loopback.</strong> On any other address, every request needs the access token. It's generated fresh at each start and never written to disk.</li>
-      <li><strong>Optional HTTPS.</strong> This encrypts the token, cookie and conversation. It never replaces the token.</li>
-      <li><strong>No-token mode keeps the Host check.</strong> With <code>--web-insecure</code>, only this machine's own names and addresses are accepted, so DNS rebinding stays blocked.</li>
+      <li><strong>Loopback by default.</strong> momo binds to <code>127.0.0.1</code> and rejects any request whose <code>Host</code> isn't a loopback name, so a website can't reach it by pointing its own domain at your machine (DNS rebinding).</li>
+      <li><strong>Same-origin writes.</strong> Anything that changes state must be a JSON request from the page itself.</li>
+      <li><strong>A token off loopback.</strong> On any other address, every request needs the access token, which is never written to disk. HTTPS, when on, encrypts it but never replaces it.</li>
+      <li id="no-token"><strong>No-token mode keeps the Host check.</strong> <code>--web-insecure</code> prints a warning, and accepts only this machine's own names and addresses (plus any you add with <code>--web-allow-host</code>), so a website you visit still can't drive momo. Anyone who can reach the address can, so use it only where you trust every device.</li>
     </ul>
 
     <h3 id="remote-access">The access token</h3>
-    <p>There's no login form. The token travels inside the URL momo prints, and your browser swaps it for a cookie the first time you open that URL.</p>
-    <h4>Where to find it</h4>
-    <p>The token appears in only one place: the web UI URL momo prints at startup. With <code>0.0.0.0</code>, the address is replaced by the machine's hostname.</p>
-    <div class="table-scroll"><table>
-      <tr><th>Running as</th><th>Where the URL appears</th></tr>
-      <tr><td>TUI (default)</td><td class="wrap">A <code>[system]</code> line near the top of the chat pane: <code>Web UI: http://my-mac.local:8765/?token=Xq3…</code></td></tr>
-      <tr><td><code>--headless</code></td><td class="wrap">The terminal it was started from: <code>momo Web UI: http://my-mac.local:8765/?token=Xq3…</code></td></tr>
-    </table></div>
-    <p>The token is everything after <code>?token=</code>. No command shows it again later. If it has scrolled away, scroll the chat pane back up, restart momo, or use <code>--web-token</code> so you already know it.</p>
-
-    <h4>In a browser</h4>
-    <ol>
-      <li>On the other machine, open the <strong>full URL</strong>, token included.</li>
-      <li>momo checks the token and replies with a redirect to <code>/</code> that sets a cookie: <code>momo_token</code>, HttpOnly and SameSite=Strict. The token disappears from the address bar and history, and page scripts can't read it.</li>
-      <li>From then on the cookie authorises every request, so bookmark plain <code>http://my-mac.local:8765/</code> (<code>https://</code> when <a href="#https">HTTPS</a> is on).</li>
-    </ol>
-    <p class="note">If the hostname doesn't resolve on the other machine (it relies on <code>.local</code> / mDNS or your DNS), replace it with the machine's IP address and keep the token: <code>http://192.168.1.20:8765/?token=Xq3…</code>.</p>
-
-    <h4>From scripts</h4>
-    <p>Scripts don't need the cookie: send the token as a Bearer header on every request.</p>
-<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>TOKEN=Xq3…      <span class="com"># the part after ?token=</span>
-curl -s -H "Authorization: Bearer $TOKEN" http://my-mac.local:8765/api/state | jq .status
-curl -s -X POST http://my-mac.local:8765/api/submit \
-     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-     -d '{"text": "/context"}'</code></pre></div>
+    <p>There's no login form. The token is part of the web UI URL momo prints at startup, in the TUI's chat pane or, with <code>--headless</code>, the terminal: <code>Web UI: http://my-mac.local:8765/?token=Xq3…</code> (with <code>0.0.0.0</code>, the hostname replaces the address). No command shows it again; scroll back, restart momo, or set <code>--web-token</code>.</p>
+    <ul>
+      <li><strong>In a browser:</strong> open the full URL once. momo swaps the token for a cookie (<code>momo_token</code>, HttpOnly, SameSite=Strict) and redirects to <code>/</code>, so the token leaves the address bar and history. Bookmark the plain address. If the hostname doesn't resolve on the other device (it relies on <code>.local</code>/mDNS or your DNS), use the IP address and keep the token.</li>
+      <li><strong>From scripts:</strong> send it as a header on every request: <code>curl -H "Authorization: Bearer $TOKEN" http://my-mac.local:8765/api/state</code>. See <a href="#api">HTTP API</a>.</li>
+    </ul>
 
     <h4>When it stops working</h4>
     <div class="table-scroll"><table>
@@ -1325,15 +1397,15 @@ curl -s -X POST http://my-mac.local:8765/api/submit \
 
 
     <h3 id="https">HTTPS</h3>
-    <p>With a certificate the device trusts, the page counts as a secure context on other devices too, so <strong>desktop notifications and the copy buttons' clipboard access work over the LAN</strong>. Browsers block both on plain-HTTP LAN addresses.</p>
+    <p>Besides encryption, HTTPS with a trusted certificate makes <strong>desktop notifications and the copy buttons work on other devices</strong>; browsers block both on plain-HTTP LAN addresses.</p>
     <h4>momo's own certificate: <code>--web-tls auto</code></h4>
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --web-host 0.0.0.0 --web-tls auto</code></pre></div>
 <div class="code-block"><div class="code-bar"><span class="code-lang">output</span></div><pre><code>Web UI: https://my-mac.local:8765/?token=Xq3…
 HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
        (also at https://my-mac.local:8765/momo-ca.pem), SHA-256 97:9A:56:…</code></pre></div>
     <ol>
-      <li><strong>First start:</strong> momo creates a small certificate authority and a server certificate for <code>localhost</code>, your hostname, <code>&lt;hostname&gt;.local</code> and this machine's LAN addresses. They're stored in <code>~/.momo-harness/tls/</code>, readable only by you. It needs just the <code>openssl</code> command; macOS's built-in one works. Add extra names or a VPN address with <code>--web-tls-name</code>.</li>
-      <li><strong>Trust the CA once per device.</strong> The file to trust is <code>~/.momo-harness/tls/momo-ca.pem</code> on the machine running momo (see <a href="#storage">Where momo stores data</a>). Either copy it from there (AirDrop, <code>scp</code>, a USB stick), or download it from <code>/momo-ca.pem</code> on the running server (no token needed; a CA certificate is public). Check that its SHA-256 fingerprint matches the one momo printed, then install it. Only ever share <code>momo-ca.pem</code>, never <code>momo-ca.key</code>.
+      <li><strong>First start:</strong> momo uses <code>openssl</code> to create a small certificate authority and a server certificate for <code>localhost</code>, your hostname, <code>&lt;hostname&gt;.local</code> and this machine's LAN addresses, in <code>~/.momo-harness/tls/</code>. Add names or a VPN address with <code>--web-tls-name</code>.</li>
+      <li><strong>Trust the CA once per device.</strong> Copy <code>~/.momo-harness/tls/momo-ca.pem</code> over, or download it from <code>/momo-ca.pem</code> on the running server (no token needed; it's public). Check its SHA-256 fingerprint against the one momo printed, then install it. Never share <code>momo-ca.key</code>.
         <div class="table-scroll"><table>
           <tr><th>Device</th><th>How</th></tr>
           <tr><td>macOS</td><td class="wrap">Open it in Keychain Access, then set <em>When using this certificate</em> to <em>Always Trust</em></td></tr>
@@ -1342,17 +1414,17 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
           <tr><td>Linux</td><td class="wrap">Copy it to <code>/usr/local/share/ca-certificates/momo-ca.crt</code> and run <code>sudo update-ca-certificates</code>. Firefox has its own store: Settings → Certificates → Import.</td></tr>
           <tr><td>Windows</td><td class="wrap">Open it and install it into <em>Trusted Root Certification Authorities</em></td></tr>
         </table></div></li>
-      <li><strong>Open the printed URL</strong> and use the token as usual. If you skip step 2, the connection is still encrypted, but the browser shows a certificate warning.</li>
+      <li><strong>Open the printed URL.</strong> Without step 2 the connection is still encrypted, but the browser warns.</li>
     </ol>
-    <p>Later starts reuse the certificate. When your IP address or hostname changes, momo issues a new server certificate by itself, and devices that already trust the CA don't need to do anything.</p>
-    <p class="note">The CA can only vouch for <code>localhost</code>, <code>*.local</code>, your hostname, loopback and private addresses (including Tailscale's <code>100.64.0.0/10</code>), and names given when it was created. This is enforced with X.509 name constraints. A device that trusts it can't be tricked into accepting a certificate for a public site, even if <code>momo-ca.key</code> leaks. Keep that key private anyway.</p>
+    <p>When your IP address or hostname changes, momo issues a new server certificate by itself; devices that trust the CA don't need to do anything.</p>
+    <p class="note">The CA can only vouch for local names and private addresses (<code>localhost</code>, <code>*.local</code>, your hostname, Tailscale's <code>100.64.0.0/10</code>, and names given at creation), enforced with X.509 name constraints. Even if <code>momo-ca.key</code> leaked, it couldn't be used to fake a public site.</p>
 
     <h4>Your own certificate</h4>
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --web-host 0.0.0.0 --web-cert my-mac.pem --web-key my-mac-key.pem</code></pre></div>
-    <p>If the certificate or key can't be loaded, momo says so at startup: <code>Web UI failed to start …</code>, and <code>--headless</code> exits with an error.</p>
+    <p>If it can't be loaded, momo says <code>Web UI failed to start …</code> (and <code>--headless</code> exits).</p>
 
     <h4>Behind a reverse proxy</h4>
-    <p>Keep momo on loopback, but give it a fixed token. That switches on token mode, which lets the proxy pass its own <code>Host</code> header:</p>
+    <p>Keep momo on loopback with a fixed token; token mode lets the proxy pass its own <code>Host</code> header:</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python momo-coding-harness.py --web-host 127.0.0.1 --web-token "$(openssl rand -hex 16)"</code></pre></div>
 <div class="code-block"><div class="code-bar"><span class="code-lang">Caddyfile</span></div><pre><code>momo.example.com {
     reverse_proxy 127.0.0.1:8765
@@ -1364,43 +1436,50 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     proxy_read_timeout 1h;
 }</code></pre></div>
     <p>Then open <code>https://momo.example.com/?token=&lt;token&gt;</code> once. Never let the proxy strip the <code>Origin</code> header: a missing Origin passes the same-origin check, so any website could then send commands to momo.</p>
-
-
-    <h3 id="no-token">No token: <code>--web-insecure</code></h3>
-    <p><code>--web-host 0.0.0.0 --web-insecure</code> serves plain HTTP without generating or asking for a token. momo prints a warning with the URL, because <strong>anyone who can reach the address can read the conversation and run commands as you</strong>. Use it only on a network where you trust every device. The Host check stays on: only this machine's own names and addresses are accepted, plus any you add with <code>--web-allow-host</code>. So a website you visit still can't drive momo.</p>
-
     <h3 id="safety">Keep it safe</h3>
     <ul>
-      <li>Treat the token like a password. Anyone with it controls momo, and it sits in your terminal scrollback.</li>
+      <li>Treat the token like a password: anyone with it controls momo, and it sits in your terminal scrollback.</li>
       <li>Over plain HTTP the token and cookie are visible on the network. Use HTTPS on anything but a network you trust.</li>
-      <li>Keep <code>~/.momo-harness/tls/momo-ca.key</code> private. It's limited to local names by design, but it's still a key your devices trust.</li>
       <li>Turn on <code>/run-confirm on</code> when others can reach the UI, or when browsing with <code>/net on</code>, so no shell command runs unseen.</li>
     </ul>
   </section>
 
-  <section id="tui" data-voice="tui">
-    <h2>Terminal UI</h2>
-    <p>The chat pane is at the top, with tool calls in yellow and thinking in orange. The status bar shows the mode, backend, model, host, CTX % and working directory (plus <code>THINK</code>, <code>NET</code>, <code>IDX</code> when they aren't at their defaults), and below it is a five-row multi-line input.</p>
+  <section id="flags" data-group="Reference" data-voice="flags">
+    <h2>Command-line flags</h2>
+    <p>Settings marked "last used" are remembered between runs; the flag overrides that.</p>
     <div class="table-scroll"><table>
-      <tr><th>Key</th><th>Action</th></tr>
-      <tr><td><kbd>Enter</kbd></td><td class="wrap">Send</td></tr>
-      <tr><td><kbd>Ctrl+J</kbd></td><td class="wrap">New line (works in every terminal; <kbd>Shift+Enter</kbd> works with CSI-u)</td></tr>
-      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td class="wrap">Move between lines. At the top or bottom edge, browse history.</td></tr>
-      <tr><td><kbd>Shift+↑</kbd> / <kbd>Shift+↓</kbd></td><td class="wrap">History, wherever the cursor is</td></tr>
-      <tr><td><kbd>Ctrl+A</kbd> <kbd>Ctrl+E</kbd> <kbd>Ctrl+K</kbd> <kbd>Ctrl+U</kbd></td><td class="wrap">Start of line, end of line, delete to end, delete to start</td></tr>
-      <tr><td><kbd>Tab</kbd></td><td class="wrap">Switch focus between chat and input</td></tr>
-      <tr><td><kbd>PgUp</kbd> / <kbd>PgDn</kbd>, <kbd>←</kbd> / <kbd>→</kbd></td><td class="wrap">Scroll the chat, and scroll wide tables sideways</td></tr>
-      <tr><td><kbd>Shift+Tab</kbd></td><td class="wrap">Cycle mode</td></tr>
-      <tr><td><kbd>Shift+T</kbd> / <kbd>M</kbd> / <kbd>D</kbd> / <kbd>Q</kbd></td><td class="wrap">Toggle thinking, markdown, diffs or the companion</td></tr>
-      <tr><td><kbd>Shift+P</kbd></td><td class="wrap">Toggle <code>run_command</code> confirmation</td></tr>
-      <tr><td><kbd>Shift+C</kbd> (web: <kbd>Esc</kbd>)</td><td class="wrap">Interrupt the running response</td></tr>
-      <tr><td><kbd>@</kbd> / <kbd>/</kbd></td><td class="wrap">Path autocomplete, command autocomplete</td></tr>
+      <tr><th>Flag</th><th>Default</th><th>Description</th></tr>
+      <tr><td><code>--provider</code></td><td>last used / <code>ollama</code></td><td class="wrap"><code>ollama</code> or <code>llamacpp</code></td></tr>
+      <tr><td><code>--host</code></td><td>:11434 / :8080</td><td class="wrap">Backend base URL, including the scheme</td></tr>
+      <tr><td><code>--model</code></td><td><code>qwen3.5:9b</code></td><td class="wrap">Model name. llama.cpp serves whatever model it was started with.</td></tr>
+      <tr><td><code>--workdir</code></td><td><code>.</code></td><td class="wrap">Root for all file operations (alias <code>--workspace</code>)</td></tr>
+      <tr><td><code>--context</code></td><td>auto</td><td class="wrap">Context token limit. The default is half the model's maximum.</td></tr>
+      <tr><td><code>--mode</code></td><td><code>design</code></td><td class="wrap">Starting mode: <code>design</code>, <code>chat</code>, <code>plan</code>, <code>coding</code> or <code>momo</code></td></tr>
+      <tr><td><code>--max-tool-result</code></td><td><code>0</code></td><td class="wrap">Max characters per tool result (0 = unlimited)</td></tr>
+      <tr><td><code>--run-mode</code></td><td>last used / <code>new</code></td><td class="wrap"><code>new</code>: <code>run_command</code> saves its output to a log and returns a view; <code>classic</code>: all of it. See <a href="#run-output">Command output</a>. <code>--run-output-limit</code> sets the view's size.</td></tr>
+      <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
+      <tr><td><code>--think</code></td><td>last used / <code>on</code></td><td class="wrap">Thinking level: <code>off</code>, <code>on</code>, or an effort level (<code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, …) for models that take one. See <a href="#think-level">Thinking level</a>. <code>--no-think</code> is <code>--think off</code>.</td></tr>
+      <tr><td><code>--think-history</code></td><td>last used / <code>turn</code></td><td class="wrap">Send the model's own reasoning back: <code>off</code>, <code>turn</code> (since your last message) or <code>all</code>. See <a href="#think-history">Sending reasoning back</a>.</td></tr>
+      <tr><td><code>--max-output-tokens</code></td><td>last used / <code>25000</code></td><td class="wrap">Most tokens one model reply may take, reasoning included; <code>0</code> = no cap. See <a href="#reply-cap">Reply cap</a>.</td></tr>
+      <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
+      <tr><td><code>--web</code> / <code>--no-web</code></td><td>on</td><td class="wrap">Serve the browser UI alongside the TUI</td></tr>
+      <tr><td><code>--web-host</code></td><td><code>127.0.0.1</code></td><td class="wrap">Interface to bind. Any non-loopback host requires a token.</td></tr>
+      <tr><td><code>--web-port</code></td><td><code>8765</code></td><td class="wrap">Port for the web UI</td></tr>
+      <tr><td><code>--web-token</code></td><td>generated</td><td class="wrap">A fixed access token instead of a random one</td></tr>
+      <tr><td><code>--web-tls auto</code></td><td>off</td><td class="wrap">Serve the web UI over HTTPS with momo's own local CA (needs <code>openssl</code>). <code>--web-tls-name</code> adds names. See <a href="#https">HTTPS</a>.</td></tr>
+      <tr><td><code>--web-cert</code> / <code>--web-key</code></td><td>—</td><td class="wrap">Serve HTTPS with your own certificate</td></tr>
+      <tr><td><code>--web-insecure</code></td><td>off</td><td class="wrap">Plain HTTP with <strong>no</strong> token, even off loopback. Trusted networks only.</td></tr>
+      <tr><td><code>--headless</code></td><td>off</td><td class="wrap">Web UI only, with no terminal UI</td></tr>
+      <tr><td><code>--no-index</code></td><td>index on</td><td class="wrap">Start with the code index off. <code>--index-max-mem</code>, <code>--index-max-files</code>, <code>--index-workers</code> and <code>--index-persist</code> set its budget, file limit, build processes and persistence.</td></tr>
+      <tr><td><code>--net</code></td><td><code>off</code></td><td class="wrap"><code>off</code>, <code>on</code> or <code>local</code> at startup (<code>--net-confirm</code>, <code>--net-max-bytes</code> and <code>--net-max-chars</code> go with it)</td></tr>
+      <tr><td><code>--guides</code></td><td>off</td><td class="wrap">Load the project's guide files into the system prompt</td></tr>
+      <tr><td><code>--companion-idle-recap</code></td><td>off</td><td class="wrap">Let momo recap recent turns when you're idle (<code>--companion-idle-recap-secs</code>)</td></tr>
     </table></div>
   </section>
 
   <section id="commands" data-voice="commands">
     <h2>Slash commands</h2>
-    <p>Commands work the same in the terminal and the browser. <code>/help</code> lists them all.</p>
+    <p>Commands work the same in the terminal and the browser, with the few exceptions listed under <a href="#web">Web UI</a>. <code>/help</code> lists them all.</p>
     <h3>Modes, model &amp; backend</h3>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Description</th></tr>
@@ -1411,10 +1490,8 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/workspace [path]</code></td><td class="wrap">Show or change the working directory (alias <code>/workdir</code>)</td></tr>
       <tr><td><code>/think [off|on|&lt;level&gt;]</code></td><td class="wrap">Show or set the model's <a href="#thinking">thinking level</a> (remembered)</td></tr>
       <tr><td><code>/think-history off|turn|all</code></td><td class="wrap"><a href="#think-history">Send the model's own reasoning back</a> to it (remembered)</td></tr>
-      <tr><td><code>/tools</code>, <code>/tools list</code></td><td class="wrap">Pick or list the current mode's tools. See <a href="#tool-choices">Turning tools on and off</a></td></tr>
-      <tr><td><code>/tools &lt;name&gt;</code></td><td class="wrap">What a tool does, its parameters, and whether it's on</td></tr>
-      <tr><td><code>/tools &lt;name&gt;… on|off</code></td><td class="wrap">Turn tools on or off for the current mode (saved in the session)</td></tr>
-      <tr><td><code>/tools on|off</code></td><td class="wrap">Turn tool calls on or off entirely</td></tr>
+      <tr><td><code>/tools [list|&lt;name&gt;]</code></td><td class="wrap">Pick this mode's tools, list them, or show one. See <a href="#tool-choices">Turning tools on and off</a></td></tr>
+      <tr><td><code>/tools [&lt;name&gt;…] on|off</code></td><td class="wrap">Turn named tools on or off for this mode (saved in the session), or all tool calls</td></tr>
       <tr><td><code>/run-confirm on|off</code></td><td class="wrap">Ask y/N before each <code>run_command</code></td></tr>
     </table></div>
     <h3>Conversation &amp; context</h3>
@@ -1463,52 +1540,23 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     </table></div>
   </section>
 
-  <section id="context" data-voice="context">
-    <h2>Context &amp; compaction</h2>
-    <p>A small model only knows what is in its context window, and every request sends the whole conversation again. momo decides what goes into each request, shows you how full it is, and drops the least useful parts before the window runs out.</p>
-
-    <h3 id="context-contents">What each request contains</h3>
-    <figure class="ctx-fig" aria-label="What one request fills of the model's context window">
-      <div class="ctx-wrap">
-        <div class="ctx-bar"><span class="sys"></span><span class="sch"></span><span class="conv"></span><span class="free"></span><span class="reply"></span></div>
-        <div class="ctx-mark" aria-hidden="true"></div>
-      </div>
-      <div class="ctx-scale"><span>0</span><span>compaction limit · 50%</span><span>model window</span></div>
-      <div class="ctx-legend"><span class="sys">system prompt</span><span class="sch">tool schemas</span><span class="conv">conversation</span><span>free</span><span class="reply">room for the reply</span></div>
-      <figcaption>One request against the model's window. Compaction keeps the first three under the limit; the rest is left for the reply.</figcaption>
-    </figure>
-    <ul>
-      <li><strong>The system prompt:</strong> the role, environment, project guides, skills, a running plan and the tool reference, rebuilt in place whenever one of them changes. See <a href="#system-prompt">The system prompt</a>.</li>
-      <li><strong>The tool schemas:</strong> the JSON definitions of this mode's tools, sent alongside. Compaction can't shrink them; switching off tools you don't need with <a href="#tool-choices"><code>/tools</code></a> does.</li>
-      <li><strong>The conversation:</strong> your messages (attachments included), the model's replies, its tool calls and their results.</li>
-      <li><strong>The model's earlier reasoning,</strong> only as far as <a href="#think-history"><code>/think-history</code></a> sends it back. The rest stays in the transcript for you and costs no context.</li>
-    </ul>
-    <p>momo asks the server for the model's <strong>full</strong> window, and the limit you set (<code>/context</code>) is only the point where compaction starts. By default that is <strong>half the window</strong>. The other half is room for one reply with its reasoning (up to the <a href="#reply-cap">reply cap</a>) and for the tool results a single step adds before the next check. Raise it with <code>/context 75%</code>, or set an absolute number with <code>/context 16384</code> or <code>--context</code>.</p>
-    <p class="note">On Ollama, the full window goes out as <code>num_ctx</code> with every request, and Ollama reserves memory for all of it. A model with a very large native window can need much more RAM or VRAM than its weights alone. On llama.cpp the window is whatever <code>-c</code> set when the server started.</p>
-
-    <h3 id="context-meter">Measuring it</h3>
-    <ul>
-      <li><strong>The CTX meter</strong> in both UIs shows how full the context is against the limit. It turns yellow at 75% and red at 90%. Before a reply the figure is an estimate (about 4 characters per token); after it, the server's own count replaces it.</li>
-      <li><strong>The breakdown,</strong> from <code>/context</code> or by clicking the web UI's CTX meter, splits it into System prompt, Project guides, Tools, User, Assistant, Tool calls, Tool results and Reasoning sent back, plus <em>Thinking (not sent)</em>, which costs nothing.</li>
-      <li><strong>Big results are kept in check before they arrive.</strong> <code>read_file</code> returns at most what the context has free, less 10% of the window. <code>run_command</code> returns a <a href="#run-output">view of its log</a>, <code>fetch_url</code> pages its text by <code>/net-max-chars</code>, and <code>index_map</code> fits a token budget. <code>/tool-result &lt;n&gt;</code> caps every other result too.</li>
-    </ul>
-
-    <h3 id="compaction">Compaction</h3>
-    <p>Before <strong>every</strong> model call, including each step of a tool loop, momo checks the size of the request. When it's over the limit, momo cuts it down to the system prompt plus <strong>a third</strong> of the remaining limit, so the next few steps have room before it has to compact again. It works through these steps and stops as soon as the request is small enough:</p>
-    <ol>
-      <li><strong>Stop sending back earlier reasoning</strong> (only with <code>/think-history all</code>). It stays in the transcript.</li>
-      <li><strong>Drop old tool calls,</strong> oldest first. Each call goes together with its results and its reasoning. Your questions and the model's answers stay, so the thread of the conversation survives.</li>
-      <li><strong>Drop whole old turns,</strong> oldest first.</li>
-      <li><strong>Trim the largest tool results that are left</strong> to their first two thirds and last third, with a <code>[… N chars removed by context compaction …]</code> marker in between.</li>
-    </ol>
-    <p><strong>Never dropped:</strong> the system prompt, so guides, skills and a running plan survive; the question being worked on; and its latest tool calls and results. A model that loses the result it just asked for asks for it again.</p>
-    <p><strong>The summary.</strong> What was dropped is summarised by the model in one extra call, with thinking off, keeping decisions, file names, code entities and outcomes. The summary is placed at the top of the oldest message that's left, as <code>[Earlier context summary: …]</code>. The next compaction folds it into the new summary, so there's only ever one. Nothing changes until the summary is in, so <kbd>Esc</kbd> during compaction leaves the history as it was. <code>/fast-compact</code> skips the summary; if the summary call fails, the messages are removed without one.</p>
-    <p>A line in the chat reports each compaction, with the size before and after: <code>Context compacted: summarised 14 messages, trimmed 1 tool result (was ~68,210 tokens, now ~24,880 tokens)</code>. <code>/compact</code> runs one by hand.</p>
-    <ul>
-      <li><strong>The model forgets earlier work?</strong> Raise the limit with <code>/context 75%</code> if the machine has the memory, or do long jobs in <a href="#plan">plan mode</a>, whose plan lives in the system prompt.</li>
-      <li><strong>Starting something unrelated?</strong> <code>/new</code> is better than letting compaction summarise the old task into the new one.</li>
-      <li><strong>"Context not compacted: the system prompt and tool reference alone are …"</strong> means the limit is too small for the fixed part. Raise it, or switch off tools, skills or guides.</li>
-    </ul>
+  <section id="api" data-voice="api">
+    <h2>HTTP API</h2>
+    <p>The page talks to the harness through a small JSON API that you can script too. From another machine, add the token as <code>Authorization: Bearer …</code> (see <a href="#remote-access">the access token</a>).</p>
+    <div class="table-scroll"><table>
+      <tr><th>Endpoint</th><th>Description</th></tr>
+      <tr><td><code>GET /api/state</code></td><td class="wrap">Snapshot of status, busy/waiting flags, modes, commands, skills and plan</td></tr>
+      <tr><td><code>GET /api/events</code></td><td class="wrap">Server-Sent Events: replays the conversation, then streams live events</td></tr>
+      <tr><td><code>POST /api/submit</code></td><td class="wrap"><code>{"text": "…"}</code>, exactly like typing in the input box</td></tr>
+      <tr><td><code>POST /api/cancel</code></td><td class="wrap">Interrupt the running response</td></tr>
+      <tr><td><code>POST /api/mode</code></td><td class="wrap"><code>{"mode": "coding"}</code></td></tr>
+      <tr><td><code>GET /api/sessions</code></td><td class="wrap">Recent sessions</td></tr>
+      <tr><td><code>POST /api/sessions/delete</code></td><td class="wrap"><code>{"names": [...]}</code>: delete saved sessions and their logs. The current one is always kept.</td></tr>
+      <tr><td><code>GET /api/export</code></td><td class="wrap">The conversation as a Markdown download</td></tr>
+    </table></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>curl -s localhost:8765/api/state | jq .status
+curl -s -X POST localhost:8765/api/submit -H 'Content-Type: application/json' -d '{"text": "/context"}'
+curl -sN localhost:8765/api/events</code></pre></div>
   </section>
 
   <section id="storage" data-voice="storage">
@@ -1553,60 +1601,10 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
     <h3>Elsewhere</h3>
     <ul>
       <li><strong>In your project:</strong> <code>.momo-plan.md</code> while a plan exists (deleted when it completes or is cancelled), and <code>conversation-&lt;timestamp&gt;.md</code> when you run <code>/export</code>.</li>
-      <li><strong>In each browser:</strong> the web UI keeps its theme, view options and notification switches in <code>localStorage</code> (<code>momo.theme</code>, <code>momo.view</code>, <code>momo.notify</code>). The token cookie lasts only until the browser closes.</li>
+      <li><strong>In each browser:</strong> the web UI keeps its theme, view options and notification switches in <code>localStorage</code>; the token cookie lasts until the browser closes.</li>
       <li><strong>Never stored:</strong> the model server token (<code>/token</code>) and the web UI access token.</li>
     </ul>
     <p class="note">Keep <code>~/.momo-harness/</code> private: sessions and logs contain your conversations, tool output from your code, and the paths of your projects. To start completely fresh, quit momo and delete the folder.</p>
-  </section>
-
-  <section id="skills" data-voice="skills">
-    <h2>Skills &amp; project guides</h2>
-    <p>Skills are Markdown files in <code>skills/</code> that are appended to the active role prompt. They stack, are saved with the session and survive mode switches.</p>
-<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/list-skills
-/load-skill python
-/unload-skill python</code></pre></div>
-    <p>Built in: <code>bash</code>, <code>c</code>, <code>code-review</code>, <code>data-analysis</code>, <code>document-editing</code>, <code>html-javascript</code>, <code>java</code>, <code>kotlin</code>, <code>maven-dependency-updates</code>, <code>python</code>, <code>rust</code>, <code>software-design</code>, <code>sql</code>, <code>storytelling</code>, <code>tdd</code>, <code>text-based-game-design</code>, <code>typescript</code>. To add your own, drop a <code>.md</code> file into the folder.</p>
-    <p><strong>Project guides</strong> (<code>/guides on</code>) load the workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>MOMO.md</code>, <code>GEMINI.md</code>, <code>.github/copilot-instructions.md</code> or <code>.cursorrules</code> into the system prompt, where compaction can't drop them. They're re-read on a new session, <code>/clear</code>, compaction and workdir changes.</p>
-    <h3 id="system-prompt">The system prompt</h3>
-    <p>The system message is built from parts, in the order the model reads them. Each part is generated for the current mode and exactly the tools that are on, so the prompt never names a tool the model can't call. Role files describe behaviour; everything about tools lives in the generated parts.</p>
-    <figure class="prompt-diagram" aria-label="How the system prompt is built">
-      <div class="pd-grid">
-      <div class="pd-head in">Inputs</div><div></div><div class="pd-head">System message, top to bottom</div>
-        <div class="pd-row"><div class="pd-in"><code>/index</code> on</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Code index banner</span><span class="pd-tag">if index</span></div></div>
-        <div class="pd-row"><div class="pd-in">mode · <code>roles/&lt;mode&gt;.md</code> · plan</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file"><span>Role</span></div></div>
-        <div class="pd-row"><div class="pd-in">workdir · date · OS · git · <code>/net</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Environment</span></div></div>
-        <div class="pd-row"><div class="pd-in"><code>/guides on</code> · <code>AGENTS.md</code>, …</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Project guides</span><span class="pd-tag">if guides</span></div></div>
-        <div class="pd-row"><div class="pd-in"><code>/load-skill</code> · <code>skills/&lt;name&gt;.md</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Skill: &lt;name&gt;</span><span class="pd-tag">each skill</span></div></div>
-        <div class="pd-row"><div class="pd-in">tools on in this mode · <code>/tool-ref</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Tool reference</span></div></div>
-        <div class="pd-row"><div class="pd-in"><code>fetch_url</code> / <code>web_search</code> on</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Using the internet</span><span class="pd-tag">if net</span></div></div>
-        <div class="pd-row"><div class="pd-in">tools on · index on or off</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Navigating code</span></div></div>
-        <div class="pd-row"><div class="pd-in">the same tools, as JSON</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part aside"><span>Tool schemas</span><span class="pd-tag">sent alongside</span></div></div>
-      </div>
-      <div class="pd-legend"><span>generated by the harness</span><span class="file">from a file</span><span class="cond">only when its input is on</span></div>
-      <figcaption>Parts are joined by <code>---</code> rules and rebuilt in place whenever an input changes.</figcaption>
-    </figure>
-    <div class="table-scroll"><table>
-      <tr><th>Part</th><th>When</th><th>What it says</th></tr>
-      <tr><td>Code index banner</td><td class="wrap">Index on</td><td class="wrap">One line: find code with the <code>index_*</code> tools, not grep or find</td></tr>
-      <tr><td>Role</td><td class="wrap">Always</td><td class="wrap"><code>roles/&lt;mode&gt;.md</code>; in plan mode also the draft plan, or the execution rules and the live plan</td></tr>
-      <tr><td>Environment</td><td class="wrap">Always</td><td class="wrap">Working directory, today's date, OS/shell and git branch (with <code>run_command</code>), "run it as <code>python3</code>" when there's no <code>python</code> command, internet on or off</td></tr>
-      <tr><td>Project guides</td><td class="wrap">With <code>/guides on</code></td><td class="wrap">The workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, …</td></tr>
-      <tr><td>Skill: &lt;name&gt;</td><td class="wrap">One per loaded skill</td><td class="wrap"><code>skills/&lt;name&gt;.md</code></td></tr>
-      <tr><td>Tool reference</td><td class="wrap">Always</td><td class="wrap">Generated from the tool schemas, <code>/tool-ref full|compact</code></td></tr>
-      <tr><td>Using the internet</td><td class="wrap">While <code>fetch_url</code> or <code>web_search</code> is on</td><td class="wrap">Check versions and APIs instead of recalling them; read the project's manifests first; look up general facts (e.g. Wikipedia) when the topic is recent, the model is unsure or you ask; stop once answered; cite URLs</td></tr>
-      <tr><td>Navigating code</td><td class="wrap">Always</td><td class="wrap">How to find code with this mode's tools; with the index on, a table of the <code>index_*</code> tools</td></tr>
-      <tr><td>Tool schemas</td><td class="wrap">Always</td><td class="wrap">The JSON tool definitions sent <em>alongside</em> the prompt: they use context but aren't prompt text</td></tr>
-    </table></div>
-    <p>The index banner comes first and the navigation rules last on purpose: small models weigh the start and end of a prompt most. The prompt is rebuilt in place whenever the mode, skills, guides, plan or tool set (<code>/tools</code>, <code>/net</code>, <code>/index</code>, <code>/run-mode</code>, <code>/tool-ref</code>) change.</p>
-    <p><code>/system-prompt</code> (alias <code>/prompt</code>) shows exactly what the model gets, part by part, each with an estimated token count.</p>
-    <p>In the TUI it opens in <code>$PAGER</code> (<code>less -R</code> by default), one ruled section per part. In the web UI, View → <strong>System prompt…</strong> or the link in the CTX popover opens a side panel with collapsible parts and a <strong>Copy</strong> button; it refreshes while open when the mode, tools, internet access, index or skills change. <code>/system-prompt list</code> prints just the parts and sizes.</p>
-  </section>
-
-  <section id="companion-docs" data-voice="companion">
-    <h2>The companion</h2>
-    <p>momo is the ASCII cat walking along the top of the input box, in both the TUI and the browser. It walks, sits, blinks and mews lines that fit the current mode and whether the model is busy. <kbd>Shift+Q</kbd> or <code>/companion off</code> hides it.</p>
-    <p>With <code>/companion-idle-recap on</code>, a companion left alone for 90 seconds (configurable) recaps what you just did instead of saying its canned lines. It does this at most once per turn, with a cooldown.</p>
-    <p class="note sys">The cat at the bottom of this page is a standalone copy of it. On this page it quotes whichever section you're reading. Click it to make it talk.</p>
   </section>
 
   <section id="dev" data-voice="dev">
@@ -1617,7 +1615,7 @@ python evals/run_evals.py --runs 3                <span class="com"># does the m
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python evals/edit_bench.py                        <span class="com"># edit_file's matcher, no model</span>
 python evals/run_evals.py --suite edit            <span class="com"># change requests, checked by running them</span>
 python evals/replay.py --exp R2 --n 10            <span class="com"># one tool result, two wordings, same conversation</span></code></pre></div>
-    <p>The edit evals measure the write tools. <code>edit_bench.py</code> puts real edits through the slips a model makes when it copies <code>old_string</code> (line numbers, lost indentation, tabs as spaces, curly quotes). It counts how many come out exactly right and how many are written to the wrong place; a unit test keeps that at zero. <code>--suite edit</code> asks the model for six changes on a small project. Each one is checked by hidden tests that run the result, and the run also counts files changed outside the task, edit errors, re-reads and model turns. <code>--edit-features</code> switches the edit tools' extras off for a same-code A/B. <code>replay.py</code> takes a real session, rebuilds the project at one tool result and lets the model continue with that result worded two ways. It isolates the effect of one message, which a whole-suite run at three samples per cell can't see.</p>
+    <p><code>edit_bench.py</code> puts real edits through the slips a model makes when it copies <code>old_string</code> and counts how many land exactly right; a unit test keeps wrong-place writes at zero. <code>--suite edit</code> asks the model for six changes on a small project, checks each with hidden tests, and counts edit errors, re-reads and turns (<code>--edit-features</code> switches the edit extras off for an A/B). <code>replay.py</code> replays a real session up to one tool result and lets the model continue with that result worded two ways, which isolates the effect of a single message.</p>
   </section>
 
   </article>
@@ -1679,6 +1677,11 @@ const docSections = [...document.querySelectorAll(".doc section")];
 for (const s of docSections) {
   const label = s.querySelector("h2").textContent;
   for (const nav of [$("#toc"), $("#toc-mobile")]) {
+    if (s.dataset.group) {
+      const g = document.createElement("div");
+      g.className = "menu-sub"; g.innerHTML = s.dataset.group;
+      nav.append(g);
+    }
     const a = document.createElement("a");
     a.href = "#" + s.id; a.textContent = label; a.dataset.id = s.id;
     nav.append(a);
@@ -1810,25 +1813,16 @@ const SPEECH = {
     "< web ui on port 8765", "< --headless for web only",
     "< tokens never touch disk", "< --mode design is default",
   ],
-  backends: [
-    "< ollama or llama.cpp, both!", "< one adapter each, purrr", "< --provider llamacpp",
-    "< old llama.cpp? add --jinja", "< /model switches on ollama", "< context from /props~",
-    "< full url, http:// too!", "< files stay on your machine",
-  ],
   requirements: [
     "< only ~40 MB of ram, purrr", "< zero required deps!", "< no node, no npm~",
     "< no build step, ever", "< curses + http.server", "< the model eats the ram",
     "< windows? try wsl", "< python 3.14 please!",
   ],
-  "index-parsing": [
-    "< filter the tree, then parse", "< one parse per file", "< 8 bytes per occurrence!",
-    "< trigrams find the text", "< never a stale answer", "< yaml keys count too",
-    "< css selectors? indexed!", "< markdown: text search", "< syntax, not types",
-  ],
   running: [
     "< ollama serve, then me!", "< OLLAMA_HOST=0.0.0.0", "< --api-key + /token",
     "< ssh -L beats open ports", "< /host moves servers", "< -c sets the window",
     "< remote gpu box? nice!", "< token never hits disk",
+    "< ollama or llama.cpp, both!", "< old llama.cpp? add --jinja",
   ],
   modes: [
     "< shift+tab cycles modes", "< design never edits code", "< chat is read-only~",
@@ -1853,7 +1847,25 @@ const SPEECH = {
     "< on by default!", "< never a stale answer", "< config parse→parse_config",
     "< database finds db~", "< pagerank for code, purrr", "< callers, depth=3!",
     "< over budget? drops a part", "< /index-persist on",
+    "< one parse per file", "< 8 bytes per occurrence!", "< syntax, not types",
   ],
+  how: [
+    "< you, me, and the model", "< the model asks, i run it", "< tools go round and round",
+    "< modes pick the tools", "< i'm also a mode. and a cat",
+  ],
+  editing: [
+    "< i show what changed~", "< broke the syntax? i'll say", "< close enough? i'll find it",
+    "< five callers, one turn", "< leftover uses, listed",
+  ],
+  thinking: [
+    "< /think high, purrr", "< high→xhigh, nearest wins", "< 25k tokens per reply max",
+    "< no 80-minute loops pls", "< turn: remember your plan",
+  ],
+  "system-prompt": [
+    "< banner first, rules last", "< /prompt shows it all", "< never a tool you can't call",
+  ],
+  flags: ["< --fresh for a clean slate", "< --headless, no tui", "< --net on, if you trust it"],
+  api: ["< curl me!", "< /api/events streams~", "< bearer token from afar"],
   net: [
     "< off by default!", "< /net local for the lan", "< 127.1 is still blocked",
     "< every hop re-checked", "< no file:// sneaking", "< cookies stay home",
