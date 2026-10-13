@@ -2,6 +2,8 @@
 
 A local AI coding assistant that connects to a running [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) server. It runs in your terminal as a split-pane TUI and can read, edit, and manage files in your project via tool calls.
 
+momo sends nothing anywhere except to the model server you point it at: no telemetry, no accounts, no update checks, and the web UI loads nothing from the internet. The only other network tools, `fetch_url` and `web_search`, are off by default and reset to off at every launch. With a local model server, nothing leaves the machine.
+
 ## Requirements
 
 - Python 3.14+ (uses `/opt/homebrew/bin/python3.14` by default)
@@ -652,7 +654,7 @@ Offered only while internet access is on (`/net on`), so the model never sees a 
 | `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 2 minutes (120s) unless the model passes `timeout=` (up to 900s, the hard cap); a command the default stopped is told how to ask for longer. In run mode `new` (the default) the output is saved to a log and the model gets a view of it: `tail=N` for the last N lines, `grep="regex"` for the matching lines, or by default the whole output when it is short and its beginning and end when it is long. See [Command output](#command-output). |
 | `command_output` | Search or page through the saved output of an earlier `run_command` without running it again: `grep=`, `tail=`, `start_line=`/`end_line=`. Takes the log path printed at the end of that result. Only in run mode `new`. |
 
-All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected.
+All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected. `run_command` is a shell, so it is not confined; turn on `/run-confirm` to approve each command.
 
 ### Editing files
 
@@ -1281,13 +1283,16 @@ At startup the harness checks the server before the first turn, because a restor
 - **Context size.** The limit follows the model's current window. A limit you set yourself (`/context N`, `--context N`) is kept, unless it is larger than the window. Sessions saved before this check existed restore every limit as the model's default.
 - **Report.** One startup line shows the model, the window and the compaction point, and lists anything that changed from the saved settings. If the server is unreachable, nothing is changed.
 
-Token usage is estimated as `sum(len(content) // 4)` across all messages (a fast approximation). Tool call argument content is not counted, so real usage in tool-heavy sessions can be higher than the displayed percentage.
+Token usage is estimated at 4 characters per token across the system prompt, messages, tool-call arguments and tool schemas. After each reply the server's own count replaces the estimate.
 
 Compaction fires automatically when token usage exceeds the limit:
 
 0. **Pass 0** — with `/think-history all`, stops sending back the reasoning of earlier turns (it stays in the transcript).
-1. **Pass 1** — removes tool-call groups (oldest first): the assistant message that issued tool calls plus all its tool/thinking result messages are removed as a unit until usage drops to 33% of the limit.
-2. **Pass 2** — if still over limit, removes the oldest user/assistant message pairs until the target is met.
+1. **Pass 1** — removes tool-call groups (oldest first): the assistant message that issued tool calls plus all its tool/thinking result messages are removed as a unit until usage drops to the target: the system prompt plus a third of the rest of the limit.
+2. **Pass 2** — if still over the target, removes the oldest whole turns.
+3. **Pass 3** — if still over, trims the largest remaining tool results to their beginning and end, with a `[… N chars removed by context compaction …]` marker.
+
+The question being worked on and its latest tool calls and results are never removed.
 
 After removing messages the harness makes a one-shot LLM call to summarise what was dropped and prepends the summary to the oldest remaining user message so the model retains key context. The notice in the chat pane says "summarised N messages" when this succeeds, or "removed N messages" if summarisation was skipped or failed.
 
