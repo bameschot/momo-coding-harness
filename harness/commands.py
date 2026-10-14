@@ -325,14 +325,29 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/plan":
         sub = arg.lower()
+        if sub in ("tdd", "normal"):
+            err = harness.set_plan_kind(sub)
+            if err:
+                return CommandResult(handled=True, output=f"ERROR: {err}")
+            harness.set_mode("plan")
+            what = ("test-driven: the plan lists each step's expected outcomes, the tests are "
+                    "written first (skipped), and every step must pass them before the next"
+                    if sub == "tdd" else "normal")
+            note = ""
+            if harness.plan is not None and harness.plan.kind != sub:
+                note = (f" The current draft stays {harness.plan.kind} until the plan is "
+                        "submitted again.")
+            return CommandResult(handled=True, output=f"Plan type: {what}.{note}")
         if not sub:
             harness.set_mode("plan")
             state = ""
             if harness.plan is not None:
                 state = f" — current plan: {harness.plan.title} ({harness._plan_progress()}); /plan show to view"
+            kind = (" Plan type: TDD (/plan normal to switch)." if harness.plan_kind == "tdd"
+                    else " Plan type: normal (/plan tdd for test-driven).")
             return CommandResult(handled=True, output=(
                 "Switched to plan mode: describe a feature or bug; I'll investigate, ask "
-                "questions, and propose a plan to approve before executing it" + state))
+                "questions, and propose a plan to approve before executing it" + state + "." + kind))
         if sub == "show":
             if harness.plan is None:
                 return CommandResult(handled=True, output="No active plan.")
@@ -348,7 +363,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, run_plan=True)
         if sub == "cancel":
             return CommandResult(handled=True, output=harness.cancel_plan())
-        return CommandResult(handled=True, output="Usage: /plan [show|run|resume|cancel]")
+        return CommandResult(handled=True, output="Usage: /plan [tdd|normal|show|run|resume|cancel]")
 
     if cmd == "/chat":
         harness.set_mode("chat")
@@ -1067,6 +1082,8 @@ Available commands:
   /code               Switch to coding mode (full tools)
   /design             Switch to design mode (read-only tools)
   /plan               Switch to plan mode (investigate → plan → approve → execute)
+  /plan tdd           Plan mode with a test-driven plan: tests first, each step gated on them
+  /plan normal        Plan mode with a normal plan (the default)
   /plan show          Show the current plan and its progress
   /plan run           Approve and execute the plan (re-reads .momo-plan.md edits)
   /plan resume        Continue a paused plan from its current step

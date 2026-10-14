@@ -145,6 +145,18 @@ class Feedback(Base):
 
 @NAV
 class Matching(Base):
+    def test_failed_deletion_is_not_reported_as_already_applied(self):
+        # A deletion's new_string is part of its old_string, so it is still in
+        # the file when old_string misses (here: blank lines that are not there).
+        # Reporting "applied already" left the block in place unnoticed.
+        self.write("m.py", 'if __name__ == "__main__":\n    main()\nclass RemoveTests(unittest.TestCase):\n')
+        out = self.run_tool("edit_file", path="m.py",
+                            old_string='if __name__ == "__main__":\n    main()\n\n\nclass RemoveTests(unittest.TestCase):',
+                            new_string="class RemoveTests(unittest.TestCase):")
+        self.assertNotIn("No change needed", out)
+        self.assertTrue(out.startswith("ERROR"), out)
+        self.assertIn('if __name__ == "__main__"', self.read("m.py"))
+
     def test_line_count_change_with_wrong_indentation_is_reindented(self):
         out = self.run_tool("edit_file", path="inv.py",
                             old_string="if it.sku == sku:\n    return it",

@@ -598,7 +598,8 @@ PLAN_TOOLS = [
     _fn("complete_step",
         "Mark the CURRENT plan step as done once its change is made and verified. This ends the "
         "step immediately: any other tool calls after it in the same turn are not run. The harness "
-        "then gives you the next step. Do not start the next step's work before calling this.",
+        "then gives you the next step. Do not start the next step's work before calling this. "
+        "In a TDD plan the harness first runs the plan's tests and refuses the step if they fail.",
         {"summary": {"type": "string", "description": "One or two sentences: what changed and how it was verified"}},
         ["summary"]),
 
@@ -614,6 +615,55 @@ PLAN_TOOLS = [
 ]
 _plan_by_name = {t["function"]["name"]: t for t in PLAN_TOOLS}
 
+# TDD plans: every step states the outcomes its tests will check, and the plan
+# names the command that runs the whole suite.
+_PLAN_STEP_SCHEMA_TDD = {
+    **_PLAN_STEP_SCHEMA,
+    "properties": {
+        **_PLAN_STEP_SCHEMA["properties"],
+        "tests": {"type": "array", "items": {"type": "string"},
+                  "description": "Expected outcomes this step's tests check, each concrete: "
+                                 "'<input or action> → <expected result>'"},
+    },
+    "required": ["title", "details", "tests"],
+}
+
+_CREATE_PLAN_TDD = _fn("create_plan",
+    "Submit the test-driven implementation plan once investigation is complete. The harness "
+    "writes it to a Markdown file and asks the user to approve it. On approval it first has you "
+    "write the tests for every step and for 'acceptance', all skipped; then for each step you "
+    "switch on that step's tests and implement it, and the harness runs test_command and only "
+    "moves on when it passes. The harness adds the test-writing and acceptance stages itself, so "
+    "do not add a step that writes all tests or a final step that only runs the tests. Each step "
+    "must be small, ordered, name the file and function/section it changes, and list in 'tests' "
+    "the outcomes that prove it works. If the user asks for changes, call create_plan again with "
+    "the complete new plan.",
+    {"title":        {"type": "string", "description": "Short name for the feature or fix"},
+     "goal":         {"type": "string", "description": "What the change achieves and why, including key findings from the investigation"},
+     "test_command": {"type": "string", "description": "Command that runs the project's whole test suite and exits non-zero when a test fails, e.g. 'python -m pytest -q'"},
+     "step_test_command": {"type": "string",
+                           "description": "Optional, for a slow suite: command that runs only some test files, "
+                                          "with {files} (their paths), {dirs} (their directories as ./dir) or "
+                                          "{stems} (file names without extension), e.g. 'python -m pytest -q {files}', "
+                                          "'python -m unittest {files}', 'npx jest {files}', 'go test {dirs}'. "
+                                          "Leave it out when the whole suite is fast."},
+     "acceptance":   {"type": "array", "items": {"type": "string"},
+                      "description": "Expected outcomes of the whole change, checked by end-to-end tests after the last step"},
+     "steps":        {"type": "array", "items": _PLAN_STEP_SCHEMA_TDD, "description": "Ordered implementation steps"}},
+    ["title", "goal", "test_command", "acceptance", "steps"])
+
+_REVISE_PLAN_TDD = _fn("revise_plan",
+    _plan_by_name["revise_plan"]["function"]["description"],
+    {"reason": {"type": "string", "description": "What was discovered that forces the change"},
+     "steps":  {"type": "array", "items": _PLAN_STEP_SCHEMA_TDD,
+                "description": "The complete new list of remaining steps (current step first), in order"}},
+    ["reason", "steps"])
+
+
+def _with_tdd(tools: list[dict]) -> list[dict]:
+    swap = {"create_plan": _CREATE_PLAN_TDD, "revise_plan": _REVISE_PLAN_TDD}
+    return [swap.get(t["function"]["name"], t) for t in tools]
+
 # Investigation may run commands (reproduce a bug, check the test baseline) but
 # must not edit files until the plan is approved.
 PLAN_INVESTIGATE_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [
@@ -623,6 +673,8 @@ PLAN_INVESTIGATE_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [
 ]
 # Execution gets exactly the coding tool set, plus the step-tracking tools.
 PLAN_EXECUTE_TOOLS = ALL_TOOLS + [_plan_by_name["complete_step"], _plan_by_name["revise_plan"]]
+PLAN_TDD_INVESTIGATE_TOOLS = _with_tdd(PLAN_INVESTIGATE_TOOLS)
+PLAN_TDD_EXECUTE_TOOLS = _with_tdd(PLAN_EXECUTE_TOOLS)
 
 
 # ── executors ────────────────────────────────────────────────────────────────
@@ -1119,24 +1171,52 @@ def _exec(command: str, timeout: int, workdir: Path, cancel, out, err):
             return proc, stopped
 
 
+# A trailing "| tail -N" makes the exit code tail's own, which is always 0, so a
+# failing test run looks like a passing one.  The 9B pipes most of its test runs
+# this way, the tool description notwithstanding, sometimes adding
+# '; echo "exit=${PIPESTATUS[0]}"' to get the code back.  Such a pipe is taken
+# off and becomes the tail parameter: the same last N lines, the real exit code.
+_TAIL_PIPE = re.compile(
+    r"\s*(?:2>&1\s*)?\|&?\s*tail\s+(?:-n\s*(\d+)|-(\d+)|--lines[= ](\d+))\s*"
+    r"(?:;\s*echo\b[^;|&]*\$\{?PIPESTATUS\[0\]\}?[^;|&]*)?\s*$")
+
+
+def _split_tail(command: str) -> tuple[str, int | None, str]:
+    """(command without a trailing tail pipe, its N, the text taken off);
+    (command, None, '') when it does not end in one."""
+    m = _TAIL_PIPE.search(command)
+    if not m or not command[:m.start()].strip():
+        return command, None, ""
+    n = int(next(g for g in m.groups() if g))
+    return command[:m.start()].rstrip(), n, m.group(0).strip()
+
+
 def _run_command(command: str, timeout: int | None = None, tail: int | None = None,
                  grep: str | None = None, context: int = 0, *, workdir: Path,
                  net_access: str = "off", cancel=None, run_mode: str = "classic",
                  run_store: "run_store_mod.RunStore | None" = None,
-                 run_output_limit: int = run_store_mod.DEFAULT_LIMIT) -> str:
+                 run_output_limit: int = run_store_mod.DEFAULT_LIMIT,
+                 run_exit: dict | None = None) -> str:
     refusal, note = _web_refusal(command, net_access)
     if refusal:
         return refusal
+    command, piped, taken = _split_tail(command)
+    if piped:
+        tail = min(tail, piped) if tail else piped
+        note += (f"(ran without `{taken}` so the exit code is the command's own; "
+                 f"showing the last {tail} lines)\n")
     defaulted = timeout is None
     timeout = _clamp_timeout(timeout)
     if run_mode != "classic" and run_store is not None:
         return note + _run_to_log(command, timeout, workdir, cancel, run_store,
-                                  run_output_limit, tail, grep, context, defaulted)
+                                  run_output_limit, tail, grep, context, defaulted, run_exit)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         proc, stopped = _exec(command, timeout, workdir, cancel, out, err)
         if proc is None:
             return stopped
         out_text, err_text = _output_tail(out), _output_tail(err)
+    if run_exit is not None and not stopped:
+        run_exit["code"] = proc.returncode
 
     parts = []
     if out_text:
@@ -1149,6 +1229,8 @@ def _run_command(command: str, timeout: int | None = None, tail: int | None = No
             tail_text = "…" + tail_text[-_STOPPED_TAIL_CHARS:]
         return (f"ERROR: {stopped}" + _longer(stopped, defaulted)
                 + (f"\n[output before it stopped]\n{tail_text}" if tail_text else ""))
+    if tail and piped:      # classic mode returns all output; a tail pipe asked for less
+        parts = ["\n".join("\n".join(parts).splitlines()[-tail:])] if parts else []
     if proc.returncode != 0:
         parts.append(f"[exit code: {proc.returncode}]")
     return note + ("\n".join(parts) or "(no output)")
@@ -1179,7 +1261,7 @@ def _log_view(text: str, limit: int, tail, grep, context, start_line=None, end_l
 
 
 def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, context,
-                defaulted=False) -> str:
+                defaulted=False, run_exit: dict | None = None) -> str:
     """/run-mode new: stdout and stderr in order in one log file, and a bounded
     view of it back, ending with the log's full path for command_output."""
     run_id, path = store.new_log()
@@ -1188,6 +1270,8 @@ def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, con
     if proc is None:
         path.unlink(missing_ok=True)
         return stopped
+    if run_exit is not None and not stopped:
+        run_exit["code"] = proc.returncode
     text = _read_log(path)
     body, hint = _log_view(text, limit, tail, grep, context)
     foot = run_store_mod.footer(path, text, proc.returncode, hint or bool(stopped), stopped)
@@ -1281,7 +1365,8 @@ _INJECTED = {
     "fetch_url":   ("net_access", "net_max_bytes", "net_max_chars", "cancel"),
     "web_search":  ("net_access", "net_max_bytes", "net_max_chars", "cancel", "search_sources"),
     "add_search_source": ("net_access", "net_max_bytes", "cancel", "search_sources"),
-    "run_command": ("net_access", "cancel", "run_mode", "run_store", "run_output_limit"),
+    "run_command": ("net_access", "cancel", "run_mode", "run_store", "run_output_limit",
+                    "run_exit"),
     "command_output": ("run_store", "run_output_limit"),
     "grep_files":  ("cancel",),
     "read_file":   ("read_budget",),
@@ -1348,14 +1433,16 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              run_mode: str = "classic", run_store: "run_store_mod.RunStore | None" = None,
              run_output_limit: int = run_store_mod.DEFAULT_LIMIT,
              search_sources: "search.SourceRegistry | None" = None,
-             edit_features=editing.EDIT_FEATURES) -> str:
+             edit_features=editing.EDIT_FEATURES, run_exit: dict | None = None) -> str:
     """read_budget: characters one read_file may return (None = no limit).
     run_mode "new" with a run_store saves run_command output to a log (/run-mode).
     search_sources: the session's web_search sources (None = the default set).
-    edit_features: what the edit tools add to a plain edit (editing.EDIT_FEATURES)."""
+    edit_features: what the edit tools add to a plain edit (editing.EDIT_FEATURES).
+    run_exit: run_command puts the command's exit code here as "code" (None when
+    it was stopped or did not start), for a caller that must not parse the text."""
     more = {"read_budget": read_budget, "run_mode": run_mode, "run_store": run_store,
             "run_output_limit": run_output_limit, "search_sources": search_sources,
-            "edit_features": edit_features}
+            "edit_features": edit_features, "run_exit": run_exit}
     if index is not None and index_route and name in _ROUTED:
         routed = _route_to_index(name, args, workdir, index, cancel)
         if routed is not None:
@@ -1660,10 +1747,29 @@ _TOOL_EXAMPLES: dict[str, dict] = {
 }
 
 
+_CREATE_PLAN_TDD_EXAMPLE = {
+    "title": "Fix off-by-one in paginate()",
+    "goal": "Last page is dropped because paginate() uses < instead of <=.",
+    "test_command": "python -m pytest -q",
+    "step_test_command": "python -m pytest -q {files}",
+    "acceptance": ["paginating 11 items by 5 → pages of 5, 5 and 1, nothing lost"],
+    "steps": [{"title": "Fix loop bound in paginate()",
+               "details": "In src/pager.py paginate(), change `while page < total` to `while page <= total`.",
+               "files": ["src/pager.py"],
+               "tests": ["paginate(range(10), size=5) → 2 pages",
+                         "paginate(range(11), size=5) → last page is [10]"]}]}
+
+
 def _example_args(tool: dict) -> dict:
     name = tool["function"]["name"]
     if tool is _RUN_COMMAND_FILE:
         return {"command": "python -m pytest", "tail": 30}
+    if tool is _CREATE_PLAN_TDD:
+        return _CREATE_PLAN_TDD_EXAMPLE
+    if tool is _REVISE_PLAN_TDD:
+        return {**_TOOL_EXAMPLES["revise_plan"],
+                "steps": [{**_TOOL_EXAMPLES["revise_plan"]["steps"][0],
+                           "tests": ["paginate(range(10), size=5) in api/pager.py → 2 pages"]}]}
     if name in _TOOL_EXAMPLES:
         return _TOOL_EXAMPLES[name]
     # Fallback for a tool with no curated example: required params only, with

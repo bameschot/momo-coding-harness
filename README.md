@@ -169,6 +169,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - **Sessions** (clock icon) opens the [session drawer](#sessions) and **Workspace files** (folder icon) opens the [workspace browser](#workspace-files).
   - The **connection dot** is green while the page is connected to the harness and red while it reconnects. It reconnects on its own after a harness restart.
   - The **mode picker** switches between design, chat, plan, coding and momo, like `/design`, `/code` and so on, or Shift+Tab.
+  - In plan mode a **plan type** selector (normal / TDD) sits next to it, like `/plan normal` and `/plan tdd`. It is locked while a plan is executing.
   - **Plan progress** (e.g. `exec 2/5`, `awaiting approval`) appears in plan mode. Clicking it, or the **Plan** button, opens the plan drawer.
   - Clicking the **model name** opens a model picker listing the models on the backend, like `/model`. llama.cpp serves a single model, so there the list is informational.
   - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
@@ -550,11 +551,41 @@ If a step is interrupted (Esc or `Shift+C`), hits a backend error, or runs out o
 
 This also works after restarting the harness and reloading the session with `/session`. `/plan cancel` discards the plan and deletes the file.
 
+#### Test-driven (TDD) plans
+
+`/plan tdd` switches to plan mode with a test-driven plan, and `/plan normal` switches back. The type is saved with the session. The status bar shows `plan (tdd)`, and the web UI has a **normal plan / TDD plan** selector next to the mode picker while in plan mode.
+
+A TDD plan states what each step and the whole change must achieve, and the tests are written before any code:
+
+- `create_plan` also takes a `test_command` (the whole suite, exiting non-zero on failure), `tests` on every step (its expected outcomes, e.g. `add(2, 3) → 5`) and `acceptance` (the outcomes of the whole change). In `.momo-plan.md` these show as `## Test command` and `Expect:` lines, with a `Tag:` per step.
+- The harness wraps the steps in two stages of its own. First, **write the tests**: complete tests for every step and for acceptance are written, each **skipped** with the framework's own marker on its own line above the test and the step's tag in the skip reason, e.g. `@unittest.skip("tdd-step-2")`, `@Disabled("tdd-step-2")`, `#[ignore = "tdd-step-2"]`, `it.skip("… (tdd-step-2)")`. Last, **acceptance**: the `tdd-acceptance` tests are switched on.
+- When a step starts, the **harness switches its tests on**: it deletes the marker lines carrying the step's tag, then runs `test_command` once and puts the result in the step's instructions. The model starts from the failures it has to fix. If the tests already pass before any code change, the model is told they don't check the step and must be made to fail first. A tagged line that is more than a plain marker (such as `it.skip("… (tdd-step-2)", () => {`) is left for the model to change.
+- Every stage ends at a **gate the harness checks itself** when the model calls `complete_step`:
+  - writing the tests: every tag must appear in the project, and no test may be only its skip marker (a test with an empty body checks nothing);
+  - a step: its tag and earlier steps' tags must be gone;
+  - acceptance: no tag may be left.
+
+  After that the harness runs `test_command`, which must exit 0, so the model doesn't need to run the suite itself first. If the gate fails, `complete_step` is refused with the reason and the test output, and the model keeps fixing. A step that ends with a text reply is gated too. After two more failed attempts the plan pauses.
+- **Test changes are audited.** The harness records which test belongs to which step when the tests are written, and compares the test files at each step's gate with how they were when the step started:
+  - a deleted check (an `assert…`/`expect…` line) is refused;
+  - so is any change to a test of a step that is already finished;
+  - any other change, such as a corrected expectation, is listed in the chat as *Test lines changed in step N*.
+- **Three refusals in a row ask you.** After the third failed gate on the same step, momo asks for guidance for the model, or `pause` to stop the plan there (resume with `/plan resume`).
+- The harness's own edits (switching tests on) show as diffs, like any other file change.
+- **Slow suites.** A plan can also give a `step_test_command` with `{files}` (the stage's test file paths), `{dirs}` (their directories, as `./dir`) or `{stems}` (their names), e.g. `python -m pytest -q {files}` or `go test {dirs}`. The harness fills it from the stage's real test files and uses it for the red check, and the step instructions offer it to the model. The full `test_command` stays the gate. The template is tried once when the tests are written; one that fails while everything is still skipped is dropped, with a note.
+- **One full run, not two.** When the model's own last command was exactly `test_command` (verbosity flags such as `-v` aside, and no pipe other than a trailing `| tail`, which `run_command` takes off), it passed, and nothing was written since, the gate uses that run instead of running the suite again. Its result says *your run of … just before*.
+- **Steps with nothing to do are dropped.** A planner step that touches no production file and only runs or keeps the tests green ("Run the full test suite", "Keep existing tests green"), or is its own "Acceptance" step, duplicates what the TDD plan does at every gate and in its acceptance stage. It is dropped with a note. A plan made only of such steps is refused. When a real step's tests already pass right after they are switched on, the model is told to call `complete_step` and say so if nothing needs changing.
+- `evals/tdd_bench.py` measures all of this against a live model (see `evals/README.md`).
+
+Tests for later steps stay skipped, so they never break the build. They count from the moment their step is implemented. Approving a TDD plan also approves running its `test_command` after every step, without a `run_command` confirmation.
+
 #### Plan commands
 
 | Command | Description |
 |---|---|
 | `/plan` | Switch to plan mode (shows the current plan's state if there is one) |
+| `/plan tdd` | Plan mode with a test-driven plan: tests first, every step gated on them |
+| `/plan normal` | Plan mode with a normal plan (the default) |
 | `/plan show` | Show the current plan with step statuses |
 | `/plan run` | Approve a plan kept for later and execute it (re-reads `.momo-plan.md`) |
 | `/plan resume` | Continue a paused plan from its current step |
@@ -698,6 +729,7 @@ A test suite or a build can print tens of kilobytes, and with a whole-output `ru
 - **`tail=N`**: the last N lines. Good for a test summary.
 - **`grep="regex"`**: only the matching lines, with their line numbers. The regex is case-insensitive, and `context=N` adds lines around each match. `a\|b` works like `a|b`, and an invalid regex is matched as plain text. With `tail=N` as well, you get the last N matches.
 - **Neither**: the whole output when it fits in the limit (5000 characters by default). Longer output comes back as its first 25% and last 75%, cut on line boundaries, with a note saying how many lines were left out in between.
+- **A trailing `| tail -N` becomes `tail=N`**, in both run modes. A pipe's exit code is `tail`'s, which is 0 whatever the tests did, and small models pipe test runs into `tail` all the time. So `pytest -q 2>&1 | tail -20` runs as `pytest -q`, and the result starts with *(ran without `2>&1 | tail -20` so the exit code is the command's own; showing the last 20 lines)*. The forms recognised are `| tail -N`, `| tail -n N`, `|& tail`, an optional `2>&1` before it, and an `; echo … ${PIPESTATUS[0]}` after it. Other pipes (`| grep`, `| head`, `| tail -f`) are left alone.
 
 stdout and stderr go into the log together, in the order they were written, so the end of the view is the real end of the run. Every result ends with the log's full path, its size and the exit code:
 

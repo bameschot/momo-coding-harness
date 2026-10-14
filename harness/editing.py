@@ -387,9 +387,11 @@ def _find_edit(text: str, old_string: str, new_string: str, replace_all: bool,
     # earlier turn. Report that as a non-error so the model stops re-trying
     # the same change (a common cause of repeated "not found" errors).  A
     # short or repeated new_string proves nothing — `return None` sits in
-    # many places — so it must be distinctive, and the line is named.
+    # many places — so it must be distinctive, and the line is named.  Nor does
+    # one that is part of old_string: a deletion's new_string is always still
+    # in the file when its old_string fails to match.
     for cand in (new_string, s_new):
-        if (cand and cand != old_string and text.count(cand) == 1
+        if (cand and cand not in old_string and cand not in s_old and text.count(cand) == 1
                 and (cand.strip().count("\n") >= 1 or len("".join(cand.split())) >= 30)):
             line = text[:text.index(cand)].count("\n") + 1
             return _Found(message=f"No change needed: the file already contains new_string at "

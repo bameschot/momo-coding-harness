@@ -571,19 +571,19 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       <a class="more" href="#net">Internet access →</a>
     </div>
     <div class="card" style="--c: var(--user)">
-      <h3><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg>Terminal UI</h3>
-      <p>A three-pane curses interface: chat, status bar and a multi-line input. Replies stream in, tool calls and thinking are colour-coded, and file edits show as coloured diffs.</p>
-      <a class="more" href="#tui">TUI docs →</a>
-    </div>
-    <div class="card" style="--c: var(--assistant)">
-      <h3><svg class="icon" aria-hidden="true"><use href="#i-browser"/></svg>Web UI, same session</h3>
-      <p>A browser chat window that shows the same session as the terminal, so you can type in either one. Reach it from another device over an SSH tunnel or HTTPS.</p>
-      <a class="more" href="#web">Web UI docs →</a>
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg>Terminal and web UI, one session</h3>
+      <p>A three-pane curses interface and a browser window that show the same session, so you can type in either one. Replies stream in, tool calls and thinking are colour-coded, and file edits show as coloured diffs. Reach the web UI from another device over an SSH tunnel or HTTPS.</p>
+      <div style="margin-top: auto"><a class="more" href="#tui">TUI docs →</a> &nbsp; <a class="more" href="#web">Web UI docs →</a></div>
     </div>
     <div class="card" style="--c: var(--ok)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg>Plan, approve, execute</h3>
       <p>Plan mode investigates first and writes a step-by-step plan to <code>.momo-plan.md</code>. Nothing changes until you approve it. Then it runs one step at a time and can pause and resume.</p>
       <a class="more" href="#plan">Plan mode →</a>
+    </div>
+    <div class="card" style="--c: var(--tool)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-plan"/></svg>Test-driven plans</h3>
+      <p><code>/plan tdd</code> writes every step's expected outcomes into tests <em>before</em> any code, all skipped so the build stays green. Each step switches its own tests on, starts red, and only moves on once the harness has run the suite itself and seen it pass.</p>
+      <a class="more" href="#plan-tdd">Test-driven plans →</a>
     </div>
     <div class="card" style="--c: var(--tool)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-tree"/></svg>Syntax-aware navigation</h3>
@@ -630,7 +630,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
   <div class="modes" aria-label="Modes at a glance">
     <div class="mode-card"><div class="name">design</div><p>Explores the code, asks grounded questions and writes the spec. Doesn't touch code.</p></div>
     <div class="mode-card"><div class="name">chat</div><p>A read-only conversation partner for understanding code and documents.</p></div>
-    <div class="mode-card"><div class="name">plan</div><p>Investigate → plan → approve → execute, one step at a time.</p></div>
+    <div class="mode-card"><div class="name">plan</div><p>Investigate → plan → approve → execute, one step at a time. Test-first with <code>/plan tdd</code>.</p></div>
     <div class="mode-card"><div class="name">coding</div><p>The full tool suite: edit, move, delete, run commands and use git.</p></div>
     <div class="mode-card"><div class="name">momo</div><p>Talk to the cat. It's a companion first, but it still has every tool.</p></div>
   </div>
@@ -835,7 +835,7 @@ ollama serve</code></pre></div>
       <tr><th>Mode</th><th>What it's for</th><th>Can change</th></tr>
       <tr><td><code>design</code></td><td class="wrap">A design partner. It explores the codebase, asks questions grounded in what it finds and writes the design document once it knows enough.</td><td class="wrap">only the design document it writes</td></tr>
       <tr><td><code>chat</code></td><td class="wrap">A conversation partner for understanding code and documents. It reads, explains and asks follow-up questions.</td><td class="wrap">nothing</td></tr>
-      <tr><td><code>plan</code></td><td class="wrap">Think it through before touching anything. See <a href="#plan">Plan mode</a>.</td><td class="wrap">nothing until you approve the plan; then everything</td></tr>
+      <tr><td><code>plan</code></td><td class="wrap">Think it through before touching anything, as a normal or a <a href="#plan-tdd">test-driven</a> plan. See <a href="#plan">Plan mode</a>.</td><td class="wrap">nothing until you approve the plan; then everything</td></tr>
       <tr><td><code>coding</code></td><td class="wrap">An engineer. It makes targeted edits, runs tests and uses git.</td><td class="wrap">everything: files and shell commands</td></tr>
       <tr><td><code>momo</code></td><td class="wrap">Talk to the cat. Replies are short, warm and lowercase. It's a companion first, but it still does the work when asked.</td><td class="wrap">everything, like coding</td></tr>
     </table></div>
@@ -845,6 +845,12 @@ ollama serve</code></pre></div>
   <section id="plan" data-voice="plan">
     <h2>Plan mode</h2>
     <p>For changes you want to see before they happen. momo investigates, writes a step-by-step plan to <code>.momo-plan.md</code>, and changes nothing until you approve it.</p>
+    <p>There are two kinds of plan, and both follow the lifecycle below:</p>
+    <ul>
+      <li><strong>Normal</strong> (<code>/plan</code> or <code>/plan normal</code>, the default). Each step says what to change and how to check it. The last step runs the project's tests, and the model reports when a step is done.</li>
+      <li><strong>Test-driven</strong> (<code>/plan tdd</code>). Every step also lists the outcomes that prove it works, and those become tests before any code is written. The harness then runs the suite itself at the end of each step and only moves on when it passes. See <a href="#plan-tdd">Test-driven plans</a>.</li>
+    </ul>
+    <p>The choice is saved with the session. The status bar shows <code>plan (tdd)</code>, and in the web UI a <strong>normal plan / TDD plan</strong> selector sits next to the mode picker while you're in plan mode. It is locked while a plan runs; a draft that isn't approved yet takes the new type the next time the model submits it.</p>
     <figure class="flow" aria-label="Plan mode lifecycle">
       <div class="flow-row"><div class="box model">1 Investigate<small>read the code, reproduce, <code>ask_user</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">2 Plan<small><code>create_plan</code> writes <code>.momo-plan.md</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">3 Confirm<small><code>y</code> runs it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">4 Execute<small>one step at a time, ▶ in the prompt</small></div><span class="arrow" aria-hidden="true">→</span><div class="box end">Done<small>the plan file is deleted</small></div></div>
       <ul class="flow-edges">
@@ -862,14 +868,88 @@ ollama serve</code></pre></div>
       <li><strong>Confirm.</strong> <code>y</code> runs it, <code>n</code> keeps it for <code>/plan run</code>, and anything else is feedback the model revises it with. You can edit the file by hand first; <code>[-]</code> skips a step.</li>
       <li><strong>Execute.</strong> One step at a time, with the plan (<code>▶</code> on the current step) in the system prompt so the model keeps its place even after compaction. <code>revise_plan</code> replaces the remaining steps. A paused plan carries on with <code>/plan resume</code> or any message, even after a restart.</li>
     </ol>
+    <p>You can edit <code>.momo-plan.md</code> freely before approving: reword or reorder steps, add or delete them, or mark one <code>[-]</code> to skip it. In a test-driven plan the expectations show as <code>Expect:</code> lines, and you can edit those too.</p>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Effect</th></tr>
       <tr><td><code>/plan</code></td><td class="wrap">Switch to plan mode, showing the current plan's state if there is one</td></tr>
+      <tr><td><code>/plan tdd</code> · <code>/plan normal</code></td><td class="wrap">Choose a test-driven or a normal plan</td></tr>
       <tr><td><code>/plan show</code></td><td class="wrap">The plan with the status of each step</td></tr>
       <tr><td><code>/plan run</code></td><td class="wrap">Approve a kept plan and execute it (re-reads the file)</td></tr>
       <tr><td><code>/plan resume</code></td><td class="wrap">Continue a paused plan from its current step</td></tr>
       <tr><td><code>/plan cancel</code></td><td class="wrap">Discard the plan and delete <code>.momo-plan.md</code></td></tr>
     </table></div>
+  </section>
+
+  <section id="plan-tdd" data-voice="plan-tdd">
+    <h2>Test-driven plans</h2>
+    <p>A normal plan trusts the model to say when a step is done. A test-driven plan doesn't. Before any code is written, the expected outcomes of every step, and of the change as a whole, become tests. Each step must then make its own tests pass, and the harness runs the suite to check. Tests for steps that aren't implemented yet are skipped, so they never break the build. They start to count when their step begins.</p>
+
+    <h3>What the plan holds</h3>
+    <p>Besides the usual goal and steps, <code>create_plan</code> asks for:</p>
+    <ul>
+      <li><strong><code>test_command</code></strong>: the command that runs the whole suite and exits non-zero on a failure, e.g. <code>python -m pytest -q</code>. The model finds it during investigation and runs it once to see that it works.</li>
+      <li><strong><code>tests</code> on every step</strong>: the outcomes that prove the step works, each written as <em>input or action → expected result</em>, e.g. <code>remove("apple", 3) when 2 are in stock → ValueError, count still 2</code>.</li>
+      <li><strong><code>acceptance</code></strong>: the outcomes of the whole change, seen from the user's side.</li>
+      <li>Optional <strong><code>step_test_command</code></strong> for a slow suite. See <a href="#tdd-slow">Slow suites</a>.</li>
+    </ul>
+    <p>The harness wraps the model's steps in two stages of its own and gives every step a fixed tag, <code>tdd-step-1</code>, <code>tdd-step-2</code> and so on, plus <code>tdd-acceptance</code>. The tags stay put when <code>revise_plan</code> reorders the steps, so the tags already written into test files stay right. A step the model adds later gets a new tag and is told to write its tests first. A step that only runs or checks the tests, such as "Run the full test suite", "Keep existing tests green" or the planner's own "Acceptance", is dropped with a note, because the plan already does that at every step.</p>
+
+    <figure class="flow" aria-label="The stages of a test-driven plan">
+      <div class="flow-col">
+        <div class="box model"><div class="flow-who">model</div>1 Write the tests, all skipped<small>complete tests for every step and for acceptance, each under the framework's own skip marker with its tag</small></div>
+        <div class="side"><b>gate</b>: every tag is present, no test is only a skip, the suite passes</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Switch on step <i>N</i>'s tests and run them<small>deletes the marker lines with its tag, shows the diff, puts the failures in the step's instructions</small></div>
+        <div class="side"><b>red first</b>: the step starts from its failing tests</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">model</div>2…N Implement the step<small>until its tests pass; later steps' tests stay skipped</small></div>
+        <div class="side"><b>gate</b>: its tags are gone, no check was deleted, finished steps' tests unchanged, the suite passes</div>
+        <div class="back">↺ next step</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Last: acceptance<small>switches the <code>tdd-acceptance</code> tests on, the same way</small></div>
+        <div class="side"><b>gate</b>: no tag left anywhere, the suite passes</div>
+      </div>
+      <div class="flow-legend"><span class="you">you</span><span class="model">model</span><span class="harness">harness</span></div>
+      <figcaption>Every gate is checked by the harness when the model calls <code>complete_step</code>. A failed gate refuses the call with the reason and the test output.</figcaption>
+    </figure>
+
+    <h3>Skip markers</h3>
+    <p>Pending tests use the test framework's own skip, on its own line directly above a complete test, with the tag in the reason:</p>
+    <div class="table-scroll"><table>
+      <tr><th>Framework</th><th>Marker</th></tr>
+      <tr><td>Python unittest</td><td><code>@unittest.skip("tdd-step-2")</code></td></tr>
+      <tr><td>pytest</td><td><code>@pytest.mark.skip(reason="tdd-step-2")</code></td></tr>
+      <tr><td>JUnit</td><td><code>@Disabled("tdd-step-2")</code></td></tr>
+      <tr><td>Rust</td><td><code>#[ignore = "tdd-step-2"]</code></td></tr>
+      <tr><td>Go</td><td><code>t.Skip("tdd-step-2")</code> as the first line of a complete test</td></tr>
+      <tr><td>Jest, Vitest, Mocha</td><td><code>it.skip("adds (tdd-step-2)", …)</code></td></tr>
+    </table></div>
+    <p>When a step starts, the harness deletes the marker lines with that step's tag itself. A line that also opens the test, like the <code>it.skip(…)</code> form, is left for the model to change, and the step's instructions name it. A test whose body is only its skip marker checks nothing, so the gate after the test-writing stage refuses it. In compiled languages the model may add minimal stubs (a signature that raises "not implemented") so skipped tests still compile.</p>
+
+    <h3>What the gate checks</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Stage</th><th>Before the suite runs</th></tr>
+      <tr><td>Writing the tests</td><td class="wrap">Every step's tag and <code>tdd-acceptance</code> appear in the project. No marker sits on an empty test. (Leaving production code alone, apart from stubs, is asked of the model, not checked.)</td></tr>
+      <tr><td>A step</td><td class="wrap">This step's tag, and the tags of all earlier steps, are gone. No check (<code>assert…</code>, <code>expect…</code>) was deleted from a test. No test of a finished step changed.</td></tr>
+      <tr><td>Acceptance</td><td class="wrap">No <code>tdd-</code> tag is left anywhere.</td></tr>
+    </table></div>
+    <p>Then <code>test_command</code> must exit 0. Approving a test-driven plan also approves running that command after every step, without a <code>run_command</code> confirmation. The tags are found by searching the project's text files. <code>.momo-plan.md</code> and momo's own logs are skipped, since the test output in them repeats the skip reasons.</p>
+    <ul>
+      <li><strong>Test changes are audited.</strong> When the tests are written, the harness notes which test belongs to which step, and at each gate it compares the test files with how they were when the step started. A deleted check is refused, and so is a change to a finished step's test. Any other change, such as an expectation the model got wrong and corrected, is listed in the chat as <em>Test lines changed in step N</em>. If an expectation itself is wrong, the model is told to say so or ask you, never to weaken the test.</li>
+      <li><strong>Three refusals in a row ask you.</strong> If the same step fails its gate three times, momo asks for guidance to pass on to the model, or <code>pause</code> to stop the plan there. Resume with <code>/plan resume</code>.</li>
+      <li><strong>A text reply doesn't skip the gate.</strong> A step the model ends with a plain answer instead of <code>complete_step</code> is gated too. After two more failed attempts the plan pauses.</li>
+      <li><strong>Tests that already pass.</strong> If a step's tests pass the moment they are switched on, the model is told so. If the step needs no code change it says so and finishes; otherwise it first makes the tests check the new behaviour.</li>
+    </ul>
+
+    <h3 id="tdd-slow">Slow suites</h3>
+    <p>Each stage runs the suite at least twice: the red check when its tests are switched on, and the gate. Two things keep that down when the suite is slow:</p>
+    <ul>
+      <li><strong>A step test command.</strong> A plan may give <code>step_test_command</code> with <code>{files}</code> (the stage's test file paths), <code>{dirs}</code> (their directories, as <code>./dir</code>) or <code>{stems}</code> (their names), e.g. <code>python -m pytest -q {files}</code> or <code>go test {dirs}</code>. The harness fills it in from the stage's real test files and uses it for the red check, and the step's instructions offer it to the model. The full suite stays the gate. The template is tried once, right after the tests are written. One that fails while everything is still skipped (wrong runner, no matching file) is dropped with a note.</li>
+      <li><strong>Reusing the model's own run.</strong> If the model's last command was the plan's <code>test_command</code> (verbosity flags such as <code>-v</code> aside), it passed, and nothing was written since, the gate uses that run instead of running the suite again. Its result says <em>your run of … just before</em>. A trailing <code>| tail -N</code> doesn't stop this, because <code>run_command</code> takes it off and keeps the real exit code. Any other pipe does.</li>
+    </ul>
+
+    <h3>What it costs</h3>
+    <p>Measured end to end with <code>evals/tdd_bench.py</code> against a 9B model on llama.cpp: a two-feature change to a small class, a hidden checker of 8 cases, 3 runs per setting. Every run of both kinds was correct. A test-driven plan took about 8 minutes against about 6 for a normal plan, and wrote two to three times as many tests. With a planted 20-second test in the suite, the harness's own test time per run fell from 141 s to 80 s, and 9 of 12 gates reused the model's run. The extra time also buys something: in these runs the red-to-green loop caught wrong expectations the model had written into its own tests, such as an off-by-one threshold or insertion order where sorted order was asked for. The audit now lists each such correction in the chat. The full tables are in <code>evals/README.md</code>.</p>
   </section>
 
   <section id="tui" data-voice="tui">
@@ -1832,6 +1912,11 @@ const SPEECH = {
     "< investigate, then plan", "< nothing edits till y!", "< edit .momo-plan.md!",
     "< [-] skips a step", "< /plan resume after a nap", "< ▶ marks the current step",
     "< complete_step!", "< ticking [x]~", "< plan done? file deleted",
+  ],
+  "plan-tdd": [
+    "< tests first, then code", "< red, then green~", "< /plan tdd!",
+    "< skipped till its step", "< no empty tests!", "< the gate runs the suite",
+    "< asserts stay put", "< tdd-step-1 tagged",
   ],
   tools: [
     "< grep is love", "< read_symbol by line no.", "< find_references!",

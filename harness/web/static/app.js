@@ -504,6 +504,7 @@ function applyStatus(s) {
   const pp = $("#plan-progress");
   pp.hidden = !s.plan_progress;
   pp.textContent = s.plan_progress;
+  updatePlanKind();
   const offline = s.backend_reachable === false;
   $("#model").textContent = offline ? `${s.model} · offline` : s.model;
   $("#model-btn").classList.toggle("offline", offline);
@@ -837,6 +838,7 @@ function applyBusy(b, w) {
     if (queue.length) setTimeout(sendNextQueued, 150);
   }
   $("#stop").hidden = !(busy && !waiting);
+  updatePlanKind();
   const bz = $("#busy");
   bz.classList.toggle("waiting", waiting);
   if (!busy) bz.textContent = "";
@@ -1369,6 +1371,14 @@ function cycleMode() {
   post("api/mode", { mode: next }).catch(() => {});
 }
 $("#mode").onchange = (e) => post("api/mode", { mode: e.target.value }).catch(() => {});
+// Plan type: shown in plan mode; fixed while a turn runs or a plan executes.
+function updatePlanKind() {
+  const sel = $("#plan-kind");
+  $("#plan-kind-pick").hidden = status.mode !== "plan";
+  if (sel.value !== (status.plan_kind || "normal")) sel.value = status.plan_kind || "normal";
+  sel.disabled = busy || (status.plan_progress || "").startsWith("exec");
+}
+$("#plan-kind").onchange = (e) => send(`/plan ${e.target.value}`);
 $("#run-badge").onclick = () => send(`/run-confirm ${status.run_confirm ? "off" : "on"}`);
 $("#tools-badge").onclick = () => send("/tools on");
 $("#net-badge").onclick = () => send(`/net ${status.net_access !== "off" ? "off" : "on"}`);

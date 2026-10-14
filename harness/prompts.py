@@ -3,6 +3,7 @@ harness appends (code index rules, plan execution rules)."""
 from __future__ import annotations
 
 import platform
+import re
 import shutil
 from datetime import date
 from pathlib import Path
@@ -59,6 +60,20 @@ def _planner_prompt(workdir: str) -> str:
         "specific, ordered, verifiable implementation plan. Do not edit files. "
         f"Working directory: {workdir}"
     )
+
+# The planner role's closing-verification rule, which a TDD plan replaces: its
+# acceptance stage runs the suite, and with the rule in place the 9B added a
+# "run the full test suite" step in 3 of 3 runs.
+_RX_VERIFIED_RULE = re.compile(r"^6\. \*\*Verified at the end\*\*.*?(?=^7\. )", re.M | re.S)
+
+
+def planner_for_tdd(text: str) -> str:
+    """The planner role with rule 6 rewritten for a TDD plan (unchanged when the
+    rule is not there, e.g. in an edited role file)."""
+    return _RX_VERIFIED_RULE.sub(
+        "6. **Verified by the harness** — the acceptance stage runs the whole suite; do not add "
+        "a step for it.\n", text, count=1)
+
 
 def _index_banner(tool_names: set[str]) -> str:
     """First line of the prompt while the code index is on."""
@@ -301,6 +316,63 @@ These rules replace "To finish" in "How the loop works" above: a step ends with 
 - If you discover the remaining plan is wrong or incomplete, call revise_plan with the complete
   corrected list of remaining steps (every step you omit is dropped). Never deviate silently.
 - If the step turns out to be done already, verify that and call complete_step."""
+
+# ── TDD plans ────────────────────────────────────────────────────────────────
+# Appended to the planner role while the next plan is test-driven, and after
+# _PLAN_EXECUTION_RULES while a TDD plan runs.  Neither may name a tool its
+# phase does not offer (test_prompt_names_only_offered_tools).
+
+_PLAN_TDD_RULES = """## This plan is test-driven (TDD)
+
+The user chose a TDD plan. After approval the harness runs it in stages:
+
+1. **Write the tests.** Tests for every step and for the acceptance outcomes are written first,
+   each one skipped with the framework's own skip marker and its step's tag in the skip reason.
+2. **One stage per step.** The step's tests are switched on, the step is implemented, and the
+   harness runs `test_command`; the plan only moves on when it passes.
+3. **Acceptance.** The end-to-end tests are switched on and the whole suite must pass.
+
+The harness adds stages 1 and 3 itself. Your plan needs, beyond the usual:
+- `test_command`: the command that runs the project's WHOLE test suite and exits non-zero when a
+  test fails. Find it during investigation and run it once to see that it works today.
+- `tests` on every step: the concrete outcomes that prove the step works, each written as
+  "<input or action> → <expected result>". These become the step's tests.
+- `acceptance`: the outcomes of the whole change, seen from the user's side.
+- If the whole suite is slow (more than a few seconds), also `step_test_command`: the same
+  runner for only some test files, with `{files}` where their paths go.
+- Note in `goal` how this project marks a test as skipped with a marker on its own line above
+  the test (e.g. `@unittest.skip("…")`, `@pytest.mark.skip(reason="…")`, `@Disabled("…")`), so
+  the test-writing stage uses the right one.
+Do not add a step that writes all the tests, or a final step that only runs them."""
+
+_PLAN_TDD_EXECUTION_RULES = """## This plan is test-driven (TDD)
+
+Pending tests are tests whose step is not implemented yet. They must not break the build, so
+each complete test is skipped with the test framework's own marker, on its own line directly
+above the test, and the skip reason carries its tag (shown in [brackets] in the plan state
+below), for example:
+- Python unittest: `@unittest.skip("tdd-step-2")` · pytest: `@pytest.mark.skip(reason="tdd-step-2")`
+- JUnit: `@Disabled("tdd-step-2")` · Rust: `#[ignore = "tdd-step-2"]`
+- Go: `t.Skip("tdd-step-2")` as the first line of the complete test body
+- JavaScript/TypeScript (Jest, Vitest, Mocha): `it.skip("… (tdd-step-2)", …)`
+Write the tag only in skip markers, never anywhere else: the harness finds pending tests by it.
+A test whose body is only the skip marker checks nothing; the harness refuses it.
+
+Stages:
+- **Write tests** (first stage): write the complete tests for every step and for acceptance —
+  setup, the call, the assertions — each skipped with its tag. Change no production code, except
+  minimal stubs (a signature that raises "not implemented") where a skipped test would otherwise
+  not compile or import.
+- **A step**: the harness removes the skip markers carrying the step's tag and runs the tests, so
+  the step starts from their failures. Implement the step until they pass.
+- **Acceptance** (last stage): the harness switches the `tdd-acceptance` tests on the same way;
+  make the whole suite pass.
+
+When you call complete_step the harness checks the markers and runs the plan's test command, so
+you do not need to run the whole suite yourself first. If anything fails, complete_step is
+refused with the reason and the test output: fix it and call complete_step again. Never delete,
+skip or weaken a test to get it green. If an expectation itself is wrong, ask the user with
+ask_user or correct the plan with revise_plan."""
 
 def _momo_prompt() -> str:
     return _load_role("momo") or (

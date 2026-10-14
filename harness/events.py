@@ -57,6 +57,7 @@ class StatusEvent:
     host: str = ""
     provider: str = ""
     plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
+    plan_kind: str = "normal"  # plan mode: the active plan's type, else the next plan's
     title: str = ""          # session title (model-generated or /title)
     guides: bool = False     # project guide files (AGENTS.md, ...) in the system prompt
     think_level: str = "on"       # /think: off | on | low | medium | high

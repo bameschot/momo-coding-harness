@@ -47,6 +47,13 @@
       <span class="sr-only">Mode</span>
       <select id="mode" title="Mode (Shift+Tab cycles)"></select>
     </label>
+    <label class="mode-pick" id="plan-kind-pick" hidden>
+      <span class="sr-only">Plan type</span>
+      <select id="plan-kind" title="Plan type (/plan normal, /plan tdd): a TDD plan writes the tests first and gates every step on them">
+        <option value="normal">normal plan</option>
+        <option value="tdd">TDD plan</option>
+      </select>
+    </label>
     <span id="plan-progress" class="chip" hidden></span>
     <button id="model-btn" class="field strong model-btn" type="button" title="Switch model" aria-haspopup="true"><span id="model"></span><svg class="icon sm" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
     <span id="host" class="field muted collapse"></span>

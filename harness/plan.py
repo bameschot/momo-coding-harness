@@ -16,6 +16,21 @@ _MARK_STATUS = {" ": "pending", "~": "in_progress", "x": "done", "X": "done", "-
 _RX_STEP  = re.compile(r'^\s*[-*]\s*\[([ xX~-])\]\s*(?:\d+[.)]\s*)?(.*?)\s*$')
 _RX_TITLE = re.compile(r'^#\s+(?:Plan:\s*)?(.+?)\s*$')
 
+# TDD plans: the harness wraps the model's steps in a test-writing stage and an
+# acceptance stage.  Pending tests carry their step's tag in the skip reason.
+STAGES = ("tests", "impl", "acceptance")
+ACCEPTANCE_TAG = "tdd-acceptance"
+_RX_STEP_TAG = re.compile(r'^tdd-step-(\d+)$')
+
+
+def str_list(v) -> list[str]:
+    """A list of non-empty strings from a list, or a newline-separated string."""
+    if isinstance(v, str):
+        v = v.splitlines()
+    if not isinstance(v, list):
+        return []
+    return [str(x).strip().lstrip("-* ").strip() for x in v if str(x).strip()]
+
 
 @dataclass
 class Step:
@@ -24,6 +39,11 @@ class Step:
     files: list[str] = field(default_factory=list)
     status: str = "pending"   # "pending" | "in_progress" | "done" | "skipped"
     note: str = ""
+    # TDD plans only: expected outcomes, the tag its pending tests carry, and
+    # which stage it is ("tests" and "acceptance" are added by the harness).
+    tests: list[str] = field(default_factory=list)
+    tag: str = ""
+    stage: str = "impl"
 
     @property
     def finished(self) -> bool:
@@ -35,17 +55,24 @@ class Step:
         if isinstance(files, str):
             files = [f.strip() for f in files.split(",") if f.strip()]
         status = d.get("status", "pending")
+        stage = d.get("stage", "impl")
         return cls(
             title=str(d.get("title", "")).strip() or "(untitled step)",
             details=str(d.get("details", "") or "").strip(),
             files=[str(f) for f in files],
             status=status if status in _STATUS_MARK else "pending",
             note=str(d.get("note", "") or "").strip(),
+            tests=str_list(d.get("tests")),
+            tag=str(d.get("tag", "") or "").strip(),
+            stage=stage if stage in STAGES else "impl",
         )
 
     def to_dict(self) -> dict:
-        return {"title": self.title, "details": self.details, "files": self.files,
-                "status": self.status, "note": self.note}
+        d = {"title": self.title, "details": self.details, "files": self.files,
+             "status": self.status, "note": self.note}
+        if self.tests or self.tag or self.stage != "impl":
+            d.update(tests=self.tests, tag=self.tag, stage=self.stage)
+        return d
 
 
 @dataclass
@@ -53,6 +80,17 @@ class Plan:
     title: str
     goal: str = ""
     steps: list[Step] = field(default_factory=list)
+    kind: str = "normal"      # "normal" | "tdd"
+    test_command: str = ""    # tdd: the full suite the harness runs at every gate
+    # tdd, optional: a template that runs only some test files ({files}, {dirs},
+    # {stems}), for the red check and the model's own runs (tdd.step_command)
+    step_test_command: str = ""
+    # tdd: {path: {test key: tag}}, recorded when the tests are written (tdd.test_owners)
+    test_owners: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    @property
+    def tdd(self) -> bool:
+        return self.kind == "tdd"
 
     # ── serialisation ─────────────────────────────────────────────────────────
 
@@ -62,16 +100,31 @@ class Plan:
             title=str(d.get("title", "")).strip() or "Implementation plan",
             goal=str(d.get("goal", "") or "").strip(),
             steps=[Step.from_dict(s) for s in (d.get("steps") or []) if isinstance(s, dict)],
+            kind="tdd" if d.get("kind") == "tdd" else "normal",
+            test_command=str(d.get("test_command", "") or "").strip(),
+            step_test_command=str(d.get("step_test_command", "") or "").strip(),
+            test_owners={str(k): {str(t): str(g) for t, g in v.items()}
+                         for k, v in (d.get("test_owners") or {}).items() if isinstance(v, dict)},
         )
 
     def to_dict(self) -> dict:
-        return {"title": self.title, "goal": self.goal,
-                "steps": [s.to_dict() for s in self.steps]}
+        d = {"title": self.title, "goal": self.goal,
+             "steps": [s.to_dict() for s in self.steps]}
+        if self.tdd:
+            d.update(kind=self.kind, test_command=self.test_command,
+                     step_test_command=self.step_test_command, test_owners=self.test_owners)
+        return d
 
     def to_markdown(self) -> str:
         lines = [f"# Plan: {self.title}", ""]
+        if self.tdd:
+            lines += ["Type: TDD", ""]
         if self.goal:
             lines += ["## Goal", "", self.goal, ""]
+        if self.tdd:
+            lines += ["## Test command", "", f"`{self.test_command}`", ""]
+            if self.step_test_command:
+                lines += ["## Step test command", "", f"`{self.step_test_command}`", ""]
         lines += ["## Steps", ""]
         for i, s in enumerate(self.steps, 1):
             lines.append(f"- [{_STATUS_MARK[s.status]}] {i}. **{s.title}**")
@@ -79,6 +132,12 @@ class Plan:
                 lines.append(f"  {dl}" if dl.strip() else "")
             if s.files:
                 lines.append(f"  Files: {', '.join(s.files)}")
+            for t in s.tests:
+                lines.append(f"  Expect: {t}")
+            if s.tag:
+                lines.append(f"  Tag: {s.tag}")
+            if s.stage != "impl":
+                lines.append(f"  Stage: {s.stage}")
             if s.note:
                 lines.append(f"  Note: {s.note}")
         lines += ["", "<!-- Legend: [ ] pending · [~] in progress · [x] done · [-] skipped. "
@@ -92,6 +151,7 @@ class Plan:
         the next step or heading) become its details, with 'Files:' and 'Note:'
         lines split out."""
         title, goal_lines, steps = "", [], []
+        kind, command_lines, step_command_lines = "normal", [], []
         section = ""
         cur: Step | None = None
         detail_lines: list[str] = []
@@ -113,6 +173,14 @@ class Plan:
                 cur, detail_lines = None, []
                 section = line[3:].strip().lower()
                 continue
+            if not section and line.strip().lower() == "type: tdd":
+                kind = "tdd"
+                continue
+            if section in ("test command", "step test command"):
+                if line.strip():
+                    (command_lines if section == "test command" else step_command_lines).append(
+                        line.strip().strip("`").strip())
+                continue
             m = _RX_STEP.match(line)
             if m and section != "goal":
                 _flush()
@@ -129,13 +197,22 @@ class Plan:
                     cur.files = [f.strip().strip("`") for f in s[6:].split(",") if f.strip()]
                 elif s.lower().startswith("note:"):
                     cur.note = s[5:].strip()
+                elif s.lower().startswith("expect:"):
+                    if s[7:].strip():
+                        cur.tests.append(s[7:].strip())
+                elif s.lower().startswith("tag:"):
+                    cur.tag = s[4:].strip().strip("`")
+                elif s.lower().startswith("stage:") and s[6:].strip().lower() in STAGES:
+                    cur.stage = s[6:].strip().lower()
                 else:
                     detail_lines.append(line[2:] if line.startswith("  ") else line)
             elif section == "goal":
                 goal_lines.append(line)
         _flush()
         return cls(title=title or "Implementation plan",
-                   goal="\n".join(goal_lines).strip(), steps=steps)
+                   goal="\n".join(goal_lines).strip(), steps=steps, kind=kind,
+                   test_command=" ".join(command_lines),
+                   step_test_command=" ".join(step_command_lines))
 
     # ── progress ──────────────────────────────────────────────────────────────
 
@@ -159,8 +236,38 @@ class Plan:
         return f"{n}/{n}" if idx is None else f"{idx + 1}/{n}"
 
     def replace_remaining(self, new_steps: list[Step]):
-        """Keep finished steps, replace everything else with `new_steps`."""
-        self.steps = [s for s in self.steps if s.finished] + new_steps
+        """Keep finished steps, replace everything else with `new_steps`.
+
+        A TDD plan keeps its harness-made stages: an unfinished test-writing
+        stage stays first and the acceptance stage stays last.  A new step whose
+        title matches an unfinished one keeps that step's tag (its tests may
+        already be written); any other new step gets a fresh tag."""
+        if not self.tdd:
+            self.steps = [s for s in self.steps if s.finished] + new_steps
+            return
+        old_tags = {s.title.strip().lower(): s.tag for s in self.steps
+                    if not s.finished and s.stage == "impl" and s.tag}
+        keep_first = [s for s in self.steps if not s.finished and s.stage == "tests"]
+        keep_last = [s for s in self.steps if not s.finished and s.stage == "acceptance"]
+        stage_titles = {s.title.strip().lower() for s in keep_first + keep_last}
+        new_steps = [s for s in new_steps
+                     if s.stage == "impl" and s.title.strip().lower() not in stage_titles]
+        self.steps = ([s for s in self.steps if s.finished] + keep_first
+                      + new_steps + keep_last)
+        for s in new_steps:
+            s.tag = old_tags.get(s.title.strip().lower(), "")
+        for s in new_steps:
+            if not s.tag:
+                s.tag = self.next_tag()
+
+    def next_tag(self) -> str:
+        """A step tag no step of this plan uses yet."""
+        used = [int(m.group(1)) for s in self.steps if (m := _RX_STEP_TAG.match(s.tag))]
+        return f"tdd-step-{max(used, default=0) + 1}"
+
+    def tags(self) -> list[str]:
+        """Every tag of this plan, in step order."""
+        return [s.tag for s in self.steps if s.tag]
 
     def render_for_prompt(self) -> str:
         """Compact status list for the system prompt, with ▶ on the current step."""
@@ -168,15 +275,22 @@ class Plan:
         out = [f"Plan: {self.title}"]
         if self.goal:
             out.append(f"Goal: {self.goal}")
+        if self.tdd:
+            out.append(f"Test command (run by the harness at every gate): {self.test_command}")
+        writing_tests = cur is not None and self.steps[cur].stage == "tests"
         for i, s in enumerate(self.steps):
             marker = "▶" if i == cur else " "
-            out.append(f"{marker} [{_STATUS_MARK[s.status]}] {i + 1}. {s.title}")
+            tag = f"  [{s.tag}]" if s.tag else ""
+            out.append(f"{marker} [{_STATUS_MARK[s.status]}] {i + 1}. {s.title}{tag}")
             if i == cur:
                 for dl in s.details.splitlines():
                     out.append(f"      {dl}")
                 if s.files:
                     out.append(f"      Files: {', '.join(s.files)}")
-            elif s.note and s.finished:
+            if (i == cur or writing_tests) and s.tests:
+                for t in s.tests:
+                    out.append(f"      Expect: {t}")
+            elif i != cur and s.note and s.finished:
                 out.append(f"      Done: {s.note}")
         return "\n".join(out)
 

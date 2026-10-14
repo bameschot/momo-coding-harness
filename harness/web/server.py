@@ -263,6 +263,7 @@ class WebServer:
             "skills": {"available": h.list_available_skills(), "active": list(h.active_skills)},
             "plan": h.plan.to_markdown() if h.plan is not None else None,
             "plan_phase": h.plan_phase if h.plan is not None else None,
+            "plan_kind": h._plan_kind_shown(),
             "history": list(h.input_history[-200:]),
             "companion": _companion_data(),
             "can_switch_model": h.client.can_switch_model,

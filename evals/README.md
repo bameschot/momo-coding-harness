@@ -522,3 +522,84 @@ A = `--edit-features feedback,match,symbol,checks --no-test-command`, B = `--edi
 After this A/B **rename_symbol and the test-command line were removed** (user's call).
 rename_symbol was used once in 12 runs, for a job edit_files already did; the test line
 changed which command ran, not how many calls it took. edit_files stays.
+
+## TDD plans (`tdd_bench.py`)
+
+`/plan tdd` end to end against a live model: one feature request (add `remove()` and
+`low_stock()` to the `Inventory` class in `evals/tdd/project/`), from investigation to the
+finished plan. The approval is answered `y`, any other question "Use your recommendation.".
+A hidden checker the model never sees (`evals/tdd/check.py`, 8 cases incl. the strict
+threshold and "a failed remove changes nothing") grades the result. `tests/test_tdd_bench.py`
+keeps the checker honest without a model: it fails every case on the untouched fixture and
+passes a reference solution.
+
+```bash
+python evals/tdd_bench.py --runs 3                            # TDD plans
+python evals/tdd_bench.py --runs 3 --kind both                # and normal plans, same task
+python evals/tdd_bench.py --host http://127.0.0.1:9931 --json out.json --keep runs/
+```
+
+`--keep` leaves each run's project, `events.txt` and `messages.json`, which is where every
+finding below came from. The columns: model calls, output/prompt tokens, stages, gate refusals
+by reason (`missing tag`, `hollow`, `red suite`, `deleted check`, `finished test changed`,
+`marker left`), edits after the test-writing stage, the model's own suite run right before
+`complete_step`, and whether the closing "run the tests" step was dropped.
+
+Ornith-1.5-9B-Q8_0 on `llama serve`, 2026-10-14 (3 runs per row; all 12 TDD runs and all 3
+normal runs passed the hidden check 8/8):
+
+| version | seconds | model calls | what went wrong |
+|---|---|---|---|
+| normal plan (baseline) | 345 (302–386) | 20 (17–24) | — |
+| TDD, first version | 519 (450–569) | 24 (19–29) | **2/3 runs wrote hollow tests** (body = only `self.skipTest("tdd-step-1")`; assertions written after the code); 22 marker-removal edits in one run |
+| + harness switches tests on and runs them (red first), hollow gate | 795 (592–1110) | 30 (25–38) | the planner added a closing "run the full test suite" step in **3/3** runs → a tests-stage refusal (no test for it) and a confused stage |
+| + that step dropped (`_only_runs_tests`) | 464 (410–513) | 22 (19–25) | planner still wrote it 2/3 (dropped) |
+| + planner rule 6 rewritten for TDD, test-change audit, refusal cap, diffs | 520 (411–627) | 21 (18–24) | none; verify step written 0/3; audit notes in 2/3 runs, both real test fixes the model named in its summary |
+
+What the runs taught:
+
+- **A gate that checks markers and a green suite cannot see a hollow test.** Only the red
+  check (switch the step's tests on, run them before any code) and the body check catch it.
+- **Role text wins over an appended override.** "Do not add a final step that only runs the
+  tests" after a role rule saying "the final step runs the project's tests" lost 3/3; removing
+  the rule from the TDD prompt (`prompts.planner_for_tdd`) fixed it.
+- **"You don't need to run the suite before complete_step" changed nothing** — the 9B runs it
+  in nearly every stage. It costs a test run, not a model round trip, so it is left alone.
+- Real TDD has a real cost: the model writes wrong expectations into its tests (an off-by-one
+  threshold, insertion vs sorted order) and fixes them when they go red. The audit shows each
+  such change to the user; deleting a check, or changing a finished step's test, is refused.
+
+### Slow suites (`--slow-suite 20`, 2026-10-14)
+
+A planted test that sleeps 20 s makes every full run cost 20 s. Before = the tree without
+`step_test_command` and gate reuse, after = with them; 3 runs each, all 8/8 on the hidden check.
+
+| | harness test time per run | gates reused | step command planned |
+|---|---|---|---|
+| before | 141 s (141–141): 7 full runs | – | – |
+| after | 94 s (60–141) | 4 of 13 | 1/3 |
+| + tail pipe → `tail=N`, no-op steps dropped | 80 s (60–121) | **9 of 12** | 0/3 |
+
+- **The template works when the planner gives one** (1/3): the red checks ran one file, and
+  harness test time fell to 60 s. With no template it stays at 141 s.
+- **Reuse depends on the model running the bare command.** In one run it did (`… -v` is
+  accepted) and 4 of 4 passing gates were reused. In the others it piped every run into
+  `tail`, whose exit code says nothing about the suite, so nothing could be reused — despite the
+  step message asking for the exact command.
+- **Wall time went up (807 s → 1751 s), but not from the harness.** The planner's plans were
+  worse in these runs: one merged both features into one step; another invented a "keep the
+  existing tests green" step and its own "Acceptance" step, spent 708 s in the first (its tests
+  already passed) and hit the 45-minute limit. Output tokens tripled (12k → 38k). With 3 runs a
+  side and this variance, the wall-clock numbers don't measure item 7.
+
+**Follow-up: real exit codes and no-op steps.** `run_command` now turns a trailing `| tail -N`
+(with `2>&1`, `|&`, or a `; echo …${PIPESTATUS[0]}` after it) into `tail=N`, so the exit code is
+the command's own; gate reuse accepts such a run. A TDD plan drops every step that touches no
+production file and only runs or keeps the tests green, or is its own acceptance step — anywhere
+in the plan, not just the last one. And a step whose tests already pass is told it may say so
+and finish. Three runs with `--slow-suite 20`: **597 s (582–616)** against 807 s (629–1137)
+before item 7 and 1751 s (901–2700) after it; 9 of 12 gates reused; the drop caught
+"Verify full suite passes" and "Acceptance: end-to-end behavior"; all 8/8. Where a gate ran
+fresh, the model had run a narrower command (`-p 'test_inventory.py'`, which skips the slow
+file), which is rightly not the full suite.
+

@@ -1162,7 +1162,8 @@ class TUI:
         if ev.think_history != "turn":
             parts.append(f"THINK-HIST: {ev.think_history}")
         self._st_extra = "".join(f" | {p}" for p in parts)
-        self._st_mode  = f"{ev.mode} [{ev.plan_progress}]" if ev.plan_progress else ev.mode
+        mode = f"{ev.mode} (tdd)" if ev.mode == "plan" and ev.plan_kind == "tdd" else ev.mode
+        self._st_mode  = f"{mode} [{ev.plan_progress}]" if ev.plan_progress else mode
         self._st_model = ev.model
         self._st_host  = ev.host
         self._st_offline = ev.backend_reachable is False

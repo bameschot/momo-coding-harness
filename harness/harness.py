@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import queue
 import threading
 import time
@@ -12,10 +13,13 @@ from .diff import build_diff_body
 from .events import EventBus, BusyEvent, DeltaEvent, StreamEndEvent
 from .llm import make_client
 from .logger import Logger
-from .plan import Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file, delete_plan_file
+from .plan import (ACCEPTANCE_TAG, Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file,
+                   delete_plan_file, str_list)
 from .tools import (ALL_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, NET_TOOLS,
-                    PLAN_EXECUTE_TOOLS, PLAN_INVESTIGATE_TOOLS, dispatch, render_tool_reference,
+                    PLAN_EXECUTE_TOOLS, PLAN_INVESTIGATE_TOOLS, PLAN_TDD_EXECUTE_TOOLS,
+                    PLAN_TDD_INVESTIGATE_TOOLS, dispatch, render_tool_reference,
                     with_edit_features, with_index_tools, with_run_mode)
+from . import tdd as tdd_mod
 from .editing import EDIT_FEATURES
 from . import run_store as run_store_mod
 from . import net as net_mod
@@ -25,8 +29,9 @@ from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
                      StatusEvent, ThinkEvent, ToolCallEvent, ToolResultEvent)
 from .prompts import (_INDEX_FIRST, _index_banner, _MODE_TOOLS,  # noqa: F401
-                      _PLAN_EXECUTION_RULES, _ROLE_LOADERS, _coding_prompt, _environment,
-                      _load_role, _nav_rules, _net_rules)
+                      _PLAN_EXECUTION_RULES, _PLAN_TDD_EXECUTION_RULES, _PLAN_TDD_RULES,
+                      _ROLE_LOADERS, _coding_prompt, _environment,
+                      _load_role, _nav_rules, _net_rules, planner_for_tdd)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls)
 
@@ -39,6 +44,36 @@ _MUTATING_TOOLS = {
 }
 
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
+
+# A TDD step that ends with a text reply gets its gate failure back this often
+# before the plan pauses.
+_TDD_TEXT_RETRIES = 2
+
+_TDD_MAX_REFUSALS = 3   # gate refusals in a row before the user is asked
+# Tools that cannot change files: a green run of the test command stays valid
+# across them (tdd gate reuse).  Any other call, run_command included, ends it.
+_KEEPS_GREEN = ({t["function"]["name"] for t in tools_mod.READ_ONLY_TOOLS + tools_mod.CODE_NAV_TOOLS}
+                | set(INDEX_TOOL_NAMES) | {"command_output", "ask_user", "complete_step"})
+
+# Steps a planner writes that a TDD plan does itself: running or keeping the
+# suite green ("Run the full test suite", "Keep existing add tests green") and
+# its own acceptance step.  The verb must open the title, so "Implement X and
+# run tests" is real work.
+_RUNS_TESTS = re.compile(r"(?i)^\W*(?:run|re-?run|verify|confirm|check|keep|ensure)\b"
+                         r".*\b(?:tests?|suite|green|pass(?:es|ing)?)\b")
+_ACCEPTANCE_TITLE = re.compile(r"(?i)^\W*(?:final\s+|end-to-end\s+)?acceptance\b")
+_TEST_PATH = re.compile(r"(?i)(?:^|/)tests?/|(?:^|/)[^/]*(?:test|spec)[^/]*$")
+
+
+def _no_work(step: Step, test_command: str, last: bool) -> bool:
+    """A step with nothing to implement in a TDD plan: it touches no production
+    file, and its title says it only runs or keeps the tests (or is acceptance,
+    which the harness adds itself).  The closing step whose details just run
+    the test command counts too."""
+    if any(not _TEST_PATH.search(f) for f in step.files):
+        return False
+    return bool(_RUNS_TESTS.search(step.title) or _ACCEPTANCE_TITLE.search(step.title)
+                or (last and test_command in f"{step.title}\n{step.details}"))
 
 # Per-role tool choices (/tools <name> on|off): what the pickers group tools by,
 # and the tools that can't be turned off because plan mode stops working without them.
@@ -326,6 +361,18 @@ class Harness:
         # for later) → "executing" (approved; paused if not currently running).
         self.plan: Plan | None = None
         self.plan_phase: str = "investigating"
+        # The type of the next plan create_plan makes: "normal" | "tdd" (/plan tdd).
+        # A plan that exists keeps its own kind (plan.kind).
+        self.plan_kind: str = "normal"
+        # A running TDD stage: test files as the stage started (audited at the
+        # gate), gate refusals in a row, and whether the user paused the plan.
+        self._tdd_snapshot: dict[str, str] | None = None
+        self._tdd_refusals = 0
+        self._tdd_pause = False
+        # The model's own run of the plan's test command just passed and nothing
+        # was written since: the gate takes it instead of running the suite again.
+        self._tdd_green = False
+        self._last_run_exit: int | None = None
         self._tool_ref = ""
         # How the prompt's tool reference is rendered: "full" (every description
         # and parameter table) or "compact" (one line per tool; the native
@@ -707,6 +754,25 @@ class Harness:
     def _plan_executing(self) -> bool:
         return self.mode == "plan" and self.plan_phase == "executing" and self.plan is not None
 
+    def _plan_kind_shown(self) -> str:
+        """The plan type in force: the running plan's own, else the next plan's."""
+        if self.plan is not None and self.plan_phase == "executing":
+            return self.plan.kind
+        return self.plan_kind
+
+    def set_plan_kind(self, kind: str) -> str:
+        """Choose the type of the next plan ("normal" | "tdd"); '' or an error."""
+        if kind not in ("normal", "tdd"):
+            return f"unknown plan type: {kind} (use normal or tdd)"
+        if self.plan is not None and self.plan_phase == "executing":
+            return "a plan is executing — its type cannot change. /plan cancel first."
+        if kind != self.plan_kind:
+            self.plan_kind = kind
+            self.rebuild_system_prompt()   # create_plan's schema and the role text change
+            self.refresh_status()
+            self._autosave()
+        return ""
+
     def _current_tools(self) -> list[dict]:
         """Tool set for the current mode (and, in plan mode, the current phase).
 
@@ -714,7 +780,9 @@ class Harness:
         cannot use it never sees it in the schema or in the generated reference.
         """
         if self._plan_executing():
-            tools = PLAN_EXECUTE_TOOLS
+            tools = PLAN_TDD_EXECUTE_TOOLS if self.plan.tdd else PLAN_EXECUTE_TOOLS
+        elif self.mode == "plan" and self.plan_kind == "tdd":
+            tools = PLAN_TDD_INVESTIGATE_TOOLS
         else:
             tools = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
         tools = with_edit_features(with_run_mode(tools, self.run_mode), self.edit_features)
@@ -735,8 +803,10 @@ class Harness:
     def _role_universe(self) -> list[dict]:
         """Every tool the current role can be offered, whatever the toggles."""
         if self.mode == "plan":
-            base = PLAN_INVESTIGATE_TOOLS + [t for t in PLAN_EXECUTE_TOOLS
-                                             if t not in PLAN_INVESTIGATE_TOOLS]
+            tdd = self._plan_kind_shown() == "tdd"
+            investigate = PLAN_TDD_INVESTIGATE_TOOLS if tdd else PLAN_INVESTIGATE_TOOLS
+            execute = PLAN_TDD_EXECUTE_TOOLS if tdd else PLAN_EXECUTE_TOOLS
+            base = investigate + [t for t in execute if t not in investigate]
         else:
             base = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
         return (with_edit_features(with_run_mode(base, self.run_mode), self.edit_features)
@@ -958,6 +1028,7 @@ class Harness:
         # A tool that raises must still produce a result: the assistant turn with
         # this call is already in the history, and an unanswered call breaks the
         # next request (and an escaped traceback would land on the curses screen).
+        run_exit: dict = {}
         try:
             return dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes,
                             self._fetch_chars(), index=self.index, cancel=self._cancel,
@@ -965,9 +1036,12 @@ class Harness:
                             run_mode=self.run_mode, run_store=self.run_store,
                             run_output_limit=self.run_output_limit,
                             search_sources=self.search_sources,
-                            edit_features=self.edit_features)
+                            edit_features=self.edit_features, run_exit=run_exit)
         except Exception as e:
             return f"ERROR: {name} failed: {type(e).__name__}: {e}"
+        finally:
+            # The real exit code of a run_command (None: stopped, or not one).
+            self._last_run_exit = run_exit.get("code")
 
     @property
     def run_store(self) -> "run_store_mod.RunStore":
@@ -1008,13 +1082,16 @@ class Harness:
             add("index", "Code index banner", _index_banner(names))
         if self._plan_executing():
             # Execution runs with exactly the coding agent's prompt plus the plan.
+            tdd = ("\n\n" + _PLAN_TDD_EXECUTION_RULES) if self.plan.tdd else ""
             role = (_coding_prompt(str(self.workdir)) + "\n\n---\n\n" + _PLAN_EXECUTION_RULES
-                    + "\n\n### Current plan state\n\n" + self.plan.render_for_prompt())
+                    + tdd + "\n\n### Current plan state\n\n" + self.plan.render_for_prompt())
             label = "Role: plan (executing)"
         else:
             loader = _ROLE_LOADERS.get(self.mode, _ROLE_LOADERS["coding"])
             role = loader(str(self.workdir))
             label = f"Role: {self.mode}"
+            if self.mode == "plan" and self.plan_kind == "tdd":
+                role = planner_for_tdd(role) + "\n\n---\n\n" + _PLAN_TDD_RULES
             if self.mode == "plan" and self.plan is not None:
                 role += ("\n\n---\n\n## Current draft plan\n\nYou already submitted this plan; "
                          "it was not approved yet. Revise it according to the user's feedback and "
@@ -1930,7 +2007,20 @@ class Harness:
                 elif name == "revise_plan":
                     result = self._handle_revise_plan(args)
                 elif name == "complete_step":
-                    if executing:
+                    if executing and self.plan.tdd:
+                        passed, report = self._tdd_gate()
+                        if passed:
+                            self._step_summary = str(args.get("summary") or "").strip()
+                            # The output is in the tdd_gate result the user sees;
+                            # a pass needs nothing more from the model.
+                            result = "Step marked complete. Tests pass."
+                        else:
+                            result = ("ERROR: step not complete — the TDD gate failed.\n" + report
+                                      + "\nFix this, then call complete_step again.")
+                            self._tdd_refusals += 1
+                            if self._tdd_refusals >= _TDD_MAX_REFUSALS:
+                                result += self._tdd_ask_user(report)
+                    elif executing:
                         self._step_summary = str(args.get("summary") or "").strip()
                         result = "Step marked complete."
                     else:
@@ -1989,6 +2079,8 @@ class Harness:
                 # Store the tool name on the message so export/replay can label
                 # results and templates can match responses to their calls.
                 self.messages.append({"role": "tool", "name": name, "content": result})
+                if executing and self.plan.tdd:
+                    self._track_tdd_green(name, args)
 
                 # Track last_tool and reset counter only on successful calls.
                 # write_file is sticky — it must not be overwritten by a later
@@ -2007,6 +2099,8 @@ class Harness:
             # drive execution.  Remaining calls in the batch have already run.
             if plan_approved:
                 return "plan_approved"
+            if self._tdd_pause:
+                return "gate"
             if self._step_summary is not None:
                 if self._step_summary:
                     self.event_queue.put(ChatEvent("assistant", self._step_summary))
@@ -2128,7 +2222,9 @@ class Harness:
         steps = []
         for item in raw if isinstance(raw, list) else []:
             if isinstance(item, dict):
-                steps.append(Step.from_dict({k: v for k, v in item.items() if k != "status"}))
+                # Status, tag and stage are the harness's to set, not the model's.
+                steps.append(Step.from_dict({k: v for k, v in item.items()
+                                             if k not in ("status", "tag", "stage")}))
             elif isinstance(item, str) and item.strip():
                 steps.append(Step(title=item.strip()))
         return steps
@@ -2164,13 +2260,21 @@ class Harness:
         if not steps:
             return ("ERROR: create_plan needs a non-empty 'steps' list of "
                     "{title, details, files} objects. Call it again with the steps.")
-        self.plan = Plan(title=str(args.get("title") or "Implementation plan").strip(),
-                         goal=str(args.get("goal") or "").strip(), steps=steps)
+        plan = Plan(title=str(args.get("title") or "Implementation plan").strip(),
+                    goal=str(args.get("goal") or "").strip(), steps=steps)
+        approve_note = ""
+        if self.plan_kind == "tdd":
+            err = self._make_tdd_plan(plan, args)
+            if err:
+                return err
+            approve_note = f" Approving also lets the harness run `{plan.test_command}` after every step."
+        self.plan = plan
         self._sync_plan_file()
         self.event_queue.put(ChatEvent("assistant", self.plan.to_markdown()))
         answer = self._ask_user(
             f"Execute this plan? y = run it · n = keep it for later (/plan run) · "
             f"anything else = feedback to revise it. You can edit {PLAN_FILENAME} before answering."
+            + approve_note
         ).strip()
         low = answer.lower().rstrip(".!")
         if low in ("y", "yes", "ok", "go", "run", "approve", "approved"):
@@ -2191,6 +2295,187 @@ class Harness:
         return (f"User requested changes to the plan: {answer}\n"
                 "Investigate further if needed, then call create_plan again with the complete revised plan.")
 
+    def _make_tdd_plan(self, plan: Plan, args: dict) -> str:
+        """Turn plan into a TDD plan: tag its steps and wrap them in the
+        test-writing and acceptance stages.  '' or an error for the model."""
+        command = str(args.get("test_command") or "").strip()
+        if not command:
+            return ("ERROR: this is a TDD plan: create_plan needs 'test_command', the command "
+                    "that runs the whole test suite. Call it again with it.")
+        # The harness runs the suite at every gate and adds the acceptance stage;
+        # a step that only does that has nothing to implement and no test to write.
+        n = len(plan.steps)
+        dropped = [st for i, st in enumerate(plan.steps) if _no_work(st, command, i == n - 1)]
+        if dropped and len(dropped) == n:
+            return ("ERROR: every step only runs or checks the tests, which a TDD plan does "
+                    "itself at every step and in its acceptance stage. Call create_plan again "
+                    "with the steps that change the code.")
+        if dropped:
+            plan.steps = [st for st in plan.steps if st not in dropped]
+            self.event_queue.put(ChatEvent("system",
+                "Dropped steps the TDD plan does itself (it runs the whole suite at every step "
+                "and adds its own acceptance stage): "
+                + ", ".join(f'"{st.title}"' for st in dropped)))
+        missing = [st.title for st in plan.steps if not st.tests]
+        if missing:
+            return ("ERROR: every step of a TDD plan needs 'tests' (its expected outcomes). "
+                    "Missing on: " + "; ".join(missing) + ". Call create_plan again.")
+        acceptance = str_list(args.get("acceptance"))
+        plan.kind, plan.test_command = "tdd", command
+        plan.step_test_command = str(args.get("step_test_command") or "").strip()
+        for i, st in enumerate(plan.steps, 1):
+            st.tag = f"tdd-step-{i}"
+        plan.steps = ([Step(title="Write the tests, all skipped", stage="tests",
+                            details="Write the tests for every step and for acceptance, each "
+                                    "skipped with its tag in the skip reason. The suite must "
+                                    "still pass.")]
+                      + plan.steps
+                      + [Step(title="Acceptance: switch on the end-to-end tests", stage="acceptance",
+                              tag=ACCEPTANCE_TAG, tests=acceptance,
+                              details="Remove the tdd-acceptance skip markers and make the "
+                                      "whole suite pass.")])
+        return ""
+
+    def _tdd_switch_on(self, step: Step) -> tuple[int, list[str], bool, str] | None:
+        """Remove the skip markers of the stage about to start and run the suite
+        once, so the model starts from the failures (red before green).
+        (markers removed, tagged lines left to the model, passed, output);
+        None when no marker could be removed."""
+        self.event_queue.put(ToolCallEvent("tdd_switch_on", {"tag": step.tag}))
+        removed, left, changed = tdd_mod.switch_on(self.workdir, step.tag)
+        for rel, old in changed.items():   # shown like any other edit
+            self._emit_diff("edit_file", {"path": rel}, "OK", old, True)
+        if not removed:
+            note = ("no skip markers to remove" if not left else
+                    "these tagged lines are not plain skip markers: " + ", ".join(left))
+            self.event_queue.put(ToolResultEvent("tdd_switch_on", note))
+            return None
+        command = tdd_mod.step_command(self.plan, step.tag) or self.plan.test_command
+        passed, output = tdd_mod.run_tests(command, self.workdir, self._cancel)
+        self.event_queue.put(ToolResultEvent("tdd_switch_on",
+            f"removed {removed} skip marker{'s' if removed != 1 else ''}; ran `{command}`: tests "
+            f"{'pass' if passed else 'fail'}\n{output}"))
+        return removed, left, passed, output
+
+    def _tdd_step_text(self, idx: int, switched=None) -> str:
+        """The instruction ending a TDD stage's step message.  switched: what
+        _tdd_switch_on did when the stage started (None = nothing)."""
+        plan = self.plan
+        step = plan.steps[idx]
+        step_cmd = tdd_mod.step_command(plan, step.tag) if step.tag else ""
+        done = ((f"Run this stage's tests with `{step_cmd}`. " if step_cmd else "")
+                + f"To check the whole suite, run exactly `{plan.test_command}` (no pipe): "
+                "complete_step reuses that run if you change nothing after it. When the stage is "
+                "done, call complete_step: it checks the skip markers and the whole suite, and the "
+                "plan only moves on when that passes.")
+        if step.stage == "tests":
+            want = "\n".join(f"- [{st.tag}] {st.title}:\n" + "\n".join(f"    - {t}" for t in st.tests)
+                             for st in plan.steps[idx + 1:] if st.tag)
+            return ("Write the complete tests for these outcomes now: setup, the call and the "
+                    "assertions. Put the test framework's own skip marker on its own line directly "
+                    "above each test, with its [tag] in the skip reason, so the suite still passes. "
+                    "A test whose body is only the skip marker checks nothing and is refused. Do not "
+                    "implement anything yet (only stubs a skipped test needs to compile or "
+                    "import).\n" + want + "\n\n" + done)
+        expect = "\n".join(f"- {t}" for t in step.tests)
+        acceptance = step.stage == "acceptance"
+        what = "end-to-end tests" if acceptance else "tests for this step"
+        if switched is None:
+            # Resumed, nothing tagged (a step added after the tests were written),
+            # or only markers the harness cannot remove.
+            text = (f"Make sure the {what} (tagged {step.tag}) run — remove any skip marker with "
+                    f"that tag that is left — then implement only this step until they pass:\n"
+                    f"{expect}\n")
+        else:
+            removed, left, passed, output = switched
+            text = f"The harness switched on the {removed} {what} tagged {step.tag} and ran them. "
+            if not passed and acceptance:
+                text += f"They fail:\n{output}\n\nFix what they show.\n"
+            elif not passed:
+                text += ("They fail, as they should before the implementation:\n"
+                         f"{output}\n\nImplement only this step until they pass:\n{expect}\n")
+            elif acceptance:
+                text += ("They already pass. Check that they cover these outcomes, then call "
+                         f"complete_step:\n{expect}\n")
+            else:
+                text += ("They already pass before any code change. If this step needs no code "
+                         "change — what it asks for exists already — call complete_step and say "
+                         "so. Otherwise make its tests check the new behaviour first (they must "
+                         f"fail), then implement:\n{expect}\n")
+            if left:
+                text += ("These tagged lines are not plain skip markers — remove the skip from "
+                         "them yourself: " + ", ".join(left) + "\n")
+        return text + "Tests tagged for later steps stay skipped.\n\n" + done
+
+    def _track_tdd_green(self, name: str, args: dict):
+        """After each tool call of a running TDD stage: a passing run of exactly the
+        plan's test command makes the suite green; anything that may write ends it."""
+        if name == "run_command":
+            code, self._last_run_exit = self._last_run_exit, None
+            self._tdd_green = code == 0 and tdd_mod.same_command(
+                str(args.get("command") or ""), self.plan.test_command)
+        elif name not in _KEEPS_GREEN:
+            self._tdd_green = False
+
+    def _check_step_command(self, idx: int):
+        """Once the tests are written: the step test command must pass on them
+        while they are all skipped.  One that fails (matches no file, wrong
+        runner) would show red at every stage, so it is dropped."""
+        plan = self.plan
+        first = next((st.tag for st in plan.steps[idx + 1:] if st.tag), "")
+        command = tdd_mod.step_command(plan, first) if first and plan.step_test_command else ""
+        if not command:
+            return
+        passed, output = tdd_mod.run_tests(command, self.workdir, self._cancel)
+        if not passed:
+            plan.step_test_command = ""
+            tail = "\n".join(output.splitlines()[-8:])
+            self.event_queue.put(ChatEvent("system",
+                f"The step test command failed on the skipped tests (`{command}`); using the "
+                f"full suite instead.\n{tail}"))
+
+    def _tdd_ask_user(self, report: str) -> str:
+        """After _TDD_MAX_REFUSALS gate refusals in a row: ask the user for
+        guidance or to pause.  Returns the text to add to the refusal."""
+        n = self._tdd_refusals
+        tail = "\n".join(report.splitlines()[-15:])
+        answer = self._ask_user(
+            f"Plan step {self.plan.progress()} still does not pass its gate after {n} attempts:\n"
+            f"{tail}\n\nReply with guidance for the model, or 'pause' to stop the plan here."
+        ).strip()
+        self._tdd_refusals = 0
+        if answer.lower().rstrip(".!") in ("", "pause", "stop", "p", "n", "no"):
+            self._tdd_pause = True
+            return "\nThe user paused the plan here. Do not call any more tools."
+        return f"\nUser guidance after {n} failed attempts: {answer}"
+
+    def _tdd_gate(self) -> tuple[bool, str]:
+        """Check the current stage of a running TDD plan (markers + test command)."""
+        idx = self.plan.current_index()
+        if idx is None:
+            return True, ""
+        self.event_queue.put(ToolCallEvent("tdd_gate", {"command": self.plan.test_command}))
+        step = self.plan.steps[idx]
+        notes = []
+        if self._tdd_snapshot is not None:
+            finished = {st.tag for st in self.plan.steps[:idx] if st.tag and st.finished}
+            refusal, notes = tdd_mod.audit(self._tdd_snapshot, self.workdir,
+                                           self.plan.test_owners, finished)
+            if refusal:
+                self.event_queue.put(ToolResultEvent("tdd_gate", refusal))
+                return False, refusal
+        passed, report = tdd_mod.check_gate(self.plan, idx, self.workdir, self._cancel,
+                                            reuse_green=self._tdd_green)
+        if passed and step.stage == "tests":
+            self.plan.test_owners = tdd_mod.test_owners(self.workdir, tdd_mod.find_tags(self.workdir))
+            self._check_step_command(idx)
+        if passed and notes:
+            self.event_queue.put(ChatEvent("system",
+                f"Test lines changed in step {idx + 1}:\n" + "\n".join(f"  {n}" for n in notes)))
+        self.event_queue.put(ToolResultEvent("tdd_gate", report))
+        self.logger.log_tool_result(self.mode, self.client.model, "tdd_gate", len(report))
+        return passed, report
+
     def _handle_revise_plan(self, args: dict) -> str:
         if not self._plan_executing():
             return "ERROR: revise_plan is only available while executing an approved plan."
@@ -2199,8 +2484,19 @@ class Harness:
             return "ERROR: revise_plan needs a non-empty 'steps' list of the remaining steps."
         new_titles = {st.title.strip().lower() for st in steps}
         dropped = [st.title for st in self.plan.steps
-                   if not st.finished and st.title.strip().lower() not in new_titles]
-        self.plan.replace_remaining(steps)
+                   if not st.finished and st.stage == "impl"
+                   and st.title.strip().lower() not in new_titles]
+        if self.plan.tdd:
+            tests_written = any(st.stage == "tests" and st.finished for st in self.plan.steps)
+            known = {st.tag for st in self.plan.steps if st.tag}
+            self.plan.replace_remaining(steps)
+            for st in steps:
+                if tests_written and st.tag not in known:
+                    st.details = (f"Its tests were not part of the test-writing stage: write "
+                                  f"them first (the outcomes below), then implement.\n{st.details}")
+            steps = [st for st in self.plan.steps if not st.finished]
+        else:
+            self.plan.replace_remaining(steps)
         steps[0].status = "in_progress"
         self._sync_plan_file()
         self._refresh_system_prompt()
@@ -2231,25 +2527,52 @@ class Harness:
         self.plan_phase = "executing"
         while (idx := plan.current_index()) is not None:
             step = plan.steps[idx]
+            first_start = step.status == "pending"
             step.status = "in_progress"
             self._sync_plan_file()
             self._refresh_system_prompt()
             self.emit_status()
             n = len(plan.steps)
             self.event_queue.put(ChatEvent("system", f"▶ Plan step {idx + 1}/{n}: {step.title}"))
+            # A TDD stage starts with its tests switched on and run once (red first),
+            # and with the test files as they are then, to audit at its gate.
+            switched = (self._tdd_switch_on(step)
+                        if plan.tdd and first_start and step.stage != "tests" else None)
+            self._tdd_snapshot = (tdd_mod.snapshot(self.workdir, plan.test_owners)
+                                  if plan.tdd and first_start and step.stage != "tests" else None)
+            self._tdd_refusals, self._tdd_pause, self._tdd_green = 0, False, False
             body = [f"Plan step {idx + 1}/{n}: {step.title}"]
             if step.details:
                 body.append(step.details)
             if step.files:
                 body.append(f"Files: {', '.join(step.files)}")
-            body.append("Implement only this step and verify it, then call complete_step with a "
+            body.append(self._tdd_step_text(idx, switched) if plan.tdd else
+                        "Implement only this step and verify it, then call complete_step with a "
                         "short summary of what you changed and how you verified it.")
             self._append_user("\n\n".join(body))
 
             tools = self._current_tools() if self.tools_enabled else []
             outcome = self._run_loop(tools, 100)
+            # A TDD step that ended with a text reply instead of complete_step
+            # has not passed the gate yet: check it, and send failures back.
+            retries = 0
+            while (outcome == "done" and plan.tdd and self._step_summary is None
+                   and plan.current_index() == idx):
+                passed, report = self._tdd_gate()
+                if passed:
+                    break
+                if retries >= _TDD_TEXT_RETRIES:
+                    outcome = "gate"
+                    break
+                retries += 1
+                self._append_user("The step is not complete — the TDD gate failed.\n" + report
+                                  + "\nFix this, then call complete_step.")
+                outcome = self._run_loop(tools, 100)
             if outcome != "done":
                 self._sync_plan_file()
+                if outcome == "gate":
+                    self.event_queue.put(ChatEvent("system",
+                        f"Step {plan.progress()} ended without passing its tests."))
                 self.event_queue.put(ChatEvent("system",
                     f"Plan paused at step {plan.progress()} — type /plan resume (or any "
                     f"message) to continue, /plan cancel to discard. Progress is kept in {PLAN_FILENAME}."))
@@ -2328,6 +2651,7 @@ class Harness:
             host=self.client.host,
             provider=self.provider,
             plan_progress=self._plan_progress(),
+            plan_kind=self._plan_kind_shown(),
             title=self.title,
             guides=self.guides,
             think_level=self.think_level,
@@ -2398,6 +2722,7 @@ class Harness:
             provider=self.provider,
             plan=self.plan.to_dict() if self.plan is not None else None,
             plan_phase=self.plan_phase,
+            plan_kind=self.plan_kind,
             momo_lines=self.momo_lines,
             momo_recap_turn=self._momo_recap_turn,
             turn_count=self._turn_count,
@@ -2474,6 +2799,7 @@ class Harness:
         saved_plan = data.get("plan")
         self.plan = Plan.from_dict(saved_plan) if saved_plan else None
         self.plan_phase = (data.get("plan_phase") or "investigating") if self.plan else "investigating"
+        self.plan_kind = "tdd" if data.get("plan_kind") == "tdd" else "normal"
         self.input_history.clear()
         self.input_history.extend(data.get("input_history", []))
         self.momo_lines = list(data.get("momo_lines", []))
@@ -2510,6 +2836,7 @@ class Harness:
         self.logger = Logger(self._ts)
         self.plan = None
         self.plan_phase = "investigating"
+        self.plan_kind = "normal"
         self.momo_lines = []
         self._momo_recap_turn = 0
         self.title = ""
