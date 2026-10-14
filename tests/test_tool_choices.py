@@ -91,13 +91,21 @@ class PerRole(Base):
         self.assertIn("ERROR", self.cmd("/tools create_plan off"))
         self.assertIn("create_plan", self.names())
 
-    def test_plan_choice_holds_during_execution(self):
+    def test_coding_choice_holds_during_execution(self):
+        # An approved plan runs in coding mode, so coding's choices apply, not plan's.
         self.h.set_mode("plan")
-        self.cmd("/tools write_file off")        # only in the execute set
-        self.h.plan = mock.Mock()
+        self.cmd("/tools run_command off")
+        self.h.set_mode("coding")
+        self.cmd("/tools write_file off")
+        self.h.plan = mock.Mock(tdd=False)
         self.h.plan_phase = "executing"
-        self.assertNotIn("write_file", self.names())
-        self.assertIn("edit_file", self.names())
+        names = self.names()
+        self.assertNotIn("write_file", names)
+        self.assertIn("run_command", names)
+        self.assertIn("complete_step", names)
+        self.assertNotIn("create_plan", names)
+        self.assertIn("ERROR", self.cmd("/tools complete_step off"))
+        self.assertIn("complete_step", self.names())
 
     def test_master_switch_and_listing_still_work(self):
         self.assertIn("off", self.cmd("/tools off"))

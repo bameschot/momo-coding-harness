@@ -752,7 +752,10 @@ class Harness:
         return self.mode == "plan" and self.plan_phase != "executing"
 
     def _plan_executing(self) -> bool:
-        return self.mode == "plan" and self.plan_phase == "executing" and self.plan is not None
+        # An approved plan runs in coding mode: the coder's role, tools and tool
+        # choices, and once it is done the next message is a coding turn, not a
+        # new plan.  In any other mode the plan is dormant (paused).
+        return self.mode == "coding" and self.plan_phase == "executing" and self.plan is not None
 
     def _plan_kind_shown(self) -> str:
         """The plan type in force: the running plan's own, else the next plan's."""
@@ -793,7 +796,7 @@ class Harness:
                              for t in NET_TOOLS]
         if self.index is not None:
             tools = with_index_tools(tools)
-        off = self.disabled_tools.get(self.mode)
+        off = self.disabled_tools.get(self.mode, set()) - _LOCKED_TOOLS
         if off:
             tools = [t for t in tools if t["function"]["name"] not in off]
         return tools
@@ -803,10 +806,9 @@ class Harness:
     def _role_universe(self) -> list[dict]:
         """Every tool the current role can be offered, whatever the toggles."""
         if self.mode == "plan":
-            tdd = self._plan_kind_shown() == "tdd"
-            investigate = PLAN_TDD_INVESTIGATE_TOOLS if tdd else PLAN_INVESTIGATE_TOOLS
-            execute = PLAN_TDD_EXECUTE_TOOLS if tdd else PLAN_EXECUTE_TOOLS
-            base = investigate + [t for t in execute if t not in investigate]
+            base = PLAN_TDD_INVESTIGATE_TOOLS if self.plan_kind == "tdd" else PLAN_INVESTIGATE_TOOLS
+        elif self._plan_executing():
+            base = PLAN_TDD_EXECUTE_TOOLS if self.plan.tdd else PLAN_EXECUTE_TOOLS
         else:
             base = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
         return (with_edit_features(with_run_mode(base, self.run_mode), self.edit_features)
@@ -827,7 +829,8 @@ class Harness:
             group = _tool_group(name)
             locked, note = False, ""
             if name in _LOCKED_TOOLS:
-                locked, note = True, "plan mode needs it"
+                locked, note = True, ("plan mode needs it" if self.mode == "plan"
+                                      else "the running plan needs it")
             elif self.index is not None and name in INDEX_REPLACES:
                 locked, note = True, "replaced by the code index"
             if group == "net" and self.net_access == "off":
@@ -1085,14 +1088,20 @@ class Harness:
             tdd = ("\n\n" + _PLAN_TDD_EXECUTION_RULES) if self.plan.tdd else ""
             role = (_coding_prompt(str(self.workdir)) + "\n\n---\n\n" + _PLAN_EXECUTION_RULES
                     + tdd + "\n\n### Current plan state\n\n" + self.plan.render_for_prompt())
-            label = "Role: plan (executing)"
+            label = "Role: coding (executing plan)"
         else:
             loader = _ROLE_LOADERS.get(self.mode, _ROLE_LOADERS["coding"])
             role = loader(str(self.workdir))
             label = f"Role: {self.mode}"
             if self.mode == "plan" and self.plan_kind == "tdd":
                 role = planner_for_tdd(role) + "\n\n---\n\n" + _PLAN_TDD_RULES
-            if self.mode == "plan" and self.plan is not None:
+            if self.mode == "plan" and self.plan is not None and self.plan_phase == "executing":
+                role += ("\n\n---\n\n## Plan in progress\n\nThe user approved this plan and it is "
+                         f"paused at step {self.plan.progress()}. If the user wants it changed, "
+                         "investigate and call create_plan with the complete new plan for the "
+                         "remaining work; it replaces this one.\n\n"
+                         + self.plan.render_for_prompt())
+            elif self.mode == "plan" and self.plan is not None:
                 role += ("\n\n---\n\n## Current draft plan\n\nYou already submitted this plan; "
                          "it was not approved yet. Revise it according to the user's feedback and "
                          "call create_plan again with the complete plan.\n\n"
@@ -2241,7 +2250,8 @@ class Harness:
             return "The plan has no steps."
         self.plan_phase = "executing"
         self._sync_plan_file()
-        self._refresh_system_prompt()
+        # The plan runs in coding mode (set_mode rebuilds the prompt and emits status).
+        self.set_mode("coding")
         return ""
 
     def cancel_plan(self) -> str:
@@ -2522,9 +2532,9 @@ class Harness:
         if plan is None:
             self.event_queue.put(ChatEvent("system", "No plan to execute."))
             return
-        if self.mode != "plan":
-            self.mode = "plan"
         self.plan_phase = "executing"
+        if self.mode != "coding":
+            self.set_mode("coding")
         while (idx := plan.current_index()) is not None:
             step = plan.steps[idx]
             first_start = step.status == "pending"
@@ -2599,7 +2609,8 @@ class Harness:
         delete_plan_file(self.workdir)
         self._refresh_system_prompt()
         self.event_queue.put(ChatEvent("system",
-            f"Plan complete: {plan.title} ({total} step{'s' if total != 1 else ''}). {PLAN_FILENAME} removed."))
+            f"Plan complete: {plan.title} ({total} step{'s' if total != 1 else ''}). {PLAN_FILENAME} removed. "
+            "Still in coding mode — /plan to plan the next change."))
 
     def execute_plan_threaded(self):
         """Run (or resume) plan execution on a worker thread for /plan run|resume."""
@@ -2612,7 +2623,8 @@ class Harness:
             self.event_queue.put(DoneEvent())
 
     def _plan_progress(self) -> str:
-        if self.mode != "plan" or self.plan is None:
+        # A running plan shows in every mode (it runs in coding mode); a draft only in plan mode.
+        if self.plan is None or (self.mode != "plan" and self.plan_phase != "executing"):
             return ""
         if self.plan_phase == "executing":
             return f"exec {self.plan.progress()}"
@@ -2800,6 +2812,8 @@ class Harness:
         self.plan = Plan.from_dict(saved_plan) if saved_plan else None
         self.plan_phase = (data.get("plan_phase") or "investigating") if self.plan else "investigating"
         self.plan_kind = "tdd" if data.get("plan_kind") == "tdd" else "normal"
+        if self.plan_phase == "executing" and self.mode == "plan":
+            self.mode = "coding"   # sessions from before plans ran in coding mode
         self.input_history.clear()
         self.input_history.extend(data.get("input_history", []))
         self.momo_lines = list(data.get("momo_lines", []))

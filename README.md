@@ -482,7 +482,7 @@ Available tools: all design tools + `edit_file`, `edit_files`, `replace_symbol`,
 
 ### Plan mode
 
-Plan mode is for features and bugfixes you want thought through before any code changes. The assistant investigates first, asks about genuine uncertainties, and writes a concrete implementation plan. Nothing is edited until you approve that plan. It then carries the plan out step by step with the same prompt, tools, and loop as coding mode, keeping track of which step it is on.
+Plan mode is for features and bugfixes you want thought through before any code changes. The assistant investigates first, asks about genuine uncertainties, and writes a concrete implementation plan. Nothing is edited until you approve that plan. Approving switches momo to **coding mode**, and it carries the plan out step by step with coding mode's prompt, tools, tool choices and loaded skills, keeping track of which step it is on. When the plan is done you stay in coding mode, so your next message is a normal coding turn rather than a new plan; `/plan` takes you back.
 
 Switch to it with `/plan` (or `Shift+Tab`) and describe the feature or bug.
 
@@ -588,10 +588,10 @@ Tests for later steps stay skipped, so they never break the build. They count fr
 | `/plan normal` | Plan mode with a normal plan (the default) |
 | `/plan show` | Show the current plan with step statuses |
 | `/plan run` | Approve a plan kept for later and execute it (re-reads `.momo-plan.md`) |
-| `/plan resume` | Continue a paused plan from its current step |
+| `/plan resume` | Continue a paused plan from its current step (switches to coding mode) |
 | `/plan cancel` | Discard the plan and delete `.momo-plan.md` |
 
-Investigation tools: read-only tools + `run_command`, `ask_user`, `create_plan`. Execution tools: same as coding mode + `complete_step`, `revise_plan`.
+Investigation tools: read-only tools + `run_command`, `ask_user`, `create_plan`. Execution runs in coding mode: its tools (and your `/tools` choices for coding) + `complete_step`, `revise_plan`. A paused plan resumes only in coding mode; in plan mode the model sees it and a new `create_plan` replaces it.
 
 ### Chat mode
 

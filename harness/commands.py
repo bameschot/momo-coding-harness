@@ -343,6 +343,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
             state = ""
             if harness.plan is not None:
                 state = f" — current plan: {harness.plan.title} ({harness._plan_progress()}); /plan show to view"
+                if harness.plan_phase == "executing":
+                    state += ", /plan resume to continue it in coding mode"
             kind = (" Plan type: TDD (/plan normal to switch)." if harness.plan_kind == "tdd"
                     else " Plan type: normal (/plan tdd for test-driven).")
             return CommandResult(handled=True, output=(
@@ -359,7 +361,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 err = harness.approve_plan()  # re-reads the plan file for hand edits
                 if err:
                     return CommandResult(handled=True, output=f"ERROR: {err}")
-            harness.set_mode("plan")
+            harness.set_mode("coding")   # an approved plan runs in coding mode
             return CommandResult(handled=True, run_plan=True)
         if sub == "cancel":
             return CommandResult(handled=True, output=harness.cancel_plan())
@@ -1085,8 +1087,8 @@ Available commands:
   /plan tdd           Plan mode with a test-driven plan: tests first, each step gated on them
   /plan normal        Plan mode with a normal plan (the default)
   /plan show          Show the current plan and its progress
-  /plan run           Approve and execute the plan (re-reads .momo-plan.md edits)
-  /plan resume        Continue a paused plan from its current step
+  /plan run           Approve and execute the plan in coding mode (re-reads .momo-plan.md edits)
+  /plan resume        Continue a paused plan from its current step (in coding mode)
   /plan cancel        Discard the plan and delete .momo-plan.md
   /chat               Switch to chat mode (read files, ask questions)
   /momo               Switch to momo companion mode (talk to the cat)

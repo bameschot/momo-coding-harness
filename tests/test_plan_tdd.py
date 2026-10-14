@@ -360,6 +360,7 @@ class Harness(_Base):
         for phase in ("investigating", "executing"):
             if phase == "executing":
                 self.h.plan, self.h.plan_phase = self.tdd_plan(), "executing"
+                self.h.set_mode("coding")       # an approved plan runs in coding mode
                 self.h.rebuild_system_prompt()
             offered = {t["function"]["name"] for t in self.h._current_tools()}
             text = "".join(s["text"] for s in self.h.system_prompt_sections()
@@ -433,7 +434,7 @@ class Harness(_Base):
 
     def _failing_step(self, answers):
         """A step whose gate the model keeps failing; answers for _ask_user."""
-        self.h.set_mode("plan")
+        self.h.set_mode("coding")
         self.h.plan = self.tdd_plan()
         self.h.plan.steps[0].status = "done"
         (self.wd / "tests" / "test_calc.py").write_text(calc_tests(True, True))
@@ -583,7 +584,7 @@ class Harness(_Base):
         self.assertTrue(gates[2].startswith(f"Tests pass: {TEST_CMD}\n"), gates[2])
 
     def test_step_whose_tests_already_pass_is_told_so(self):
-        self.h.set_mode("plan")
+        self.h.set_mode("coding")
         self.h.plan = self.tdd_plan()
         self.h.plan.steps[0].status = "done"
         (self.wd / "calc.py").write_text(CALC_RIGHT)
@@ -597,7 +598,7 @@ class Harness(_Base):
         self.assertIn("call complete_step and say so", msg)
 
     def test_text_reply_cannot_skip_the_gate(self):
-        self.h.set_mode("plan")
+        self.h.set_mode("coding")
         self.h.plan = self.tdd_plan()
         self.h.plan.steps[0].status = "done"
         (self.wd / "tests" / "test_calc.py").write_text(calc_tests(False, True))

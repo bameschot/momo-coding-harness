@@ -155,8 +155,12 @@ class Sections(Base):
         role = self.h.system_prompt_sections()[0]
         self.assertIn("Current draft plan", role["text"])
         self.h.plan_phase = "executing"
+        role = self.h.system_prompt_sections()[0]   # paused, seen from plan mode
+        self.assertIn("Plan in progress", role["text"])
+        self.assertNotIn("Current draft plan", role["text"])
+        self.h.set_mode("coding")                   # an approved plan runs in coding mode
         role = self.h.system_prompt_sections()[0]
-        self.assertEqual(role["label"], "Role: plan (executing)")
+        self.assertEqual(role["label"], "Role: coding (executing plan)")
         self.assertIn("Current plan state", role["text"])
 
     def test_tool_count_follows_choices(self):
