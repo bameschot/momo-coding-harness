@@ -53,6 +53,16 @@ class WebServer(unittest.TestCase):
         conn.close()
         return r, data
 
+    def test_export_full_download(self):
+        self.h.messages += [{"role": "user", "content": "hi"},
+                            {"role": "thinking", "content": "PONDER"}]
+        r, data = self.request("GET", "/api/export")
+        self.assertNotIn(b"PONDER", data)
+        r, data = self.request("GET", "/api/export?full=1")
+        self.assertEqual(r.status, 200)
+        self.assertIn(b"PONDER", data)
+        self.assertIn("-full.md", r.getheader("Content-Disposition"))
+
     def test_static_file_revalidates_with_etag(self):
         r, body = self.request("GET", "/app.js")
         self.assertEqual(r.status, 200)

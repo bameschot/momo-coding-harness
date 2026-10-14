@@ -70,7 +70,8 @@ def save(ts: str, model: str, mode: str, workdir: Path,
          disabled_tools: dict[str, list[str]] | None = None,
          title: str = "",
          title_turn: int = 0,
-         title_locked: bool = False):
+         title_locked: bool = False,
+         compacted: list[dict] | None = None):
     data = {
         "created_at": ts,
         "model": model,
@@ -94,6 +95,7 @@ def save(ts: str, model: str, mode: str, workdir: Path,
         "title_turn": title_turn,
         "title_locked": title_locked,
         "messages": messages,
+        "compacted": compacted or [],
     }
     atomic_write(session_path(ts), json.dumps(data, indent=2))
 

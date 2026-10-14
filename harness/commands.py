@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from . import code_index, ignore_rules
@@ -12,7 +13,8 @@ from . import run_store as run_store_mod
 from . import search as search_mod
 from . import session as session_mod
 from . import tools as tools_mod
-from .harness import MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness
+from . import transcript as transcript_mod
+from .harness import MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness, _mask_messages
 from .llm.base import THINK_LEVELS
 from .tools import dispatch
 
@@ -389,6 +391,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             plan_note = "; " + harness.cancel_plan()  # also refreshes messages[0]
         system_msg = harness.messages[0]
         harness.messages = [system_msg]
+        harness.compacted = []
         harness.drop_run_logs()
         guides_note = harness.reload_guides()
         harness.refresh_status()
@@ -961,8 +964,12 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return CommandResult(handled=True, output="Recent sessions:\n" + "\n".join(lines))
 
     if cmd == "/export":
-        filename = arg.strip() or f"conversation-{harness._ts}.md"
-        rendered = render_markdown(harness.messages)
+        parts = arg.split(None, 1)
+        full = bool(parts) and parts[0] == "full"
+        if full:
+            arg = parts[1] if len(parts) > 1 else ""
+        filename = arg.strip() or f"conversation-{'full-' if full else ''}{harness._ts}.md"
+        rendered = export_markdown(harness, full)
         out = harness.workdir / filename
         try:
             out.write_text(rendered, encoding="utf-8")
@@ -1028,13 +1035,24 @@ def _mask_token(t: str) -> str:
     return t[:2] + "*" * (n - 5) + t[-3:]
 
 
-def render_markdown(messages: list[dict]) -> str:
+def _fence(text: str, lang: str = "") -> str:
+    """`text` in a code fence longer than any backtick run inside it."""
+    longest = max((len(r) for r in re.findall(r"`+", text)), default=0)
+    ticks = "`" * max(3, longest + 1)
+    return f"{ticks}{lang}\n{text}\n{ticks}"
+
+
+def render_markdown(messages: list[dict], full: bool = False,
+                    archive: list[dict] = (), meta: dict | None = None) -> str:
+    """The conversation as Markdown.  `full` renders everything the harness
+    holds: the system prompt, thinking, tool calls with their arguments, and the
+    messages compaction removed (`archive`, see transcript.py), headed by `meta`."""
+    if full:
+        return _render_full(messages, archive, meta or {})
     parts = []
     for m in messages:
         role = m.get("role")
-        content = m.get("content") or ""
-        if isinstance(content, list):
-            content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+        content = _content_text(m)
         if role in ("system", "thinking"):
             continue
         if role == "user":
@@ -1044,8 +1062,72 @@ def render_markdown(messages: list[dict]) -> str:
                 parts.append(f"**Assistant:**\n\n{content}")
         elif role == "tool":
             name = m.get("name", "tool")
-            parts.append(f"**Tool result ({name}):**\n\n```\n{content}\n```")
+            parts.append(f"**Tool result ({name}):**\n\n{_fence(content)}")
     return "\n\n---\n\n".join(parts) + "\n"
+
+
+def _render_full(messages: list[dict], archive: list[dict], meta: dict) -> str:
+    head = ["# momo conversation log (full)", ""]
+    for key, label in (("title", "Title"), ("session", "Session"), ("model", "Model"),
+                       ("provider", "Provider"), ("host", "Host"), ("mode", "Mode"),
+                       ("workdir", "Workspace"), ("exported", "Exported")):
+        if meta.get(key):
+            head.append(f"- **{label}:** {meta[key]}")
+    parts = ["\n".join(head)]
+    for m, note in transcript_mod.full_transcript(messages, archive):
+        body = _render_full_message(m)
+        if body is None:
+            continue
+        parts.append(f"*[{note}]*\n\n{body}" if note else body)
+    return "\n\n---\n\n".join(parts) + "\n"
+
+
+def _render_full_message(m: dict) -> str | None:
+    role = m.get("role")
+    content = _content_text(m)
+    if role == "system":
+        return f"**System prompt:**\n\n{_fence(content)}"
+    if role == "thinking":
+        label = "Thinking (not sent back)" if m.get("unsent") else "Thinking"
+        return f"**{label}:**\n\n{_fence(content)}"
+    if role == "user":
+        return f"**You:**\n\n{content}"
+    if role == "tool":
+        return f"**Tool result ({m.get('name', 'tool')}):**\n\n{_fence(content)}"
+    if role == "assistant":
+        out = [f"**Assistant:**\n\n{content}"] if content else []
+        for c in (_mask_messages([m])[0].get("tool_calls") or []):
+            fn = c.get("function", c)
+            args = fn.get("arguments")
+            if not isinstance(args, str):
+                args = json.dumps(args or {}, indent=2, ensure_ascii=False, default=str)
+            out.append(f"**Tool call: `{fn.get('name', '?')}`**\n\n{_fence(args, 'json')}")
+        return "\n\n".join(out) or "**Assistant:** *(empty reply)*"
+    return f"**{role}:**\n\n{_fence(content)}"
+
+
+def export_markdown(harness, full: bool = False) -> str:
+    """The conversation as /export and the web download write it."""
+    if not full:
+        return render_markdown(harness.messages)
+    meta = {
+        "title": harness.title,
+        "session": harness.session_path().stem,
+        "model": harness.client.model,
+        "provider": harness.provider,
+        "host": harness.client.host,
+        "mode": harness.mode,
+        "workdir": str(harness.workdir),
+        "exported": datetime.now().isoformat(timespec="seconds"),
+    }
+    return render_markdown(harness.messages, full=True, archive=harness.compacted, meta=meta)
+
+
+def _content_text(m: dict) -> str:
+    content = m.get("content") or ""
+    if isinstance(content, list):
+        content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return content
 
 
 def _last_assistant_text(messages: list[dict]) -> str:
@@ -1174,6 +1256,7 @@ Available commands:
   /title [text|auto]  Show or set the session title (auto = let the model name it)
   /session-titles on|off  Model-generated session titles, refreshed when idle (default on)
   /export [filename]  Export conversation to a Markdown file
+  /export full [filename]  Export the full log: system prompt, thinking, tool calls, compacted history
   /copy               Copy last assistant message to clipboard
   /copy all           Copy full conversation to clipboard
   /cost               Show token usage for this session by mode and model

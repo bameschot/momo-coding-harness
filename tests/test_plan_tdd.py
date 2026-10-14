@@ -320,7 +320,8 @@ class Commands(unittest.TestCase):
         planned = "python3 -m unittest discover -s tests -t ."
         for ran, same in [(planned, True), (planned + " -v", True), ("  " + planned, True),
                           (planned + " -v 2>&1 | tail -25", True),      # run_command strips it
-                          (planned + " 2>&1 | grep -E 'OK|FAIL'", False), (planned + "; echo $?", False),
+                          (planned + " 2>&1 | grep -E 'OK|FAIL'", True),    # this too
+                          (planned + " | grep -v OK", False), (planned + "; echo $?", False),
                           (planned + " > out.txt", False), ("python3 -m unittest tests.test_x", False),
                           (planned + " && rm -rf x", False), ("$(echo " + planned + ")", False)]:
             self.assertEqual(tdd.same_command(ran, planned), same, ran)

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import re
 import queue
+import shlex
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import session as session_mod
@@ -20,6 +22,7 @@ from .tools import (ALL_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, NE
                     PLAN_TDD_INVESTIGATE_TOOLS, dispatch, render_tool_reference,
                     with_edit_features, with_index_tools, with_run_mode)
 from . import tdd as tdd_mod
+from . import transcript as transcript_mod
 from .editing import EDIT_FEATURES
 from . import run_store as run_store_mod
 from . import net as net_mod
@@ -54,6 +57,16 @@ _TDD_MAX_REFUSALS = 3   # gate refusals in a row before the user is asked
 # across them (tdd gate reuse).  Any other call, run_command included, ends it.
 _KEEPS_GREEN = ({t["function"]["name"] for t in tools_mod.READ_ONLY_TOOLS + tools_mod.CODE_NAV_TOOLS}
                 | set(INDEX_TOOL_NAMES) | {"command_output", "ask_user", "complete_step"})
+
+
+def _run_key(command: str) -> tuple | str:
+    """A run_command as the re-run check compares it: without a trailing view
+    pipe or verbosity flags, since the earlier log answers those too."""
+    base = tools_mod._split_view_pipe(command)[0]
+    try:
+        return tuple(t for t in shlex.split(base) if t not in tdd_mod._VERBOSITY)
+    except ValueError:
+        return base
 
 # Steps a planner writes that a TDD plan does itself: running or keeping the
 # suite green ("Run the full test suite", "Keep existing add tests green") and
@@ -373,6 +386,10 @@ class Harness:
         # was written since: the gate takes it instead of running the suite again.
         self._tdd_green = False
         self._last_run_exit: int | None = None
+        # The last run_command (its compare key, its log) while nothing has written
+        # since, and the last call that failed: _annotate_result notes a repeat.
+        self._last_run: tuple | None = None
+        self._last_failed_call: tuple[str, str] | None = None
         self._tool_ref = ""
         # How the prompt's tool reference is rendered: "full" (every description
         # and parameter table) or "compact" (one line per tool; the native
@@ -401,6 +418,8 @@ class Harness:
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
         ]
+        # What compaction took out of `messages`, for the full export (transcript.py).
+        self.compacted: list[dict] = []
         self._token_estimate = 0
         self._stream_chars = 0      # chars of the reply currently streaming in
         self._measured_tokens: int | None = None  # last prompt+eval the server reported
@@ -1058,6 +1077,7 @@ class Harness:
     def drop_run_logs(self) -> None:
         """Delete the saved command output: the conversation that could refer to
         it is gone (/clear, /new, a loaded session)."""
+        self._last_run = None
         if self._run_store is not None:
             self._run_store.clear()
             self._run_store = None
@@ -1432,7 +1452,11 @@ class Harness:
             if self._cancel.is_set():
                 return False, "Compaction cancelled — history unchanged."
 
-        # Commit.
+        # Commit.  Archive first: the trims below change the messages in place.
+        self.compacted = transcript_mod.archive_compaction(
+            self.compacted, msgs, drop, trims, keep_idx,
+            max((r["n"] for r in self.compacted), default=0) + 1,
+            datetime.now().isoformat(timespec="seconds"))
         # (In place: _turn_user tracks the running turn's message by identity.)
         for k, text in trims.items():
             msgs[k]["content"] = text
@@ -1734,6 +1758,7 @@ class Harness:
         executing = self._plan_executing()
         plan_approved = False
         self._step_summary = None  # set by complete_step; ends the loop after this batch
+        self._last_run = self._last_failed_call = None  # the user may have changed files
 
         iteration = 0
         tool_only_turns = 0
@@ -2069,6 +2094,7 @@ class Harness:
                         if cutoff < self.max_tool_result // 2:
                             cutoff = self.max_tool_result
                         result = result[:cutoff] + f"\n... (truncated after {cutoff} chars of {total} — use read_file with start_line/end_line for specific sections)"
+                result = self._annotate_result(name, args, result)
 
                 # For mutating tools, show a diff of what changed on disk instead
                 # of the terse "OK" result. Falls back to ToolResultEvent on errors
@@ -2417,6 +2443,41 @@ class Harness:
                          "them yourself: " + ", ".join(left) + "\n")
         return text + "Tests tagged for later steps stay skipped.\n\n" + done
 
+    def _annotate_result(self, name: str, args: dict, result: str) -> str:
+        """Notes on a tool result that only the history can give: the exact call
+        that just failed, made again (a plan run sent one failing edit_file twice),
+        and a run_command repeated while nothing was written, which the 9B does to
+        grep another slice of a test run (8 of 14 suite runs in one plan run, and
+        no command_output call despite the footer's pointer to it)."""
+        key = (name, json.dumps(args, sort_keys=True, default=str))
+        failed = result.startswith("ERROR")
+        if failed and key == self._last_failed_call:
+            result += ("\n(You made this exact call just before and it failed the same way "
+                       "— change the arguments, re-reading the file if unsure, instead of "
+                       "repeating it.)")
+        self._last_failed_call = key if failed else None
+        if name == "run_command":
+            return self._rerun_note(str(args.get("command") or ""), result)
+        if name not in _KEEPS_GREEN:
+            self._last_run = None
+        return result
+
+    def _rerun_note(self, command: str, result: str) -> str:
+        """A new-mode run_command result, headed by a pointer to the earlier log
+        when the same command ran last and nothing has written since.  The run
+        happens anyway: tests can be flaky, and a command may read the network."""
+        saved = re.search(r"^\[output saved: (.+?) — ", result, re.MULTILINE)
+        if self.run_mode != "new" or not saved:
+            self._last_run = None
+            return result
+        key = _run_key(command)
+        last, self._last_run = self._last_run, (key, saved.group(1))
+        if last is None or last[0] != key:
+            return result
+        return (f"[same command as {Path(last[1]).name} and no files changed since — "
+                f'command_output(path="{last[1]}", grep="…") shows any part of that output '
+                f"without running it again]\n" + result)
+
     def _track_tdd_green(self, name: str, args: dict):
         """After each tool call of a running TDD stage: a passing run of exactly the
         plan's test command makes the suite green; anything that may write ends it."""
@@ -2742,6 +2803,8 @@ class Harness:
             title=self.title,
             title_turn=self._title_turn,
             title_locked=self.title_locked,
+            compacted=[{**r, "message": _mask_messages([r["message"]])[0]}
+                       for r in self.compacted],
         )
         session_mod.save_prefs(model=self.client.model, provider=self.provider)
 
@@ -2756,6 +2819,7 @@ class Harness:
         self._ts = path.stem
         self.logger = Logger(self._ts)
         self.messages = data["messages"]
+        self.compacted = data.get("compacted", [])
         # Sessions saved in a mode that no longer exists (e.g. the removed
         # "writing" mode) fall back to design mode.
         mode = data.get("mode", "design")
@@ -2860,6 +2924,7 @@ class Harness:
         self.disabled_tools = {}
         self._guides = self._read_guides() if self.guides else []
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
+        self.compacted = []
         self._token_estimate = self._estimate(schemas=True)
         self._measured_tokens = None
         self.emit_status()

@@ -401,10 +401,11 @@ def _find_edit(text: str, old_string: str, new_string: str, replace_all: bool,
 
 # ── hints for an old_string that did not match ───────────────────────────────
 
-def _closest_lines_hint(content: str, old_string: str) -> str:
+def _closest_lines_hint(content: str, old_string: str, diff: bool = False) -> str:
     """Find the file lines most similar to old_string and return them verbatim so
-    the model can copy the exact text on its next attempt. Returns '' if nothing is
-    close enough."""
+    the model can copy the exact text on its next attempt, and with diff (the match
+    feature) where a one-line old_string differs from the closest. Returns '' if
+    nothing is close enough."""
     file_lines = content.splitlines()
     old_nonblank = [ln for ln in old_string.split("\n") if ln.strip()]
     if not old_nonblank or not file_lines:
@@ -416,15 +417,32 @@ def _closest_lines_hint(content: str, old_string: str) -> str:
     as_written: dict[str, str] = {}
     for ln in file_lines:
         as_written.setdefault(ln.strip(), ln)
-    best = [as_written[m][:200]
-            for m in difflib.get_close_matches(query, list(as_written), n=3, cutoff=0.6)]
-    if not best:
+    close = difflib.get_close_matches(query, list(as_written), n=3, cutoff=0.6)
+    if not close:
         return ""
-    return (
-        " The closest lines in the file are below — copy old_string exactly from these, "
-        "including leading whitespace and WITHOUT the read_file line-number prefix:\n"
-        + "\n".join(best)
-    )
+    out = (" The closest lines in the file are below — copy old_string exactly from these, "
+           "including leading whitespace and WITHOUT the read_file line-number prefix:\n"
+           + "\n".join(as_written[m][:200] for m in close))
+    if diff and len(old_nonblank) == 1 and close[0] != query:
+        # One line: say where the best one is and where it differs — the model
+        # sent the same miss twice when it only had the line to compare by eye.
+        n = next(i for i, ln in enumerate(file_lines) if ln.strip() == close[0]) + 1
+        yours, theirs = _first_difference(query, close[0])
+        out += f"\nFirst difference — yours: `{yours}`; the file's line {n}: `{theirs}`"
+    return out
+
+
+def _first_difference(a: str, b: str, around: int = 30) -> tuple[str, str]:
+    """a and b cut to the stretch where they first differ, `around` chars of
+    common text on each side, with … where text was cut."""
+    op = next(o for o in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+              if o[0] != "equal")
+    _, i1, i2, j1, j2 = op
+
+    def cut(s: str, lo: int, hi: int) -> str:
+        start, end = max(0, lo - around), min(len(s), hi + around)
+        return ("…" if start else "") + s[start:end] + ("…" if end < len(s) else "")
+    return cut(a, i1, i2), cut(b, j1, j2)
 
 
 def _numbered(lines: list[str], first: int) -> str:
@@ -938,7 +956,7 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
             except Exception:
                 pass
         hint = _closest_block_hint(content, old_string) if match else ""
-        msg += hint or _closest_lines_hint(content, old_string)
+        msg += hint or _closest_lines_hint(content, old_string, match)
         if ("symbol" in features and lang is not None
                 and _strip_lineno_prefixes(old_string).strip("\n").count("\n") >= 10):
             msg += ("\nTo rewrite a whole function or class, replace_symbol(path, name, "
@@ -1150,7 +1168,7 @@ def edit_files(edits, *, workdir: Path, index=None, cancel=None,
             else:
                 msg = "old_string not found in the file."
                 if match:
-                    msg += (_closest_block_hint(text, old) or _closest_lines_hint(text, old))
+                    msg += (_closest_block_hint(text, old) or _closest_lines_hint(text, old, True))
                 else:
                     msg += _closest_lines_hint(text, old)
             return (f"ERROR: {where}: {msg}\nNothing was written — no file was changed. Fix "

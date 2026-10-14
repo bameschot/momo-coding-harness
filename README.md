@@ -280,6 +280,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
 | System prompt… | `/system-prompt` | View → Other: a side panel with the [composed system prompt](#seeing-the-system-prompt), part by part. The CTX popover links to it too |
 | Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
+| Download full log | `/export full` | Downloads everything momo holds for the session: the system prompt, thinking, every tool call with its arguments, full tool results, and the messages context compaction removed (marked as such) |
 
 Typing the TUI command in the browser (e.g. `/think-output off`) has the same effect as the menu.
 
@@ -390,7 +391,7 @@ The page talks to the harness through a small JSON API, which can also be script
 | `POST /api/sessions/delete` `{"names": [...]}` | Delete saved sessions (and their logs) by name. Returns `{deleted, skipped: [{name, reason}]}`; the current session and anything that isn't a plain session name are skipped |
 | `GET /api/tools` | The current mode's tools: `{mode, tools_enabled, tools: [{name, group, enabled, locked, note, desc, params}]}` |
 | `GET /api/system-prompt` | The composed system prompt: `{mode, text, total_tokens, sections: [{key, label, tokens, text}], schemas: {label, tokens, text}}` |
-| `GET /api/export` | The conversation as a Markdown download |
+| `GET /api/export` | The conversation as a Markdown download; `?full=1` for the full log |
 | `GET /api/files?path=&hidden=0\|1` | Workspace directory listing |
 | `GET /api/file?path=` | A workspace file converted to text (same conversion as uploads) |
 | `GET /api/files/search?q=` | Fuzzy workspace path search (top 30) |
@@ -1223,6 +1224,7 @@ Type any command in the input bar:
 | `/session <name>` | Load a saved session by exact name or partial prefix (e.g. `2026-06-22` matches the first session from that date) |
 | `/export` | Export the conversation to a Markdown file in the working directory (filename: `conversation-<timestamp>.md`) |
 | `/export <filename>` | Export to a specific filename |
+| `/export full [filename]` | Export the full log: system prompt, thinking, tool calls with arguments, complete tool results, and the history compaction removed (default filename: `conversation-full-<timestamp>.md`). Secret request headers are masked. Compacted messages are kept in the session file for this, from compactions made after this feature landed |
 | `/copy` | Copy the last assistant message to the clipboard (tries `pbcopy`, then `xclip`, then `xsel`) |
 | `/copy all` | Copy the full conversation to the clipboard |
 | `/ls [path]` | List directory contents directly (no model round-trip) |

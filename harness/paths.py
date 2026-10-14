@@ -31,6 +31,11 @@ def split_lines(text: str, keepends: bool = False) -> list[str]:
     return [p[:-1] if p.endswith("\r") else p for p in parts]
 
 
+def _outside(workdir: Path) -> str:
+    # Naming the directory saves the model guessing which paths would work.
+    return f"ERROR: path outside working directory ({workdir.resolve()}) — use a path inside it"
+
+
 def safe_path(raw: str, workdir: Path) -> Path | str:
     """raw resolved against the workdir, or an ERROR string when it leaves it."""
     if "\0" in raw:
@@ -39,7 +44,7 @@ def safe_path(raw: str, workdir: Path) -> Path | str:
     try:
         p.relative_to(workdir.resolve())
     except ValueError:
-        return "ERROR: path outside working directory"
+        return _outside(workdir)
     return p
 
 
@@ -56,7 +61,7 @@ def safe_entry_path(raw: str, workdir: Path) -> Path | str:
     try:
         parent.relative_to(root)
     except ValueError:
-        return "ERROR: path outside working directory"
+        return _outside(workdir)
     return parent / q.name
 
 

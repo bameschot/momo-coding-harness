@@ -1009,7 +1009,7 @@ ollama serve</code></pre></div>
       <tr><td><kbd>Shift+Tab</kbd></td><td>anywhere</td><td class="wrap">Cycle mode</td></tr>
       <tr><td><kbd>Shift+T</kbd> / <kbd>M</kbd> / <kbd>D</kbd> / <kbd>Q</kbd> / <kbd>P</kbd> / <kbd>C</kbd></td><td>outside the input</td><td class="wrap">Same as in the <a href="#tui">TUI</a></td></tr>
     </table></div>
-    <p><strong>What differs from the TUI:</strong> <code>/exit</code> and <code>/quit</code> don't work from the browser (close the tab, or quit in the terminal). <code>/copy</code> copies to the clipboard of the machine running momo; use a code block's <strong>Copy</strong> button for your own. <code>/export</code> writes into the workspace on that machine; the View menu's <strong>Download conversation</strong> saves it in your browser instead.</p>
+    <p><strong>What differs from the TUI:</strong> <code>/exit</code> and <code>/quit</code> don't work from the browser (close the tab, or quit in the terminal). <code>/copy</code> copies to the clipboard of the machine running momo; use a code block's <strong>Copy</strong> button for your own. <code>/export</code> writes into the workspace on that machine; the View menu's <strong>Download conversation</strong> saves it in your browser instead (<strong>Download full log</strong> for <code>/export full</code>).</p>
   </section>
 
   <section id="skills" data-voice="skills">
@@ -1614,6 +1614,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/sessions</code></td><td class="wrap">Recent sessions with their mode and model</td></tr>
       <tr><td><code>/session [name]</code></td><td class="wrap">Show the current session, or load one by name or prefix</td></tr>
       <tr><td><code>/export [file]</code></td><td class="wrap">The conversation as Markdown, saved in the workspace</td></tr>
+      <tr><td><code>/export full [file]</code></td><td class="wrap">The full log: system prompt, thinking, tool calls with arguments, complete tool results, and what context compaction removed</td></tr>
       <tr><td><code>/copy [all]</code></td><td class="wrap">Copy the last reply, or everything, to the clipboard</td></tr>
       <tr><td><code>/ls</code>, <code>/read</code>, <code>/grep</code></td><td class="wrap">Inspect files directly, with no model round-trip</td></tr>
       <tr><td><code>/exit</code>, <code>/quit</code></td><td class="wrap">Save and exit</td></tr>
@@ -1632,7 +1633,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>POST /api/mode</code></td><td class="wrap"><code>{"mode": "coding"}</code></td></tr>
       <tr><td><code>GET /api/sessions</code></td><td class="wrap">Recent sessions</td></tr>
       <tr><td><code>POST /api/sessions/delete</code></td><td class="wrap"><code>{"names": [...]}</code>: delete saved sessions and their logs. The current one is always kept.</td></tr>
-      <tr><td><code>GET /api/export</code></td><td class="wrap">The conversation as a Markdown download</td></tr>
+      <tr><td><code>GET /api/export</code></td><td class="wrap">The conversation as a Markdown download; <code>?full=1</code> for the full log</td></tr>
     </table></div>
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>curl -s localhost:8765/api/state | jq .status
 curl -s -X POST localhost:8765/api/submit -H 'Content-Type: application/json' -d '{"text": "/context"}'

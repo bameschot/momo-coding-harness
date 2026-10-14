@@ -18,7 +18,7 @@ Routes
   GET  /api/index     code index memory broken down per category and language
   GET  /api/tools     the current mode's tools and whether each is on (/tools)
   GET  /api/system-prompt the composed system prompt in its parts (/system-prompt)
-  GET  /api/export    the conversation as a Markdown download
+  GET  /api/export    the conversation as a Markdown download (?full=1: the full log)
   GET  /api/files     ?path= → directory listing (read-only, confined to the workspace)
   GET  /api/file      ?path= → file contents as text (same conversion as uploads)
   GET  /api/files/search ?q= → fuzzy path search for @-mentions
@@ -61,7 +61,7 @@ from .. import ignore_rules
 from ..file_search import fuzzy_search, workspace_files
 from .. import session as session_mod
 from ..paths import SKIP_DIRS, safe_path
-from ..commands import help_commands, render_markdown
+from ..commands import export_markdown, help_commands
 from ..controller import Controller
 from ..events import ErrorEvent, event_to_json
 from ..prompts import MODES
@@ -421,9 +421,11 @@ class WebServer:
                 elif path == "/api/last-user":
                     self._json(web.controller.last_user_message() or {})
                 elif path == "/api/export":
-                    body = render_markdown(h.messages).encode("utf-8")
+                    full = arg("full") == "1"
+                    body = export_markdown(h, full).encode("utf-8")
+                    name = f"momo-{h.session_path().stem}{'-full' if full else ''}.md"
                     self._send(HTTPStatus.OK, body, "text/markdown; charset=utf-8", headers={
-                        "Content-Disposition": f'attachment; filename="momo-{h.session_path().stem}.md"'})
+                        "Content-Disposition": f'attachment; filename="{name}"'})
                 elif path == "/api/files":
                     res = _list_workspace(h.workdir, arg("path"), arg("hidden") == "1")
                     if isinstance(res, str):

@@ -310,9 +310,9 @@ _SHELL_OPS = {"|", "||", "&&", ";", ">", ">>", "<", "&", "2>&1", "2>", "1>"}
 def same_command(ran: str, planned: str) -> bool:
     """Whether the model's command runs the planned one with the same exit code:
     the same words apart from verbosity flags, and no pipe or other shell
-    operator (a pipe's exit code is its last command's).  A trailing tail pipe
-    is fine: run_command takes it off and keeps the real exit code."""
-    ran = tools._split_tail(ran)[0]
+    operator (a pipe's exit code is its last command's).  A trailing tail, head
+    or grep pipe is fine: run_command takes it off and keeps the real exit code."""
+    ran = tools._split_view_pipe(ran)[0]
     if "$(" in ran or "`" in ran:
         return False
     try:

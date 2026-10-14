@@ -603,3 +603,35 @@ before item 7 and 1751 s (901–2700) after it; 9 of 12 gates reused; the drop c
 fresh, the model had run a narrower command (`-p 'test_inventory.py'`, which skips the slow
 file), which is rightly not the full suite.
 
+
+### Grep/head pipes, re-run hint, repeated failures (2026-10-14)
+
+From a long 9B normal-plan session (a Wikipedia scraper, 2 h 18 min, 174 tool calls). The suite
+ran 14 times; 11 of those runs ended in `| grep …` or `| head -N`, so failing suites were
+reported as "exit code 0". 8 runs repeated the previous command, with nothing written in
+between, just to grep another slice. `command_output` was never called. One failing `edit_file`
+was sent twice, unchanged. Fixes:
+
+- `| grep [-E|-i|-n|-e] [-A/-B/-C N] PATTERN [| head -N]` and `| head -N` now become views, the
+  way `| tail -N` already did, in both run modes.
+- A new-mode run that repeats the last command with nothing written since starts with a pointer
+  to the earlier log. It still runs.
+- An ERROR result from the exact call that just failed says so.
+- A one-line `edit_file` miss shows where it first differs.
+
+**Live check:** `--kind normal`, 2 runs per side, interleaved, clean worktrees, a 30-minute
+budget.
+
+| | time | calls | hidden | suite runs piped | unchanged re-runs in a step | repeated failures |
+|---|---|---|---|---|---|---|
+| before | 312 s, 390 s | 23, 23 | 8/8, 8/8 | 0, 0 | 0, 0 | 0, 0 |
+| after | 377 s, 288 s | 25, 23 | 8/8, 8/8 | 1, 4 (all `tail`) | 0, 0 | 0, 0 |
+
+- **No regression, but this task doesn't exercise the fixes.** The suite is small and stays
+  green, so there was no grep pipe, no re-run within a step and no edit miss on either side.
+  The four `tail` pipes in one "after" run were split as before, so their exit codes were the
+  real ones.
+- One run typed `| tail - 20`. That isn't a tail pipe the harness recognises, so it went to the
+  shell and failed.
+- Measuring these fixes needs a task where the first suite runs fail: a replay of the scraper
+  session, or a bench whose plan has to debug.

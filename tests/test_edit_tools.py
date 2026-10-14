@@ -212,6 +212,17 @@ class Matching(Base):
         self.assertIn("First difference — your line 2: `for it in self.itemz:`; the file's line 3:", out)
         self.assertEqual(self.read("inv.py"), INV)
 
+    def test_one_line_miss_shows_where_it_differs(self):
+        # The 9B sent this miss twice: one word wrong in a long line.
+        self.write("t.py", "x = 1\nlink = 'See [[C++]] for a related language and more.'\n")
+        out = self.run_tool("edit_file", path="t.py",
+                            old_string="link = 'See [[The Sun]] for a related language and more.'",
+                            new_string="x")
+        self.assertIn("\nlink = 'See [[C++]] for a related language and more.'\n", out)
+        self.assertIn("First difference — yours: `link = 'See [[The Sun]] for a related "
+                      "language and …`; the file's line 2: `link = 'See [[C++]] for a related "
+                      "language and …`", out)
+
     def test_long_old_string_points_at_replace_symbol(self):
         old = "\n".join(f"line {i}" for i in range(12))
         out = self.run_tool("edit_file", path="inv.py", old_string=old, new_string="x")
@@ -430,6 +441,7 @@ class FeaturesOff(Base):
                             new_string="x")
         self.assertTrue(out.startswith("ERROR: old_string not found in file. The closest lines "
                                        "in the file are below"), out)
+        self.assertNotIn("First difference", out)
         self.assertEqual(self.run_tool("write_file", path="inv.py", content="x = (\n"),
                          "Written: inv.py (1 line, 6 bytes)")
 

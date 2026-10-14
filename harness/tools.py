@@ -2,6 +2,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1174,21 +1175,62 @@ def _exec(command: str, timeout: int, workdir: Path, cancel, out, err):
 # A trailing "| tail -N" makes the exit code tail's own, which is always 0, so a
 # failing test run looks like a passing one.  The 9B pipes most of its test runs
 # this way, the tool description notwithstanding, sometimes adding
-# '; echo "exit=${PIPESTATUS[0]}"' to get the code back.  Such a pipe is taken
-# off and becomes the tail parameter: the same last N lines, the real exit code.
+# '; echo "exit=${PIPESTATUS[0]}"' to get the code back.  "| grep …" and
+# "| head -N" do the same (a plan run piped 11 of 14 suite runs through them and
+# was told "exit code 0" on failing suites), and each new slice meant running the
+# suite again.  Such a pipe is taken off and becomes a view of the output: the
+# same lines, the real exit code, and the whole output kept in the run log.
 _TAIL_PIPE = re.compile(
     r"\s*(?:2>&1\s*)?\|&?\s*tail\s+(?:-n\s*(\d+)|-(\d+)|--lines[= ](\d+))\s*"
     r"(?:;\s*echo\b[^;|&]*\$\{?PIPESTATUS\[0\]\}?[^;|&]*)?\s*$")
+_HEAD_N = r"head\s+(?:-n\s*(\d+)|-(\d+)|--lines[= ](\d+))"
+_HEAD_PIPE = re.compile(r"\s*(?:2>&1\s*)?\|&?\s*" + _HEAD_N + r"\s*$")
+# grep with only the flags a view can honour (-E/-i/-n need nothing; -A/-B/-C
+# become context), one pattern, and optionally a head after it, which is
+# dropped: the view is windowed anyway.  A double-quoted pattern with $ or `
+# would expand in the shell, so it is left alone.
+_GREP_PIPE = re.compile(
+    r"\s*(?:2>&1\s*)?\|&?\s*grep((?:\s+(?:-[Ein]+|-[ABC]\s*\d+|--extended-regexp))*)"
+    r"(?:\s+-e)?\s+('[^']*'|\"(?:[^\"\\$`]|\\.)*\"|[^\s'\"|;&<>()$`\\-][^\s'\"|;&<>()$`\\]*)"
+    r"(?:\s*\|\s*" + _HEAD_N + r")?\s*$")
 
 
-def _split_tail(command: str) -> tuple[str, int | None, str]:
-    """(command without a trailing tail pipe, its N, the text taken off);
-    (command, None, '') when it does not end in one."""
-    m = _TAIL_PIPE.search(command)
-    if not m or not command[:m.start()].strip():
+def _split_view_pipe(command: str) -> tuple[str, dict | None, str]:
+    """(command without a trailing tail/grep/head pipe, the view it asked for, the
+    text taken off); (command, None, '') when it does not end in one.  view is
+    {"tail": N}, {"head": N} or {"grep": pattern, "context": N}."""
+    for rx in (_TAIL_PIPE, _GREP_PIPE, _HEAD_PIPE):     # grep before head: "grep x | head -5"
+        m = rx.search(command)
+        if m:
+            break
+    else:
         return command, None, ""
-    n = int(next(g for g in m.groups() if g))
-    return command[:m.start()].rstrip(), n, m.group(0).strip()
+    base = command[:m.start()].rstrip()
+    try:
+        if not shlex.split(base):     # nothing before the pipe
+            return command, None, ""
+    except ValueError:                # the "pipe" sits inside an open quote
+        return command, None, ""
+    if rx is not _GREP_PIPE:
+        n = int(next(g for g in m.groups() if g))
+        return base, {"tail" if rx is _TAIL_PIPE else "head": n}, m.group(0).strip()
+    flags, pattern = m.group(1), shlex.split(m.group(2))[0]
+    if not ("E" in flags or "extended" in flags) and re.search(r"\\[(){}+?]", pattern):
+        return command, None, ""      # basic-regex groups mean something else in Python
+    context = max((int(c) for c in re.findall(r"-[ABC]\s*(\d+)", flags)), default=0)
+    return base, {"grep": pattern, "context": context}, m.group(0).strip()
+
+
+def _view_note(taken: str, view: dict) -> str:
+    if "grep" in view:
+        what = f"the lines matching `{view['grep']}` (case-insensitive)"
+        if view["context"]:
+            what += f" with {view['context']} lines of context"
+    elif "head" in view:
+        what = f"the first {view['head']} lines"
+    else:
+        what = f"the last {view['tail']} lines"
+    return f"(ran without `{taken}` so the exit code is the command's own; showing {what})\n"
 
 
 def _run_command(command: str, timeout: int | None = None, tail: int | None = None,
@@ -1200,16 +1242,25 @@ def _run_command(command: str, timeout: int | None = None, tail: int | None = No
     refusal, note = _web_refusal(command, net_access)
     if refusal:
         return refusal
-    command, piped, taken = _split_tail(command)
+    command, piped, taken = _split_view_pipe(command)
+    head = None
     if piped:
-        tail = min(tail, piped) if tail else piped
-        note += (f"(ran without `{taken}` so the exit code is the command's own; "
-                 f"showing the last {tail} lines)\n")
+        if "tail" in piped:
+            tail = piped["tail"] = min(tail, piped["tail"]) if tail else piped["tail"]
+        elif "head" in piped:
+            head = piped["head"]
+        elif grep:                    # the model's own grep= wins over the piped one
+            piped = None
+        else:
+            grep, context = piped["grep"], max(context or 0, piped["context"])
+        if piped:
+            note += _view_note(taken, piped)
     defaulted = timeout is None
     timeout = _clamp_timeout(timeout)
     if run_mode != "classic" and run_store is not None:
         return note + _run_to_log(command, timeout, workdir, cancel, run_store,
-                                  run_output_limit, tail, grep, context, defaulted, run_exit)
+                                  run_output_limit, tail, grep, context, defaulted, run_exit,
+                                  end_line=head)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         proc, stopped = _exec(command, timeout, workdir, cancel, out, err)
         if proc is None:
@@ -1229,8 +1280,14 @@ def _run_command(command: str, timeout: int | None = None, tail: int | None = No
             tail_text = "…" + tail_text[-_STOPPED_TAIL_CHARS:]
         return (f"ERROR: {stopped}" + _longer(stopped, defaulted)
                 + (f"\n[output before it stopped]\n{tail_text}" if tail_text else ""))
-    if tail and piped:      # classic mode returns all output; a tail pipe asked for less
-        parts = ["\n".join("\n".join(parts).splitlines()[-tail:])] if parts else []
+    if piped and parts:     # classic mode returns all output; the pipe asked for less
+        lines = "\n".join(parts).splitlines()
+        if "tail" in piped:
+            parts = ["\n".join(lines[-tail:])]
+        elif "head" in piped:
+            parts = ["\n".join(lines[:head])]
+        else:
+            parts = [run_store_mod.grep(lines, grep, context)]
     if proc.returncode != 0:
         parts.append(f"[exit code: {proc.returncode}]")
     return note + ("\n".join(parts) or "(no output)")
@@ -1261,7 +1318,7 @@ def _log_view(text: str, limit: int, tail, grep, context, start_line=None, end_l
 
 
 def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, context,
-                defaulted=False, run_exit: dict | None = None) -> str:
+                defaulted=False, run_exit: dict | None = None, end_line: int | None = None) -> str:
     """/run-mode new: stdout and stderr in order in one log file, and a bounded
     view of it back, ending with the log's full path for command_output."""
     run_id, path = store.new_log()
@@ -1273,7 +1330,8 @@ def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, con
     if run_exit is not None and not stopped:
         run_exit["code"] = proc.returncode
     text = _read_log(path)
-    body, hint = _log_view(text, limit, tail, grep, context)
+    body, hint = _log_view(text, limit, tail, grep, context,
+                           1 if end_line else None, end_line)
     foot = run_store_mod.footer(path, text, proc.returncode, hint or bool(stopped), stopped)
     if stopped:
         head = f"ERROR: {stopped}" + _longer(stopped, defaulted)    # the log path stays last
