@@ -11,6 +11,7 @@ import collections
 import dataclasses
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -184,6 +185,13 @@ class EventBus:
         self._latest: dict[str, Any] = {}
 
     def put(self, ev: Any):
+        # When it happened (the web UI shows it), unless the event says already:
+        # transcript_events sets None on events rebuilt from a saved session.
+        if not hasattr(ev, "_ts"):
+            try:
+                ev._ts = time.time()
+            except AttributeError:      # a slotted or frozen event: no time, no harm
+                pass
         with self._lock:
             kind = type(ev).__name__
             if kind in self._LATEST_ONLY:
@@ -227,4 +235,4 @@ def event_to_json(ev: Any) -> dict:
     snake = "".join("_" + c.lower() if c.isupper() and i else c.lower()
                     for i, c in enumerate(name))
     data = dataclasses.asdict(ev) if dataclasses.is_dataclass(ev) else {}
-    return {"type": snake, **data}
+    return {"type": snake, **data, "ts": getattr(ev, "_ts", None)}

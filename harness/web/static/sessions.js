@@ -60,6 +60,17 @@ function renameInPlace(item, title) {
   field.select();
 }
 
+// Which date heading a session goes under (the list comes newest first).
+function dayGroup(mtime) {
+  const startOfToday = new Date().setHours(0, 0, 0, 0) / 1000;
+  if (mtime >= startOfToday) return "Today";
+  if (mtime >= startOfToday - 86400) return "Yesterday";
+  if (mtime >= startOfToday - 6 * 86400) return "This week";
+  return "Earlier";
+}
+
+const folderName = (path) => String(path || "").split(/[\\/]/).filter(Boolean).pop() || "";
+
 // Whether a row matches the filter box: title, first message, folder, model, name.
 function matches(x, q) {
   return !q || [x.title, x.preview, x.workdir, x.model, x.mode, x.name]
@@ -85,7 +96,10 @@ function renderSessions() {
   const shown = data.sessions.filter((x) => matches(x, q));
   if (!data.sessions.length) items.push(el("div", "muted", "No saved sessions yet."));
   else if (!shown.length) items.push(el("div", "muted", "No session matches the filter."));
+  let heading = null;
   for (const x of shown) {
+    const group = dayGroup(x.mtime);
+    if (group !== heading) { items.push(el("div", "session-group", group)); heading = group; }
     const current = x.name === data.current;
     const item = el("div", "session-item");
     const row = el("button", `session-row${current ? " current" : ""}`);
@@ -94,7 +108,8 @@ function renderSessions() {
     const first = x.title && x.preview ? `\n${x.preview}` : "";
     row.title = `${x.name}${current ? " (open now)" : ""}${first}\n${x.workdir}`;
     row.append(el("span", "session-preview", label),
-               el("span", "session-meta", `${x.mode} · ${x.model} · ${x.messages} msgs · ${ago(x.mtime)}`));
+               el("span", "session-meta", [folderName(x.workdir), x.mode, x.model, `${x.messages} msgs`, ago(x.mtime)]
+                 .filter(Boolean).join(" · ")));
     if (selecting) {
       const cb = el("input");
       cb.type = "checkbox";

@@ -95,6 +95,10 @@ def transcript_events(messages: list[dict]) -> list[Any]:
             cid = msg.get("tool_call_id") or ""
             name = call_id_to_name.get(cid) or msg.get("name") or ""
             events.append(ToolResultEvent(name, content))
+    # A saved session doesn't record when things happened: no time beats the
+    # time of loading (EventBus.put would stamp it).
+    for ev in events:
+        ev._ts = None
     return events
 
 

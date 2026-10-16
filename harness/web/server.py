@@ -74,7 +74,7 @@ _STATIC_FILES = {
     "/app.css":  ("app.css",    "text/css; charset=utf-8"),
     **{f"/{name}": (name, "text/javascript; charset=utf-8")
        for name in ("app.js", "dom.js", "markdown.js", "highlight.js", "notify.js",
-                    "companion.js", "sessions.js", "files.js", "chips.js", "palette.js")},
+                    "companion.js", "sessions.js", "files.js", "chips.js", "palette.js", "find.js")},
 }
 _MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
@@ -484,7 +484,9 @@ class WebServer:
                         try:
                             ev = sub.get(timeout=_KEEPALIVE_S)
                         except queue.Empty:
-                            self.wfile.write(b": ping\n\n")
+                            # A named event, not an SSE comment: the page sees it
+                            # and can tell a stalled stream from a quiet one.
+                            self.wfile.write(b"event: ping\ndata: \n\n")
                             self.wfile.flush()
                             continue
                         chunks = [ev]

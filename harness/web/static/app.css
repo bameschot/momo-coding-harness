@@ -38,7 +38,10 @@
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   /* One scale for corners and type, used everywhere below. */
   --r-xs: 4px; --r-sm: 6px; --r: 8px; --r-lg: 12px; --r-pill: 999px;
-  --fs-xs: 11px; --fs-sm: 12px; --fs: 13px; --fs-md: 14px;
+  /* Type follows --base-fs (View → Text size: 14 / 15 / 17px), the UI's sizes with it. */
+  --base-fs: 15px;
+  --fs-xs: calc(var(--base-fs) - 4px); --fs-sm: calc(var(--base-fs) - 3px);
+  --fs: calc(var(--base-fs) - 2px); --fs-md: calc(var(--base-fs) - 1px);
 }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"]  { color-scheme: dark; }
@@ -53,7 +56,7 @@ body {
   height: 100dvh;
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.55 var(--sans);
+  font: var(--base-fs)/1.55 var(--sans);
   overflow: hidden;
 }
 button, select, input, textarea { font: inherit; color: inherit; }
@@ -475,7 +478,7 @@ details.think.live summary { font-style: italic; }
 }
 
 @media (max-width: 640px) {
-  body { font-size: var(--fs-md); }
+  :root { --base-fs: 14px; }   /* "Medium" on a phone; Small and Large set their own */
   .collapse, .hint, .ctx-label { display: none; }
   /* The top row fits a phone without the name; the chips scroll sideways. */
   .status-row { gap: 4px; }
@@ -669,3 +672,57 @@ details.tool-group .group-err { color: var(--danger); }
 /* A stretch with a single tool call needs no summary line of its own. */
 details.tool-group.single > summary { display: none; }
 details.tool-group.single > .tool-group-body { margin-left: 0; padding-left: 0; border-left: 0; }
+
+/* ── second usability round ─────────────────────────────────────────────── */
+/* Plan steps and task items: in progress stands out, skipped steps step back. */
+.md li.task { list-style: none; margin-left: -1.2em; }
+.md li.task-current { font-weight: 600; color: var(--focus); }
+.md li.task-skipped { color: var(--muted); text-decoration: line-through; }
+.md li.task-done { color: var(--muted); }
+/* Long code blocks fold to about 30 lines, fading out. */
+.code-block.folded pre { max-height: calc(30 * var(--fs) * 1.55 + 38px); overflow: hidden; }   /* 30 lines + padding */
+.code-block.folded::after {
+  content: ""; position: absolute; left: 1px; right: 1px; bottom: 26px; height: 48px; pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--code-bg)); border-radius: 0 0 var(--r) var(--r);
+}
+.code-more { margin: 2px 0 0; }
+/* Wide transcript: the conversation and the composer use the whole width. */
+body.wide #transcript > *, body.wide #composer > * { max-width: none; }
+.workdir-btn { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: var(--muted); }
+.workdir-btn:hover { color: var(--text); text-decoration: underline dotted; }
+/* Connection lost: shown over the composer, typing keeps working. */
+.offline-bar {
+  margin-bottom: 8px; padding: 5px 10px; border-radius: var(--r); font-size: var(--fs-sm);
+  border: 1px solid var(--warn); color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+}
+.offline-bar.back { border-color: var(--ok); color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--surface)); }
+/* Find in conversation. */
+.find-bar {
+  position: fixed; right: 16px; top: var(--status-h, 84px); z-index: 30; display: flex; align-items: center; gap: 4px;
+  padding: 4px 6px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); box-shadow: var(--shadow);
+}
+.find-bar input { width: 220px; border: 0; background: none; padding: 4px 6px; outline: none; font-size: var(--fs); }
+mark.find-hit { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inherit; border-radius: 2px; }
+mark.find-hit.current { background: var(--warn); color: var(--surface); }
+/* Quote a selection into the composer. */
+.quote-btn { position: fixed; z-index: 25; box-shadow: var(--shadow); background: var(--surface); }
+/* Word-level changes inside a changed diff line. */
+.dl.del .dw { background: color-mix(in srgb, var(--del) 28%, transparent); border-radius: 2px; }
+.dl.add .dw { background: color-mix(in srgb, var(--add) 28%, transparent); border-radius: 2px; }
+/* When a message happened, in its hover actions. */
+.msg-time { font: var(--fs-xs) var(--mono); color: var(--muted); align-self: center; padding: 0 4px; }
+.session-group { font: 600 var(--fs-xs) var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: 10px 10px 2px; }
+/* Touch screens: targets a finger can hit. */
+@media (pointer: coarse) {
+  .icon-btn { width: 40px; height: 40px; }
+  .icon-btn.sm { width: 36px; height: 36px; }
+  .chip { min-height: 32px; padding: 4px 12px; }
+  .btn { min-height: 38px; }
+  .btn.small, .btn.quiet { min-height: 32px; }
+  .menu label, .settings label { padding: 9px 0; }
+  .tree-row { padding: 8px 6px; }
+  .session-row { padding: 12px 10px; }
+  .palette-list .p-item { padding: 11px 10px; }
+  .tool > summary, details.tool-group > summary { padding: 8px; }
+}
+

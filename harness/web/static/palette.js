@@ -21,6 +21,8 @@ export const SHORTCUTS = [
   ["/", "Commands, in the input box"],
   ["@", "Insert a workspace path, in the input box"],
   ["Ctrl+K  ⌘K", "This palette"],
+  ["Ctrl+F  ⌘F", "Find in the conversation (twice: the browser's find)"],
+  ["Alt+↑  Alt+↓", "Previous / next message you sent"],
   ["?", "These shortcuts"],
   ["Shift+T", "Thinking shown / hidden"],
   ["Shift+M", "Markdown on / off"],

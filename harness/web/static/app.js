@@ -5,9 +5,10 @@
 
 import { initChips, refreshChipMenus, renderChipMenu } from "./chips.js";
 import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
-import { $, closeLayer, confirmInline, copyWithFeedback, el, formatSize, icon, loadJSON,
+import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, formatSize, icon, loadJSON,
          makeResizable, openLayer, saveJSON, toast } from "./dom.js";
 import { initFiles, openFiles, showFile } from "./files.js";
+import { clamped, closeFind, findOpen, initFind, openFind, refreshFind } from "./find.js";
 import { addCopyButtons, renderMarkdown } from "./markdown.js";
 import { initNotify, noteActivity, notify, signal, syncNotifyControls } from "./notify.js";
 import { initPalette, openPalette } from "./palette.js";
@@ -17,7 +18,8 @@ const transcript = $("#transcript");
 const input = $("#input");
 
 // ── view options (per browser, like the TUI's local toggles) ──────────────────
-const VIEW_DEFAULTS = { tools: true, group: true, think: true, md: true, diff: true, diffStyle: "compact", companion: true };
+const VIEW_DEFAULTS = { tools: true, group: true, think: true, md: true, diff: true, diffStyle: "compact",
+                        companion: true, size: "m", wide: false };
 const view = { ...VIEW_DEFAULTS, ...loadJSON("momo.view", {}) };
 // CommandResult view fields → our keys
 const VIEW_MAP = { tool_output: "tools", think_output: "think", md_render: "md",
@@ -25,27 +27,55 @@ const VIEW_MAP = { tool_output: "tools", think_output: "think", md_render: "md",
 
 const saveView = () => saveJSON("momo.view", view);
 
-// ── light/dark theme (per browser; index.html applies the saved choice before paint) ──
+// ── theme and text size (per browser) ────────────────────────────────────────
+// momo.theme holds "light" or "dark"; absent = follow the system.  index.html
+// applies a saved choice before the first paint.
 const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+const THEMES = ["system", "light", "dark"];
+let themeChoice = ["light", "dark"].includes(loadJSON("momo.theme", null)) ? loadJSON("momo.theme", null) : "system";
 function currentTheme() {
-  return document.documentElement.dataset.theme || (darkQuery.matches ? "dark" : "light");
+  return themeChoice === "system" ? (darkQuery.matches ? "dark" : "light") : themeChoice;
 }
+function setTheme(choice) {
+  themeChoice = THEMES.includes(choice) ? choice : "system";
+  if (themeChoice === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = themeChoice;
+  saveJSON("momo.theme", themeChoice === "system" ? undefined : themeChoice);
+  renderThemeBtn();
+}
+// The button cycles System → Light → Dark; its icon and title say which is on.
 function renderThemeBtn() {
-  const dark = currentTheme() === "dark";
-  const label = dark ? "Switch to light mode" : "Switch to dark mode";
+  const next = THEMES[(THEMES.indexOf(themeChoice) + 1) % THEMES.length];
+  const now = themeChoice === "system" ? `follows the system (${currentTheme()} now)` : themeChoice;
+  const label = `Theme: ${now} — click for ${next}`;
   const btn = $("#theme-btn");
   btn.title = label;
   btn.setAttribute("aria-label", label);
-  btn.querySelector("use").setAttribute("href", dark ? "#i-sun" : "#i-moon");
+  btn.querySelector("use").setAttribute("href",
+    { system: "#i-contrast", light: "#i-sun", dark: "#i-moon" }[themeChoice]);
+  for (const r of document.querySelectorAll("input[name=theme]")) r.checked = r.value === themeChoice;
 }
-$("#theme-btn").onclick = () => {
-  const next = currentTheme() === "dark" ? "light" : "dark";
-  document.documentElement.dataset.theme = next;
-  saveJSON("momo.theme", next);
-  renderThemeBtn();
-};
-darkQuery.addEventListener("change", renderThemeBtn);  // follows the OS until the user picks
+$("#theme-btn").onclick = () => setTheme(THEMES[(THEMES.indexOf(themeChoice) + 1) % THEMES.length]);
+for (const r of document.querySelectorAll("input[name=theme]")) r.onchange = () => setTheme(r.value);
+darkQuery.addEventListener("change", renderThemeBtn);
 renderThemeBtn();
+
+// Text size (S/M/L) and the wide transcript.  Medium leaves the stylesheet's
+// size, which is smaller on a phone.
+const TEXT_SIZES = { s: "14px", l: "17px" };
+function applyAppearance() {
+  const root = document.documentElement.style;
+  if (TEXT_SIZES[view.size]) root.setProperty("--base-fs", TEXT_SIZES[view.size]);
+  else root.removeProperty("--base-fs");
+  document.body.classList.toggle("wide", !!view.wide);
+  for (const r of document.querySelectorAll("input[name=text-size]")) r.checked = r.value === (view.size || "m");
+}
+function setTextSize(size) {
+  view.size = size;
+  saveView();
+  applyAppearance();
+}
+for (const r of document.querySelectorAll("input[name=text-size]")) r.onchange = () => setTextSize(r.value);
 
 // ── shared state ──────────────────────────────────────────────────────────────
 let events = [];            // transcript events, for re-rendering on view changes
@@ -116,6 +146,35 @@ function renderEvent(ev) {
 }
 
 function renderOne(ev) {
+  const node = renderKind(ev);
+  if (node && ev.ts) stampTime(node, ev.ts);
+  return node;
+}
+
+// When it happened (EventBus stamps live events; a loaded session has no times).
+function timeLabel(ts) {
+  const d = new Date(ts * 1000), now = new Date();
+  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === now.toDateString() ? hm
+    : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${hm}`;
+}
+function stampTime(node, ts) {
+  const when = timeLabel(ts);
+  const full = new Date(ts * 1000).toLocaleString();
+  if (node.classList.contains("assistant")) {
+    const t = el("span", "msg-time", when);
+    t.title = full;
+    node.querySelector(".msg-actions")?.prepend(t);
+  } else if (node.classList.contains("user")) {
+    node.querySelector(".bubble").title = full;
+  } else if (node.matches("details.tool, .ask")) {
+    (node.querySelector("summary") || node).title = full;
+  } else if (node.classList.contains("turn-meta")) {
+    node.append(` · ${when}`);
+  }
+}
+
+function renderKind(ev) {
   switch (ev.type) {
     case "user": return renderUser(ev.text);
     case "chat": return renderChat(ev.role, ev.text);
@@ -261,7 +320,9 @@ function clampedPre(text, maxLines) {
   if (lines.length > maxLines) {
     const more = el("button", "link-btn more", `show all (${lines.length - maxLines} more lines)`);
     more.type = "button";
-    more.onclick = () => { pre.textContent = text; more.remove(); };
+    const expand = () => { pre.textContent = text; more.remove(); clamped.delete(pre); };
+    more.onclick = expand;
+    clamped.set(pre, { text, expand });   // find.js searches the hidden lines too
     frag.append(more);
   }
   return frag;
@@ -344,22 +405,85 @@ function renderDiff(ev) {
   const body = el("div", "diff-body");
   const numW = Math.max(1, ...ev.body.flatMap(([, o, n]) => [o, n]).filter((x) => x != null).map((x) => String(x).length));
   const fmt = (n) => (n == null ? "" : String(n)).padStart(numW);
-  const addLines = (rows) => {
-    for (const [kind, o, n, text] of rows) {
+  const words = pairWords(ev.body);
+  const addLines = (from, to) => {
+    for (let i = from; i < to; i++) {
+      const [kind, o, n, text] = ev.body[i];
       const row = el("div", `dl ${kind}`);
-      row.append(el("span", "gut", `${fmt(o)} ${fmt(n)}`), el("span", "txt", text));
+      const txt = el("span", "txt");
+      const parts = words.get(i);
+      if (parts) {
+        txt.append(text[0]);
+        for (const [piece, changed] of parts) txt.append(changed ? el("span", "dw", piece) : piece);
+      } else txt.textContent = text;
+      row.append(el("span", "gut", `${fmt(o)} ${fmt(n)}`), txt);
       body.append(row);
     }
   };
-  addLines(ev.body.slice(0, DIFF_MAX));
+  addLines(0, Math.min(DIFF_MAX, ev.body.length));
   box.append(body);
   if (ev.body.length > DIFF_MAX) {
     const more = el("button", "link-btn more", `show ${ev.body.length - DIFF_MAX} more diff lines`);
     more.type = "button";
-    more.onclick = () => { addLines(ev.body.slice(DIFF_MAX)); more.remove(); };
+    more.onclick = () => { addLines(DIFF_MAX, ev.body.length); more.remove(); };
     box.append(more);
   }
   return box;
+}
+
+// Word-level changes: where k removed lines are followed directly by k added
+// ones, line j of each pair is compared token by token and the tokens that
+// differ are marked.  index in body → [[text, changed], …] (without the +/-).
+const WORD_RX = /\w+|\s+|[^\w\s]/g;
+function pairWords(body) {
+  const out = new Map();
+  for (let i = 0; i < body.length;) {
+    if (body[i][0] !== "del") { i++; continue; }
+    let d = i;
+    while (d < body.length && body[d][0] === "del") d++;
+    let a = d;
+    while (a < body.length && body[a][0] === "add") a++;
+    if (a - d === d - i) {
+      for (let k = 0; k < d - i; k++) {
+        const parts = tokenDiff(body[i + k][3].slice(1), body[d + k][3].slice(1));
+        if (parts) { out.set(i + k, parts[0]); out.set(d + k, parts[1]); }
+      }
+    }
+    i = Math.max(a, i + 1);
+  }
+  return out;
+}
+function tokenDiff(a, b) {
+  const x = a.match(WORD_RX) || [], y = b.match(WORD_RX) || [];
+  if (!x.length || !y.length || x.length * y.length > 160_000) return null;
+  // LCS table, then walk it to mark what is not shared.
+  const m = x.length, n = y.length;
+  const L = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    }
+  }
+  const keepX = new Array(m).fill(false), keepY = new Array(n).fill(false);
+  for (let i = 0, j = 0; i < m && j < n;) {
+    if (x[i] === y[j]) { keepX[i++] = true; keepY[j++] = true; }
+    else if (L[i + 1][j] >= L[i][j + 1]) i++;
+    else j++;
+  }
+  // Lines that share little are a rewrite: marking every word says nothing.
+  const shared = keepX.filter(Boolean).length;
+  if (shared < 0.4 * Math.max(m, n)) return null;
+  const merge = (toks, keep) => {
+    const parts = [];
+    toks.forEach((t, i) => {
+      const changed = !keep[i] && t.trim() !== "";
+      const last = parts[parts.length - 1];
+      if (last && last[1] === changed) last[0] += t;
+      else parts.push([t, changed]);
+    });
+    return parts;
+  };
+  return [merge(x, keepX), merge(y, keepY)];
 }
 
 // What a finished turn cost, under its reply (DoneEvent; zero for compaction).
@@ -517,6 +641,7 @@ function rerenderAll() {
   if (keep) transcript.append(keep);
   if (!busy) closeGroup();   // a finished turn's last stretch folds like the others
   renderWelcome();
+  refreshFind();
   refreshUserActions();
   if (openAsk && !waiting && !openAsk.classList.contains("answered")) {
     // Replayed question that has since been answered elsewhere — keep, but no buttons.
@@ -562,7 +687,7 @@ function applyStatus(s) {
   $("#host").textContent = `${s.provider}@${s.host.replace(/^https?:\/\//, "")}`;
   updateConnDot();
   $("#workdir").textContent = s.workdir;
-  $("#workdir").title = s.workdir;
+  $("#workdir").title = `${s.workdir} — click to browse, right-click to copy`;
   $("#ctx-pct").textContent = `${s.ctx_pct}%`;
   $("#ctx-fill").style.width = `${Math.min(100, s.ctx_pct)}%`;
   $(".ctx").className = `ctx ${s.ctx_color}`;
@@ -682,6 +807,21 @@ function applyIndexStatus(s) {
 function updateTitle() {
   const name = status.title ? ` · ${status.title}` : "";
   document.title = `${notify.unseen ? "(•) " : ""}momo · ${status.mode || ""}${name}${busy ? " …" : ""}`;
+  setFaviconDot(notify.unseen || waiting);
+}
+
+// The tab icon gets a dot while momo waits for you or did something while you
+// were away — visible in a crowded tab strip where the title is cut off.
+const favicon = { link: document.querySelector("link[rel=icon]"), plain: null, dotted: null, on: false };
+fetch("favicon.svg").then((r) => r.text()).then((svg) => {
+  favicon.plain = favicon.link.href;
+  favicon.dotted = "data:image/svg+xml," + encodeURIComponent(svg.replace(/<\/svg>\s*$/,
+    '<circle cx="25" cy="7" r="6" fill="#f08c00" stroke="#fff" stroke-width="1.5"/></svg>'));
+  setFaviconDot(favicon.on);
+}).catch(() => {});
+function setFaviconDot(on) {
+  favicon.on = on;
+  if (favicon.dotted) favicon.link.href = on ? favicon.dotted : favicon.plain;
 }
 
 // ── notifications (notify.js does the telling) ────────────────────────────────
@@ -697,7 +837,10 @@ function lastAssistantText() {
 
 function applyBusy(b, w) {
   const wasBusy = busy;
-  if (b && !wasBusy) busySince = Date.now();
+  if (b && !wasBusy) {
+    busySince = Date.now();
+    activity = { label: "thinking", since: busySince };
+  }
   busy = b; waiting = w;
   document.body.classList.toggle("is-busy", busy);
   if (wasBusy && !busy) {
@@ -725,8 +868,22 @@ function applyBusy(b, w) {
   updateTitle();
 }
 
+// What momo is doing right now, from the events: "running run_command",
+// "writing", "thinking" — with the time spent on it.
+let activity = { label: "thinking", since: Date.now() };
+function setActivity(label) {
+  if (activity.label !== label) activity = { label, since: Date.now() };
+}
+const clock = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
 setInterval(() => {
-  if (busy && !waiting) $("#busy").textContent = `${SPIN[spinI++ % SPIN.length]} thinking`;
+  if (!busy || waiting) return;
+  const now = Date.now();
+  const bz = $("#busy");
+  bz.textContent = `${SPIN[spinI++ % SPIN.length]} ${activity.label} · ${clock(now - activity.since)}`;
+  bz.title = `This turn: ${clock(now - busySince)}`;
 }, 100);
 
 // ── event stream ──────────────────────────────────────────────────────────────
@@ -737,9 +894,37 @@ setInterval(() => {
 // which is exactly when you no longer need telling. Fall back to a timer there.
 const schedule = (fn) => (document.hidden ? setTimeout(fn, 0) : requestAnimationFrame(fn));
 
+// The server sends a ping event every 15 s when there is nothing else.  A stream
+// that stays silent much longer is dead without the browser noticing (a laptop
+// that slept, Wi-Fi that went): drop it and connect again.
+const STALL_MS = 40_000;
+let es = null;
+let lastHeard = 0;
+let retryTimer = null;
+
+function lostConnection() {
+  es?.close();
+  es = null;
+  connected = false;
+  updateConnDot();
+  showOffline();
+  renderQueue();
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(connect, 2000);
+}
+
+setInterval(() => {
+  if (es && Date.now() - lastHeard > STALL_MS) lostConnection();
+}, 5000);
+
 function connect() {
-  const es = new EventSource("api/events");
+  clearTimeout(retryTimer);
+  es?.close();
+  es = new EventSource("api/events");
+  lastHeard = Date.now();
+  es.addEventListener("ping", () => { lastHeard = Date.now(); });
   es.onopen = () => {
+    lastHeard = Date.now();
     // Every (re)connect replays the full backlog: start from a clean slate.  That
     // includes a half-streamed reply: its stream_end is never replayed.
     connectedAt = Date.now();
@@ -748,15 +933,22 @@ function connect() {
     rerenderAll();
     connected = true;
     updateConnDot();
-    refreshState();
+    showOnline();
+    renderQueue();
+    // Messages typed while offline go once momo is back and idle.
+    refreshState().then(() => { if (queue.length && !busy) sendNextQueued(); });
   };
   es.onerror = () => {
+    // The browser retries by itself unless it gave up (an HTTP error status).
+    if (es.readyState === EventSource.CLOSED) return lostConnection();
     connected = false;
     updateConnDot();
+    showOffline();
   };
   let batch = [];
   let scheduled = false;
   es.onmessage = (m) => {
+    lastHeard = Date.now();
     batch.push(JSON.parse(m.data));
     if (!scheduled) {
       scheduled = true;
@@ -768,6 +960,31 @@ function connect() {
       });
     }
   };
+}
+
+// A lost connection gets a bar over the input box (after a short grace: a
+// reconnect within 1.5 s is not worth a flash), and "Reconnected" when it's back.
+const offline = { timer: null, shown: false };
+function showOffline() {
+  if (offline.timer || offline.shown) return;
+  offline.timer = setTimeout(() => {
+    offline.timer = null;
+    offline.shown = true;
+    const bar = $("#offline-bar");
+    bar.textContent = "Connection to momo lost — reconnecting… What you send now waits until it's back.";
+    bar.classList.remove("back");
+    bar.hidden = false;
+  }, 1500);
+}
+function showOnline() {
+  clearTimeout(offline.timer);
+  offline.timer = null;
+  if (!offline.shown) return;
+  offline.shown = false;
+  const bar = $("#offline-bar");
+  bar.textContent = "Reconnected.";
+  bar.classList.add("back");
+  setTimeout(() => { if (connected && !offline.shown) bar.hidden = true; }, 2000);
 }
 
 function handleEvents(evs) {
@@ -796,6 +1013,8 @@ function handleEvents(evs) {
       default: {
         events.push(ev);
         if (ev.type === "user") $(".welcome")?.remove();
+        if (ev.type === "tool_call") setActivity(`running ${ev.name}`);
+        else if (ev.type === "tool_result" || ev.type === "diff") setActivity("thinking");
         if (ev.type === "error" || (ev.type === "chat" && ev.role === "system" && ev.text.startsWith("ERROR"))) {
           lastServerError = { text: ev.type === "error" ? ev.text : ev.text.replace(/^ERROR:\s*/, ""), at: Date.now() };
         }
@@ -827,6 +1046,7 @@ function streamDelta(ev) {
     // message once the stream is over.
     transcript.setAttribute("aria-busy", "true");
   }
+  setActivity(ev.kind === "thinking" ? "thinking" : "writing");
   if (ev.kind === "thinking") {
     if (!view.think) return;
     if (!live$.think) {
@@ -896,6 +1116,7 @@ function renderPlan() {
   $("#plan-run").hidden = !state.plan || executing;
   $("#plan-resume").hidden = !executing;
   $("#plan-cancel").hidden = !state.plan;
+  if (!$("#plan-drawer").hidden) $("#plan-body .task-current")?.scrollIntoView({ block: "nearest" });
 }
 
 function renderSkills() {
@@ -924,7 +1145,10 @@ async function send(text, atts = []) {
     applyView(r.view || {});
     return true;
   } catch (e) {
-    handleEvents([{ type: "error", text: `could not reach momo: ${e.message}` }]);
+    // fetch() rejects with a TypeError when momo can't be reached at all (not on
+    // an HTTP error): the stream is likely dead too, whatever it says.
+    if (e instanceof TypeError) lostConnection();
+    else handleEvents([{ type: "error", text: `could not reach momo: ${e.message}` }]);
     return false;
   }
 }
@@ -1007,16 +1231,9 @@ async function submitInput() {
     return;
   }
   if (!text.trim() && !ready.length) return;
-  // Busy with a turn: queue plain messages instead of bouncing them.
-  if (busy && !waiting && !isCmd) {
-    queue.push({ text, atts: ready.map((a) => ({ name: a.name, text: a.text })) });
-    attachments = attachments.filter((a) => a.status !== "ready");
-    input.value = "";
-    histIdx = -1; histStash = "";
-    autosize();
-    closeSuggest();
-    renderChips();
-    renderQueue();
+  // Busy with a turn, or offline: queue plain messages instead of bouncing them.
+  if (!isCmd && ((busy && !waiting) || !connected)) {
+    queueMessage(text, ready, !connected);
     return;
   }
   input.value = "";
@@ -1029,15 +1246,29 @@ async function submitInput() {
   if (ok && atts.length) {
     attachments = attachments.filter((a) => a.status === "loading");
     renderChips();
+  } else if (!ok && !isCmd && !connected) {
+    queueMessage(text, ready, true);   // the connection dropped as it was sent
   } else if (!ok && !input.value) {
     input.value = text;  // keep what the user typed if the request failed
     autosize();
   }
 }
 
+function queueMessage(text, ready, offline) {
+  if (offline) toast("Queued — it is sent when the connection is back.");
+  queue.push({ text, atts: ready.map((a) => ({ name: a.name, text: a.text })) });
+  attachments = attachments.filter((a) => a.status !== "ready");
+  if (input.value === text) input.value = "";
+  histIdx = -1; histStash = "";
+  autosize();
+  closeSuggest();
+  renderChips();
+  renderQueue();
+}
+
 // ── queued messages ───────────────────────────────────────────────────────────
 async function sendNextQueued() {
-  if (busy || !queue.length) return;
+  if (busy || !connected || !queue.length) return;
   const item = queue.shift();
   renderQueue();
   const ok = await send(item.text, item.atts);
@@ -1052,7 +1283,8 @@ function renderQueue() {
     const name = el("span", "att-name");
     name.append(icon("clock", "icon sm"), preview);
     name.title = q.text;
-    const meta = el("span", "att-meta", i === 0 ? "sends when momo is done" : `#${i + 1} in queue`);
+    const meta = el("span", "att-meta", i > 0 ? `#${i + 1} in queue`
+      : connected ? "sends when momo is done" : "sends when reconnected");
     const edit = el("button", "att-x");
     edit.append(icon("pencil", "icon sm"));
     edit.type = "button";
@@ -1186,10 +1418,69 @@ function updateSuggest() {
   const at = v.slice(0, input.selectionStart).match(AT_RX);
   if (at) return schedulePathSearch(at[1]);
   clearTimeout(pathTimer);
+  const arg = v.match(/^(\/[\w-]+) (\S*)$/);
+  if (state && arg && state.commands.some((c) => c.cmd === arg[1].toLowerCase())) {
+    return suggestArgs(arg[1].toLowerCase(), arg[2]);
+  }
   if (!state || !v.startsWith("/") || v.includes("\n") || /\s\S*\s/.test(v)) return closeSuggest();
   const word = v.split(/\s/)[0].toLowerCase();
   sugg = state.commands.filter((c) => c.cmd.startsWith(word) || c.usage.startsWith(v));
   if (!sugg.length || (sugg.length === 1 && sugg[0].usage === v.trim())) return closeSuggest();
+  renderSuggest();
+}
+
+// Values a command takes after its name: the `a|b|c` and literal words of its
+// /help usages, plus live lists for models, sessions and skills.
+let argSeq = 0;
+const argCache = new Map();   // source → {at, values}
+async function cachedValues(key, load) {
+  const hit = argCache.get(key);
+  if (hit && Date.now() - hit.at < 10_000) return hit.values;
+  const values = await load();
+  argCache.set(key, { at: Date.now(), values });
+  return values;
+}
+async function argValues(cmd) {
+  const out = new Map();     // value → description
+  for (const c of state.commands.filter((x) => x.cmd === cmd)) {
+    // "on|off", "[new|classic]", "auto|<n>", "[n|off]": the literal choices.  A
+    // lone bracketed word ("[filename]"), <placeholders> and "n" are not values.
+    for (const tok of c.usage.split(/\s+/).slice(1)) {
+      const opt = /^\[.*\]$/.test(tok);
+      if (opt && !tok.includes("|")) continue;
+      for (const v of (opt ? tok.slice(1, -1) : tok).split("|")) {
+        if (v && !/[<>[\]]/.test(v) && v !== "n" && !out.has(v)) out.set(v, c.desc);
+      }
+    }
+  }
+  try {
+    if (cmd === "/model") {
+      for (const m of await cachedValues("models", async () => (await (await fetch("api/models")).json()).models || [])) {
+        out.set(m, m === status.model ? "the model in use" : "");
+      }
+    } else if (cmd === "/session") {
+      const rows = await cachedValues("sessions", async () => (await (await fetch("api/sessions")).json()).sessions || []);
+      for (const s of rows) out.set(s.name, s.title || s.preview || "");
+    } else if (cmd === "/load-skill" || cmd === "/unload-skill") {
+      const { available = [], active = [] } = state.skills || {};
+      out.clear();
+      for (const s of cmd === "/load-skill" ? available.filter((x) => !active.includes(x)) : active) out.set(s, "");
+    } else if (cmd === "/think") {
+      for (const v of status.think_choices || []) out.set(v, `${status.model} takes this`);
+    }
+  } catch { /* offline: the static choices still help */ }
+  return [...out];
+}
+async function suggestArgs(cmd, partial) {
+  const seq = ++argSeq;
+  const values = await argValues(cmd);
+  if (seq !== argSeq) return;                       // typed on meanwhile
+  const p = partial.toLowerCase();
+  sugg = values.filter(([v]) => v.toLowerCase().includes(p) && v !== partial)
+    .sort(([a], [b]) => (b.toLowerCase().startsWith(p) - a.toLowerCase().startsWith(p)))
+    .slice(0, 30)
+    .map(([v, d]) => ({ usage: `${cmd} ${v}`, desc: d, fill: `${cmd} ${v}` }));
+  if (!sugg.length) return closeSuggest();
   renderSuggest();
 }
 
@@ -1228,6 +1519,8 @@ function pickSuggest(i) {
   const c = sugg[i];
   if (c.path) {
     insertPath(c.path, true);
+  } else if (c.fill) {
+    input.value = c.fill;
   } else {
     const takesArg = c.usage.includes(" ") && !c.usage.includes(" | ");
     input.value = c.cmd + (takesArg ? " " : "");
@@ -1409,14 +1702,30 @@ $("#filter-text").addEventListener("keydown", (e) => {
 });
 $("#index-load").onclick = () => send("/index load");
 
-// Ctrl/Cmd+K opens the palette from anywhere, the input box included.
+// Ctrl/Cmd+K opens the palette and Ctrl/Cmd+F the find bar, from anywhere.  A
+// second Ctrl+F while the find bar has focus is the browser's own find.
 document.addEventListener("keydown", (e) => {
-  if (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+  const k = e.key.toLowerCase();
+  if (k === "k") {
     e.preventDefault();
     closeMenu();
     openPalette();
+  } else if (k === "f" && document.activeElement !== $("#find-input")) {
+    e.preventDefault();
+    closeMenu();
+    openFind();
   }
 });
+
+// Alt+↑ / Alt+↓: the previous / next message you sent.
+function jumpTurn(dir) {
+  const top = transcript.scrollTop;
+  const users = [...transcript.querySelectorAll(".msg.user")];
+  const target = dir < 0 ? users.filter((u) => u.offsetTop < top - 8).pop()
+                         : users.find((u) => u.offsetTop > top + 8);
+  if (target) transcript.scrollTop = target.offsetTop - 12;
+}
 
 // Esc from a field inside a popover or panel closes that popover or panel (the
 // input box keeps its own Esc: interrupt; fields that handle Esc themselves win).
@@ -1433,12 +1742,17 @@ document.addEventListener("keydown", (e) => {
   if (e.target === input || e.target.matches?.("input, select, textarea")) return;
   if (e.key === "Escape") {
     if (MENUS.some(([, m]) => !$(m).hidden)) return closeMenu();
+    if (findOpen()) return closeFind();
     // Through each drawer's own close, so the filter's unsaved-changes check runs.
     for (const [d, close] of Object.entries(DRAWERS)) {
       if (!$(d).hidden) return close();
     }
     if (busy && !waiting) post("api/cancel").catch(() => {});
     return;
+  }
+  if (e.altKey && !e.metaKey && !e.ctrlKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    e.preventDefault();
+    return jumpTurn(e.key === "ArrowUp" ? -1 : 1);
   }
   if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
@@ -1467,6 +1781,7 @@ function syncViewMenu() {
   for (const r of document.querySelectorAll("input[name=diff-style]")) r.checked = r.value === view.diffStyle;
   $("#composer").classList.toggle("no-companion", !view.companion);
   $("#companion").hidden = !view.companion;
+  applyAppearance();
   syncNotifyControls();
 }
 // Popover menus: [button, menu].  One is open at a time; a click outside closes it.
@@ -1966,6 +2281,12 @@ function openRight(id, focusFirst = true) {
 for (const b of document.querySelectorAll(".drawer-close")) b.onclick = () => DRAWERS[`#${b.closest("aside").id}`]();
 
 $("#sessions-btn").onclick = () => { if (openDrawer("#sessions-drawer")) openSessions(); };
+// The workspace path in the status bar: click browses it, right-click copies it.
+$("#workdir").onclick = () => { if (openDrawer("#files-drawer")) openFiles(); };
+$("#workdir").oncontextmenu = async (e) => {
+  e.preventDefault();
+  try { await copyText(status.workdir); toast(`Copied ${status.workdir}`); } catch { toast("Copy failed", "error"); }
+};
 $("#files-btn").onclick = () => { if (openDrawer("#files-drawer")) openFiles(); };
 
 // ── settings drawer ───────────────────────────────────────────────────────────
@@ -2052,17 +2373,67 @@ for (const host of [transcript, $("#plan-body")]) {
   });
 }
 
-// The composer's height, for what floats above it (new-messages pill, toasts).
+// The composer's and the status bar's heights, for what floats next to them
+// (new-messages pill, toasts, the find bar).
 new ResizeObserver(() => {
-  document.documentElement.style.setProperty("--composer-h", `${$("#composer").offsetHeight}px`);
+  const root = document.documentElement.style;
+  root.setProperty("--composer-h", `${$("#composer").offsetHeight}px`);
+  root.setProperty("--status-h", `${$("#status").offsetHeight + 6}px`);
 }).observe($("#composer"));
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty("--status-h", `${$("#status").offsetHeight + 6}px`);
+}).observe($("#status"));
+
+// ── quote a selection ─────────────────────────────────────────────────────────
+// Select text in the conversation and a "Quote in reply" button appears by it;
+// it puts the text into the input box as a > quote.
+{
+  const btn = $("#quote-btn");
+  let timer = null;
+  const selected = () => {
+    const sel = getSelection();
+    if (!sel.rangeCount || sel.isCollapsed) return null;
+    const range = sel.getRangeAt(0);
+    if (!transcript.contains(range.commonAncestorContainer)) return null;
+    const text = sel.toString().trim();
+    return text ? { text, rect: range.getBoundingClientRect() } : null;
+  };
+  document.addEventListener("selectionchange", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const s = selected();
+      btn.hidden = !s;
+      if (!s) return;
+      const w = btn.offsetWidth || 120;
+      btn.style.left = `${Math.max(8, Math.min(s.rect.right - w, innerWidth - w - 8))}px`;
+      btn.style.top = `${Math.max(8, s.rect.top - 36)}px`;
+    }, 150);
+  });
+  transcript.addEventListener("scroll", () => { btn.hidden = true; });
+  btn.onmousedown = (e) => e.preventDefault();       // keep the selection
+  btn.onclick = () => {
+    const s = selected();
+    btn.hidden = true;
+    if (!s) return;
+    const quote = s.text.split("\n").map((l) => `> ${l}`).join("\n") + "\n\n";
+    const pos = input.selectionStart ?? input.value.length;
+    const before = input.value.slice(0, pos);
+    const lead = before && !before.endsWith("\n") ? "\n\n" : "";
+    input.value = before + lead + quote + input.value.slice(pos);
+    getSelection().removeAllRanges();
+    autosize();
+    input.focus();
+    const caret = (before + lead + quote).length;
+    input.setSelectionRange(caret, caret);
+  };
+}
 
 // ── command palette ───────────────────────────────────────────────────────────
 const fakeClick = { stopPropagation() {} };
 function paletteActions() {
   const show = (key, what, keys) => ({
     label: `${view[key] ? "Hide" : "Show"} ${what}`, desc: "View", keys, run: () => toggleView(key) });
-  const sections = [["companion", "Companion"], ["context", "Context"], ["run", "Running commands"],
+  const sections = [["appearance", "Appearance"], ["companion", "Companion"], ["context", "Context"], ["run", "Running commands"],
                     ["network", "Network"], ["index", "Code index"], ["skills", "Skills"],
                     ["notifications", "Notifications"], ["other", "Conversation and downloads"]];
   return [
@@ -2080,7 +2451,14 @@ function paletteActions() {
     show("tools", "tool output"), show("think", "thinking", "Shift+T"), show("diff", "edit diffs", "Shift+D"),
     show("companion", "companion", "Shift+Q"),
     { label: view.md ? "Plain text replies" : "Markdown replies", desc: "View", keys: "Shift+M", run: () => toggleView("md") },
-    { label: `Switch to ${currentTheme() === "dark" ? "light" : "dark"} mode`, desc: "Theme", run: () => $("#theme-btn").click() },
+    { label: "Find in conversation", desc: "Also inside collapsed tool output", keys: "Ctrl+F", run: openFind },
+    { label: "Previous message you sent", desc: "Scroll to it", keys: "Alt+↑", run: () => jumpTurn(-1) },
+    { label: "Next message you sent", desc: "Scroll to it", keys: "Alt+↓", run: () => jumpTurn(1) },
+    ...THEMES.map((t) => ({ label: `Theme: ${t[0].toUpperCase()}${t.slice(1)}`,
+                            desc: t === themeChoice ? "current" : "Appearance", run: () => setTheme(t) })),
+    ...[["s", "Small"], ["m", "Medium"], ["l", "Large"]].map(([s, name]) => ({
+      label: `Text size: ${name}`, desc: s === (view.size || "m") ? "current" : "Appearance", run: () => setTextSize(s) })),
+    { label: view.wide ? "Narrow transcript" : "Wide transcript", desc: "Appearance", run: () => toggleView("wide") },
     { label: "Download conversation", desc: "Markdown file", run: () => $("#export-link").click() },
     { label: "Download full log", desc: "With system prompt, thinking and tool calls", run: () => $("#export-full-link").click() },
     { label: "Keyboard shortcuts", desc: "Every key the UI knows", keys: "?", run: () => openPalette({ shortcuts: true }) },
@@ -2093,6 +2471,7 @@ initChips({
   send, status: () => status, openSettings, closeMenu,
   openToolsMenu: () => toggleMenu(fakeClick, "#tools-menu", "Tools", refreshToolsMenu),
 });
+initFind();
 initPalette({
   commands: () => state?.commands || [],
   actions: paletteActions,

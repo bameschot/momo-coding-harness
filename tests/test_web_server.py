@@ -85,6 +85,22 @@ class WebServer(unittest.TestCase):
         r, _ = self.request("HEAD", "/api/events")
         self.assertEqual(r.status, 405)
 
+    def test_idle_stream_sends_a_named_ping(self):
+        # An SSE comment would be invisible to the page; its stall watchdog
+        # needs an event it can listen for.
+        from harness.web import server as server_mod
+        with mock.patch.object(server_mod, "_KEEPALIVE_S", 0.05):
+            conn = http.client.HTTPConnection("127.0.0.1", self.web.port, timeout=5)
+            conn.request("GET", "/api/events", headers={"Host": "127.0.0.1"})
+            r = conn.getresponse()
+            self.assertEqual(r.status, 200)
+            seen = b""
+            while b"event: ping\ndata: \n\n" not in seen:
+                line = r.fp.readline()
+                self.assertTrue(line, "stream ended before a ping")
+                seen += line
+            conn.close()
+
     def test_mode_switch_refused_while_busy(self):
         self.h.set_mode("design")
         self.c._busy = True                         # a turn is running

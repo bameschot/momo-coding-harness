@@ -58,7 +58,7 @@ async function openPreview(rel) {
     if (!r.ok) throw new Error(f.error);
   } catch (e) { toast(e.message, "error"); return false; }
   previewFile = f;
-  $("#files-tree").hidden = true;
+  $("#files-tree").hidden = $("#files-results").hidden = true;
   $("#file-preview").hidden = false;
   $("#preview-name").textContent = rel;
   $("#preview-name").title = rel;
@@ -122,11 +122,52 @@ export async function showFile(rel, line = 0) {
   scroll.scrollTop = Math.max(0, top - scroll.clientHeight / 3);
 }
 
+// ── search: the same fuzzy path search as @-mentions (api/files/search) ──────
+let searchTimer = null;
+let searchSeq = 0;
+
+// Back from a preview, or the search field changed: the results while there is
+// a query, else the tree.
+function showListing() {
+  const q = $("#files-search").value.trim();
+  $("#files-results").hidden = !q;
+  $("#files-tree").hidden = !!q;
+}
+
+async function runSearch() {
+  const q = $("#files-search").value.trim();
+  $("#file-preview").hidden = true;
+  showListing();
+  if (!q) return;
+  const seq = ++searchSeq;
+  const box = $("#files-results");
+  let results = [];
+  try {
+    results = (await (await fetch(`api/files/search?q=${encodeURIComponent(q)}`)).json()).results || [];
+  } catch (e) { box.replaceChildren(el("div", "muted small", e.message)); return; }
+  if (seq !== searchSeq) return;                 // a newer query is on its way
+  if (!results.length) { box.replaceChildren(el("div", "muted small", "No file matches.")); return; }
+  box.replaceChildren(...results.map((rel) => {
+    const btn = el("button", "tree-row");
+    btn.type = "button";
+    btn.title = rel;
+    const ti = el("span", "tree-icon");
+    ti.append(icon("file", "icon sm"));
+    const slash = rel.lastIndexOf("/");
+    btn.append(ti, el("span", "tree-name", rel.slice(slash + 1)),
+               el("span", "tree-size", slash > 0 ? rel.slice(0, slash) : ""));
+    btn.onclick = () => openPreview(rel);
+    return btn;
+  }));
+}
+
 // The drawer was opened: the tree from the top.
 export function openFiles() {
   $("#file-preview").hidden = true;
-  $("#files-tree").hidden = false;
+  $("#files-search").value = "";
+  showListing();
   loadDir("", $("#files-tree"));
+  if (!matchMedia("(pointer: coarse)").matches) $("#files-search").focus();   // no keyboard pop-up on phones
 }
 
 export function initFiles(h) {
@@ -138,7 +179,11 @@ export function initFiles(h) {
     setPreviewRendered(on);
     saveJSON("momo.previewRendered", on);
   };
-  $("#preview-back").onclick = () => { $("#file-preview").hidden = true; $("#files-tree").hidden = false; };
+  $("#preview-back").onclick = () => { $("#file-preview").hidden = true; showListing(); };
+  $("#files-search").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 150); };
+  $("#files-search").onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("#files-results .tree-row")?.click(); }
+  };
   $("#preview-attach").onclick = () => {
     const f = previewFile;
     if (!f) return;

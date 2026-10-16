@@ -65,6 +65,10 @@ export function renderMarkdown(text) {
       while (i < lines.length && !lines[i].trim().startsWith(fence)) body.push(lines[i++]);
       i++;
       out.push(`<pre><code${m[2] ? ` data-lang="${esc(m[2])}"` : ""}>${highlight(body.join("\n"), m[2])}</code></pre>`);
+    } else if (/^\s*<!--/.test(line) && (m = lines.findIndex((l, j) => j >= i && l.includes("-->"))) >= 0) {
+      // An HTML comment is not shown (plan files carry a legend in one); one that
+      // never closes is text.  Escape-first: no other HTML is taken.
+      i = m + 1;
     } else if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {               // heading
       out.push(`<h${m[1].length}>${mdInline(m[2])}</h${m[1].length}>`);
       i++;
@@ -95,8 +99,9 @@ export function renderMarkdown(text) {
       const tableStarts = (j) => lines[j].includes("|") && j + 1 < lines.length && isTableSep(lines[j + 1]);
       // A paragraph ends where another block starts, a table included: models
       // write "Results:" on the line right above one.
-      while (i < lines.length && lines[i].trim() && !tableStarts(i) &&
-             !/^(#{1,6}\s|\s*(```|~~~)|\s*>|\s*([-*+]|\d+[.)])\s+)/.test(lines[i])) body.push(lines[i++]);
+      // Its first line is always taken (an unclosed "<!--" lands here).
+      while (i < lines.length && lines[i].trim() && (!body.length || (!tableStarts(i) &&
+             !/^(#{1,6}\s|\s*(```|~~~)|\s*>|\s*<!--|\s*([-*+]|\d+[.)])\s+)/.test(lines[i])))) body.push(lines[i++]);
       out.push(`<p>${body.map(mdInline).join("<br>")}</p>`);
     }
   }
@@ -129,13 +134,21 @@ function renderList(lines, start, setIndex) {
   const tag = ordered ? "ol" : "ul";
   const startAttr = ordered && +first[1] !== 1 ? ` start="${+first[1]}"` : "";
   return `<${tag}${startAttr}>` + items.map((it) => {
-    const task = it.text.match(/^\[([ xX])\]\s+(.*)$/);
-    const body = task ? `${task[1] === " " ? "☐" : "☑"} ${mdInline(task[2])}` : mdInline(it.text);
-    return `<li>${body}${it.sub}</li>`;
+    // Task items, plan steps included: [ ] pending, [x] done, [~] in progress, [-] skipped.
+    const task = it.text.match(/^\[([ xX~-])\]\s+(.*)$/);
+    if (!task) return `<li>${mdInline(it.text)}${it.sub}</li>`;
+    const [mark, cls] = TASK_MARKS[task[1].toLowerCase()];
+    return `<li class="task ${cls}">${mark} ${mdInline(task[2])}${it.sub}</li>`;
   }).join("") + `</${tag}>`;
 }
 
-// A copy button on every code block under `root` (once per block).
+const TASK_MARKS = { " ": ["☐", "task-pending"], x: ["☑", "task-done"],
+                     "~": ["◐", "task-current"], "-": ["⊘", "task-skipped"] };
+
+const FOLD_LINES = 30;   // a longer code block shows this many lines until unfolded
+
+// A copy button on every code block under `root` (once per block); a long block
+// folds to its first lines with "Show all N lines" (copy still copies it all).
 export function addCopyButtons(root) {
   for (const pre of root.querySelectorAll("pre")) {
     const code = pre.querySelector("code");
@@ -151,5 +164,16 @@ export function addCopyButtons(root) {
     btn.onclick = () => copyWithFeedback(btn, code.textContent);
     bar.append(el("span", "code-lang", lang || ""), btn);
     box.append(bar, pre);
+    const n = code.textContent.split("\n").length;
+    if (n > FOLD_LINES + 5) {
+      box.classList.add("folded");
+      const more = el("button", "link-btn more code-more", `Show all ${n} lines`);
+      more.type = "button";
+      more.onclick = () => {
+        const folded = box.classList.toggle("folded");
+        more.textContent = folded ? `Show all ${n} lines` : "Fold";
+      };
+      box.append(more);
+    }
   }
 }

@@ -33,6 +33,8 @@
   <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/></symbol>
   <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></symbol>
   <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-contrast" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v18"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
   <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M6.5 7l.9 12.1A2 2 0 0 0 9.4 21h5.2a2 2 0 0 0 2-1.9L17.5 7"/><path d="M9.5 7V4.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7"/><path d="M10.5 11v6M13.5 11v6"/></symbol>
   <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
@@ -64,7 +66,7 @@
     <button id="view-btn" class="icon-btn" type="button" title="View options" aria-label="View options" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg></button>
   </div>
   <div class="status-row second">
-    <span id="workdir" class="field muted mono collapse" dir="rtl"></span>
+    <button id="workdir" class="field muted mono collapse workdir-btn" type="button" dir="rtl" title="Workspace"></button>
     <span class="spacer"></span>
     <button id="ctx-btn" class="ctx" type="button" title="Context used — click for a breakdown" aria-haspopup="dialog" aria-expanded="false">
       <span class="ctx-label">CTX</span>
@@ -85,6 +87,7 @@
     <label><input type="checkbox" data-view="md"> Markdown <kbd>Shift+M</kbd></label>
     <label><input type="checkbox" data-view="diff"> Edit diffs <kbd>Shift+D</kbd></label>
     <label><input type="checkbox" data-view="companion"> Companion <kbd>Shift+Q</kbd></label>
+    <label><input type="checkbox" data-view="wide"> Wide transcript</label>
     <div class="menu-sub">Diff style</div>
     <div class="seg" role="radiogroup" aria-label="Diff style">
       <label><input type="radio" name="diff-style" value="compact"> compact</label>
@@ -118,7 +121,15 @@
   <div id="tools-off-menu" class="menu chip-menu" role="dialog" aria-label="Tool calls" hidden></div>
 </header>
 
+<div id="find-bar" class="find-bar" role="search" hidden>
+  <input id="find-input" type="search" placeholder="Find in conversation" aria-label="Find in conversation" autocomplete="off" spellcheck="false">
+  <span id="find-count" class="muted small" aria-live="polite"></span>
+  <button id="find-prev" class="icon-btn sm" type="button" title="Previous (Shift+Enter)" aria-label="Previous match"><svg class="icon sm" aria-hidden="true"><use href="#i-arrow-up"/></svg></button>
+  <button id="find-next" class="icon-btn sm" type="button" title="Next (Enter)" aria-label="Next match"><svg class="icon sm" aria-hidden="true"><use href="#i-arrow-down"/></svg></button>
+  <button id="find-close" class="icon-btn sm" type="button" title="Close (Esc)" aria-label="Close find"><svg class="icon sm" aria-hidden="true"><use href="#i-x"/></svg></button>
+</div>
 <main id="transcript" tabindex="-1" aria-live="polite" aria-label="Conversation"></main>
+<button id="quote-btn" class="btn small quote-btn" type="button" hidden>Quote in reply</button>
 <button id="new-msgs" class="pill" type="button" hidden><svg class="icon sm" aria-hidden="true"><use href="#i-arrow-down"/></svg> New messages</button>
 
 <aside id="sessions-drawer" class="drawer left" aria-label="Sessions" hidden>
@@ -146,6 +157,8 @@
     <span class="spacer"></span>
     <button class="icon-btn drawer-close" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
+  <div class="drawer-filter"><input id="files-search" type="search" placeholder="Find a file…" aria-label="Find a file in the workspace"></div>
+  <div id="files-results" class="drawer-body tree" hidden></div>
   <div id="files-tree" class="drawer-body tree"></div>
   <div id="file-preview" class="file-preview" hidden>
     <div class="preview-head">
@@ -202,6 +215,22 @@
     <button id="settings-close" class="icon-btn" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
   <div id="settings-body" class="drawer-body settings">
+    <details data-section="appearance">
+      <summary>Appearance</summary>
+      <div class="menu-sub">Theme</div>
+      <div class="seg" role="radiogroup" aria-label="Theme">
+        <label><input type="radio" name="theme" value="system"> System</label>
+        <label><input type="radio" name="theme" value="light"> Light</label>
+        <label><input type="radio" name="theme" value="dark"> Dark</label>
+      </div>
+      <div class="menu-sub">Text size</div>
+      <div class="seg" role="radiogroup" aria-label="Text size">
+        <label><input type="radio" name="text-size" value="s"> Small</label>
+        <label><input type="radio" name="text-size" value="m"> Medium</label>
+        <label><input type="radio" name="text-size" value="l"> Large</label>
+      </div>
+      <label><input type="checkbox" data-view="wide"> Wide transcript (no 920px column)</label>
+    </details>
     <details data-section="companion">
       <summary>Companion</summary>
       <label><input type="checkbox" id="idle-recap" data-cmd="/companion-idle-recap"> Recap when I'm idle <kbd>/companion-idle-recap</kbd></label>
@@ -277,6 +306,7 @@
   <pre id="companion" aria-hidden="true"></pre>
   <div id="suggest" class="suggest" role="listbox" hidden></div>
   <div id="queue" class="attachments" aria-live="polite" hidden></div>
+  <div id="offline-bar" class="offline-bar" role="status" hidden></div>
   <div id="edit-banner" class="edit-banner" hidden>
     <span><svg class="icon sm" aria-hidden="true"><use href="#i-pencil"/></svg> Editing your last message<span id="edit-atts"></span> — Enter re-sends it</span>
     <button id="edit-cancel" type="button" class="icon-btn" title="Cancel editing" aria-label="Cancel editing"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
