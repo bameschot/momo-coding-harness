@@ -12,7 +12,7 @@ from pathlib import Path
 
 import harness.harness as hmod
 from harness import session as session_mod
-from harness import tdd
+from harness import plan_runner, tdd
 from harness.commands import handle as handle_command
 from harness.events import ChatEvent, DiffEvent, ToolCallEvent, ToolResultEvent
 from harness.llm.base import ChatResponse, LLMClient, ToolCall
@@ -611,7 +611,7 @@ class Harness(_Base):
         self.assertTrue(any("ended without passing its tests" in t for t in texts), texts)
         gate_msgs = [m for m in self.h.messages if m.get("role") == "user"
                      and m["content"].startswith("The step is not complete")]
-        self.assertEqual(len(gate_msgs), hmod._TDD_TEXT_RETRIES)
+        self.assertEqual(len(gate_msgs), plan_runner._TDD_TEXT_RETRIES)
 
 
 if __name__ == "__main__":

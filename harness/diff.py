@@ -3,6 +3,8 @@ from __future__ import annotations
 import difflib
 import re
 
+from .paths import split_lines
+
 # Captures the old/new starting line numbers from a unified-diff hunk header,
 # e.g. "@@ -12,3 +12,4 @@". The counts are optional (git omits them for a
 # single line) and the starts can be 0 for pure add/delete hunks.
@@ -26,8 +28,9 @@ def build_diff_body(
     Body lines are returned unwrapped; the TUI's _LineBuffer provides horizontal
     scrolling, so long lines stay intact and "+"/"-" columns remain aligned.
     """
-    old_lines = old_text.splitlines()
-    new_lines = new_text.splitlines()
+    # Numbered as read_file and the editors number them (split_lines).
+    old_lines = split_lines(old_text)
+    new_lines = split_lines(new_text)
     body: list[tuple[str, int | None, int | None, str]] = []
     added = removed = 0
     old_ln = new_ln = 0

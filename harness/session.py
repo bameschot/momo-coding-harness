@@ -5,9 +5,11 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .paths import momo_home
 
-SESSION_DIR = Path.home() / ".momo-harness" / "sessions"
-_PREFS_PATH = Path.home() / ".momo-harness" / "prefs.json"
+# Module attributes (tests patch them); the Logger reads SESSION_DIR at use too.
+SESSION_DIR = momo_home() / "sessions"
+_PREFS_PATH = momo_home() / "prefs.json"
 _prefs_lock = threading.Lock()     # save_prefs is called from the TUI, web and worker threads
 
 

@@ -6,7 +6,6 @@ import queue
 import shlex
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 from . import session as session_mod
@@ -15,14 +14,14 @@ from .diff import build_diff_body
 from .events import EventBus, BusyEvent, DeltaEvent, StreamEndEvent
 from .llm import make_client
 from .logger import Logger
-from .plan import (ACCEPTANCE_TAG, Plan, Step, PLAN_FILENAME, write_plan_file, read_plan_file,
-                   delete_plan_file, str_list)
+from .compaction import CompactionMixin, calls_tokens, content_text, format_for_summary, text_tokens
+from .plan import Plan
+from .plan_runner import KEEPS_GREEN, TDD_MAX_REFUSALS, PlanRunnerMixin
 from .tools import (ALL_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, NET_TOOLS,
                     PLAN_EXECUTE_TOOLS, PLAN_INVESTIGATE_TOOLS, PLAN_TDD_EXECUTE_TOOLS,
                     PLAN_TDD_INVESTIGATE_TOOLS, dispatch, render_tool_reference,
                     with_edit_features, with_index_tools, with_run_mode)
 from . import tdd as tdd_mod
-from . import transcript as transcript_mod
 from .editing import EDIT_FEATURES
 from . import run_store as run_store_mod
 from . import net as net_mod
@@ -31,7 +30,7 @@ from . import tools as tools_mod
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
                      StatusEvent, ThinkEvent, ToolCallEvent, ToolResultEvent)
-from .prompts import (_INDEX_FIRST, _index_banner, _MODE_TOOLS,  # noqa: F401
+from .prompts import (_index_banner, _MODE_TOOLS,
                       _PLAN_EXECUTION_RULES, _PLAN_TDD_EXECUTION_RULES, _PLAN_TDD_RULES,
                       _ROLE_LOADERS, _coding_prompt, _environment,
                       _load_role, _nav_rules, _net_rules, planner_for_tdd)
@@ -48,45 +47,16 @@ _MUTATING_TOOLS = {
 
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
-# A TDD step that ends with a text reply gets its gate failure back this often
-# before the plan pauses.
-_TDD_TEXT_RETRIES = 2
-
-_TDD_MAX_REFUSALS = 3   # gate refusals in a row before the user is asked
-# Tools that cannot change files: a green run of the test command stays valid
-# across them (tdd gate reuse).  Any other call, run_command included, ends it.
-_KEEPS_GREEN = ({t["function"]["name"] for t in tools_mod.READ_ONLY_TOOLS + tools_mod.CODE_NAV_TOOLS}
-                | set(INDEX_TOOL_NAMES) | {"command_output", "stop_command", "ask_user", "complete_step"})
-
 
 def _run_key(command: str) -> tuple | str:
     """A run_command as the re-run check compares it: without a trailing view
     pipe or verbosity flags, since the earlier log answers those too."""
-    base = tools_mod._split_view_pipe(command)[0]
+    base = tools_mod.split_view_pipe(command)[0]
     try:
-        return tuple(t for t in shlex.split(base) if t not in tdd_mod._VERBOSITY)
+        return tuple(t for t in shlex.split(base) if t not in tdd_mod.VERBOSITY_FLAGS)
     except ValueError:
         return base
 
-# Steps a planner writes that a TDD plan does itself: running or keeping the
-# suite green ("Run the full test suite", "Keep existing add tests green") and
-# its own acceptance step.  The verb must open the title, so "Implement X and
-# run tests" is real work.
-_RUNS_TESTS = re.compile(r"(?i)^\W*(?:run|re-?run|verify|confirm|check|keep|ensure)\b"
-                         r".*\b(?:tests?|suite|green|pass(?:es|ing)?)\b")
-_ACCEPTANCE_TITLE = re.compile(r"(?i)^\W*(?:final\s+|end-to-end\s+)?acceptance\b")
-_TEST_PATH = re.compile(r"(?i)(?:^|/)tests?/|(?:^|/)[^/]*(?:test|spec)[^/]*$")
-
-
-def _no_work(step: Step, test_command: str, last: bool) -> bool:
-    """A step with nothing to implement in a TDD plan: it touches no production
-    file, and its title says it only runs or keeps the tests (or is acceptance,
-    which the harness adds itself).  The closing step whose details just run
-    the test command counts too."""
-    if any(not _TEST_PATH.search(f) for f in step.files):
-        return False
-    return bool(_RUNS_TESTS.search(step.title) or _ACCEPTANCE_TITLE.search(step.title)
-                or (last and test_command in f"{step.title}\n{step.details}"))
 
 # Per-role tool choices (/tools <name> on|off): what the pickers group tools by,
 # and the tools that can't be turned off because plan mode stops working without them.
@@ -153,40 +123,8 @@ def _mask_messages(messages: list[dict]) -> list[dict]:
     return out
 
 
-# ── token estimation ──────────────────────────────────────────────────────────
+# ── context budget ────────────────────────────────────────────────────────────
 
-def _content_text(m: dict) -> str:
-    content = m.get("content") or ""
-    if isinstance(content, list):
-        content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-    return content
-
-
-def _text_tokens(text: str) -> int:
-    return len(text) // 4
-
-
-def _calls_tokens(m: dict) -> int:
-    calls = m.get("tool_calls") or []
-    if not calls:
-        return 0
-    return _text_tokens(json.dumps([tc.get("function", tc) for tc in calls], default=str))
-
-
-def _msg_tokens(m: dict, sent: set[int] = frozenset()) -> int:
-    """Estimated tokens one message costs in a request.  A stored thinking
-    message costs nothing unless its id is in `sent` (Harness._sent_thinking)."""
-    if m.get("role") == "thinking":
-        return _text_tokens(_content_text(m)) if id(m) in sent else 0
-    return _text_tokens(_content_text(m)) + _calls_tokens(m)
-
-
-# Compaction folds the dropped history into this block at the top of the oldest
-# remaining user message; a later compaction replaces it rather than stacking.
-_SUMMARY_OPEN = "[Earlier context summary:\n"
-_SUMMARY_CLOSE = "\n]\n\n"
-_SUMMARY_REPLY_TOKENS = 1024   # room kept free for the summary in the summariser call
-_TRIM_FLOOR_TOKENS = 256       # a trimmed tool result keeps at least this much
 _READ_RESERVE = 10             # % of the context window a read_file must leave free
 _READ_FLOOR_TOKENS = 1000      # a read may always use this much, so a nearly full
                                # context (compaction runs only past the limit) never
@@ -215,38 +153,6 @@ THINK_HISTORY = ("off", "turn", "all")
 # /max-output-tokens: the most tokens one model reply may take (0 = no cap).
 DEFAULT_MAX_OUTPUT_TOKENS = 25_000
 MIN_MAX_OUTPUT_TOKENS = 256
-
-
-def _split_summary(text: str) -> tuple[str, str]:
-    """Split a compaction summary block off the front of a user message:
-    returns (summary, rest); summary is '' when there is none."""
-    if text.startswith(_SUMMARY_OPEN):
-        end = text.find(_SUMMARY_CLOSE, len(_SUMMARY_OPEN))
-        if end != -1:
-            return text[len(_SUMMARY_OPEN):end], text[end + len(_SUMMARY_CLOSE):]
-    return "", text
-
-
-def _format_for_summary(messages: list[dict]) -> str:
-    parts = []
-    for m in messages:
-        role = m.get("role", "")
-        content = m.get("content") or ""
-        if isinstance(content, list):
-            content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-        if role == "user":
-            parts.append(f"User: {content}")
-        elif role == "assistant":
-            if content:
-                parts.append(f"Assistant: {content}")
-            for tc in (m.get("tool_calls") or []):
-                fn = tc.get("function", {})
-                parts.append(f"  [Tool call: {fn.get('name', '?')} {json.dumps(fn.get('arguments', {}))}]")
-        elif role == "tool":
-            name = m.get("name", "tool")
-            snippet = content[:500] + ("…" if len(content) > 500 else "")
-            parts.append(f"  [Tool result ({name}): {snippet}]")
-    return "\n".join(parts)
 
 
 def clean_title(reply: str) -> str:
@@ -304,7 +210,7 @@ def _has_model(available: list[str], name: str) -> bool:
     return name in available or f"{name}:latest" in available
 
 
-class Harness:
+class Harness(CompactionMixin, PlanRunnerMixin):
     def __init__(self, host: str, model: str, workdir: Path, provider: str = "ollama"):
         self.workdir = workdir.resolve()
         self.mode = "design"
@@ -495,15 +401,15 @@ class Harness:
         url = str(args.get("url") or "")
         private = net_mod.is_private_target(url)
         # Model-supplied text headed for the curses screen: no escape sequences.
-        shown_url = net_mod._safe_line(url, 500)
+        shown_url = net_mod.safe_line(url, 500)
         if not self.net_confirm and not private:
             return None
         why = ("\nThis is a local/private address, so it is confirmed even though "
                "write confirmation is off." if private and not self.net_confirm else "")
-        body = net_mod._CTRL.sub("", str(args.get("body") or ""))
+        body = net_mod.CONTROL_CHARS.sub("", str(args.get("body") or ""))
         shown = body if len(body) <= 500 else body[:500] + f"… (+{len(body) - 500} chars)"
         return (f"Send this request? Reply 'y' to allow, anything else to decline.{why}\n"
-                f"  {net_mod._safe_line(method, 20)} {shown_url}"
+                f"  {net_mod.safe_line(method, 20)} {shown_url}"
                 + (f"\n  body: {shown}" if shown else ""))
 
     def _add_search_source(self, args: dict) -> str:
@@ -528,7 +434,7 @@ class Harness:
         """Read the text of a workdir-relative path. Returns (text, existed).
         Missing files, directories, paths outside the workdir and read errors
         all yield ("", False)."""
-        got = tools_mod._read_text(rel_path, self.workdir)
+        got = tools_mod.read_text(rel_path, self.workdir)
         return ("", False) if isinstance(got, str) else (got[1], True)
 
     def _emit_diff(self, name: str, args: dict, result: str,
@@ -570,18 +476,24 @@ class Harness:
         # available; context_limit is only the compaction threshold (the point
         # at which we start dropping old history to leave room for the reply).
         self.model_max_ctx = reported or None
-        if self.context_fixed:
-            msg = (f"Model context: {self.context_limit:,} tokens compaction threshold (set by you"
-                   + (f", {reported:,} max" if reported else "") + f", {self.client.model})")
-        elif reported:
+        if reported and not self.context_fixed:
             pct = self.context_pct if self.context_pct is not None else 50
             self.context_limit = max(256, int(reported * pct / 100))
-            msg = f"Model context: {self.context_limit:,} tokens compaction threshold ({pct}% of {reported:,} max, {self.client.model})"
-        else:
-            msg = f"Model context: unknown — using default {self.context_limit:,} tokens ({self.client.model})"
         if emit:
-            self.event_queue.put(ChatEvent("system", msg))
+            self.event_queue.put(ChatEvent("system", self.context_note()))
         return reported or None
+
+    def context_note(self) -> str:
+        """The compaction threshold and where it comes from, as last read."""
+        reported, model = self.model_max_ctx, self.client.model
+        if self.context_fixed:
+            return (f"Model context: {self.context_limit:,} tokens compaction threshold (set by you"
+                    + (f", {reported:,} max" if reported else "") + f", {model})")
+        if reported:
+            pct = self.context_pct if self.context_pct is not None else 50
+            return (f"Model context: {self.context_limit:,} tokens compaction threshold "
+                    f"({pct}% of {reported:,} max, {model})")
+        return f"Model context: unknown — using default {self.context_limit:,} tokens ({model})"
 
     def _fit_fixed_limit(self, reported: int | None) -> bool:
         """A limit the user set above the model's window can't be honoured: fall
@@ -765,35 +677,7 @@ class Harness:
                     + f" (compaction at {self.context_limit:,} tokens)."))
             return after != before
 
-    # ── mode switching ────────────────────────────────────────────────────────
-
-    def _plan_investigating(self) -> bool:
-        return self.mode == "plan" and self.plan_phase != "executing"
-
-    def _plan_executing(self) -> bool:
-        # An approved plan runs in coding mode: the coder's role, tools and tool
-        # choices, and once it is done the next message is a coding turn, not a
-        # new plan.  In any other mode the plan is dormant (paused).
-        return self.mode == "coding" and self.plan_phase == "executing" and self.plan is not None
-
-    def _plan_kind_shown(self) -> str:
-        """The plan type in force: the running plan's own, else the next plan's."""
-        if self.plan is not None and self.plan_phase == "executing":
-            return self.plan.kind
-        return self.plan_kind
-
-    def set_plan_kind(self, kind: str) -> str:
-        """Choose the type of the next plan ("normal" | "tdd"); '' or an error."""
-        if kind not in ("normal", "tdd"):
-            return f"unknown plan type: {kind} (use normal or tdd)"
-        if self.plan is not None and self.plan_phase == "executing":
-            return "a plan is executing — its type cannot change. /plan cancel first."
-        if kind != self.plan_kind:
-            self.plan_kind = kind
-            self.rebuild_system_prompt()   # create_plan's schema and the role text change
-            self.refresh_status()
-            self._autosave()
-        return ""
+    # ── tool sets ─────────────────────────────────────────────────────────────
 
     def _current_tools(self) -> list[dict]:
         """Tool set for the current mode (and, in plan mode, the current phase).
@@ -1164,9 +1048,9 @@ class Harness:
         return {
             "mode": self.mode,
             "text": "".join(s["sep"] + s["text"] for s in secs),
-            "total_tokens": sum(_text_tokens(s["sep"] + s["text"]) for s in secs),
+            "total_tokens": sum(text_tokens(s["sep"] + s["text"]) for s in secs),
             "sections": [{"key": s["key"], "label": s["label"], "text": s["text"],
-                          "tokens": _text_tokens(s["text"])} for s in secs],
+                          "tokens": text_tokens(s["text"])} for s in secs],
             "schemas": {"label": f"Tool schemas ({len(tools)} tools, sent alongside the prompt)",
                         "tokens": self._schema_tokens(),
                         "text": json.dumps(tools, indent=2, ensure_ascii=False)},
@@ -1243,7 +1127,7 @@ class Harness:
         if not self._guides:
             return f"No project guide files found in {self.workdir}"
         names = ", ".join(name for name, _ in self._guides)
-        return f"Project guides loaded: {names} (~{_text_tokens(self._guides_text):,} tokens)"
+        return f"Project guides loaded: {names} (~{text_tokens(self._guides_text):,} tokens)"
 
     # ── context management ────────────────────────────────────────────────────
 
@@ -1256,7 +1140,7 @@ class Harness:
         return min(100, int(used / self.context_limit * 100))
 
     def _context_categories(self) -> dict[str, int]:
-        """Estimated tokens per context category (chars/4, see _text_tokens).
+        """Estimated tokens per context category (chars/4, see text_tokens).
         Thinking is kept in the transcript; what /think-history sends back counts
         as "reasoning", the rest as "thinking" (reported, never sent)."""
         cats = {key: 0 for key, _, _ in _CTX_CATEGORIES}
@@ -1266,28 +1150,28 @@ class Harness:
         cats["tools"] += cats["schemas"]
         for m in list(self.messages):
             role = m.get("role")
-            text = _content_text(m)
+            text = content_text(m)
             if role == "system":
                 # The generated tool reference is part of the system prompt text,
                 # but it is spent on tools, so it is attributed to them.
                 ref = self._tool_ref
                 if ref and ref in text:
-                    cats["tools"] += _text_tokens(ref)
+                    cats["tools"] += text_tokens(ref)
                     text = text.replace(ref, "", 1)
                 guides = self._guides_text
                 if guides and guides in text:
-                    cats["guides"] += _text_tokens(guides)
+                    cats["guides"] += text_tokens(guides)
                     text = text.replace(guides, "", 1)
-                cats["system"] += _text_tokens(text)
+                cats["system"] += text_tokens(text)
             elif role == "user":
-                cats["user"] += _text_tokens(text)
+                cats["user"] += text_tokens(text)
             elif role == "assistant":
-                cats["assistant"] += _text_tokens(text)
-                cats["tool_calls"] += _calls_tokens(m)
+                cats["assistant"] += text_tokens(text)
+                cats["tool_calls"] += calls_tokens(m)
             elif role == "tool":
-                cats["tool_results"] += _text_tokens(text)
+                cats["tool_results"] += text_tokens(text)
             elif role == "thinking":
-                cats["reasoning" if id(m) in sent else "thinking"] += _text_tokens(text)
+                cats["reasoning" if id(m) in sent else "thinking"] += text_tokens(text)
         cats["generating"] = self._stream_tokens
         return cats
 
@@ -1297,7 +1181,7 @@ class Harness:
         tools = self._current_tools() if self.tools_enabled else []
         key = tuple(t["function"]["name"] for t in tools)
         if self._schema_cache[0] != key:
-            n = _text_tokens(json.dumps(tools, separators=(",", ":"))) if tools else 0
+            n = text_tokens(json.dumps(tools, separators=(",", ":"))) if tools else 0
             self._schema_cache = (key, n)
         return self._schema_cache[1]
 
@@ -1326,189 +1210,6 @@ class Harness:
             return "yellow"
         return "normal"
 
-    def compact(self, summarise: bool = True) -> str:
-        return self._compact(summarise)[1]
-
-    def _compact(self, summarise: bool = True) -> tuple[bool, str]:
-        """Shrink the history to a third of its budget (the limit minus the fixed
-        system prompt).  Returns (changed, notice).
-
-        Pass 1 drops old tool-call groups (assistant + its tool/thinking messages),
-        pass 2 drops whole old turns, pass 3 trims the largest tool results that
-        are left.  The running turn's question and its latest tool group are never
-        dropped — deleting the result the model just asked for makes it ask again.
-        Nothing is changed until the summary is in, so a cancel leaves it intact.
-        """
-        # Re-read the guides first, so the fixed size below includes any edits.
-        old_guides = self._guides
-        guides_notice = self.reload_guides() if self.guides else ""
-        if self._guides == old_guides:
-            guides_notice = ""
-        msgs = self.messages
-        before = self._token_estimate or self._estimate(schemas=True)
-        sent = self._sent_thinking()
-        costs = [_msg_tokens(m, sent) for m in msgs]
-        fixed = costs[0] if msgs else 0
-        if fixed >= self.context_limit:
-            return False, (f"Context not compacted: the system prompt and tool reference alone are "
-                           f"~{fixed:,} tokens, over the {self.context_limit:,}-token limit. "
-                           "Raise it with /context <n> or /context <n>%.")
-        target = fixed + (self.context_limit - fixed) // 3
-        total = sum(costs)
-
-        users = [i for i, m in enumerate(msgs) if m.get("role") == "user"]
-        anchor = next((i for i, m in enumerate(msgs) if m is self._turn_user), None)
-        if anchor is None:
-            anchor = users[-1] if users else len(msgs)
-        # The latest tool group of the running turn stays (it may be in flight).
-        last_calls = next((i for i in range(len(msgs) - 1, anchor, -1)
-                           if msgs[i].get("role") == "assistant" and msgs[i].get("tool_calls")), None)
-        tail = last_calls if last_calls is not None else len(msgs)
-
-        drop: set[int] = set()
-
-        def take(idx):
-            nonlocal total
-            drop.add(idx)
-            total -= costs[idx]
-
-        # Pass 0: stop sending back the reasoning of earlier turns (/think-history
-        # all) — the cheapest thing to lose; it stays in the transcript.
-        unsend: list[int] = []
-        for k in range(1, anchor):
-            if total <= target:
-                break
-            if id(msgs[k]) in sent:
-                unsend.append(k)
-                total -= costs[k]
-                costs[k] = 0       # a later pass dropping it saves nothing more
-
-        # Pass 1: tool-call groups, oldest first.
-        i = 1
-        while i < tail and total > target:
-            role = msgs[i].get("role")
-            if role == "assistant":
-                j = i + 1
-                while j < tail and msgs[j].get("role") in ("tool", "thinking"):
-                    j += 1
-                if j > i + 1:
-                    for k in range(i, j):
-                        take(k)
-                    i = j
-                    continue
-            elif role in ("tool", "thinking"):
-                take(i)   # orphaned tool/thinking with no preceding assistant
-            i += 1
-
-        # Pass 2: whole turns before the running one, oldest first, so what is
-        # left still starts with a user message and keeps its tool pairing.
-        starts = [u for u in users if u < anchor]
-        if not starts or starts[0] > 1:
-            starts.insert(0, 1)
-        for n, s0 in enumerate(starts):
-            if total <= target:
-                break
-            s1 = starts[n + 1] if n + 1 < len(starts) else anchor
-            for k in range(s0, s1):
-                if k not in drop:
-                    take(k)
-
-        # Pass 3: still over the target — trim the largest remaining tool results.
-        # Trimming only to the limit would leave the context a few tokens under
-        # it: every later request then sits at ~100% yet never re-triggers.
-        trims: dict[int, str] = {}
-        if total > target:
-            for k in sorted((k for k in range(1, len(msgs))
-                             if k not in drop and msgs[k].get("role") == "tool"),
-                            key=lambda k: -costs[k]):
-                excess = total - target
-                if excess <= 0:
-                    break
-                keep = max(costs[k] - excess - 16, _TRIM_FLOOR_TOKENS)  # 16: the marker
-                if keep >= costs[k]:
-                    continue
-                text = _content_text(msgs[k])
-                head, tail_chars = keep * 4 * 2 // 3, keep * 4 // 3
-                cut = len(text) - head - tail_chars
-                trims[k] = (f"{text[:head]}\n[… {cut:,} chars removed by context compaction …]\n"
-                            f"{text[len(text) - tail_chars:]}")
-                total -= costs[k] - _text_tokens(trims[k])
-
-        if not drop and not trims and not unsend:
-            return False, (f"Context not compacted: nothing left to remove "
-                           f"(~{total:,} of {self.context_limit:,} tokens).")
-
-        # Summarise what goes, folding in a summary already at the top of the
-        # oldest surviving user message so the new one replaces it.
-        keep_idx = [k for k in range(len(msgs)) if k not in drop]
-        first_user = next((k for k in keep_idx if msgs[k].get("role") == "user"), None)
-        prev_summary, first_body = "", None
-        if first_user is not None:
-            prev_summary, first_body = _split_summary(_content_text(msgs[first_user]))
-        removed_msgs = [msgs[k] for k in sorted(drop)]
-        summary = ""
-        if summarise and removed_msgs:
-            summary = self._summarize_removed(removed_msgs, prev_summary)
-            if self._cancel.is_set():
-                return False, "Compaction cancelled — history unchanged."
-
-        # Commit.  Archive first: the trims below change the messages in place.
-        self.compacted = transcript_mod.archive_compaction(
-            self.compacted, msgs, drop, trims, keep_idx,
-            max((r["n"] for r in self.compacted), default=0) + 1,
-            datetime.now().isoformat(timespec="seconds"))
-        # (In place: _turn_user tracks the running turn's message by identity.)
-        for k, text in trims.items():
-            msgs[k]["content"] = text
-        for k in unsend:
-            msgs[k]["unsent"] = True
-        if summary and first_user is not None:
-            msgs[first_user]["content"] = f"{_SUMMARY_OPEN}{summary}{_SUMMARY_CLOSE}{first_body}"
-        self.messages = [msgs[k] for k in keep_idx]
-
-        after = self._estimate(schemas=True)
-        self._token_estimate = after
-        self._measured_tokens = None
-        action = "summarised" if summary else "removed"
-        notice = f"Context compacted: {action} {len(drop)} messages"
-        if unsend:
-            notice += (f", stopped sending back {len(unsend)} earlier reasoning "
-                       f"block{'s' if len(unsend) > 1 else ''}")
-        if trims:
-            notice += f", trimmed {len(trims)} tool result{'s' if len(trims) > 1 else ''}"
-        notice += f" (was ~{before:,} tokens, now ~{after:,} tokens)"
-        if guides_notice:
-            notice += f"\n{guides_notice}"
-        self.logger.log_compact(self.mode, self.client.model, len(drop), before, after)
-        return True, notice
-
-    def _summarize_removed(self, msgs: list[dict], previous: str = "") -> str:
-        """One-shot LLM call to summarise removed messages (superseding `previous`,
-        an earlier summary). Returns '' on failure."""
-        conversation = _format_for_summary(msgs)
-        if not conversation.strip():
-            return previous
-        num_ctx = self.model_max_ctx or self.context_limit
-        instruction = ("Summarize the following conversation fragment concisely. "
-                       "Preserve: key decisions, file names, code entities, outcomes, and "
-                       "any facts needed to continue the work. Omit pleasantries and filler.\n\n")
-        if previous:
-            instruction += f"It continues from this earlier summary; fold it in:\n{previous}\n\n"
-        # Fit the call's window: keep the newest part of the fragment.
-        budget = (num_ctx - _SUMMARY_REPLY_TOKENS - _text_tokens(instruction)) * 4
-        if budget <= 0:
-            return previous
-        if len(conversation) > budget:
-            conversation = conversation[-budget:]
-            conversation = conversation[conversation.find("\n") + 1:]
-        prompt = [{"role": "user", "content": instruction + conversation}]
-        try:
-            response = self.client.chat(prompt, [], think=False, num_ctx=num_ctx)
-        except Exception:
-            return ""
-        content, _ = _extract_and_strip_thinking(response.content or "")
-        return content
-
     def user_turns(self) -> int:
         return self._turn_count
 
@@ -1527,10 +1228,10 @@ class Harness:
         parts: list[str] = []
         used = 0
         for m in reversed(body[start:]):          # newest first, so the oldest get dropped
-            text = _format_for_summary([m])
+            text = format_for_summary([m])
             if not text:
                 continue
-            cost = len(text) // 4 + 1              # same estimate as _text_tokens
+            cost = len(text) // 4 + 1              # same estimate as text_tokens
             if used + cost > budget_tokens:
                 if not parts:                      # always keep the end of the newest message
                     parts.append(text[-budget_tokens * 4:])
@@ -1622,16 +1323,6 @@ class Harness:
             self.momo_lines.append(line)
         del self.momo_lines[:-_MOMO_LINES_MAX]
 
-    def compact_threaded(self, summarise: bool = True):
-        """Run compact() on a worker thread, emitting events back to the TUI."""
-        self._cancel.clear()   # an earlier Esc must not cancel this compaction
-        try:
-            notice = self.compact(summarise=summarise)
-            self.event_queue.put(ChatEvent("system", notice))
-            self.emit_status()
-        finally:
-            self.event_queue.put(DoneEvent())
-
     def _sent_thinking(self) -> set[int]:
         """ids of the stored thinking messages the next request sends back: each
         goes with the assistant message right after it (reasoning that ended a
@@ -1719,8 +1410,9 @@ class Harness:
                 self._append_user(text)
                 self._execute_plan()
                 return
-            self.messages.append({"role": "user", "content": text})
-            self._turn_user = self.messages[-1]
+            # An earlier turn that errored or was interrupted can leave a user or
+            # tool message last; _append_user keeps the turn order valid.
+            self._append_user(text)
             if self.refresh_backend():
                 self.emit_status()
                 if (note := self.think_note()):
@@ -1787,6 +1479,11 @@ class Harness:
                     self.event_queue.put(ChatEvent("system", notice))
                     self.emit_status()
                 compact_notice = notice
+                if self._cancel.is_set():
+                    # Esc during the summary: abort() already swapped in a fresh
+                    # client, so going on would send a whole new request.
+                    self.event_queue.put(ChatEvent("system", "Interrupted."))
+                    return "cancelled"
 
             self.logger.log_request(
                 self.mode, self.client.model,
@@ -1836,7 +1533,7 @@ class Harness:
             else:
                 # No server count: fold the streamed reply into the estimate so the
                 # bar does not fall back when the stream preview ends.
-                self._token_estimate += _text_tokens((response.content or "") + (response.thinking or ""))
+                self._token_estimate += text_tokens((response.content or "") + (response.thinking or ""))
 
             # Extract thinking tokens from two sources:
             # 1. response.thinking — the adapter's reasoning field (Ollama's msg.thinking,
@@ -2017,7 +1714,7 @@ class Harness:
                 diff_existed = False
                 # edit_files changes several files: one diff each.
                 multi_snaps = ({pth: self._read_text_safe(pth)
-                                for pth in tools_mod._edit_paths(args)}
+                                for pth in tools_mod.edit_paths(args)}
                                if name == "edit_files" and isinstance(args, dict) else None)
                 if name in _MUTATING_TOOLS:
                     snap_path = args.get("src") if name == "move_file" else args.get("path")
@@ -2052,7 +1749,7 @@ class Harness:
                             result = ("ERROR: step not complete — the TDD gate failed.\n" + report
                                       + "\nFix this, then call complete_step again.")
                             self._tdd_refusals += 1
-                            if self._tdd_refusals >= _TDD_MAX_REFUSALS:
+                            if self._tdd_refusals >= TDD_MAX_REFUSALS:
                                 result += self._tdd_ask_user(report)
                     elif executing:
                         self._step_summary = str(args.get("summary") or "").strip()
@@ -2172,7 +1869,7 @@ class Harness:
 
         return "done"
 
-    # ── plan mode ─────────────────────────────────────────────────────────────
+    # ── streaming ─────────────────────────────────────────────────────────────
 
     def _delta_sink(self):
         """Streaming callback that coalesces deltas (~50 ms / 200 chars) before
@@ -2236,214 +1933,6 @@ class Harness:
         on_delta.flush = finish
         return on_delta
 
-    def _refresh_system_prompt(self):
-        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
-
-    def _sync_plan_file(self):
-        """Mirror the in-memory plan to the plan file; report (not raise) on failure."""
-        if self.plan is not None:
-            err = write_plan_file(self.plan, self.workdir)
-            if err:
-                self.event_queue.put(ErrorEvent(err))
-
-    @staticmethod
-    def _parse_steps(raw) -> list[Step]:
-        """Build steps from a tool's 'steps' argument.  Tolerates a JSON-encoded
-        string and bare strings (title only), which small models sometimes send."""
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except json.JSONDecodeError:
-                raw = [line for line in raw.splitlines() if line.strip()]
-        steps = []
-        for item in raw if isinstance(raw, list) else []:
-            if isinstance(item, dict):
-                # Status, tag and stage are the harness's to set, not the model's.
-                steps.append(Step.from_dict({k: v for k, v in item.items()
-                                             if k not in ("status", "tag", "stage")}))
-            elif isinstance(item, str) and item.strip():
-                steps.append(Step(title=item.strip()))
-        return steps
-
-    def approve_plan(self) -> str:
-        """Approve the current plan for execution, re-reading the plan file first so
-        the user's hand edits are honoured.  Returns '' on success or an error."""
-        if self.plan is None:
-            return "No plan to run. Switch to /plan and describe a feature or bug first."
-        edited = read_plan_file(self.workdir)
-        if edited is not None:
-            self.plan = edited
-        if not self.plan.steps:
-            return "The plan has no steps."
-        self.plan_phase = "executing"
-        self._sync_plan_file()
-        # The plan runs in coding mode (set_mode rebuilds the prompt and emits status).
-        self.set_mode("coding")
-        return ""
-
-    def cancel_plan(self) -> str:
-        if self.plan is None:
-            return "No active plan."
-        title = self.plan.title
-        self.plan = None
-        self.plan_phase = "investigating"
-        delete_plan_file(self.workdir)
-        self._refresh_system_prompt()
-        self.emit_status()
-        return f"Plan discarded: {title} ({PLAN_FILENAME} removed)"
-
-    def _handle_create_plan(self, args: dict) -> str:
-        steps = self._parse_steps(args.get("steps"))
-        if not steps:
-            return ("ERROR: create_plan needs a non-empty 'steps' list of "
-                    "{title, details, files} objects. Call it again with the steps.")
-        plan = Plan(title=str(args.get("title") or "Implementation plan").strip(),
-                    goal=str(args.get("goal") or "").strip(), steps=steps)
-        approve_note = ""
-        if self.plan_kind == "tdd":
-            err = self._make_tdd_plan(plan, args)
-            if err:
-                return err
-            approve_note = f" Approving also lets the harness run `{plan.test_command}` after every step."
-        self.plan = plan
-        self._sync_plan_file()
-        self.event_queue.put(ChatEvent("assistant", self.plan.to_markdown()))
-        answer = self._ask_user(
-            f"Execute this plan? y = run it · n = keep it for later (/plan run) · "
-            f"anything else = feedback to revise it. You can edit {PLAN_FILENAME} before answering."
-            + approve_note
-        ).strip()
-        low = answer.lower().rstrip(".!")
-        if low in ("y", "yes", "ok", "go", "run", "approve", "approved"):
-            err = self.approve_plan()
-            if err:
-                return f"ERROR: {err}"
-            n = len(self.plan.steps)
-            return (f"User approved the plan ({n} steps). The harness will now drive "
-                    f"execution one step at a time.")
-        if low in ("", "n", "no", "later", "not now"):
-            self.plan_phase = "awaiting_approval"
-            self._refresh_system_prompt()
-            self.emit_status()
-            return (f"User chose to keep the plan for later (saved to {PLAN_FILENAME}). "
-                    "Do not call any more tools; reply with one short sentence.")
-        self.plan_phase = "investigating"
-        self._refresh_system_prompt()
-        return (f"User requested changes to the plan: {answer}\n"
-                "Investigate further if needed, then call create_plan again with the complete revised plan.")
-
-    def _make_tdd_plan(self, plan: Plan, args: dict) -> str:
-        """Turn plan into a TDD plan: tag its steps and wrap them in the
-        test-writing and acceptance stages.  '' or an error for the model."""
-        command = str(args.get("test_command") or "").strip()
-        if not command:
-            return ("ERROR: this is a TDD plan: create_plan needs 'test_command', the command "
-                    "that runs the whole test suite. Call it again with it.")
-        # The harness runs the suite at every gate and adds the acceptance stage;
-        # a step that only does that has nothing to implement and no test to write.
-        n = len(plan.steps)
-        dropped = [st for i, st in enumerate(plan.steps) if _no_work(st, command, i == n - 1)]
-        if dropped and len(dropped) == n:
-            return ("ERROR: every step only runs or checks the tests, which a TDD plan does "
-                    "itself at every step and in its acceptance stage. Call create_plan again "
-                    "with the steps that change the code.")
-        if dropped:
-            plan.steps = [st for st in plan.steps if st not in dropped]
-            self.event_queue.put(ChatEvent("system",
-                "Dropped steps the TDD plan does itself (it runs the whole suite at every step "
-                "and adds its own acceptance stage): "
-                + ", ".join(f'"{st.title}"' for st in dropped)))
-        missing = [st.title for st in plan.steps if not st.tests]
-        if missing:
-            return ("ERROR: every step of a TDD plan needs 'tests' (its expected outcomes). "
-                    "Missing on: " + "; ".join(missing) + ". Call create_plan again.")
-        acceptance = str_list(args.get("acceptance"))
-        plan.kind, plan.test_command = "tdd", command
-        plan.step_test_command = str(args.get("step_test_command") or "").strip()
-        for i, st in enumerate(plan.steps, 1):
-            st.tag = f"tdd-step-{i}"
-        plan.steps = ([Step(title="Write the tests, all skipped", stage="tests",
-                            details="Write the tests for every step and for acceptance, each "
-                                    "skipped with its tag in the skip reason. The suite must "
-                                    "still pass.")]
-                      + plan.steps
-                      + [Step(title="Acceptance: switch on the end-to-end tests", stage="acceptance",
-                              tag=ACCEPTANCE_TAG, tests=acceptance,
-                              details="Remove the tdd-acceptance skip markers and make the "
-                                      "whole suite pass.")])
-        return ""
-
-    def _tdd_switch_on(self, step: Step) -> tuple[int, list[str], bool, str] | None:
-        """Remove the skip markers of the stage about to start and run the suite
-        once, so the model starts from the failures (red before green).
-        (markers removed, tagged lines left to the model, passed, output);
-        None when no marker could be removed."""
-        self.event_queue.put(ToolCallEvent("tdd_switch_on", {"tag": step.tag}))
-        removed, left, changed = tdd_mod.switch_on(self.workdir, step.tag)
-        for rel, old in changed.items():   # shown like any other edit
-            self._emit_diff("edit_file", {"path": rel}, "OK", old, True)
-        if not removed:
-            note = ("no skip markers to remove" if not left else
-                    "these tagged lines are not plain skip markers: " + ", ".join(left))
-            self.event_queue.put(ToolResultEvent("tdd_switch_on", note))
-            return None
-        command = tdd_mod.step_command(self.plan, step.tag) or self.plan.test_command
-        passed, output = tdd_mod.run_tests(command, self.workdir, self._cancel)
-        self.event_queue.put(ToolResultEvent("tdd_switch_on",
-            f"removed {removed} skip marker{'s' if removed != 1 else ''}; ran `{command}`: tests "
-            f"{'pass' if passed else 'fail'}\n{output}"))
-        return removed, left, passed, output
-
-    def _tdd_step_text(self, idx: int, switched=None) -> str:
-        """The instruction ending a TDD stage's step message.  switched: what
-        _tdd_switch_on did when the stage started (None = nothing)."""
-        plan = self.plan
-        step = plan.steps[idx]
-        step_cmd = tdd_mod.step_command(plan, step.tag) if step.tag else ""
-        done = ((f"Run this stage's tests with `{step_cmd}`. " if step_cmd else "")
-                + f"To check the whole suite, run exactly `{plan.test_command}` (no pipe): "
-                "complete_step reuses that run if you change nothing after it. When the stage is "
-                "done, call complete_step: it checks the skip markers and the whole suite, and the "
-                "plan only moves on when that passes.")
-        if step.stage == "tests":
-            want = "\n".join(f"- [{st.tag}] {st.title}:\n" + "\n".join(f"    - {t}" for t in st.tests)
-                             for st in plan.steps[idx + 1:] if st.tag)
-            return ("Write the complete tests for these outcomes now: setup, the call and the "
-                    "assertions. Put the test framework's own skip marker on its own line directly "
-                    "above each test, with its [tag] in the skip reason, so the suite still passes. "
-                    "A test whose body is only the skip marker checks nothing and is refused. Do not "
-                    "implement anything yet (only stubs a skipped test needs to compile or "
-                    "import).\n" + want + "\n\n" + done)
-        expect = "\n".join(f"- {t}" for t in step.tests)
-        acceptance = step.stage == "acceptance"
-        what = "end-to-end tests" if acceptance else "tests for this step"
-        if switched is None:
-            # Resumed, nothing tagged (a step added after the tests were written),
-            # or only markers the harness cannot remove.
-            text = (f"Make sure the {what} (tagged {step.tag}) run — remove any skip marker with "
-                    f"that tag that is left — then implement only this step until they pass:\n"
-                    f"{expect}\n")
-        else:
-            removed, left, passed, output = switched
-            text = f"The harness switched on the {removed} {what} tagged {step.tag} and ran them. "
-            if not passed and acceptance:
-                text += f"They fail:\n{output}\n\nFix what they show.\n"
-            elif not passed:
-                text += ("They fail, as they should before the implementation:\n"
-                         f"{output}\n\nImplement only this step until they pass:\n{expect}\n")
-            elif acceptance:
-                text += ("They already pass. Check that they cover these outcomes, then call "
-                         f"complete_step:\n{expect}\n")
-            else:
-                text += ("They already pass before any code change. If this step needs no code "
-                         "change — what it asks for exists already — call complete_step and say "
-                         "so. Otherwise make its tests check the new behaviour first (they must "
-                         f"fail), then implement:\n{expect}\n")
-            if left:
-                text += ("These tagged lines are not plain skip markers — remove the skip from "
-                         "them yourself: " + ", ".join(left) + "\n")
-        return text + "Tests tagged for later steps stay skipped.\n\n" + done
-
     def _annotate_result(self, name: str, args: dict, result: str) -> str:
         """Notes on a tool result that only the history can give: the exact call
         that just failed, made again (a plan run sent one failing edit_file twice),
@@ -2459,7 +1948,7 @@ class Harness:
         self._last_failed_call = key if failed else None
         if name == "run_command":
             return self._rerun_note(str(args.get("command") or ""), result)
-        if name not in _KEEPS_GREEN:
+        if name not in KEEPS_GREEN:
             self._last_run = None
         return result
 
@@ -2478,221 +1967,6 @@ class Harness:
         return (f"[same command as {Path(last[1]).name} and no files changed since — "
                 f'command_output(path="{last[1]}", grep="…") shows any part of that output '
                 f"without running it again]\n" + result)
-
-    def _track_tdd_green(self, name: str, args: dict):
-        """After each tool call of a running TDD stage: a passing run of exactly the
-        plan's test command makes the suite green; anything that may write ends it."""
-        if name == "run_command":
-            code, self._last_run_exit = self._last_run_exit, None
-            self._tdd_green = code == 0 and tdd_mod.same_command(
-                str(args.get("command") or ""), self.plan.test_command)
-        elif name not in _KEEPS_GREEN:
-            self._tdd_green = False
-
-    def _check_step_command(self, idx: int):
-        """Once the tests are written: the step test command must pass on them
-        while they are all skipped.  One that fails (matches no file, wrong
-        runner) would show red at every stage, so it is dropped."""
-        plan = self.plan
-        first = next((st.tag for st in plan.steps[idx + 1:] if st.tag), "")
-        command = tdd_mod.step_command(plan, first) if first and plan.step_test_command else ""
-        if not command:
-            return
-        passed, output = tdd_mod.run_tests(command, self.workdir, self._cancel)
-        if not passed:
-            plan.step_test_command = ""
-            tail = "\n".join(output.splitlines()[-8:])
-            self.event_queue.put(ChatEvent("system",
-                f"The step test command failed on the skipped tests (`{command}`); using the "
-                f"full suite instead.\n{tail}"))
-
-    def _tdd_ask_user(self, report: str) -> str:
-        """After _TDD_MAX_REFUSALS gate refusals in a row: ask the user for
-        guidance or to pause.  Returns the text to add to the refusal."""
-        n = self._tdd_refusals
-        tail = "\n".join(report.splitlines()[-15:])
-        answer = self._ask_user(
-            f"Plan step {self.plan.progress()} still does not pass its gate after {n} attempts:\n"
-            f"{tail}\n\nReply with guidance for the model, or 'pause' to stop the plan here."
-        ).strip()
-        self._tdd_refusals = 0
-        if answer.lower().rstrip(".!") in ("", "pause", "stop", "p", "n", "no"):
-            self._tdd_pause = True
-            return "\nThe user paused the plan here. Do not call any more tools."
-        return f"\nUser guidance after {n} failed attempts: {answer}"
-
-    def _tdd_gate(self) -> tuple[bool, str]:
-        """Check the current stage of a running TDD plan (markers + test command)."""
-        idx = self.plan.current_index()
-        if idx is None:
-            return True, ""
-        self.event_queue.put(ToolCallEvent("tdd_gate", {"command": self.plan.test_command}))
-        step = self.plan.steps[idx]
-        notes = []
-        if self._tdd_snapshot is not None:
-            finished = {st.tag for st in self.plan.steps[:idx] if st.tag and st.finished}
-            refusal, notes = tdd_mod.audit(self._tdd_snapshot, self.workdir,
-                                           self.plan.test_owners, finished)
-            if refusal:
-                self.event_queue.put(ToolResultEvent("tdd_gate", refusal))
-                return False, refusal
-        passed, report = tdd_mod.check_gate(self.plan, idx, self.workdir, self._cancel,
-                                            reuse_green=self._tdd_green)
-        if passed and step.stage == "tests":
-            self.plan.test_owners = tdd_mod.test_owners(self.workdir, tdd_mod.find_tags(self.workdir))
-            self._check_step_command(idx)
-        if passed and notes:
-            self.event_queue.put(ChatEvent("system",
-                f"Test lines changed in step {idx + 1}:\n" + "\n".join(f"  {n}" for n in notes)))
-        self.event_queue.put(ToolResultEvent("tdd_gate", report))
-        self.logger.log_tool_result(self.mode, self.client.model, "tdd_gate", len(report))
-        return passed, report
-
-    def _handle_revise_plan(self, args: dict) -> str:
-        if not self._plan_executing():
-            return "ERROR: revise_plan is only available while executing an approved plan."
-        steps = self._parse_steps(args.get("steps"))
-        if not steps:
-            return "ERROR: revise_plan needs a non-empty 'steps' list of the remaining steps."
-        new_titles = {st.title.strip().lower() for st in steps}
-        dropped = [st.title for st in self.plan.steps
-                   if not st.finished and st.stage == "impl"
-                   and st.title.strip().lower() not in new_titles]
-        if self.plan.tdd:
-            tests_written = any(st.stage == "tests" and st.finished for st in self.plan.steps)
-            known = {st.tag for st in self.plan.steps if st.tag}
-            self.plan.replace_remaining(steps)
-            for st in steps:
-                if tests_written and st.tag not in known:
-                    st.details = (f"Its tests were not part of the test-writing stage: write "
-                                  f"them first (the outcomes below), then implement.\n{st.details}")
-            steps = [st for st in self.plan.steps if not st.finished]
-        else:
-            self.plan.replace_remaining(steps)
-        steps[0].status = "in_progress"
-        self._sync_plan_file()
-        self._refresh_system_prompt()
-        self.emit_status()
-        reason = str(args.get("reason") or "").strip()
-        start = len(self.plan.steps) - len(steps) + 1
-        listing = "\n".join(f"  {start + i}. {st.title}" for i, st in enumerate(steps))
-        dropped_txt = ("\nDropped steps:\n" + "\n".join(f"  - {t}" for t in dropped)) if dropped else ""
-        self.event_queue.put(ChatEvent("system",
-            f"Plan revised{': ' + reason if reason else ''}\nRemaining steps:\n{listing}{dropped_txt}"))
-        warn = ("\nThese steps were dropped because they are not in your list — if that was not "
-                "intended (or they are not actually done), call revise_plan again including them:"
-                + dropped_txt) if dropped else ""
-        return (f"Plan revised. Remaining steps:\n{listing}{warn}\n"
-                f"Continue with step {start} only: {steps[0].title}")
-
-    def _execute_plan(self):
-        """Drive an approved plan one step at a time.  Each step runs the same tool
-        loop as coding mode; a text-only reply completes the step.  Any other loop
-        outcome (interrupt, error, iteration cap) pauses execution so it can be
-        resumed with /plan resume.  The plan file is deleted when all steps are done."""
-        plan = self.plan
-        if plan is None:
-            self.event_queue.put(ChatEvent("system", "No plan to execute."))
-            return
-        self.plan_phase = "executing"
-        if self.mode != "coding":
-            self.set_mode("coding")
-        while (idx := plan.current_index()) is not None:
-            step = plan.steps[idx]
-            first_start = step.status == "pending"
-            step.status = "in_progress"
-            self._sync_plan_file()
-            self._refresh_system_prompt()
-            self.emit_status()
-            n = len(plan.steps)
-            self.event_queue.put(ChatEvent("system", f"▶ Plan step {idx + 1}/{n}: {step.title}"))
-            # A TDD stage starts with its tests switched on and run once (red first),
-            # and with the test files as they are then, to audit at its gate.
-            switched = (self._tdd_switch_on(step)
-                        if plan.tdd and first_start and step.stage != "tests" else None)
-            self._tdd_snapshot = (tdd_mod.snapshot(self.workdir, plan.test_owners)
-                                  if plan.tdd and first_start and step.stage != "tests" else None)
-            self._tdd_refusals, self._tdd_pause, self._tdd_green = 0, False, False
-            body = [f"Plan step {idx + 1}/{n}: {step.title}"]
-            if step.details:
-                body.append(step.details)
-            if step.files:
-                body.append(f"Files: {', '.join(step.files)}")
-            body.append(self._tdd_step_text(idx, switched) if plan.tdd else
-                        "Implement only this step and verify it, then call complete_step with a "
-                        "short summary of what you changed and how you verified it.")
-            self._append_user("\n\n".join(body))
-
-            tools = self._current_tools() if self.tools_enabled else []
-            outcome = self._run_loop(tools, 100)
-            # A TDD step that ended with a text reply instead of complete_step
-            # has not passed the gate yet: check it, and send failures back.
-            retries = 0
-            while (outcome == "done" and plan.tdd and self._step_summary is None
-                   and plan.current_index() == idx):
-                passed, report = self._tdd_gate()
-                if passed:
-                    break
-                if retries >= _TDD_TEXT_RETRIES:
-                    outcome = "gate"
-                    break
-                retries += 1
-                self._append_user("The step is not complete — the TDD gate failed.\n" + report
-                                  + "\nFix this, then call complete_step.")
-                outcome = self._run_loop(tools, 100)
-            if outcome != "done":
-                self._sync_plan_file()
-                if outcome == "gate":
-                    self.event_queue.put(ChatEvent("system",
-                        f"Step {plan.progress()} ended without passing its tests."))
-                self.event_queue.put(ChatEvent("system",
-                    f"Plan paused at step {plan.progress()} — type /plan resume (or any "
-                    f"message) to continue, /plan cancel to discard. Progress is kept in {PLAN_FILENAME}."))
-                return
-
-            # The step that is in progress now may differ from `idx` if the model
-            # called revise_plan during the step.
-            cur = plan.current_index()
-            if cur is not None and plan.steps[cur].status == "in_progress":
-                if self._step_summary:
-                    note = self._step_summary
-                else:  # text-only reply ended the step
-                    last = self.messages[-1] if self.messages else {}
-                    note = (last.get("content") or "") if last.get("role") == "assistant" else ""
-                note = " ".join(note.split())
-                plan.steps[cur].status = "done"
-                plan.steps[cur].note = note[:200] + ("…" if len(note) > 200 else "")
-            self._sync_plan_file()
-            self._autosave()
-
-        total = len(plan.steps)
-        self.plan = None
-        self.plan_phase = "investigating"
-        delete_plan_file(self.workdir)
-        self._refresh_system_prompt()
-        self.event_queue.put(ChatEvent("system",
-            f"Plan complete: {plan.title} ({total} step{'s' if total != 1 else ''}). {PLAN_FILENAME} removed. "
-            "Still in coding mode — /plan to plan the next change."))
-
-    def execute_plan_threaded(self):
-        """Run (or resume) plan execution on a worker thread for /plan run|resume."""
-        self._cancel.clear()
-        try:
-            self._execute_plan()
-        finally:
-            self.emit_status()
-            self._autosave()
-            self.event_queue.put(DoneEvent())
-
-    def _plan_progress(self) -> str:
-        # A running plan shows in every mode (it runs in coding mode); a draft only in plan mode.
-        if self.plan is None or (self.mode != "plan" and self.plan_phase != "executing"):
-            return ""
-        if self.plan_phase == "executing":
-            return f"exec {self.plan.progress()}"
-        if self.plan_phase == "awaiting_approval":
-            return "awaiting approval"
-        return "draft"
 
     def refresh_status(self):
         """Re-estimate the context (the prompt or history changed) and emit it."""
@@ -2765,7 +2039,8 @@ class Harness:
         if name in self.active_skills:
             return f"Skill '{name}' is already active."
         self.active_skills.append(name)
-        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
+        self.rebuild_system_prompt()
+        self.refresh_status()
         return f"Skill loaded: {name}"
 
     def unload_skill(self, name: str) -> str:
@@ -2773,7 +2048,8 @@ class Harness:
         if name not in self.active_skills:
             return f"Skill '{name}' is not active."
         self.active_skills.remove(name)
-        self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
+        self.rebuild_system_prompt()
+        self.refresh_status()
         return f"Skill unloaded: {name}"
 
     def _has_conversation(self) -> bool:
@@ -2895,8 +2171,7 @@ class Harness:
             self._start_index()
         # Always rebuild the system prompt from the current role files and skills on
         # disk — saved sessions carry a snapshot; role/skill edits must take effect.
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0] = {"role": "system", "content": self._build_system_prompt()}
+        self.rebuild_system_prompt()
         self._token_estimate = self._estimate(schemas=True)
         self._measured_tokens = None
         self.emit_status()

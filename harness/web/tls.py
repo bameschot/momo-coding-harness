@@ -35,6 +35,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..paths import momo_home
+
 CA_DAYS = 3650
 SERVER_DAYS = 397            # browsers cap leaf lifetimes; 397 is accepted everywhere
 RENEW_BEFORE_S = 30 * 86400
@@ -60,7 +62,7 @@ class AutoCert:
 
 
 def tls_dir() -> Path:
-    return Path.home() / ".momo-harness" / "tls"
+    return momo_home() / "tls"
 
 
 def fingerprint(pem_path: Path) -> str:

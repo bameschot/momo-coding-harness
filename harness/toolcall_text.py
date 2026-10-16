@@ -17,8 +17,10 @@ _RX_QWEN      = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>',         re
 # Functionary / older Hermes variants
 _RX_FUNC      = re.compile(r'<functioncall>\s*(\{.*?\})\s*</functioncall>',   re.DOTALL | re.IGNORECASE)
 _RX_FUNC2     = re.compile(r'<function_call>\s*(\{.*?\})\s*</function_call>', re.DOTALL | re.IGNORECASE)
-# Phi-3 / Phi-4 — no closing tag, JSON follows the token directly
-_RX_PHI       = re.compile(r'<\|tool_call\|>\s*(\{.*?\})',                    re.DOTALL)
+# Phi-3 / Phi-4 — no closing tag, JSON follows the token directly.  Without a
+# closing tag a regex cannot tell where the object ends, so these two formats
+# only find their start and _json_after reads the whole object.
+_RX_PHI       = re.compile(r'<\|tool_call\|>\s*(?=\{)')
 # DeepSeek-V2/V3/R1 — tool name precedes the args JSON, separated by a special token
 _RX_DEEPSEEK  = re.compile(
     r'<｜tool▁call▁begin｜>(.*?)<｜tool▁sep｜>(.*?)<｜tool▁call▁end｜>', re.DOTALL
@@ -26,9 +28,26 @@ _RX_DEEPSEEK  = re.compile(
 # Mistral / Mixtral — JSON array prefixed by a literal tag
 _RX_MISTRAL   = re.compile(r'\[TOOL_CALL\]\s*(\[.*?\])',                       re.DOTALL)
 # Command-R / Cohere — text-based action format
-_RX_COMMAND_R = re.compile(r'Action:\s*(\S+)\s*\nAction\s+Input:\s*(\{.*?\})', re.DOTALL)
+_RX_COMMAND_R = re.compile(r'Action:\s*(\S+)\s*\nAction\s+Input:\s*(?=\{)')
 
 _JSON_DECODER = json.JSONDecoder()
+
+
+def _json_after(rx: re.Pattern, text: str):
+    """(match, object, end) for each match of rx that a JSON object follows
+    directly; raw_decode reads the whole object, braces in strings included."""
+    for m in rx.finditer(text):
+        try:
+            obj, end = _JSON_DECODER.raw_decode(text, m.end())
+        except json.JSONDecodeError:
+            continue
+        yield m, obj, end
+
+
+def _cut_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    for start, end in sorted(spans, reverse=True):
+        text = text[:start] + text[end:]
+    return text
 
 
 def _match_paren(s: str, i: int) -> int:
@@ -81,9 +100,9 @@ def _strip_text_tool_calls(text: str) -> str:
     """
     for rx in (_RX_QWEN, _RX_FUNC, _RX_FUNC2, _RX_MISTRAL):
         text = rx.sub("", text)
-    text = _RX_PHI.sub("", text)
     text = _RX_DEEPSEEK.sub("", text)
-    text = _RX_COMMAND_R.sub("", text)
+    for rx in (_RX_PHI, _RX_COMMAND_R):
+        text = _cut_spans(text, [(m.start(), end) for m, _obj, end in _json_after(rx, text)])
     return text.strip()
 
 
@@ -145,7 +164,11 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
 
     # ── Tagged / structured formats ───────────────────────────────────────────
 
-    for rx in (_RX_QWEN, _RX_FUNC, _RX_FUNC2, _RX_PHI):
+    for _m, obj, _end in _json_after(_RX_PHI, text):
+        if (hit := _accept_full(obj)):
+            _append(hit)
+
+    for rx in (_RX_QWEN, _RX_FUNC, _RX_FUNC2):
         for m in rx.finditer(text):
             try:
                 hit = _accept_full(json.loads(m.group(1)))
@@ -174,14 +197,9 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    for m in _RX_COMMAND_R.finditer(text):
-        name = m.group(1).strip()
-        try:
-            hit = _accept_args(name, json.loads(m.group(2).strip()))
-            if hit:
-                _append(hit)
-        except json.JSONDecodeError:
-            pass
+    for m, obj, _end in _json_after(_RX_COMMAND_R, text):
+        if (hit := _accept_args(m.group(1).strip(), obj)):
+            _append(hit)
 
     # Nameless <tool_call> payloads: some models (notably gemma) emit the argument
     # object directly inside the tag with no {"name":..., "arguments":...} wrapper.

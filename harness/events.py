@@ -14,8 +14,6 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import code_index
-
 _BACKLOG_MAX = 5000
 
 
@@ -71,8 +69,10 @@ class StatusEvent:
     index_progress: str = ""      # "812/1873" while building/refreshing
     index_files: int = 0
     index_mem: int = 0            # estimated bytes in use
-    index_max_bytes: int = code_index.DEFAULT_MAX_BYTES
-    index_max_files: int = code_index.DEFAULT_MAX_FILES
+    # Always filled in by Harness.status_event (code_index's defaults live there),
+    # so this module stays free of harness imports.
+    index_max_bytes: int = 0
+    index_max_files: int = 0
     index_workers: int = 0        # /index-workers: 0 = auto
     index_persist: bool = True    # /index-persist: load/save a pickle
     index_route: bool = True      # /index-route: answer grep_files/find_files from the index
@@ -105,39 +105,39 @@ class DiffEvent:
     is_new: bool = False           # write_file created a new file
 
 
-@dataclasses.dataclass
+@dataclass
 class UserEvent:
     """Text the user submitted from any frontend (shown in all of them)."""
     text: str
 
 
-@dataclasses.dataclass
+@dataclass
 class ResetEvent:
     """The transcript was replaced (e.g. a session was loaded) — clear the view."""
     pass
 
 
-@dataclasses.dataclass
+@dataclass
 class DeltaEvent:
     """A streamed piece of the reply being generated (kind: "content" | "thinking")."""
     kind: str
     text: str
 
 
-@dataclasses.dataclass
+@dataclass
 class StreamEndEvent:
     """The streamed preview is over; the final Think/Chat events follow."""
     pass
 
 
-@dataclasses.dataclass
+@dataclass
 class BusyEvent:
     """Shared busy / waiting-for-input state changed."""
     busy: bool
     waiting: bool
 
 
-@dataclasses.dataclass
+@dataclass
 class CompanionEvent:
     """momo's idle-recap state: whether the user is idle, the remembered recap lines,
     and the feature's settings (so every frontend's controls stay in sync)."""

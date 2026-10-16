@@ -5,6 +5,10 @@ file_dependencies tools.  Everything here is read-only.  Grammars come from the
 per-language ``tree-sitter-<lang>`` wheels, which bundle the compiled grammar, so
 nothing is downloaded at runtime.  If tree-sitter is not installed, AVAILABLE is
 False and tools.py leaves these tools out of every mode's tool set.
+
+code_index builds on this module's internals (node-type tables, classifiers,
+_Index) by design: the two are one tree-sitter subsystem.  Every other module
+uses only the public names (parse, index, parse_bytes, enclosing_symbol, ...).
 """
 import fnmatch
 import importlib
@@ -208,7 +212,7 @@ _BINDING_FIELDS = {"assignment": "left", "for_statement": "left", "for_in_statem
 _IMPORT_ANCESTOR_DEPTH = 6  # an identifier sits close to its import statement
 
 # Kinds whose nested functions are reported as methods.
-_CONTAINER_KINDS = {"class", "interface", "enum", "record", "struct", "union",
+CONTAINER_KINDS = {"class", "interface", "enum", "record", "struct", "union",
                     "trait", "impl", "object"}
 
 # Wrapper nodes whose span belongs to the definition they wrap (decorators,
@@ -690,7 +694,7 @@ def _extract(root, lang: str, lines: list[str],
                 walk(child, parent_qual, parent_kind, depth)
                 continue
             name, name_row = got
-            if kind == "function" and parent_kind in _CONTAINER_KINDS:
+            if kind == "function" and parent_kind in CONTAINER_KINDS:
                 kind = "method"
             if kind == "namespace":
                 namespaces.add(name.rsplit(".", 1)[-1])
@@ -1207,7 +1211,7 @@ def parse(path: Path) -> _Parsed | None:
     if hit and hit[0] == stamp:
         _cache.move_to_end(key)
         return hit[1]
-    parsed = _parse_bytes(lang, path.read_bytes())
+    parsed = parse_bytes(lang, path.read_bytes())
     while len(_cache) >= _MAX_CACHE:
         _cache.popitem(last=False)
     _cache[key] = (stamp, parsed)
@@ -1266,7 +1270,7 @@ def index(path: Path) -> _Index | None:
     if cached and cached[0] == stamp:
         _put_index(key, stamp, cached[1])
         return _index_cache[key][1]
-    idx = make_index(_parse_bytes(lang, path.read_bytes()))
+    idx = make_index(parse_bytes(lang, path.read_bytes()))
     while len(_index_cache) >= _MAX_INDEX_CACHE:
         _index_cache.popitem(last=False)
     _index_cache[key] = (stamp, idx)
@@ -1290,10 +1294,10 @@ def parse_uncached(path: Path, raw: bytes | None = None) -> _Parsed | None:
         return None
     if raw is None:
         raw = path.read_bytes()
-    return _parse_bytes(lang, raw)
+    return parse_bytes(lang, raw)
 
 
-def _parse_bytes(lang: str, raw: bytes) -> _Parsed:
+def parse_bytes(lang: str, raw: bytes) -> _Parsed:
     """One parse of a file's bytes: tree, symbols, imports — and, for HTML, the
     JavaScript of its inline <script> blocks as an embedded parse."""
     tree = _parser(lang).parse(raw)
@@ -1342,7 +1346,7 @@ def _inline_scripts(tree, raw: bytes) -> "_Parsed | None":
         found = True
     if not found:
         return None
-    return _parse_bytes("javascript", "\n".join(rows).encode("utf-8"))
+    return parse_bytes("javascript", "\n".join(rows).encode("utf-8"))
 
 
 def make_index(parsed: _Parsed) -> _Index:
@@ -1519,7 +1523,7 @@ def _unsupported(path: str) -> str:
             "Use grep_file / read_file instead.")
 
 
-def _iter_source_files(root: Path, stats: dict | None = None):
+def iter_source_files(root: Path, stats: dict | None = None):
     """Yield supported source files under root (or root itself if it is a file),
     skipping the same noise directories and oversized files as grep_files.  With
     `stats`, counts what was skipped so the caller can admit the gap."""
@@ -1552,7 +1556,7 @@ def _scan(root: Path, stats: dict, *, tree: bool = False):
     say so — otherwise the model reads an empty result as proof of absence.
     Yields _Index objects unless `tree` is set, which yields full _Parsed."""
     load = parse if tree else index
-    for f in _iter_source_files(root, stats):
+    for f in iter_source_files(root, stats):
         try:
             got = load(f)
         except OSError:
@@ -1589,7 +1593,7 @@ def _line_label(sym: Symbol) -> str:
     return sig
 
 
-def _enclosing(symbols: list[Symbol], line: int, skip_name: str | None = None) -> Symbol | None:
+def enclosing_symbol(symbols: list[Symbol], line: int, skip_name: str | None = None) -> Symbol | None:
     """Innermost definition containing `line`.  With skip_name, the definition of
     that name starting on this line is ignored, so a definition site reports its
     parent rather than itself."""
@@ -1603,7 +1607,7 @@ def _enclosing(symbols: list[Symbol], line: int, skip_name: str | None = None) -
 # Public because read_file's footer, find_symbol's line form and read_symbol's
 # line form all need the same "which definition is line N in?" lookup.
 def enclosing(idx: "_Index", line: int) -> Symbol | None:
-    return _enclosing(idx.symbols, line)
+    return enclosing_symbol(idx.symbols, line)
 
 
 _LINE_QUERY = re.compile(r"[Ll]?(\d+)")
@@ -2238,7 +2242,7 @@ def resolve_symbol(parsed: _Parsed, name: str, path: str, rel: str | None = None
     if line is not None:
         if not 1 <= line <= max(len(parsed.lines), 1):
             return f"ERROR: line {line} is outside {path} (1-{len(parsed.lines)})"
-        owner = _enclosing(parsed.symbols, line)
+        owner = enclosing_symbol(parsed.symbols, line)
         if owner is None:
             return (f"(line {line} of {rel or path} is not inside any definition — "
                     f"{fallback})")
@@ -2319,7 +2323,7 @@ def find_references(name: str, directory: str = ".", role: str | None = None,
             line = parsed.lines[r] if r < len(parsed.lines) else ""
             # Name the enclosing definition so the model does not have to guess
             # which function a call site sits in.
-            owner = _enclosing(parsed.symbols, r + 1, skip_name=bare if kind == "def" else None)
+            owner = enclosing_symbol(parsed.symbols, r + 1, skip_name=bare if kind == "def" else None)
             where = f" [in {owner.qualname}]" if owner else ""
             tag = f" ({kind}" + (f", recv {recv})" if recv else ")")
             hits.append(f"{rel}:{r + 1}:{where}{tag} {line.strip()}")

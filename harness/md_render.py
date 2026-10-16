@@ -8,9 +8,9 @@ Color IDs must match the constants assigned in tui.py.
 """
 from __future__ import annotations
 
+import curses
 import re
 import textwrap
-import curses
 
 # Color pair IDs — must match tui.py _C_MD_* assignments
 _C_NORMAL   = 0   # default terminal colors
@@ -39,7 +39,6 @@ def process(text: str, cols: int) -> list[tuple[str, int, int]]:
         table_buf.clear()
 
     in_code = False
-    lang_line = False  # True for the opening ``` line itself (skip it)
 
     for raw in lines:
         stripped = raw.rstrip()
@@ -48,8 +47,7 @@ def process(text: str, cols: int) -> list[tuple[str, int, int]]:
         if stripped.startswith("```"):
             if not in_code:
                 flush_table()
-                in_code = True
-                lang_line = True   # skip the opening fence line
+                in_code = True     # the opening fence line itself is not shown
             else:
                 in_code = False
             continue
@@ -74,7 +72,6 @@ def process(text: str, cols: int) -> list[tuple[str, int, int]]:
             heading = _strip_inline(heading)
             w = max(4, cols - 2)
             if level == 1:
-                bar = "═" * w
                 label = heading.upper()
                 padded = f" {label} "
                 left = (w - len(padded)) // 2

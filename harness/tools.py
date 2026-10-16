@@ -1,10 +1,10 @@
 import fnmatch
+import inspect
 import json
 import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -21,7 +21,7 @@ from .paths import (BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, SKIP_DIRS, safe_ent
 
 _MAX_FIND_RESULTS    = 100
 _MAX_GREP_RESULTS    = 200
-_MAX_COMMAND_TIMEOUT = 900   # 15 minutes — upper bound for a single run_command
+MAX_COMMAND_TIMEOUT = 900   # 15 minutes — upper bound for a single run_command
 # Without timeout= a command gets this long.  The model never passes timeout=, so a
 # default at the ceiling let its own infinite loop block a turn for 15 minutes
 # (edit evals, 2026-10-07); a build that needs longer is told how to ask for it.
@@ -307,7 +307,7 @@ _RUN_COMMAND_CLASSIC = _fn("run_command",
     "each stream); exit code is appended when non-zero. A command that times out or is "
     "interrupted returns the end of its output so far.",
     {"command": {"type": "string", "description": "Shell command to execute (runs in the working directory)"},
-     "timeout": {"type": "integer", "description": f"Timeout in seconds (default {_DEFAULT_COMMAND_TIMEOUT}, maximum {_MAX_COMMAND_TIMEOUT} = {_MAX_COMMAND_TIMEOUT // 60} minutes) — pass a longer one for a full build or test suite"}},
+     "timeout": {"type": "integer", "description": f"Timeout in seconds (default {_DEFAULT_COMMAND_TIMEOUT}, maximum {MAX_COMMAND_TIMEOUT} = {MAX_COMMAND_TIMEOUT // 60} minutes) — pass a longer one for a full build or test suite"}},
     ["command"])
 
 _RUN_COMMAND_NOTES = (
@@ -329,7 +329,7 @@ _RUN_COMMAND_FILE = _fn(
      "tail":    {"type": "integer", "description": "Only the last N lines (e.g. 30 for a test summary)"},
      "grep":    {"type": "string", "description": "Case-insensitive regex; only matching lines, numbered (e.g. \"error|fail\")"},
      "context": {"type": "integer", "description": "With grep: lines around each match"},
-     "timeout": {"type": "integer", "description": f"Seconds (default {_DEFAULT_COMMAND_TIMEOUT}, maximum {_MAX_COMMAND_TIMEOUT}); longer for a full build or test suite"},
+     "timeout": {"type": "integer", "description": f"Seconds (default {_DEFAULT_COMMAND_TIMEOUT}, maximum {MAX_COMMAND_TIMEOUT}); longer for a full build or test suite"},
      "background": {"type": "boolean", "description": "Keep it running (a server, a watcher); stop_command ends it"},
      "wait_for": {"type": "string", "description": "With background: regex printed once ready; waits up to timeout (default 30s)"}},
     ["command"])
@@ -777,7 +777,7 @@ def _read_footer(p: Path, path: str, n: int, start_line: int, end_line: int | No
             f'read_symbol("{path}", "{owner.qualname}") reads that definition whole]')
 
 
-def _read_text(path: str, workdir: Path, *, refuse_binary: bool = False) -> tuple[Path, str] | str:
+def read_text(path: str, workdir: Path, *, refuse_binary: bool = False) -> tuple[Path, str] | str:
     """(resolved path, text) of a file in the workdir, or an ERROR string.
     With refuse_binary, a file with a NUL byte near the start is an ERROR too."""
     p = safe_path(path, workdir)
@@ -801,7 +801,7 @@ def _read_file(path: str, start_line: int = 1, end_line: int | None = None, *, w
                read_budget: int | None = None) -> str:
     """read_budget: the most characters this read may return (the context left,
     less a reserve — see Harness._read_budget); None = no limit."""
-    got = _read_text(path, workdir, refuse_binary=True)
+    got = read_text(path, workdir, refuse_binary=True)
     if isinstance(got, str):
         return got
     p, text = got
@@ -843,7 +843,7 @@ def _capped(hits: list[str], total: int, advice: str) -> str:
 
 def _grep_one(pattern: str, path: str, workdir: Path):
     """(text, compiled regex) for the single-file greps, or an ERROR string."""
-    got = _read_text(path, workdir, refuse_binary=True)
+    got = read_text(path, workdir, refuse_binary=True)
     if isinstance(got, str):
         return got
     try:
@@ -1090,7 +1090,7 @@ def _clean_output(text: str) -> str:
     return "\n".join(lines).strip("\n").rstrip()
 
 
-def _output_tail(f) -> str:
+def output_tail(f) -> str:
     """The text a command wrote to temp file f: its last _OUTPUT_READ_BYTES."""
     size = f.seek(0, os.SEEK_END)
     skip = max(0, size - _OUTPUT_READ_BYTES)
@@ -1127,10 +1127,10 @@ def _clamp_timeout(timeout) -> int:
         return _DEFAULT_COMMAND_TIMEOUT
     if timeout <= 0:
         return _DEFAULT_COMMAND_TIMEOUT
-    return min(timeout, _MAX_COMMAND_TIMEOUT)
+    return min(timeout, MAX_COMMAND_TIMEOUT)
 
 
-def _exec(command: str, timeout: int, workdir: Path, cancel, out, err):
+def exec_command(command: str, timeout: int, workdir: Path, cancel, out, err):
     """Run command with its output going to the open files out and err (err may
     be subprocess.STDOUT).  Returns (proc, stopped) — stopped says why it was
     killed, None when it exited — or (None, error text) when it cannot start.
@@ -1193,7 +1193,7 @@ _GREP_PIPE = re.compile(
     r"(?:\s*\|\s*" + _HEAD_N + r")?\s*$")
 
 
-def _split_view_pipe(command: str) -> tuple[str, dict | None, str]:
+def split_view_pipe(command: str) -> tuple[str, dict | None, str]:
     """(command without a trailing tail/grep/head pipe, the view it asked for, the
     text taken off); (command, None, '') when it does not end in one.  view is
     {"tail": N}, {"head": N} or {"grep": pattern, "context": N}."""
@@ -1244,7 +1244,7 @@ def _run_command(command: str, timeout: int | None = None, tail: int | None = No
     refusal, note = _web_refusal(command, net_access)
     if refusal:
         return refusal
-    command, piped, taken = _split_view_pipe(command)
+    command, piped, taken = split_view_pipe(command)
     head = None
     if piped:
         if "tail" in piped:
@@ -1272,10 +1272,10 @@ def _run_command(command: str, timeout: int | None = None, tail: int | None = No
                                   run_output_limit, tail, grep, context, defaulted, run_exit,
                                   end_line=head, background=bool(background), wait_for=wait_for)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        proc, stopped = _exec(command, timeout, workdir, cancel, out, err)
+        proc, stopped = exec_command(command, timeout, workdir, cancel, out, err)
         if proc is None:
             return stopped
-        out_text, err_text = _output_tail(out), _output_tail(err)
+        out_text, err_text = output_tail(out), output_tail(err)
     if run_exit is not None and not stopped:
         run_exit["code"] = proc.returncode
 
@@ -1309,7 +1309,7 @@ def _longer(stopped: str, defaulted: bool) -> str:
         return ""
     return (f"\n(it ran with the default {_DEFAULT_COMMAND_TIMEOUT}s limit — if it really "
             f"needs longer, e.g. a full build or test suite, run it again with timeout= up to "
-            f"{_MAX_COMMAND_TIMEOUT}; a quick check that hangs is stuck, not slow)")
+            f"{MAX_COMMAND_TIMEOUT}; a quick check that hangs is stuck, not slow)")
 
 
 def _read_log(store: "run_store_mod.RunStore", path: Path) -> str:
@@ -1336,7 +1336,7 @@ _BACKGROUND_WAIT = 30      # seconds to wait for wait_for when no timeout is giv
 def _start_background(command, timeout, defaulted, wait_for, workdir, cancel, log, store, path):
     """Start a command that is meant to keep running (a server, a watcher) and
     wait until it is ready: wait_for appears in its output, or a few seconds
-    pass.  Returns (proc, stopped, notice) like _exec, plus a line saying how
+    pass.  Returns (proc, stopped, notice) like exec_command, plus a line saying how
     the wait ended; proc None: it could not start (stopped is the error)."""
     # Python block-buffers stdout that is not a terminal: "Serving on …" would
     # sit in the buffer and wait_for never see it.
@@ -1383,7 +1383,7 @@ def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, con
             proc, stopped, notice = _start_background(command, timeout, defaulted, wait_for,
                                                       workdir, cancel, log, store, path)
         else:
-            (proc, stopped), notice = _exec(command, timeout, workdir, cancel, log,
+            (proc, stopped), notice = exec_command(command, timeout, workdir, cancel, log,
                                             subprocess.STDOUT), ""
     if proc is None:
         path.unlink(missing_ok=True)
@@ -1574,7 +1574,7 @@ def _edit_list(edits) -> list:
     return edits if isinstance(edits, list) else [edits] if isinstance(edits, dict) else []
 
 
-def _edit_paths(args: dict) -> list[str]:
+def edit_paths(args: dict) -> list[str]:
     return [e["path"] for e in _edit_list(args.get("edits"))
             if isinstance(e, dict) and isinstance(e.get("path"), str)]
 
@@ -1613,7 +1613,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
         if name in _WRITES_PATHS:
             index.invalidate([args.get(k) for k in _WRITES_PATHS[name] if isinstance(args.get(k), str)])
         elif name == "edit_files":
-            index.invalidate(_edit_paths(args))
+            index.invalidate(edit_paths(args))
         elif name == "run_command":
             index.mark_dirty()
     return result
@@ -1662,7 +1662,7 @@ def _route_to_index(name: str, args: dict, workdir: Path, index, cancel) -> str 
     root = safe_path(str(args.get("directory") or "."), workdir)
     if isinstance(root, str):
         return None
-    rel = index._rel(root)
+    rel = index.rel(root)
     if rel is None:
         return None
     path = None if rel == "." else rel
@@ -1700,10 +1700,8 @@ def _index_note_for_grep(result: str, index) -> str:
     with the index tools when its hits are in indexed files (a trailing tip
     was being skipped)."""
     hits = [ln.split(":", 1)[0] for ln in result.splitlines()[:50] if ":" in ln]
-    with index._lock:
-        indexed = any(h in index._by_path for h in hits)
     body = result.replace(_INDEX_GREP_TIP, "")
-    if not indexed:
+    if not index.has_file(*hits):
         return body
     return ("(the code index is on: index_text searches text, index_search finds definitions, "
             "index_callers finds uses — each in one call)\n" + body)
@@ -1718,23 +1716,20 @@ def _index_result_hint(name: str, args: dict, workdir: Path, index) -> str:
     p = safe_path(str(target or "."), workdir)
     if isinstance(p, str):
         return ""
-    rel = index._rel(p)
+    rel = index.rel(p)
     if rel is None:
         return ""
     arg = "" if rel == "." else f'path="{rel}"'
     if name in ("list_directory", "code_outline"):
         if not p.is_dir():
             return ""
-        prefix = "" if rel == "." else rel + "/"
-        with index._lock:
-            if not any(r.startswith(prefix) for r in index._by_path):
-                return ""
+        if not index.has_files_under(rel):
+            return ""
         return (f"\n(code index: index_map({arg}) lists these files ranked by how much the "
                 f"project uses them, with their main definitions)")
     if name == "grep_file":
-        with index._lock:
-            if rel not in index._by_path:
-                return ""
+        if not index.has_file(rel):
+            return ""
         text = _literal(str(args.get("pattern", ""))) or "<text>"
         return (f"\n(code index: index_text({json.dumps(text)}, path=\"{rel}\") names the "
                 f"definition each hit is in; index_file(\"{rel}\") shows its outline and users)")
@@ -1816,10 +1811,14 @@ def _dispatch(name: str, args: dict, workdir: Path, net_access: str, net_max_byt
     state = {"net_access": net_access, "net_max_bytes": net_max_bytes,
              "net_max_chars": net_max_chars, "index": index, "cancel": cancel, **more}
     extra = {k: state[k] for k in _INJECTED.get(name, ())}
+    # Check the call against the signature first, so only an argument mismatch
+    # reads as "bad arguments" — a TypeError raised inside the tool is a bug and
+    # propagates (the harness reports it as the tool failing).
     try:
-        return fn(**args, workdir=workdir, **extra)
+        inspect.signature(fn).bind(**args, workdir=workdir, **extra)
     except TypeError as e:
         return f"ERROR: bad arguments for {name}: {e}"
+    return fn(**args, workdir=workdir, **extra)
 
 
 # ── tool reference rendering ──────────────────────────────────────────────────
@@ -1946,7 +1945,7 @@ _TOOL_REFERENCE_INTRO_COMPACT = (
     "writes put `path` before `content`."
 )
 
-_TOOL_REF_STYLES = ("full", "compact")
+TOOL_REF_STYLES = ("full", "compact")
 
 
 def _first_sentence(text: str) -> str:

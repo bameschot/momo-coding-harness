@@ -9,7 +9,7 @@ substrings that have to appear in the model's final reply; keep them to facts
 the answer cannot avoid stating (a file name, a symbol name), not to phrasing,
 and never to a heading level or other formatting detail.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ TASKS: list[Task] = [
         id="find-definition",
         prompt="Which file and line defines the EventBus class?",
         ideal=frozenset({"find_symbol", "index_search"}),
-        must=("events.py", "76"),
+        must=("events.py", "165"),
         note="find_symbol returns the line range directly; a follow-up read is waste.",
         max_calls=1,
     ),
@@ -54,7 +54,7 @@ TASKS: list[Task] = [
         id="callers",
         prompt="Which functions call safe_path? List the calling functions.",
         ideal=frozenset({"find_references", "index_callers"}),
-        must=("code_outline", "_read_text", "_edit_file"),
+        must=("code_outline", "read_text", "_load"),
         note="find_references(role='call') is complete in one call. The known "
              "failure is re-deriving it with shell after already getting it.",
         max_calls=1,
@@ -204,7 +204,7 @@ INDEX_TASKS: list[Task] = [
         id="indirect-callers",
         prompt="What calls references_in, and what calls those callers in turn? Name the functions.",
         ideal=frozenset({"index_callers", "find_references"}),
-        must=("find_references", "_uses", "index_callers"),
+        must=("find_references", "uses_of", "index_callers"),
         note="Two levels: index_callers(depth=2) is one call; find_references needs one per level.",
         max_calls=2,
     ),

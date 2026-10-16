@@ -40,7 +40,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from harness import code_index as ci  # noqa: E402
-from harness import code_nav, tools  # noqa: E402
+from harness import tools  # noqa: E402
 
 LANG_DIR = Path(__file__).resolve().parent / "lang"
 _RESULT_LINE = re.compile(r"^(\S+):L(\d+)-(\d+)\s+(\S+)\s+(\S+)\s+\|")
@@ -195,7 +195,7 @@ def _score(exp, idx, root: Path, sc: Scorer, res: Result) -> None:
     for name, want in exp.CALLERS.items():
         truth = {(rel, line_of(root, rel, a)): role for rel, a, role in want}
         bare, want_recv, cls = ci.query_target(idx, name)
-        uses, _defs = ci._uses(idx, bare, want_recv, None, cls)
+        uses, _defs = ci.uses_of(idx, bare, want_recv, None, cls)
         got = {(u[0], u[1]): u[2] for u in uses}
         for (rel, line), role in truth.items():
             hit = (rel, line) in got

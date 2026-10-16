@@ -376,7 +376,7 @@ class Hardening(unittest.TestCase):
             self.assertRegex(line, r"^(HTTP |redirected:|body:|note:|[a-z-]+:)")
 
     def test_safe_line_truncates(self):
-        out = net._safe_line("x" * 5000, 100)
+        out = net.safe_line("x" * 5000, 100)
         self.assertLessEqual(len(out), 101)
 
     # ── content fence ─────────────────────────────────────────────────────────

@@ -48,8 +48,9 @@ def main():
     parser.add_argument("--mode",    default=None, choices=["design", "chat", "plan", "coding", "momo"],
                         help="Starting mode (default: last-selected mode, else design; "
                              "ignored when restoring a session)")
-    parser.add_argument("--max-tool-result", default=0, type=int, metavar="N",
-                        help="Max chars returned by a single tool call (0 = unlimited)")
+    parser.add_argument("--max-tool-result", default=None, type=int, metavar="N",
+                        help="Max chars returned by a single tool call, 0 = unlimited "
+                             "(default: last /tool-result setting, else 0)")
     parser.add_argument("--run-mode", choices=("new", "classic"), default=None,
                         help="run_command output: 'new' saves it to a log and returns a view "
                              "(tail/grep, command_output); 'classic' returns all of it "
@@ -82,10 +83,12 @@ def main():
                              "(default: on). Writes to private addresses always ask.")
     parser.add_argument("--net-max-bytes", default=None, metavar="SIZE",
                         help="Ceiling on a single fetch_url download, in bytes or with a "
-                             "unit: 200000, 500kb, 2mb (default: 2mb)")
+                             "unit: 200000, 500kb, 2mb (default: last /net-max-bytes "
+                             "setting, else 2mb)")
     parser.add_argument("--net-max-chars", type=int, default=None, metavar="N",
                         help="Characters of page text one fetch_url call returns; the model "
-                             "pages through the rest (default: 24000)")
+                             "pages through the rest (default: last /net-max-chars setting, "
+                             "else 24000)")
     parser.add_argument("--no-stream", action="store_true", default=False,
                         help="Wait for complete replies instead of streaming them as they are generated")
     parser.add_argument("--companion-idle-recap", action=argparse.BooleanOptionalAction, default=None,
@@ -160,14 +163,32 @@ def main():
         print(f"error: --workdir is not a directory: {workdir}", file=sys.stderr)
         sys.exit(1)
 
+    if args.context is not None and args.context < 256:
+        parser.error("--context: expected at least 256")
+    if args.max_tool_result is not None and args.max_tool_result < 0:
+        parser.error("--max-tool-result: expected 0 (unlimited) or more")
+    if args.net_max_bytes is not None and not net_mod.parse_size(args.net_max_bytes):
+        parser.error(f"--net-max-bytes: not a size: {args.net_max_bytes}")
+    if args.net_max_chars is not None and not 1000 <= args.net_max_chars <= net_mod.HARD_MAX_CHARS:
+        parser.error(f"--net-max-chars: expected 1000..{net_mod.HARD_MAX_CHARS}")
+
     prefs = session_mod.load_prefs()
     provider = args.provider or prefs.get("provider") or "ollama"
     host = args.host or _DEFAULT_HOSTS.get(provider, _DEFAULT_HOSTS["ollama"])
     model = args.model or prefs.get("model") or "qwen3.5:9b"
-    harness = Harness(host=host, model=model, workdir=workdir, provider=provider)
-    if args.context is not None and args.context < 256:
-        parser.error("--context: expected at least 256")
-    harness.max_tool_result = args.max_tool_result
+    try:
+        harness = Harness(host=host, model=model, workdir=workdir, provider=provider)
+    except ValueError as e:        # an unusable --host (or saved provider)
+        parser.error(str(e))
+
+    def pref_int(key: str, ok) -> int | None:
+        """A saved numeric setting, or None when it is missing or invalid."""
+        v = prefs.get(key)
+        return v if isinstance(v, int) and not isinstance(v, bool) and ok(v) else None
+
+    max_tool_result = (args.max_tool_result if args.max_tool_result is not None
+                       else pref_int("max_tool_result", lambda v: v >= 0))
+    harness.max_tool_result = max_tool_result or 0
     think = "off" if args.no_think else args.think or prefs.get("think")
     harness.think_level = think if think in THINK_LEVELS else "on"
     history = args.think_history or prefs.get("think_history")
@@ -176,15 +197,14 @@ def main():
         harness.stream = False
     harness.net_access = args.net
     harness.net_confirm = args.net_confirm == "on"
-    if args.net_max_bytes:
-        if (size := net_mod.parse_size(args.net_max_bytes)):
-            harness.net_max_bytes = min(size, net_mod.HARD_MAX_BYTES)
-        else:
-            parser.error(f"--net-max-bytes: not a size: {args.net_max_bytes}")
-    if args.net_max_chars:
-        if not 1000 <= args.net_max_chars <= net_mod.HARD_MAX_CHARS:
-            parser.error(f"--net-max-chars: expected 1000..{net_mod.HARD_MAX_CHARS}")
-        harness.net_max_chars = args.net_max_chars
+    net_bytes = (net_mod.parse_size(args.net_max_bytes) if args.net_max_bytes is not None
+                 else pref_int("net_max_bytes", lambda v: v > 0))
+    if net_bytes:
+        harness.net_max_bytes = min(net_bytes, net_mod.HARD_MAX_BYTES)
+    net_chars = (args.net_max_chars if args.net_max_chars is not None
+                 else pref_int("net_max_chars", lambda v: 1000 <= v <= net_mod.HARD_MAX_CHARS))
+    if net_chars:
+        harness.net_max_chars = net_chars
     def flag_or_pref(flag, key: str, default: bool) -> bool:
         return bool(flag if flag is not None else prefs.get(key, default))
 
@@ -203,7 +223,8 @@ def main():
 
     harness.idle_recap = flag_or_pref(args.companion_idle_recap, "idle_recap", False)
     harness.session_titles = bool(prefs.get("session_titles", True))
-    harness.idle_recap_secs = max(10, args.companion_idle_recap_secs or prefs.get("idle_recap_secs") or 90)
+    harness.idle_recap_secs = max(10, args.companion_idle_recap_secs
+                                  or pref_int("idle_recap_secs", lambda v: v > 0) or 90)
     harness.guides = flag_or_pref(args.guides, "guides", False)
     harness.index_max_bytes = parsed(args.index_max_mem, "--index-max-mem", "index_max_mem",
                                      code_index.parse_max_mem, harness.index_max_bytes)

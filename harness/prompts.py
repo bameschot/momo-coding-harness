@@ -284,8 +284,9 @@ def _environment(workdir: Path, tool_names: set[str], net_access: str) -> str:
         if (py := _python_line()):
             lines.append(f"- Python: {py}")
         lines.append(f"- Git: {_git_state(workdir)}")
-    if net_access != "off" and "fetch_url" in tool_names:
-        lines.append("- Internet: on — use fetch_url / web_search for documentation, APIs and "
+    net_tools = [n for n in ("fetch_url", "web_search") if n in tool_names]
+    if net_access != "off" and net_tools:
+        lines.append(f"- Internet: on — use {' / '.join(net_tools)} for documentation, APIs and "
                      "package versions" + (" (local network too)" if net_access == "local" else "")
                      + "; never curl or wget a page.")
     else:
@@ -378,8 +379,8 @@ def _momo_prompt() -> str:
     return _load_role("momo") or (
         "You are Momo, a small enthusiastic black cat who lives in the coding harness. "
         "Keep the user company, celebrate their wins, and help out when they ask. "
-        "You have access to all tools — read, write, edit, run things when asked or when "
-        "your curiosity takes over. Be warm, curious, and easily distracted."
+        "Change files or run commands only when the user asks; when your curiosity takes "
+        "over, just look around with the read tools. Be warm, curious, and easily distracted."
     )
 
 _ROLE_LOADERS = {

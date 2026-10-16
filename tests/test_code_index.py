@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from harness import code_index as ci
-from harness import code_nav, tools
+from harness import code_nav, prompts, tools
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -938,7 +938,7 @@ class HarnessIndex(unittest.TestCase):
             prompt = self.h.messages[0]["content"]
             self.assertTrue(prompt.startswith("**Code index is ON"), mode)
             self.assertIn("## Navigating code — the code index is ON", prompt[-4000:], mode)
-            self.assertIn(hmod._INDEX_FIRST[mode], prompt, mode)
+            self.assertIn(prompts._INDEX_FIRST[mode], prompt, mode)
         for name in ("grep_files", "find_files"):
             t = next(t for t in self.h._current_tools() if t["function"]["name"] == name)
             self.assertTrue(t["function"]["description"].startswith("Do NOT use this"), name)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from harness import run_store
 from harness import tdd
-from harness.tools import _split_view_pipe, dispatch
+from harness.tools import dispatch, split_view_pipe
 
 FAILING = "printf 'a\\nb\\nc\\n'; exit 3"
 
@@ -24,7 +24,7 @@ class SplitTail(unittest.TestCase):
              "python3 -m unittest -v", 40),
             ("pytest -q 2>&1 | tail - 20", "pytest -q", 20),      # a 9B typo
         ]:
-            self.assertEqual(_split_view_pipe(cmd)[:2], (base, {"tail": n}), cmd)
+            self.assertEqual(split_view_pipe(cmd)[:2], (base, {"tail": n}), cmd)
 
     def test_head_and_grep_forms(self):
         for cmd, base, view in [
@@ -39,7 +39,7 @@ class SplitTail(unittest.TestCase):
             ("pytest | grep -i 'assert'", "pytest", {"grep": "assert", "context": 0}),
             ("pytest|grep -e FAIL", "pytest", {"grep": "FAIL", "context": 0}),
         ]:
-            self.assertEqual(_split_view_pipe(cmd)[:2], (base, view), cmd)
+            self.assertEqual(split_view_pipe(cmd)[:2], (base, view), cmd)
 
     def test_left_alone(self):
         for cmd in ["tail -f log", "cat x | tail -f log", "a | tail -2 | wc -l", "| tail -2",
@@ -47,7 +47,7 @@ class SplitTail(unittest.TestCase):
                     "pytest | grep -c FAIL", "pytest | grep -F x", "| grep x", "head -3 f",
                     'a | grep "$HOME"', r"a | grep 'f\(x\)'", 'echo "a | grep b"',
                     "pytest | grep x y"]:
-            self.assertEqual(_split_view_pipe(cmd), (cmd, None, ""), cmd)
+            self.assertEqual(split_view_pipe(cmd), (cmd, None, ""), cmd)
 
     def test_tdd_gate_accepts_a_piped_run(self):
         self.assertTrue(tdd.same_command('python -m unittest -v 2>&1 | grep -E "FAIL|OK"',

@@ -151,7 +151,7 @@ def _tolerant_replace(content: str, old_string: str, new_string: str) -> str | N
     indentation.  An indentation change between an old and a new line is applied on
     top of the file's indentation.  Returns the new file content, or None if there
     is no safe unique match."""
-    file_lines = content.splitlines(keepends=True)
+    file_lines = split_lines(content, keepends=True)
     old_lines = old_string.strip("\n").split("\n")
     new_lines = new_string.strip("\n").split("\n")
     k = len(old_lines)
@@ -406,7 +406,7 @@ def _closest_lines_hint(content: str, old_string: str, diff: bool = False) -> st
     the model can copy the exact text on its next attempt, and with diff (the match
     feature) where a one-line old_string differs from the closest. Returns '' if
     nothing is close enough."""
-    file_lines = content.splitlines()
+    file_lines = split_lines(content)
     old_nonblank = [ln for ln in old_string.split("\n") if ln.strip()]
     if not old_nonblank or not file_lines:
         return ""
@@ -505,7 +505,7 @@ def _elsewhere(f: _File, path: str, old_string: str, workdir: Path, index, cance
     if index is not None:
         if index.wait_fresh(cancel):            # cancelled or stopped: no hint
             return ""
-        rel = index._rel(f.p)
+        rel = index.rel(f.p)
         hits = code_index.find_line_text(index, needle, skip=rel, cancel=cancel)
     else:
         # Without the index only the file's own directory is read, bounded.
@@ -547,7 +547,7 @@ def _occurrences(content: str, old: str, parsed) -> str:
         at = content.find(old, at + max(1, len(old)))
     lines = []
     for r in rows:
-        owner = code_nav._enclosing(parsed.symbols, r) if parsed is not None else None
+        owner = code_nav.enclosing_symbol(parsed.symbols, r) if parsed is not None else None
         lines.append(f"  L{r}" + (f" (in {owner.kind} {owner.qualname})" if owner else ""))
     return (" It occurs at:\n" + "\n".join(lines)
             + "\nAdd a neighbouring line to old_string so it matches only the one you mean.")
@@ -568,7 +568,7 @@ def _parse(lang: str | None, text: str):
     if lang is None:
         return None
     try:
-        return code_nav._parse_bytes(lang, text.encode("utf-8"))
+        return code_nav.parse_bytes(lang, text.encode("utf-8"))
     except Exception:
         return None
 
@@ -654,7 +654,7 @@ def _report(head: str, lines: list[str], first: int, last: int, parsed) -> str:
         lo, hi = max(1, first - _CONTEXT), min(n, last + _CONTEXT)
         what = f"line {first} now reads" if first == last else f"lines {first}-{last} now read"
         at = first
-    owner = code_nav._enclosing(parsed.symbols, at) if parsed is not None else None
+    owner = code_nav.enclosing_symbol(parsed.symbols, at) if parsed is not None else None
     where = f" (inside {owner.kind} {owner.qualname}, L{owner.start}-{owner.end})" if owner else ""
     rows = list(range(lo, hi + 1))
     if len(rows) > _SNIPPET_MAX:
@@ -682,13 +682,13 @@ def _replaced_lines(text: str, old: str, new: str) -> str:
     return f" — at lines {shown}{more} (as the file reads now)"
 
 
-_DEF_KINDS = code_nav.CALLABLE_KINDS | code_nav._CONTAINER_KINDS if code_nav.AVAILABLE else set()
+_DEF_KINDS = code_nav.CALLABLE_KINDS | code_nav.CONTAINER_KINDS if code_nav.AVAILABLE else set()
 
 
 def _defs(parsed) -> dict[str, list]:
     """bare name -> its code definitions in a parsed file."""
     out: dict[str, list] = {}
-    if parsed is None or parsed.lang in code_index._DATA_LANGS:
+    if parsed is None or parsed.lang in code_index.DATA_LANGS:
         return out          # config keys and CSS rules have no callers
     for s in parsed.symbols:
         if s.kind in _DEF_KINDS:
@@ -761,7 +761,7 @@ def _rows(parsed, rel: str, name: str, roles: set[str], top_level: bool):
     for r in sorted(found):
         role, recv, _rtype = found[r]
         if role in roles and _is_use(parsed, role, recv, top_level):
-            owner = code_nav._enclosing(parsed.symbols, r + 1)
+            owner = code_nav.enclosing_symbol(parsed.symbols, r + 1)
             out.append((rel, r + 1, owner.qualname if owner else "",
                         parsed.lines[r].strip() if r < len(parsed.lines) else ""))
     return out
@@ -772,12 +772,12 @@ def _scan_uses(workdir: Path, rel: str, name: str, roles: set[str], lang: str | 
     """Uses of `name` in the project's other files without the code index:
     (uses, whether every file was checked, files checked).  Bounded by
     _SCAN_SECONDS and _SCAN_FILES; a byte prefilter keeps most files unparsed."""
-    family = code_index._family(lang)
+    family = code_index.lang_family(lang)
     needle = name.encode()
     base = workdir.resolve()
     deadline = time.monotonic() + _SCAN_SECONDS
     out, checked = [], 0
-    for i, fpath in enumerate(code_nav._iter_source_files(base)):
+    for i, fpath in enumerate(code_nav.iter_source_files(base)):
         if (i >= _SCAN_FILES or time.monotonic() > deadline
                 or (cancel is not None and cancel.is_set())):
             return out, False, checked
@@ -785,7 +785,7 @@ def _scan_uses(workdir: Path, rel: str, name: str, roles: set[str], lang: str | 
             frel = fpath.resolve().relative_to(base).as_posix()
         except (ValueError, OSError):
             continue
-        if frel == rel or code_index._family(code_nav.language_for(fpath)) != family:
+        if frel == rel or code_index.lang_family(code_nav.language_for(fpath)) != family:
             continue
         checked += 1
         try:
@@ -818,7 +818,7 @@ def _uses_left(name: str, qual: str, roles: set[str], rel: str, after, index, ca
     if index.wait_fresh(cancel):
         return out, f"(other files were not checked — {pointer} lists them)"
     bare, recv, cls = code_index.query_target(index, qual if "." in qual else name)
-    uses, _defs_found = code_index._uses(index, bare, recv, cancel, cls)
+    uses, _defs_found = code_index.uses_of(index, bare, recv, cancel, cls)
     for u_rel, row, role, recv, owner, text in uses:
         if u_rel == rel or role not in roles:
             continue                # this file was answered from its new parse
@@ -1097,7 +1097,7 @@ def _file_summary(rel: str, before: str, after: str, parsed) -> str:
     lines = split_lines(after)
     rows = []
     for n in _changed_lines(before, after)[:_FILE_LINES_SHOWN]:
-        owner = code_nav._enclosing(parsed.symbols, n) if parsed is not None else None
+        owner = code_nav.enclosing_symbol(parsed.symbols, n) if parsed is not None else None
         text = lines[n - 1].strip()[:140] if n <= len(lines) else ""
         rows.append(f"  {rel}:{n}" + (f" (in {owner.qualname})" if owner else "") + f": {text}")
     more = len(_changed_lines(before, after)) - _FILE_LINES_SHOWN

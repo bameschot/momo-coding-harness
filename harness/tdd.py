@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .paths import BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, walk_files
+from .paths import BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, split_lines, walk_files
 from .plan import PLAN_FILENAME, Plan
 from . import tools
 
@@ -59,7 +59,7 @@ def find_tags(workdir: Path) -> dict[str, list[str]]:
         if b"\0" in data[:BINARY_SNIFF_BYTES] or b"tdd-" not in data:
             continue
         text = data.decode("utf-8", errors="replace")
-        for n, line in enumerate(text.splitlines(), 1):
+        for n, line in enumerate(split_lines(text), 1):
             for tag in set(TAG_RE.findall(line)):
                 found.setdefault(tag, []).append(f"{rel.as_posix()}:{n}")
     return found
@@ -130,7 +130,7 @@ def hollow_sites(workdir: Path, found: dict[str, list[str]]) -> list[str]:
     sites = [site for v in found.values() for site in v]
     for path, idxs in _tagged_files(workdir, sites).items():
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = split_lines(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
         rel = path.relative_to(workdir).as_posix()
@@ -168,7 +168,7 @@ def test_owners(workdir: Path, found: dict[str, list[str]]) -> dict[str, dict[st
     for tag, sites in found.items():
         for path, idxs in _tagged_files(workdir, sites).items():
             try:
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = split_lines(path.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 continue
             rel = path.relative_to(workdir).as_posix()
@@ -223,7 +223,7 @@ def audit(before: dict[str, str], workdir: Path, owners: dict[str, dict[str, str
             new = ""
         if new == old:
             continue
-        a, b = old.splitlines(), new.splitlines()
+        a, b = split_lines(old), split_lines(new)
         heads = owners.get(rel, {})
         matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
         for group in matcher.get_grouped_opcodes(0):
@@ -265,7 +265,8 @@ def switch_on(workdir: Path, tag: str) -> tuple[int, list[str], dict[str, str]]:
     removed, left, changed = 0, [], {}
     for path, idxs in _tagged_files(workdir, find_tags(workdir).get(tag, [])).items():
         try:
-            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            # Bytes, not text mode: text mode would turn a CRLF file into LF.
+            lines = split_lines(path.read_bytes().decode("utf-8"), keepends=True)
         except (OSError, UnicodeDecodeError):
             continue
         drop = {i for i in idxs if i < len(lines) and _is_marker(lines[i])
@@ -274,8 +275,8 @@ def switch_on(workdir: Path, tag: str) -> tuple[int, list[str], dict[str, str]]:
         left += [f"{rel}:{i + 1}" for i in sorted(set(idxs) - drop)]
         if drop:
             changed[rel] = "".join(lines)
-            path.write_text("".join(l for i, l in enumerate(lines) if i not in drop),
-                            encoding="utf-8")
+            path.write_bytes("".join(l for i, l in enumerate(lines) if i not in drop)
+                             .encode("utf-8"))
             removed += len(drop)
     return removed, left, changed
 
@@ -303,7 +304,7 @@ def step_command(plan: Plan, tag: str) -> str:
 
 
 # Flags that only change how much a test runner prints, not what it runs.
-_VERBOSITY = {"-v", "-vv", "-vvv", "--verbose", "-q", "-qq", "--quiet"}
+VERBOSITY_FLAGS = {"-v", "-vv", "-vvv", "--verbose", "-q", "-qq", "--quiet"}
 _SHELL_OPS = {"|", "||", "&&", ";", ">", ">>", "<", "&", "2>&1", "2>", "1>"}
 
 
@@ -312,7 +313,7 @@ def same_command(ran: str, planned: str) -> bool:
     the same words apart from verbosity flags, and no pipe or other shell
     operator (a pipe's exit code is its last command's).  A trailing tail, head
     or grep pipe is fine: run_command takes it off and keeps the real exit code."""
-    ran = tools._split_view_pipe(ran)[0]
+    ran = tools.split_view_pipe(ran)[0]
     if "$(" in ran or "`" in ran:
         return False
     try:
@@ -322,17 +323,17 @@ def same_command(ran: str, planned: str) -> bool:
     if any(t in _SHELL_OPS or t.startswith((">", "<", "|")) or t.endswith((";", "|", "&"))
            for t in a):
         return False
-    return [t for t in a if t not in _VERBOSITY] == [t for t in b if t not in _VERBOSITY]
+    return [t for t in a if t not in VERBOSITY_FLAGS] == [t for t in b if t not in VERBOSITY_FLAGS]
 
 
 def run_tests(command: str, workdir: Path, cancel=None) -> tuple[bool, str]:
     """Run the plan's test command.  (passed, the end of its output)."""
-    timeout = tools._MAX_COMMAND_TIMEOUT
+    timeout = tools.MAX_COMMAND_TIMEOUT
     with tempfile.TemporaryFile() as out:
-        proc, stopped = tools._exec(command, timeout, workdir, cancel, out, subprocess.STDOUT)
+        proc, stopped = tools.exec_command(command, timeout, workdir, cancel, out, subprocess.STDOUT)
         if proc is None:
             return False, stopped
-        text = tools._output_tail(out)
+        text = tools.output_tail(out)
     if len(text) > _OUTPUT_CHARS:
         text = "…" + text[-_OUTPUT_CHARS:]
     if stopped:

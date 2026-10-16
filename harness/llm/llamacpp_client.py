@@ -48,21 +48,26 @@ class LlamaCppClient(LLMClient):
         super().__init__(host=host, model=model, auth_token=auth_token)
         self._client = self._make_client()
 
-    def _make_client(self) -> HTTPClient:
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._auth_token}"} if self._auth_token else {}
+
+    def _make_client(self, host: str | None = None) -> HTTPClient:
         # Streams have no read timeout (generation can take a long time); abort()
         # closes the client to interrupt an in-flight request instead.
-        headers = {"Authorization": f"Bearer {self._auth_token}"} if self._auth_token else {}
-        return HTTPClient(normalize_base_url(self.host, 8080), headers)
+        return HTTPClient(normalize_base_url(self.host if host is None else host, 8080),
+                          self._headers())
 
     def set_host(self, host: str):
+        # Built first: a bad URL raises ValueError before the working client is closed.
+        client = self._make_client(host)
         self.host = host
         self._client.close()
-        self._client = self._make_client()
+        self._client = client
         self.forget_thinking_caps()
 
     def set_auth_token(self, token: str | None):
         self._auth_token = token
-        self._client.headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self._client.headers = self._headers()
 
     def abort(self):
         """Close the underlying HTTP client to interrupt any in-flight request."""
@@ -252,7 +257,8 @@ class LlamaCppClient(LLMClient):
                 args = raw_args
             else:
                 args = {}
-            calls.append(ToolCall(name=fn.get("name", ""), arguments=args))
+            calls.append(ToolCall(name=fn.get("name", ""),
+                                  arguments=args if isinstance(args, dict) else {}))
 
         usage = data.get("usage") or {}
         return ChatResponse(

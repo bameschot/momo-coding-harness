@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import random
+import re
+import unicodedata
 
 _MOMO_WR = [   # walking right — two alternating leg frames
     ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " /\\/\\/\\ "],
@@ -16,11 +18,11 @@ _MOMO_SIT = [  # sitting — normal, blink
     ["\\    /\\ ", " )  ( -)", "(  /  ) ", " \\(__)| "],
 ]
 _MOMO_SIT_L = [  # sitting facing left — normal, blink
-    [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", "|(__)/ "],
-    [" /\\   \\ ", "(- )  ( ", "(  \\  ) ", "|(__)/ "],
+    [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", "|(__)/  "],
+    [" /\\   \\ ", "(- )  ( ", "(  \\  ) ", "|(__)/  "],
 ]
 _MOMO_WR_BLINK = ["\\    /\\ ", " )  ( -)", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-right blink
-_MOMO_WL_BLINK = [" /\\   \\ ", "(' )  ( ", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-left blink
+_MOMO_WL_BLINK = [" /\\   \\ ", "(- )  ( ", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-left blink
 # key: (mode, is_thinking)  value: list of strings each ≤ BUBBLE_MAX (40) visible chars
 _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
     ("coding",  False): [
@@ -332,8 +334,6 @@ MAX_RECAP_LINES = 5   # recap lines one recap call may produce
 
 
 def _clean_line(line: str) -> str:
-    import re
-    import unicodedata
     s = unicodedata.normalize("NFKC", line).strip()
     prev = None
     while prev != s:                                          # bullets, numbering, "< "

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import attachments as attach_mod
-from .commands import handle as handle_command
+from .commands import mask_token, handle as handle_command
 from .events import (BusyEvent, ChatEvent, CompanionEvent, ThinkEvent, ToolCallEvent,
                      ToolResultEvent, UserEvent)
 from .harness import Harness
@@ -38,7 +38,7 @@ def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
     return (cmd in _MUTATING or cmd in _MODE_COMMANDS
             or (cmd == "/plan" and arg != "show")
             or (cmd in ("/session", "/workspace", "/workdir", "/run-mode",
-                        "/search-sources") and bool(arg))
+                        "/search-sources", "/host", "/model") and bool(arg))
             # a per-tool change (/tools <name> on|off) alters the running turn's tools
             or (cmd == "/tools" and len(parts) > 1 and len(parts[1].split()) > 1))
 
@@ -93,11 +93,6 @@ def transcript_events(messages: list[dict]) -> list[Any]:
             name = call_id_to_name.get(cid) or msg.get("name") or ""
             events.append(ToolResultEvent(name, content))
     return events
-
-
-def _mask_token(raw: str) -> str:
-    n = len(raw)
-    return (raw[:2] + "*" * (n - 5) + raw[-3:]) if n > 5 else "*" * n
 
 
 class Controller:
@@ -390,13 +385,6 @@ class Controller:
         self.harness.set_mode(mode)
         return True
 
-    def cycle_net(self):
-        """off -> on -> off.  '/net local' is deliberately not in the cycle: it is
-        the setting that exposes this harness's own API, so it stays explicit."""
-        h = self.harness
-        h.set_net_access("off" if h.net_access != "off" else "on")
-        self._system(f"Internet access: {h.net_access}")
-
     def toggle_run_confirm(self):
         self.harness.run_confirm = not self.harness.run_confirm
         self._system(f"run_command confirmation: {'on' if self.harness.run_confirm else 'off'}")
@@ -426,7 +414,7 @@ class Controller:
 
         # Sensitive command: never add to history or show the raw token.
         if cmd == "/token" and len(parts) > 1:
-            self.bus.put(UserEvent(f"/token {_mask_token(parts[1])}"))
+            self.bus.put(UserEvent(f"/token {mask_token(parts[1])}"))
             result = handle_command(text, h)
             if result.output:
                 self._system(result.output)
@@ -476,7 +464,11 @@ class Controller:
             self._system(_BUSY_MSG)
             return SubmitOutcome()
 
-        result = handle_command(text, self.harness)
+        try:
+            result = handle_command(text, self.harness)
+        except Exception as e:      # a command must never take a frontend down with it
+            self._system(f"ERROR: {text.split()[0]} failed: {type(e).__name__}: {e}")
+            return SubmitOutcome()
         if result.exit_app:
             return SubmitOutcome(exit_app=True)
         if not result.handled:

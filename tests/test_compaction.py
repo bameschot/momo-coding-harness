@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import harness.harness as hmod
+from harness import compaction
 from harness.llm.base import ChatResponse, LLMClient
 
 
@@ -70,7 +71,7 @@ class Compaction(unittest.TestCase):
         self.h._turn_user = self.h.messages[-1]
 
     def fixed(self):
-        return hmod._msg_tokens(self.h.messages[0])
+        return compaction.msg_tokens(self.h.messages[0])
 
     def test_never_wipes_the_conversation(self):
         # Regression: the system prompt alone exceeded limit // 3, so every message went.
@@ -79,7 +80,7 @@ class Compaction(unittest.TestCase):
         notice = self.h.compact()
         roles = [m["role"] for m in self.h.messages]
         self.assertIn("summarised", notice)
-        self.assertEqual(self.h.messages[-1]["content"].split(hmod._SUMMARY_CLOSE)[-1], "CURRENT QUESTION")
+        self.assertEqual(self.h.messages[-1]["content"].split(compaction._SUMMARY_CLOSE)[-1], "CURRENT QUESTION")
         self.assertEqual(roles[1], "user")
         self.assertLessEqual(self.h._estimate(), self.h.context_limit)
 
@@ -127,7 +128,7 @@ class Compaction(unittest.TestCase):
         self.h.messages[-1:-1] = [m for n in range(8) for m in turn(100 + n)]
         self.h.compact()
         text = "".join(str(m.get("content")) for m in self.h.messages)
-        self.assertEqual(text.count(hmod._SUMMARY_OPEN), 1)
+        self.assertEqual(text.count(compaction._SUMMARY_OPEN), 1)
         self.assertIn("SECOND", text)
         # The earlier summary was handed to the summariser to fold in.
         self.assertIn("SUMMARY", self.client.calls[-1]["messages"][0]["content"])
@@ -140,7 +141,7 @@ class Compaction(unittest.TestCase):
         self.assertIs(call["think"], False)
         self.assertEqual(call["num_ctx"], 32768)
         self.assertLessEqual(len(call["messages"][0]["content"]) // 4,
-                             32768 - hmod._SUMMARY_REPLY_TOKENS)
+                             32768 - compaction._SUMMARY_REPLY_TOKENS)
         joined = "".join(str(m.get("content")) for m in self.h.messages)
         self.assertNotIn("pondering", joined)
 
@@ -156,7 +157,7 @@ class Compaction(unittest.TestCase):
     def test_linear_cost(self):
         self.history(100)
         self.h.context_limit = self.fixed() + 6000
-        with mock.patch.object(hmod, "_msg_tokens", wraps=hmod._msg_tokens) as counted:
+        with mock.patch.object(compaction, "msg_tokens", wraps=compaction.msg_tokens) as counted:
             t0 = time.perf_counter()
             self.h.compact(summarise=False)
             elapsed = time.perf_counter() - t0

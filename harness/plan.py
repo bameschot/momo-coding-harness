@@ -226,9 +226,6 @@ class Plan:
                 return i
         return None
 
-    def is_complete(self) -> bool:
-        return all(s.finished for s in self.steps)
-
     def progress(self) -> str:
         """'<current step>/<total>' — the step number being (or next to be) worked on."""
         idx = self.current_index()

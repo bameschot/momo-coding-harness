@@ -17,6 +17,12 @@ MAX_SCAN_FILE_BYTES = 2_000_000  # larger files are skipped by grep_files, code 
 BINARY_SNIFF_BYTES = 4096        # bytes inspected for a NUL byte to detect binary files
 
 
+def momo_home() -> Path:
+    """~/.momo-harness, where sessions, prefs, logs, the index and run logs live.
+    Read per call, so a HOME changed after import (tests) is honoured."""
+    return Path.home() / ".momo-harness"
+
+
 def split_lines(text: str, keepends: bool = False) -> list[str]:
     """Lines as tree-sitter, git and editors number them: split on "\\n" only.
     str.splitlines() also splits on form feeds, \\u2028, \\x1c... and a lone

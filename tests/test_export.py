@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import harness.harness as hmod
+from harness import compaction
 from harness import session as session_mod
 from harness import transcript
 from harness.commands import export_markdown, handle as handle_command, render_markdown
@@ -140,7 +141,7 @@ class HarnessExport(unittest.TestCase):
 
     def test_full_export_keeps_what_compaction_removed(self):
         self.fill(20)
-        self.h.context_limit = hmod._msg_tokens(self.h.messages[0]) + 6000
+        self.h.context_limit = compaction.msg_tokens(self.h.messages[0]) + 6000
         changed, _ = self.h._compact()
         self.assertTrue(changed)
         self.assertTrue(self.h.compacted)
@@ -156,7 +157,7 @@ class HarnessExport(unittest.TestCase):
 
     def test_archive_survives_save_and_load(self):
         self.fill(20)
-        self.h.context_limit = hmod._msg_tokens(self.h.messages[0]) + 6000
+        self.h.context_limit = compaction.msg_tokens(self.h.messages[0]) + 6000
         self.h._compact()
         archived = len(self.h.compacted)
         self.h._autosave()

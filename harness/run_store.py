@@ -23,6 +23,8 @@ import time
 import weakref
 from pathlib import Path
 
+from .paths import momo_home
+
 DEFAULT_LIMIT = 5000          # chars one run_command / command_output view may return
 MIN_LIMIT = 500
 KEEP_LOGS = 20                # per session; older logs are deleted
@@ -39,7 +41,7 @@ _LOG_RE = re.compile(r"r(\d+)(?:\.log)?")
 
 def runs_root() -> Path:
     """Evaluated per call, so a test that points HOME elsewhere is honoured."""
-    return Path.home() / ".momo-harness" / "runs"
+    return momo_home() / "runs"
 
 
 class RunStore:

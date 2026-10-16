@@ -110,38 +110,35 @@ def compose(text: str, attachments: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def split(text: str) -> tuple[str, list[dict]]:
-    """Inverse of compose(): (typed text, [{name, text}]) from a stored message."""
-    atts, typed_parts, pos = [], [], 0
+def _parse(text: str) -> list[str | dict]:
+    """A stored message as its pieces: typed text (str) and attachment blocks
+    ({name, text}).  The block's chars="N" gives the exact body length, so file
+    content that itself contains '</attachment>' cannot end a block early; an
+    ill-formed block is left as text."""
+    pieces: list[str | dict] = []
+    pos = 0
     while (m := _ATTACH_OPEN.search(text, pos)):
         end = m.end() + int(m.group(2))
         if not text.startswith(_ATTACH_CLOSE, end):
-            typed_parts.append(text[pos:m.end()])
+            pieces.append(text[pos:m.end()])
             pos = m.end()
             continue
-        typed_parts.append(text[pos:m.start()])
+        pieces.append(text[pos:m.start()])
         name = m.group(1).replace("&quot;", '"').replace("&lt;", "<").replace("&amp;", "&")
-        atts.append({"name": name, "text": text[m.end():end]})
+        pieces.append({"name": name, "text": text[m.end():end]})
         pos = end + len(_ATTACH_CLOSE)
-    typed_parts.append(text[pos:])
-    return "".join(typed_parts).strip(), atts
+    pieces.append(text[pos:])
+    return pieces
+
+
+def split(text: str) -> tuple[str, list[dict]]:
+    """Inverse of compose(): (typed text, [{name, text}]) from a stored message."""
+    pieces = _parse(text)
+    typed = "".join(p for p in pieces if isinstance(p, str))
+    return typed.strip(), [p for p in pieces if isinstance(p, dict)]
 
 
 def summarize(text: str) -> str:
-    """Replace attachment blocks with a one-line '📎 name (N chars)' for display.
-
-    The block's chars="N" gives the exact body length, so file content that
-    itself contains '</attachment>' cannot end a block early."""
-    out, pos = [], 0
-    while (m := _ATTACH_OPEN.search(text, pos)):
-        n = int(m.group(2))
-        end = m.end() + n
-        if not text.startswith(_ATTACH_CLOSE, end):
-            out.append(text[pos:m.end()])  # not a well-formed block; leave it as is
-            pos = m.end()
-            continue
-        name = m.group(1).replace("&quot;", '"').replace("&lt;", "<").replace("&amp;", "&")
-        out.append(text[pos:m.start()] + f"📎 {name} ({n:,} chars)")
-        pos = end + len(_ATTACH_CLOSE)
-    out.append(text[pos:])
-    return "".join(out)
+    """Replace attachment blocks with a one-line '📎 name (N chars)' for display."""
+    return "".join(p if isinstance(p, str) else f"📎 {p['name']} ({len(p['text']):,} chars)"
+                   for p in _parse(text))

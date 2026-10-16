@@ -3,10 +3,13 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import session as session_mod
+
 
 class Logger:
     def __init__(self, session_ts: str):
-        log_dir = Path.home() / ".momo-harness" / "sessions"
+        # Next to the session file it belongs to (delete_sessions removes both).
+        log_dir = session_mod.SESSION_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
         self._path = log_dir / f"{session_ts}.log"
         # 0600 like the session file: the log holds tool arguments and results.

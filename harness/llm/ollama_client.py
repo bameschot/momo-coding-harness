@@ -69,13 +69,16 @@ class OllamaClient(LLMClient):
         token = self._auth_token or os.environ.get("OLLAMA_API_KEY")
         return {"Authorization": f"Bearer {token}"} if token else {}
 
-    def _make_client(self) -> HTTPClient:
-        return HTTPClient(normalize_base_url(self.host, 11434), self._headers())
+    def _make_client(self, host: str | None = None) -> HTTPClient:
+        return HTTPClient(normalize_base_url(self.host if host is None else host, 11434),
+                          self._headers())
 
     def set_host(self, host: str):
+        # Built first: a bad URL raises ValueError before the working client is closed.
+        client = self._make_client(host)
         self.host = host
         self._client.close()
-        self._client = self._make_client()
+        self._client = client
         self.forget_thinking_caps()
 
     def set_auth_token(self, token: str | None):
@@ -94,6 +97,8 @@ class OllamaClient(LLMClient):
         out = []
         for m in messages:
             w = {k: m[k] for k in _MESSAGE_FIELDS if m.get(k)}
+            if m.get("role") == "tool" and m.get("name") and "tool_name" not in w:
+                w["tool_name"] = m["name"]   # the harness stores it as "name"
             if m.get("reasoning"):          # the model's own reasoning, sent back
                 w["thinking"] = m["reasoning"]
             if "tool_calls" in w:

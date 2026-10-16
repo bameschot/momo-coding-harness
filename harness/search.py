@@ -32,12 +32,13 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import net
+from .paths import momo_home
 
 SHIPPED_DIR = Path(__file__).parent.parent / "search_sources"
 
 
 def user_dir() -> Path:
-    return Path.home() / ".momo-harness" / "search_sources"
+    return momo_home() / "search_sources"
 
 
 _MAX_RESULTS = 10
@@ -134,7 +135,7 @@ def validate_spec(spec, origin: str) -> tuple[Source | None, str | None]:
             return None, "url must contain the {query} placeholder"
         if names - {"query", "n"}:
             return None, f"url may only use the {{query}} and {{n}} placeholders, not {{{', '.join(sorted(names - {'query', 'n'}))}}}"
-        if net._CTRL.search(url) or " " in url:
+        if net.CONTROL_CHARS.search(url) or " " in url:
             return None, "url contains spaces or control characters"
 
     for key in ("results", "title", "link", "snippet"):
@@ -162,7 +163,7 @@ def validate_spec(spec, origin: str) -> tuple[Source | None, str | None]:
         if net.is_secret_header(k):
             return None, (f"header '{k}' looks like a credential; sources may not carry "
                           "secrets (they are saved in plain text and shown in the transcript)")
-        if k.lower() in ("host", "content-length", "accept-encoding") or net._CTRL.search(k + v):
+        if k.lower() in ("host", "content-length", "accept-encoding") or net.CONTROL_CHARS.search(k + v):
             return None, f"header '{k}' is not allowed"
     default = spec.get("default", False)
     if not isinstance(default, bool):
@@ -239,9 +240,9 @@ class SourceRegistry:
         heads = ", ".join(f"{k}: {v}" for k, v in src.headers.items()) or "none"
         return ("Save this search source for future sessions? Reply 'y' to allow, anything "
                 "else to decline.\n"
-                f"  name: {src.name} — {net._safe_line(src.description, 200)}\n"
-                f"  url:  {net._safe_line(src.url, 400)}\n"
-                f"  headers: {net._safe_line(heads, 300)}\n"
+                f"  name: {src.name} — {net.safe_line(src.description, 200)}\n"
+                f"  url:  {net.safe_line(src.url, 400)}\n"
+                f"  headers: {net.safe_line(heads, 300)}\n"
                 f"  saved to: {self._user_dir / (src.name + '.json')}")
 
     def save(self, name: str) -> str:
@@ -315,7 +316,7 @@ class Ctx:
         if isinstance(got, str):
             return got
         if got["status"] >= 400:
-            return f"HTTP {got['status']} {net._safe_line(got['reason'], 40)}"
+            return f"HTTP {got['status']} {net.safe_line(got['reason'], 40)}"
         try:
             return json.loads(got["raw"].decode("utf-8", errors="replace"))
         except ValueError:
@@ -426,7 +427,7 @@ def query_source(src: Source, query: str, n: int, ctx: Ctx, strict: bool = False
     if got["status"] == 404:
         return [], None                      # an exact lookup that found nothing
     if got["status"] >= 400:
-        return [], f"HTTP {got['status']} {net._safe_line(got['reason'], 40)}"
+        return [], f"HTTP {got['status']} {net.safe_line(got['reason'], 40)}"
     try:
         payload = json.loads(got["raw"].decode("utf-8", errors="replace"))
     except ValueError:
@@ -540,10 +541,10 @@ def _probe(url: str, ctx: Ctx) -> Result:
                          timeout=_SOURCE_TIMEOUT, cancel=ctx.cancel)
     if isinstance(got, str):
         return Result(title="", url=url, proposed=True,
-                      error=net._safe_line(got.removeprefix("ERROR: "), 160))
+                      error=net.safe_line(got.removeprefix("ERROR: "), 160))
     if got["status"] >= 400:
         return Result(title="", url=url, proposed=True,
-                      error=f"HTTP {got['status']} {net._safe_line(got['reason'], 40)}")
+                      error=f"HTTP {got['status']} {net.safe_line(got['reason'], 40)}")
     title, text = _page_text(got)
     return Result(title=title or url, url=url, proposed=True, content=text)
 
@@ -684,7 +685,7 @@ def web_search(query: str = "", source: str | None = None, urls=None,
         names = [s.strip().lower() for s in str(source).split(",") if s.strip()]
         unknown = [s for s in names if registry.get(s) is None]
         if unknown:
-            return (f"ERROR: unknown source(s): {', '.join(net._safe_line(u, 40) for u in unknown)}. "
+            return (f"ERROR: unknown source(s): {', '.join(net.safe_line(u, 40) for u in unknown)}. "
                     f"Available: {', '.join(registry.names())}. Omit source to search the "
                     "defaults, or add one with add_search_source.")
         sources = [registry.get(s) for s in names]
@@ -702,7 +703,7 @@ def web_search(query: str = "", source: str | None = None, urls=None,
         for src, fut in zip(sources, queries):
             found, err = fut.result()
             if err:
-                notes.append(f"{src.name} failed: {net._safe_line(err, 160)}")
+                notes.append(f"{src.name} failed: {net.safe_line(err, 160)}")
             per_source.append(found)
     if cancel is not None and cancel.is_set():
         return "ERROR: web_search cancelled by the user"
@@ -714,7 +715,7 @@ def web_search(query: str = "", source: str | None = None, urls=None,
     if not results:
         if notes:
             return "ERROR: web_search found nothing. " + "; ".join(notes)
-        return (f"No results for {net._safe_line(query, 120)!r} in "
+        return (f"No results for {net.safe_line(query, 120)!r} in "
                 f"{', '.join(s.name for s in sources) or 'the given urls'}. Try other words, "
                 "another source, or propose likely URLs in urls.")
 
@@ -732,8 +733,8 @@ def web_search(query: str = "", source: str | None = None, urls=None,
             for r, got in zip(todo, fetched):
                 if isinstance(got, str) or got["status"] >= 400:
                     why = got if isinstance(got, str) else f"HTTP {got['status']}"
-                    notes.append(f"could not read {net._safe_line(r.url, 120)}: "
-                                 f"{net._safe_line(why.removeprefix('ERROR: '), 100)}")
+                    notes.append(f"could not read {net.safe_line(r.url, 120)}: "
+                                 f"{net.safe_line(why.removeprefix('ERROR: '), 100)}")
                     continue
                 title, r.content = _page_text(got)
                 pages.append(r)
@@ -742,7 +743,7 @@ def web_search(query: str = "", source: str | None = None, urls=None,
         if not passages:
             notes.append("read: no passage in the fetched pages matched the query")
 
-    head = [f"web_search {net._safe_line(query, 120)!r} — "
+    head = [f"web_search {net.safe_line(query, 120)!r} — "
             + (f"sources: {', '.join(s.name for s in sources)}" if sources else "no sources")
             + (f"; {len(proposed_urls)} proposed URL(s)" if proposed_urls else "")]
     head += [f"note: {n_}" for n_ in notes]
@@ -957,14 +958,14 @@ def scan_project(workdir: Path) -> ProjectScan:
                 text = "".join(next(f, "") for _ in range(_README_LINES))
         except OSError:
             text = ""
-        text = net._CTRL.sub("", text).strip()[:_README_CHARS]
+        text = net.CONTROL_CHARS.sub("", text).strip()[:_README_CHARS]
         if text:
             fence = "~~~~" if "~~~" in text else "~~~"   # the README has its own ``` blocks
             out.append(f"{readme.name} (first lines):\n{fence}\n{text}\n{fence}")
 
     docs.sort(key=lambda r: (len(r.parts), r.as_posix()))
     doc_lines = [f"- {r.as_posix()}: {h}" for r in docs[:_OTHER_DOCS]
-                 if (h := net._CTRL.sub("", _headings(root / r)))]
+                 if (h := net.CONTROL_CHARS.sub("", _headings(root / r)))]
     if doc_lines:
         out.append(f"Other documents ({len(docs)} in total; headings of the first few):\n"
                    + "\n".join(doc_lines))

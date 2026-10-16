@@ -36,7 +36,7 @@ import sys
 import sysconfig
 import time
 import warnings
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent

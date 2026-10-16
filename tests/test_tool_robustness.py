@@ -140,7 +140,7 @@ class RunCommand(Base):
     def test_default_timeout_is_short_and_says_how_to_ask_for_longer(self):
         self.assertEqual(tools._clamp_timeout(None), tools._DEFAULT_COMMAND_TIMEOUT)
         self.assertEqual(tools._clamp_timeout(0), tools._DEFAULT_COMMAND_TIMEOUT)
-        self.assertEqual(tools._clamp_timeout(5000), tools._MAX_COMMAND_TIMEOUT)
+        self.assertEqual(tools._clamp_timeout(5000), tools.MAX_COMMAND_TIMEOUT)
         self.assertEqual(tools._clamp_timeout("300"), 300)
         with mock.patch.object(tools, "_DEFAULT_COMMAND_TIMEOUT", 1):
             out = self.run_tool("run_command", command="sleep 30")

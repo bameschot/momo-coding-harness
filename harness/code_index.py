@@ -23,6 +23,9 @@ not run in parallel.  Results are still applied by the one indexer thread.
 The index can be saved to and loaded from a pickle in ~/.momo-harness/index/.
 Loading goes through a restricted unpickler that only admits this module's
 classes, so a tampered file fails to load instead of running code.
+
+The module-level tool functions work on ProjectIndex's internals under its lock
+(same module); other modules use its public methods (rel, has_file, ...).
 """
 from __future__ import annotations
 
@@ -46,7 +49,7 @@ from pathlib import Path
 
 from . import code_nav, ignore_rules
 from .net import format_size, parse_size
-from .paths import BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, safe_path, split_lines
+from .paths import BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, momo_home, safe_path, split_lines
 from .session import atomic_write
 
 FORMAT_VERSION = 7   # 6: HTML inline-script JavaScript; 7: skipped files, source fingerprint
@@ -325,7 +328,7 @@ class _RestrictedUnpickler(pickle.Unpickler):
 
 
 def index_dir() -> Path:
-    return Path.home() / ".momo-harness" / "index"
+    return momo_home() / "index"
 
 
 def pickle_path(root: Path) -> Path:
@@ -417,7 +420,6 @@ def _header(root: Path) -> dict:
 
 
 def _fmt_size(n: int) -> str:
-    from .net import format_size
     return format_size(max(0, int(n)))
 
 
@@ -511,6 +513,17 @@ class ProjectIndex:
         with self._lock:
             return len(self._by_path)
 
+    def has_file(self, *rels: str) -> bool:
+        """Whether any of these project-relative paths is indexed."""
+        with self._lock:
+            return any(r in self._by_path for r in rels)
+
+    def has_files_under(self, rel_dir: str) -> bool:
+        """Whether any indexed file lies under this directory ("." = the root)."""
+        prefix = "" if rel_dir in ("", ".") else rel_dir.rstrip("/") + "/"
+        with self._lock:
+            return any(r.startswith(prefix) for r in self._by_path)
+
     def degraded(self) -> bool:
         return self.partial or not all(self.components.values())
 
@@ -539,7 +552,7 @@ class ProjectIndex:
             for p in paths:
                 if not p:
                     continue
-                rel = self._rel(Path(p) if os.path.isabs(str(p)) else self.root / str(p))
+                rel = self.rel(Path(p) if os.path.isabs(str(p)) else self.root / str(p))
                 # A filtered-out file is only queued to drop it (the worker skips it).
                 if rel is not None and (rel in self._by_path or not self._rules.excluded(rel)):
                     self._queue[rel] = None
@@ -586,7 +599,7 @@ class ProjectIndex:
             return
         self._diff()
 
-    def _rel(self, p: Path) -> str | None:
+    def rel(self, p: Path) -> str | None:
         try:
             rel = p.resolve().relative_to(self.root)
         except (ValueError, OSError):
@@ -1088,7 +1101,7 @@ class ProjectIndex:
     # ── the code_nav provider ────────────────────────────────────────────────
 
     def provide(self, key: str, stamp) -> "code_nav._Index | None":
-        rel = self._rel(Path(key))
+        rel = self.rel(Path(key))
         if rel is None:
             return None
         with self._lock:
@@ -1104,7 +1117,7 @@ class ProjectIndex:
         """The indexed source files under `root`, for code_nav's directory scans
         (find_symbol, code_outline) — the same files the index_* tools see.
         None when `root` is outside the project."""
-        rel = self._rel(root)
+        rel = self.rel(root)
         if rel is None:
             return None
         prefix = "" if rel == "." else rel + "/"
@@ -1239,7 +1252,7 @@ _RANK_KINDS = {"class", "interface", "struct", "enum", "trait", "type", "typedef
 
 _CODE_KIND_ORDER = {"class": 0, "interface": 0, "struct": 0, "trait": 0, "enum": 1,
                     "function": 1, "method": 1, "table": 2, "stage": 2}
-_DATA_LANGS = set(code_nav._DATA_EXTRACTORS)
+DATA_LANGS = set(code_nav._DATA_EXTRACTORS)
 
 
 def _path_filter(path: str | None):
@@ -1396,7 +1409,7 @@ _FAMILY = {"javascript": "js", "typescript": "js", "tsx": "js", "html": "js",
            "c": "c", "cpp": "c", "java": "jvm", "kotlin": "jvm"}
 
 
-def _family(lang: str | None) -> str | None:
+def lang_family(lang: str | None) -> str | None:
     return _FAMILY.get(lang, lang) if lang else None
 
 
@@ -1406,7 +1419,7 @@ def _is_code_symbol(lang: str | None, sym) -> bool:
         return False
     if lang == "html":
         return sym.kind not in _HTML_KINDS
-    return lang not in _DATA_LANGS
+    return lang not in DATA_LANGS
 
 
 def _file_score(rel: str, q: str) -> int:
@@ -1612,7 +1625,7 @@ def _search(query: str, kind: str | None, path: str | None, lang: str | None, wo
             lines.append("The text appears in: " + mentions + " — index_text shows the lines")
         else:
             with index._lock:
-                data = sorted({e.path for _, e in index._alive() if e.lang in _DATA_LANGS
+                data = sorted({e.path for _, e in index._alive() if e.lang in DATA_LANGS
                                and e.lang not in ("html", "css") and keep(e.path)})
             if data:
                 lines.append(f"Config files in the index ({len(data)}): " + ", ".join(data[:12])
@@ -1672,7 +1685,7 @@ def _search(query: str, kind: str | None, path: str | None, lang: str | None, wo
     if len(hits) > len(shown_hits):
         trailer.append(f"... ({len(shown_hits)} of {len(hits)} — narrow with kind=, lang= or path=)")
     best = hits[0][5]
-    if -hits[0][0] < 90 or hits[0][6] in _DATA_LANGS:
+    if -hits[0][0] < 90 or hits[0][6] in DATA_LANGS:
         # No exact definition, or only a markup/config one: the answer may be
         # prose (docs, comments), which index_search cannot see.
         mentions = _text_mentions(index, q, keep)
@@ -1683,7 +1696,7 @@ def _search(query: str, kind: str | None, path: str | None, lang: str | None, wo
     else:
         # Callers make sense for code — including JavaScript inside an HTML page —
         # not for a config key or a CSS rule: decide by what the definition is.
-        code_like = best.kind in _CALLABLE_KINDS or best.kind in code_nav._CONTAINER_KINDS
+        code_like = best.kind in _CALLABLE_KINDS or best.kind in code_nav.CONTAINER_KINDS
         callee = q if -hits[0][0] == 100 and best.depth == 0 and best.name == mod_name else best.name
         trailer.append(f'(next: read_symbol("{hits[0][3]}", "{best.qualname}") reads the best match'
                        + (f"; index_callers(\"{callee}\") shows who uses it)" if code_like else ")"))
@@ -1745,7 +1758,7 @@ def _line_owner(index: ProjectIndex, line: int, path: str | None, workdir: Path)
     p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
-    rel = index._rel(p)
+    rel = index.rel(p)
     with index._lock:
         fid = index._by_path.get(rel) if rel else None
         e = index.files[fid] if fid is not None else None
@@ -1754,7 +1767,7 @@ def _line_owner(index: ProjectIndex, line: int, path: str | None, workdir: Path)
                                                           if p.is_dir() else ""))
     if not 1 <= line <= max(e.nlines, 1):
         return f"ERROR: line {line} is outside {path} (1-{e.nlines})"
-    owner = code_nav._enclosing(e.symbols, line)
+    owner = code_nav.enclosing_symbol(e.symbols, line)
     if owner is None:
         return f"(line {line} of {e.path} is not inside any definition — it is at module level)"
     return (f"{e.path}:L{owner.start}-{owner.end}  {owner.kind} {owner.qualname}  | {owner.signature}\n"
@@ -1859,7 +1872,7 @@ def index_text(query: str, path: str | None = None, regex: bool = False, *, work
     for rel, ln, line, symbols in hits:
         if rel == cur and in_file >= _MAX_TEXT_PER_FILE:
             continue                # breadth first: the other files matter more
-        owner = code_nav._enclosing(symbols, ln) if symbols else None
+        owner = code_nav.enclosing_symbol(symbols, ln) if symbols else None
         where = f" [in {owner.qualname}]" if owner else ""
         text = line.strip()
         if len(text) > _MAX_TEXT_LINE:
@@ -1913,7 +1926,7 @@ def _other_type(index: ProjectIndex, rtype: str | None, cls: str) -> bool:
 def _is_project_class(index: ProjectIndex, t: str) -> bool:
     with index._lock:
         return any(index.files[f] is not None and index.files[f].symbols[i].name == t
-                   and index.files[f].symbols[i].kind in code_nav._CONTAINER_KINDS
+                   and index.files[f].symbols[i].kind in code_nav.CONTAINER_KINDS
                    for f, i in index._sym_by_name.get(t.lower(), []))
 
 
@@ -1929,7 +1942,7 @@ def _is_subtype(index: ProjectIndex, t: str, target: str, depth: int = 4) -> boo
         sigs = [(index.files[f].lang, index.files[f].symbols[i].signature)
                 for f, i in index._sym_by_name.get(t.lower(), [])
                 if index.files[f] is not None and index.files[f].symbols[i].name == t
-                and index.files[f].symbols[i].kind in code_nav._CONTAINER_KINDS]
+                and index.files[f].symbols[i].kind in code_nav.CONTAINER_KINDS]
     for lang, sig in sigs:
         rest = sig.split(t, 1)[-1]
         if lang != "python":
@@ -1974,12 +1987,12 @@ def query_target(index: ProjectIndex, name: str) -> tuple[str, str | None, str |
     qualifier = dotted.rsplit(".", 1)[0]
     with index._lock:
         is_class = any(index.files[fid] is not None
-                       and index.files[fid].symbols[i].kind in code_nav._CONTAINER_KINDS
+                       and index.files[fid].symbols[i].kind in code_nav.CONTAINER_KINDS
                        for fid, i in index._sym_by_name.get(qualifier.rsplit(".", 1)[-1].lower(), []))
     return (bare, None, qualifier) if is_class else (bare, qualifier, None)
 
 
-def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
+def uses_of(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
           cls: str | None = None, module: "_Module | None" = None) -> tuple[list, list]:
     """All uses of `bare`: ([(rel, row1, role, recv, owner, line_text)], defs [(rel, Symbol)]).
     With `cls` (a query for cls.bare), drop what syntax shows is another object's
@@ -1999,7 +2012,7 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
              or s.qualname.endswith(f".{cls_last}.{bare}")] or named
     # A Python method is never called from JavaScript: when every definition
     # meant is in one language family, uses in other languages are other names.
-    fams = {_family(lang) for lang, _ in meant}
+    fams = {lang_family(lang) for lang, _ in meant}
     family = fams.pop() if len(fams) == 1 else None
     named = [s for _, s in named]
     owners_of_name = {s.qualname.rsplit(".", 1)[0] for s in named}
@@ -2013,11 +2026,11 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
             occ = index._occurrences(bare)
             targets = [(e.path, set(lines)) for fid, lines in occ.items()
                        if (e := index.files[fid]) is not None and e.lang
-                       and (family is None or _family(e.lang) == family)]
+                       and (family is None or lang_family(e.lang) == family)]
         else:
             targets = [(e.path, None) for _, e in index._alive()
-                       if e.lang and (e.lang not in _DATA_LANGS or e.lang == "html")
-                       and (family is None or _family(e.lang) == family)]
+                       if e.lang and (e.lang not in DATA_LANGS or e.lang == "html")
+                       and (family is None or lang_family(e.lang) == family)]
     uses, defs = [], []
     for i, (rel, rows) in enumerate(sorted(targets, key=lambda t: t[0])):
         if cancel is not None and i % 20 == 0 and cancel.is_set():
@@ -2042,7 +2055,7 @@ def _uses(index: ProjectIndex, bare: str, want_recv: str | None, cancel,
                 continue
             if only_top_level and recv and recv.split(".", 1)[0] in ("self", "this", "cls"):
                 continue
-            owner = code_nav._enclosing(parsed.symbols, r + 1)
+            owner = code_nav.enclosing_symbol(parsed.symbols, r + 1)
             if cls_last and role == "call":
                 if recv and recv.startswith(("self.", "this.")):
                     continue            # an attribute of self is a different object
@@ -2154,7 +2167,7 @@ def _files_named(index: ProjectIndex, name: str) -> list[str]:
     with index._lock:
         out = []
         for _, e in index._alive():
-            if not e.lang or e.lang in _DATA_LANGS:
+            if not e.lang or e.lang in DATA_LANGS:
                 continue
             stem_path = e.path.rsplit(".", 1)[0]
             if (e.path == q or stem_path == q or stem_path.replace("/", ".").endswith(dotted)
@@ -2217,7 +2230,7 @@ def index_callers(name: str, depth: int = 1, role: str | None = None, *, workdir
     module = _module_scope(index, want_recv, bare) if want_recv else None
     if module is not None:
         want_recv = None            # code_nav.parse: parse() inside code_nav counts too
-    uses, defs = _uses(index, bare, want_recv, cancel, cls, module)
+    uses, defs = uses_of(index, bare, want_recv, cancel, cls, module)
     if cancel is not None and cancel.is_set():
         return "ERROR: cancelled"
     if cls:
@@ -2293,7 +2306,7 @@ def index_callers(name: str, depth: int = 1, role: str | None = None, *, workdir
                 continue
             # Scoped like level 1: Cart.total's users, not every `total`.
             b2, _recv, c2 = query_target(index, owner.qualname)
-            u2, _ = _uses(index, b2, None, cancel, c2)
+            u2, _ = uses_of(index, b2, None, cancel, c2)
             u2 = [u for u in u2 if u[2] in ("call", "other", "type")]
             if not u2:
                 continue
@@ -2380,7 +2393,7 @@ def _module_names(index: ProjectIndex) -> tuple[dict[str, set[int]], dict[str, s
     cands: dict[str, set[int]] = defaultdict(set)
     fqns: dict[str, set[int]] = defaultdict(set)    # "com.acme.Money" -> Money.java
     for fid, e in index._alive():
-        if not e.lang or e.lang in _DATA_LANGS:
+        if not e.lang or e.lang in DATA_LANGS:
             continue
         for c in code_nav._module_candidates(index.root / e.path, index.root)[1]:
             cands[c].add(fid)
@@ -2488,8 +2501,8 @@ def _resolve_import(imp, lang: str | None, cands, fqns, index: ProjectIndex) -> 
     if lang in ("c", "cpp") and imp.module.lower().endswith(_HEADER_EXTS):
         targets = {d for d in targets if index.files[d].path.lower().endswith(_HEADER_EXTS)}
     # `import java.util.List` is not util.c; a Kotlin build script is not vite.config.ts.
-    fam = _family(lang)
-    return {d for d in targets if _family(index.files[d].lang) == fam
+    fam = lang_family(lang)
+    return {d for d in targets if lang_family(index.files[d].lang) == fam
             or (fam == "js" and index.files[d].lang in ("css", "json"))}
 
 
@@ -2575,7 +2588,7 @@ def index_map(path: str | None = None, budget: int = 1500, *, workdir: Path,
             ub = used_by.get(fid, 0)
             line = f"{e.path} ({lang}, {e.nlines} lines)" + (f" — imported by {ub} files" if ub else "")
             block = [line]
-            if e.lang in _DATA_LANGS:
+            if e.lang in DATA_LANGS:
                 tops = [s.name for s in e.symbols if s.depth == 0][:8]
                 if tops:
                     block.append("  " + ", ".join(tops))
@@ -2605,7 +2618,7 @@ def index_file(path: str, *, workdir: Path, index: ProjectIndex | None = None, c
     p = safe_path(path, workdir)
     if isinstance(p, str):
         return p
-    rel = index._rel(p)
+    rel = index.rel(p)
     with index._lock:
         fid = index._by_path.get(rel) if rel else None
         if fid is None:
@@ -2636,7 +2649,7 @@ def index_file(path: str, *, workdir: Path, index: ProjectIndex | None = None, c
                                           f"{', ...' if len(imp.names) > 6 else ''})" if imp.names else ""))
             out.append(f"Imports ({len(e.imports)}): " + "; ".join(mods)
                        + (" ..." if len(e.imports) > 30 else ""))
-        if e.lang and e.lang not in _DATA_LANGS:
+        if e.lang and e.lang not in DATA_LANGS:
             graph = _import_graph(index)
             importers = sorted(((ofid, f"{index.files[ofid].path}:L{targets[fid]}")
                                 for ofid, targets in graph.items() if fid in targets),
@@ -2668,7 +2681,7 @@ def index_file(path: str, *, workdir: Path, index: ProjectIndex | None = None, c
     if example:
         out.append(f'(next: read_symbol("{e.path}", "{example}") reads one definition'
                    + (f"; index_callers(\"{example.rsplit('.', 1)[-1]}\") shows its users)"
-                      if e.lang not in _DATA_LANGS else ")"))
+                      if e.lang not in DATA_LANGS else ")"))
     return _with_note("\n".join(out), index)
 
 
@@ -2767,7 +2780,7 @@ def breakdown(index: ProjectIndex) -> dict:
         }
 
 
-def _skip_label(reason: str, n: int, max_files: int) -> str:
+def skip_label(reason: str, n: int, max_files: int) -> str:
     """One "Skipped:" entry; "limit" is a flag (the listing stops at the limit)."""
     if reason == "limit":
         return f"files past the {max_files:,}-file limit"
@@ -2803,7 +2816,7 @@ def status_text(index: ProjectIndex) -> str:
         ]
         sk = {k: v for k, v in index.skipped.items() if v}
         if sk:
-            lines.append("Skipped: " + ", ".join(_skip_label(k, v, index.max_files)
+            lines.append("Skipped: " + ", ".join(skip_label(k, v, index.max_files)
                                                  for k, v in sk.items()))
         if index.last_error:
             lines.append(f"Last error: {index.last_error}")

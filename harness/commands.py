@@ -14,6 +14,7 @@ from . import search as search_mod
 from . import session as session_mod
 from . import tools as tools_mod
 from . import transcript as transcript_mod
+from .compaction import content_text
 from .harness import MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness, _mask_messages
 from .llm.base import THINK_LEVELS
 from .tools import dispatch
@@ -66,7 +67,7 @@ def _format_index(harness) -> str:
         if b["shared"]:
             lines.append(share_row("shared names", b["shared"], "identifier names used across files"))
     if b["skipped"]:
-        lines.append("Skipped: " + ", ".join(code_index._skip_label(k, v, b["max_files"])
+        lines.append("Skipped: " + ", ".join(code_index.skip_label(k, v, b["max_files"])
                                              for k, v in b["skipped"].items()))
     if b["error"]:
         lines.append(f"Last error: {b['error']}")
@@ -294,24 +295,27 @@ def handle(line: str, harness: Harness) -> CommandResult:
         if not arg:
             return CommandResult(handled=True,
                                  output=f"{harness.client.provider_name} host: {harness.client.host}")
-        harness.client.set_host(arg)
+        try:
+            harness.client.set_host(arg)
+        except ValueError as e:      # the old host stays in use
+            return CommandResult(handled=True, output=f"ERROR: {e}")
         # A new host may be a different server serving a different model and context
         # window — adopt the server's loaded model (fixed-model backends) and re-read
         # its context size so the display matches reality.
         harness.refresh_backend()
-        harness._sync_context_limit(emit=True)
         harness.emit_status()
-        return CommandResult(handled=True, output=f"Host set to: {arg}"
-                             + ("" if harness.backend_reachable else " (not reachable)"))
+        if not harness.backend_reachable:
+            return CommandResult(handled=True, output=f"Host set to: {arg} (not reachable)")
+        return CommandResult(handled=True, output=f"Host set to: {arg}\n{harness.context_note()}")
 
     if cmd == "/token":
         if not arg:
             token = harness.client.auth_token
             if token:
-                return CommandResult(handled=True, output=f"Auth token: {_mask_token(token)}")
+                return CommandResult(handled=True, output=f"Auth token: {mask_token(token)}")
             return CommandResult(handled=True, output="Auth token: not set")
         harness.client.set_auth_token(arg)
-        return CommandResult(handled=True, output=f"Auth token set: {_mask_token(arg)}")
+        return CommandResult(handled=True, output=f"Auth token set: {mask_token(arg)}")
 
     if cmd == "/clear-token":
         harness.client.set_auth_token(None)
@@ -486,6 +490,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             if n < 0:
                 return CommandResult(handled=True, output="ERROR: value must be >= 0")
             harness.max_tool_result = n
+            session_mod.save_prefs(max_tool_result=n)
             label = f"{n} chars" if n > 0 else "unlimited"
             return CommandResult(handled=True, output=f"Tool result cap set to: {label}")
         except ValueError:
@@ -602,7 +607,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
         if not arg:
             return CommandResult(handled=True, output=_ref_state())
         style = arg.strip().lower()
-        if style not in tools_mod._TOOL_REF_STYLES:
+        if style not in tools_mod.TOOL_REF_STYLES:
             return _bad_choice(arg, "'full' or 'compact'")
         harness.tool_ref = style
         session_mod.save_prefs(tool_ref=style)
@@ -696,6 +701,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"ERROR: {net_mod.format_size(size)} is above the "
                 f"{net_mod.format_size(net_mod.HARD_MAX_BYTES)} hard limit."))
         harness.net_max_bytes = size
+        session_mod.save_prefs(net_max_bytes=size)
         harness.emit_status()
         return CommandResult(handled=True, output=(
             f"fetch_url download cap: {net_mod.format_size(size)} ({size} bytes)"))
@@ -719,6 +725,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"ERROR: expected a number of characters between 1000 and "
                 f"{net_mod.HARD_MAX_CHARS:,}, got: {arg}"))
         harness.net_max_chars = n
+        session_mod.save_prefs(net_max_chars=n)
         harness.emit_status()
         warn = ""
         if n // 4 > harness.context_limit // 2:
@@ -1028,7 +1035,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
     return CommandResult(handled=False)
 
 
-def _mask_token(t: str) -> str:
+def mask_token(t: str) -> str:
     n = len(t)
     if n <= 5:
         return "*" * n
@@ -1052,7 +1059,7 @@ def render_markdown(messages: list[dict], full: bool = False,
     parts = []
     for m in messages:
         role = m.get("role")
-        content = _content_text(m)
+        content = content_text(m)
         if role in ("system", "thinking"):
             continue
         if role == "user":
@@ -1084,7 +1091,7 @@ def _render_full(messages: list[dict], archive: list[dict], meta: dict) -> str:
 
 def _render_full_message(m: dict) -> str | None:
     role = m.get("role")
-    content = _content_text(m)
+    content = content_text(m)
     if role == "system":
         return f"**System prompt:**\n\n{_fence(content)}"
     if role == "thinking":
@@ -1123,21 +1130,10 @@ def export_markdown(harness, full: bool = False) -> str:
     return render_markdown(harness.messages, full=True, archive=harness.compacted, meta=meta)
 
 
-def _content_text(m: dict) -> str:
-    content = m.get("content") or ""
-    if isinstance(content, list):
-        content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-    return content
-
-
 def _last_assistant_text(messages: list[dict]) -> str:
     for m in reversed(messages):
-        if m.get("role") == "assistant":
-            content = m.get("content") or ""
-            if isinstance(content, list):
-                content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-            if content:
-                return content
+        if m.get("role") == "assistant" and (content := content_text(m)):
+            return content
     return ""
 
 
@@ -1164,7 +1160,7 @@ Available commands:
   /token <key>        Set a Bearer token for authenticated remote hosts
   /clear-token        Remove the current auth token
   /code               Switch to coding mode (full tools)
-  /design             Switch to design mode (read-only tools)
+  /design             Switch to design mode (read tools; writes and revises a spec)
   /plan               Switch to plan mode (investigate → plan → approve → execute)
   /plan tdd           Plan mode with a test-driven plan: tests first, each step gated on them
   /plan normal        Plan mode with a normal plan (the default)
@@ -1195,7 +1191,7 @@ Available commands:
   /context <n>        Set context token limit (e.g. /context 8192)
   /context <n>%       Set context limit as % of model max (e.g. /context 75%); saved in session
   /tool-result        Show current tool result character cap
-  /tool-result <n>    Set cap (e.g. /tool-result 8000); 0 = unlimited
+  /tool-result <n>    Set cap (e.g. /tool-result 8000); 0 = unlimited (saved)
   /think              Show the thinking level and what the model takes
   /think off|on|low|medium|high|xhigh  Set the model's thinking/reasoning level
                       (saved); levels need a model that takes them (gpt-oss,
@@ -1224,9 +1220,9 @@ Available commands:
   /net-confirm        Show whether fetch_url writes ask for confirmation
   /net-confirm on|off Ask y/N before each POST/PUT/PATCH/DELETE (default on)
   /net-max-bytes      Show the fetch_url download size cap
-  /net-max-bytes <n>  Set it, in bytes or with a unit: 200000, 500kb, 2mb
+  /net-max-bytes <n>  Set it, in bytes or with a unit: 200000, 500kb, 2mb (saved)
   /net-max-chars      Show how much page text one fetch_url call returns
-  /net-max-chars <n>  Set it in characters (default 24000); the rest is paged
+  /net-max-chars <n>  Set it in characters (default 24000; saved); the rest is paged
   /search-sources     List web_search sources (shipped, user, session)
   /search-sources suggest [focus]  Have the model analyse the project and add fitting sources
   /search-sources save <name>|all  Keep session sources for future sessions

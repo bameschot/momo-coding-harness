@@ -131,17 +131,17 @@ def format_size(n: int) -> str:
 # Keep \t and \n; drop the rest of C0, DEL and the C1 block so a page cannot emit
 # ANSI escapes into the curses TUI.  U+009B is CSI in terminals that honour
 # 8-bit controls, so stopping at DEL is not enough.
-_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
-def _safe_line(value, limit: int = 200) -> str:
+def safe_line(value, limit: int = 200) -> str:
     """One value fit for the trusted header block above the content fence.
 
     Strips control characters and collapses every run of whitespace, because a
     folded header (``Server: a\r\n\tb``) would otherwise add its own lines to a
     region the model reads as harness output rather than as page content.
     """
-    out = _CTRL.sub("", str(value))
+    out = CONTROL_CHARS.sub("", str(value))
     out = re.sub(r"\s+", " ", out).strip()
     return out[:limit] + "…" if len(out) > limit else out
 
@@ -220,14 +220,14 @@ def _vet(url: str, allow_private: bool
     except ValueError as e:
         return f"ERROR: blocked URL: malformed URL ({e}).", "host", None
 
-    if _CTRL.search(url or ""):
+    if CONTROL_CHARS.search(url or ""):
         # Never valid in a URL, and echoing one back would put an ANSI escape
         # into the curses TUI by way of the error message.
         return ("ERROR: blocked URL: the URL contains control characters.", "host", None)
 
     scheme = (parts.scheme or "").lower()
     if scheme not in ("http", "https"):
-        return (f"ERROR: blocked URL: scheme '{_safe_line(scheme, 20) or 'none'}' is not allowed. "
+        return (f"ERROR: blocked URL: scheme '{safe_line(scheme, 20) or 'none'}' is not allowed. "
                 "fetch_url speaks http and https only — to read a local file use read_file.",
                 "scheme", None)
 
@@ -255,11 +255,11 @@ def _vet(url: str, allow_private: bool
     try:
         infos = _getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
-        return f"ERROR: could not resolve host '{_safe_line(host, 80)}': {_safe_line(e.strerror or e)}.", "resolve", None
+        return f"ERROR: could not resolve host '{safe_line(host, 80)}': {safe_line(e.strerror or e)}.", "resolve", None
     except (UnicodeError, OSError) as e:
-        return f"ERROR: could not resolve host '{_safe_line(host, 80)}': {_safe_line(e)}.", "resolve", None
+        return f"ERROR: could not resolve host '{safe_line(host, 80)}': {safe_line(e)}.", "resolve", None
     if not infos:
-        return f"ERROR: could not resolve host '{_safe_line(host, 80)}'.", "resolve", None
+        return f"ERROR: could not resolve host '{safe_line(host, 80)}'.", "resolve", None
     addrs = [info[4][0] for info in infos]
     if allow_private:
         return None, "ok", ((host, port), addrs)
@@ -270,9 +270,9 @@ def _vet(url: str, allow_private: bool
             ip = ipaddress.ip_address(raw)
         except ValueError:
             return (f"ERROR: blocked URL: unparseable address for host "
-                    f"'{_safe_line(host, 80)}'.", "address", None)
+                    f"'{safe_line(host, 80)}'.", "address", None)
         if (why := _blocked_reason(ip)):
-            return (f"ERROR: blocked URL: '{_safe_line(host, 80)}' resolves to {ip} ({why}). fetch_url "
+            return (f"ERROR: blocked URL: '{safe_line(host, 80)}' resolves to {ip} ({why}). fetch_url "
                     "only reaches public internet addresses. Ask the user to run "
                     "'/net local' if reaching this address is intended.", "address", None)
     return None, "ok", ((host, port), addrs)
@@ -1005,11 +1005,11 @@ def _window(body: str, offset: int, find: str | None, max_chars: int,
         hit = _find(body, find)
         if hit == -1 and (alt := _heading_word_match(body, _clean_needle(find))):
             hit = alt[0]
-            notes.append(f"find: '{_safe_line(find, 80)}' does not occur verbatim — jumped "
-                         f"to the first heading containing '{_safe_line(alt[1], 40)}'")
+            notes.append(f"find: '{safe_line(find, 80)}' does not occur verbatim — jumped "
+                         f"to the first heading containing '{safe_line(alt[1], 40)}'")
         if hit == -1:
             missed = True
-            notes.append(f"find: '{_safe_line(find, 80)}' does not occur in the page — "
+            notes.append(f"find: '{safe_line(find, 80)}' does not occur in the page — "
                          f"showing from char {min(start, total)}; the section list at the "
                          f"end names the headings that do")
         else:
@@ -1046,7 +1046,7 @@ def _render(url: str, final_url: str, status: int, reason: str, headers,
     # markers.  The other way round, "<<<END UNTRUSTED\x00 WEB CONTENT>>>"
     # survives the replace and the strip then reassembles it into a real closing
     # marker, letting the page continue outside the fence as trusted text.
-    body = _CTRL.sub("", body)
+    body = CONTROL_CHARS.sub("", body)
     body = body.replace(_END, "[END-MARKER-REMOVED]").replace(_BEGIN, "[BEGIN-MARKER-REMOVED]")
     notes = list(notes)
     body = _window(body, offset, find, max_chars, notes)
@@ -1054,14 +1054,14 @@ def _render(url: str, final_url: str, status: int, reason: str, headers,
     # Everything below sits ABOVE the fence, so the model reads it as harness
     # output.  The status reason, the final URL and the response headers are all
     # server-controlled, so each one is reduced to a single safe line.
-    head = [f"HTTP {status} {_safe_line(reason, 40)} — {method} {_safe_line(final_url, 300)}"]
+    head = [f"HTTP {status} {safe_line(reason, 40)} — {method} {safe_line(final_url, 300)}"]
     if hops:
-        head.append("redirected: " + _safe_line(" -> ".join([url, *hops]), 500))
+        head.append("redirected: " + safe_line(" -> ".join([url, *hops]), 500))
     for name in _SHOW_HEADERS:
         if (value := _header(headers, name)):
-            head.append(f"{name}: {_safe_line(value)}")
-    head.append(f"body: {_safe_line(kind, 120)}")
-    head.extend(f"note: {_safe_line(n, 400)}" for n in notes)
+            head.append(f"{name}: {safe_line(value)}")
+    head.append(f"body: {safe_line(kind, 120)}")
+    head.extend(f"note: {safe_line(n, 400)}" for n in notes)
     out = "\n".join(head)
 
     if method == "HEAD" or not body.strip():
@@ -1151,7 +1151,7 @@ def _get(url: str, *, method: str = "GET", headers: dict | None = None,
         if resp is None:
             # A director with no handler for the scheme returns None rather than
             # raising; without this the next line is a confusing AttributeError.
-            return f"ERROR: no handler could open {_safe_line(url, 300)}."
+            return f"ERROR: no handler could open {safe_line(url, 300)}."
         with resp:
             raw, truncated = _read_capped(resp, max_bytes, deadline, cancel)
             status = getattr(resp, "status", None) or resp.getcode()
@@ -1159,7 +1159,7 @@ def _get(url: str, *, method: str = "GET", headers: dict | None = None,
             rheaders = resp.headers
             final_url = resp.geturl()
     except BlockedURL as e:
-        return f"{_safe_line(e.detail, 400)} (blocked on a redirect from {_safe_line(url, 300)})"
+        return f"{safe_line(e.detail, 400)} (blocked on a redirect from {safe_line(url, 300)})"
     except urllib.error.HTTPError as e:
         # HTTPError is both the exception and the response: 4xx/5xx bodies carry
         # the error message the model needs.
@@ -1167,24 +1167,24 @@ def _get(url: str, *, method: str = "GET", headers: dict | None = None,
             with e:
                 raw, truncated = _read_capped(e, max_bytes, deadline, cancel)
         except _Cancelled:
-            return f"ERROR: fetch of {_safe_line(url, 300)} cancelled by the user"
+            return f"ERROR: fetch of {safe_line(url, 300)} cancelled by the user"
         except Exception:
             raw, truncated = b"", False
         status, reason = e.code, (e.reason or "")
         rheaders, final_url = (e.headers or {}), (e.url or url)
         notes.append("server returned an error status")
     except _Cancelled:
-        return f"ERROR: fetch of {_safe_line(url, 300)} cancelled by the user"
+        return f"ERROR: fetch of {safe_line(url, 300)} cancelled by the user"
     except _Deadline as e:
-        return f"ERROR: {_safe_line(url, 300)} timed out after {timeout}s: {_safe_line(e)}"
+        return f"ERROR: {safe_line(url, 300)} timed out after {timeout}s: {safe_line(e)}"
     except (TimeoutError, socket.timeout):
-        return f"ERROR: {_safe_line(url, 300)} timed out after {timeout}s"
+        return f"ERROR: {safe_line(url, 300)} timed out after {timeout}s"
     except ssl.SSLError as e:
-        return f"ERROR: TLS failure for {_safe_line(url, 300)}: {_safe_line(e)}"
+        return f"ERROR: TLS failure for {safe_line(url, 300)}: {safe_line(e)}"
     except urllib.error.URLError as e:
-        return f"ERROR: could not fetch {_safe_line(url, 300)}: {_safe_line(e.reason)}"
+        return f"ERROR: could not fetch {safe_line(url, 300)}: {safe_line(e.reason)}"
     except (OSError, ValueError, UnicodeError) as e:
-        return f"ERROR: could not fetch {_safe_line(url, 300)}: {_safe_line(e)}"
+        return f"ERROR: could not fetch {safe_line(url, 300)}: {safe_line(e)}"
 
     if truncated:
         notes.append(
@@ -1225,7 +1225,7 @@ def fence(body: str) -> str:
     """`body` inside the untrusted-content markers, with the data-not-instructions
     footer.  Control characters are stripped FIRST, then the markers
     neutralised — the other order lets a stripped byte reassemble a marker."""
-    body = _CTRL.sub("", body)
+    body = CONTROL_CHARS.sub("", body)
     body = body.replace(_END, "[END-MARKER-REMOVED]").replace(_BEGIN, "[BEGIN-MARKER-REMOVED]")
     return f"{_BEGIN}\n{body}\n{_END}\n\n{_FOOTER}"
 
@@ -1256,7 +1256,7 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
 
     method = str(method or "GET").upper()
     if method not in _METHODS:
-        return (f"ERROR: method '{_safe_line(method, 20)}' is not supported. "
+        return (f"ERROR: method '{safe_line(method, 20)}' is not supported. "
                 f"Use one of: {', '.join(_METHODS)}.")
 
     # Every URL this fetch approves — the first one and each redirect hop — is
@@ -1279,7 +1279,7 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
     else:
         asked = parse_size(max_bytes)
         if asked is None:
-            return (f"ERROR: max_bytes '{_safe_line(max_bytes, 40)}' is not a size. Use a number of bytes "
+            return (f"ERROR: max_bytes '{safe_line(max_bytes, 40)}' is not a size. Use a number of bytes "
                     f"or a unit string such as 500kb or 2mb.")
         max_bytes = min(asked, ceiling)
     try:
@@ -1293,7 +1293,7 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
     try:
         offset = max(0, int(offset or 0))
     except (TypeError, ValueError):
-        return f"ERROR: offset '{_safe_line(offset, 40)}' is not a number of characters."
+        return f"ERROR: offset '{safe_line(offset, 40)}' is not a number of characters."
     find = str(find) if find not in (None, "") else None
     json_path = str(json_path) if json_path not in (None, "") else None
     max_chars = min(int(net_max_chars or DEFAULT_MAX_CHARS), HARD_MAX_CHARS)
