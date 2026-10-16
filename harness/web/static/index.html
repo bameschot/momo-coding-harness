@@ -54,30 +54,30 @@
         <option value="tdd">TDD plan</option>
       </select>
     </label>
-    <span id="plan-progress" class="chip" hidden></span>
-    <button id="model-btn" class="field strong model-btn" type="button" title="Switch model" aria-haspopup="true"><span id="model"></span><svg class="icon sm" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+    <button id="plan-progress" class="chip button" type="button" title="Show the plan" hidden></button>
+    <button id="model-btn" class="field strong model-btn" type="button" title="Switch model" aria-haspopup="dialog"><span id="model"></span><svg class="icon sm" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
     <span id="host" class="field muted collapse"></span>
     <span class="spacer"></span>
     <button id="plan-btn" class="icon-btn" type="button" title="Plan" aria-label="Plan" hidden><svg class="icon" aria-hidden="true"><use href="#i-plan"/></svg></button>
     <button id="theme-btn" class="icon-btn" type="button" title="Switch to dark mode" aria-label="Switch to dark mode"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button>
-    <button id="tools-btn" class="icon-btn" type="button" title="Tools for this mode (/tools)" aria-label="Tools for this mode" aria-haspopup="true" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg><span id="tools-off" class="count" hidden></span></button>
-    <button id="view-btn" class="icon-btn" type="button" title="View options" aria-label="View options" aria-haspopup="true" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg></button>
+    <button id="tools-btn" class="icon-btn" type="button" title="Tools for this mode (/tools)" aria-label="Tools for this mode" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg><span id="tools-off" class="count" hidden></span></button>
+    <button id="view-btn" class="icon-btn" type="button" title="View options" aria-label="View options" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg></button>
   </div>
   <div class="status-row second">
     <span id="workdir" class="field muted mono collapse" dir="rtl"></span>
     <span class="spacer"></span>
-    <button id="ctx-btn" class="ctx" type="button" title="Context used — click for a breakdown" aria-haspopup="true" aria-expanded="false">
+    <button id="ctx-btn" class="ctx" type="button" title="Context used — click for a breakdown" aria-haspopup="dialog" aria-expanded="false">
       <span class="ctx-label">CTX</span>
       <span class="meter"><span id="ctx-fill"></span></span>
       <span id="ctx-pct" class="mono">0%</span>
     </button>
-    <button id="think-badge" class="chip button" type="button" title="Thinking level (/think)" aria-haspopup="true" aria-expanded="false">THINK: on</button>
+    <button id="think-badge" class="chip button" type="button" title="Thinking level (/think)" aria-haspopup="dialog" aria-expanded="false">THINK: on</button>
     <button id="tools-badge" class="chip button warn" type="button" title="Tools are disabled — click to enable" hidden>TOOLS: off</button>
     <button id="run-badge" class="chip button" type="button" title="Toggle run_command confirmation (Shift+P)">RUN: auto</button>
     <button id="net-badge" class="chip button" type="button" title="Internet access is off — click to turn it on">NET: off</button>
-    <button id="index-badge" class="chip button" type="button" title="Code index is off — click to turn it on" aria-haspopup="true" aria-expanded="false">INDEX: off</button>
+    <button id="index-badge" class="chip button" type="button" title="Code index is off — click to turn it on" aria-haspopup="dialog" aria-expanded="false">INDEX: off</button>
   </div>
-  <div id="view-menu" class="menu" role="menu" hidden>
+  <div id="view-menu" class="menu" role="dialog" aria-label="View options" hidden>
     <div class="menu-title">View</div>
     <label><input type="checkbox" data-view="tools"> Tool output <kbd>/tool-output</kbd></label>
     <label><input type="checkbox" data-view="think"> Thinking <kbd>Shift+T</kbd></label>
@@ -125,12 +125,12 @@
     <a id="export-link" class="menu-link" href="api/export" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download conversation (.md)</a>
     <a id="export-full-link" class="menu-link" href="api/export?full=1" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download full log (.md)</a>
   </div>
-  <div id="tools-menu" class="menu tools-menu" role="menu" hidden></div>
+  <div id="tools-menu" class="menu tools-menu" role="dialog" aria-label="Tools for this mode" hidden></div>
   <div id="tool-tip" role="tooltip" hidden></div>
-  <div id="model-menu" class="menu model-menu" role="menu" hidden></div>
+  <div id="model-menu" class="menu model-menu" role="dialog" aria-label="Models" hidden></div>
   <div id="ctx-menu" class="menu ctx-menu" role="dialog" aria-label="Context usage" hidden></div>
   <div id="index-menu" class="menu ctx-menu" role="dialog" aria-label="Code index composition" hidden></div>
-  <div id="think-menu" class="menu think-menu" role="menu" aria-label="Thinking level" hidden>
+  <div id="think-menu" class="menu think-menu" role="dialog" aria-label="Thinking level" hidden>
     <div class="menu-title">Thinking <kbd>/think</kbd></div>
     <div id="think-levels"></div>
     <div id="think-note" class="muted menu-note"></div>
@@ -218,7 +218,7 @@
   <div id="prompt-body"></div>
 </aside>
 
-<aside id="plan-drawer" aria-label="Plan" hidden>
+<aside id="plan-drawer" class="side-drawer" aria-label="Plan" hidden>
   <div class="drawer-head">
     <strong>Plan</strong>
     <span id="plan-phase" class="chip"></span>
@@ -227,9 +227,9 @@
   </div>
   <div id="plan-body" class="md"></div>
   <div class="drawer-actions">
-    <button type="button" data-cmd="/plan run" class="primary">Run</button>
-    <button type="button" data-cmd="/plan resume">Resume</button>
-    <button type="button" data-cmd="/plan cancel" class="danger">Cancel plan</button>
+    <button type="button" id="plan-run" data-cmd="/plan run" class="primary">Run</button>
+    <button type="button" id="plan-resume" data-cmd="/plan resume" class="primary" hidden>Resume</button>
+    <button type="button" id="plan-cancel" data-cmd="/plan cancel" class="danger">Cancel plan</button>
   </div>
 </aside>
 

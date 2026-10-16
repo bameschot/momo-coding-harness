@@ -1,22 +1,38 @@
-// Escape-first Markdown renderer (same feature set as md_render.py).
+// Escape-first Markdown renderer for chat replies, plans and previews: headings,
+// lists (task items too), quotes, fenced code, tables, rules, links, bold, italic,
+// strikethrough and inline code.  (md_render.py, the TUI's, does a smaller set.)
 // Output is safe for innerHTML: all source text is escaped before any markup is added.
+import { copyText, el } from "./dom.js";
 import { esc, highlight } from "./highlight.js";
 
-export function mdInline(src) {
-  const codes = [];
-  let s = esc(src).replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
-  s = s
+// Placeholders for spans taken out before the emphasis pass: inline code
+// (\u0000) and links (\u0001).  Neither character survives in esc() output's
+// markup, and a stray one in the source is dropped.
+const CODE_MARK = "\u0000", LINK_MARK = "\u0001";
+
+function emphasis(s) {
+  return s
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/__(.+?)__/g, "<strong>$1</strong>")
     .replace(/(^|[^*\w])\*(?!\s)(.+?)\*(?!\w)/g, "$1<em>$2</em>")
     .replace(/(^|[^_\w])_(?!\s)(.+?)_(?!\w)/g, "$1<em>$2</em>")
-    .replace(/~~(.+?)~~/g, "<del>$1</del>")
+    .replace(/~~(.+?)~~/g, "<del>$1</del>");
+}
+
+export function mdInline(src) {
+  const codes = [], links = [];
+  let s = esc(String(src).replace(/[\u0000\u0001]/g, ""))
+    .replace(/`([^`]+)`/g, (_, c) => `${CODE_MARK}${codes.push(c) - 1}${CODE_MARK}`)
+    // Links come out before emphasis, so `__init__.py` in a URL stays a URL.
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, text, url) => {
       // url is already escaped; allow only http(s), mailto and relative links.
       const raw = url.replace(/&amp;/g, "&");
-      if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^(https?|mailto):/i.test(raw)) return text;
-      return `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+      const label = emphasis(text);
+      const html = /^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^(https?|mailto):/i.test(raw) ? label
+        : `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+      return `${LINK_MARK}${links.push(html) - 1}${LINK_MARK}`;
     });
+  s = emphasis(s).replace(/\u0001(\d+)\u0001/g, (_, i) => links[+i]);
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[+i]}</code>`);
 }
 
@@ -64,7 +80,10 @@ export function renderMarkdown(text) {
       i++;
     } else {                                                          // paragraph
       const body = [];
-      while (i < lines.length && lines[i].trim() &&
+      const tableStarts = (j) => lines[j].includes("|") && j + 1 < lines.length && isTableSep(lines[j + 1]);
+      // A paragraph ends where another block starts, a table included: models
+      // write "Results:" on the line right above one.
+      while (i < lines.length && lines[i].trim() && !tableStarts(i) &&
              !/^(#{1,6}\s|\s*(```|~~~)|\s*>|\s*([-*+]|\d+[.)])\s+)/.test(lines[i])) body.push(lines[i++]);
       out.push(`<p>${body.map(mdInline).join("<br>")}</p>`);
     }
@@ -75,7 +94,8 @@ export function renderMarkdown(text) {
 function renderList(lines, start, setIndex) {
   const indentOf = (l) => l.match(/^\s*/)[0].length;
   const base = indentOf(lines[start]);
-  const ordered = /^\s*\d+[.)]/.test(lines[start]);
+  const first = lines[start].match(/^\s*(\d+)[.)]/);
+  const ordered = !!first;
   const items = [];
   let i = start;
   while (i < lines.length) {
@@ -95,10 +115,40 @@ function renderList(lines, start, setIndex) {
   }
   setIndex(i);
   const tag = ordered ? "ol" : "ul";
-  return `<${tag}>` + items.map((it) => {
+  const startAttr = ordered && +first[1] !== 1 ? ` start="${+first[1]}"` : "";
+  return `<${tag}${startAttr}>` + items.map((it) => {
     const task = it.text.match(/^\[([ xX])\]\s+(.*)$/);
     const body = task ? `${task[1] === " " ? "☐" : "☑"} ${mdInline(task[2])}` : mdInline(it.text);
     return `<li>${body}${it.sub}</li>`;
   }).join("") + `</${tag}>`;
 }
 
+// A copy button on every code block under `root` (once per block).
+export function addCopyButtons(root) {
+  for (const pre of root.querySelectorAll("pre")) {
+    const code = pre.querySelector("code");
+    if (!code || pre.parentElement.classList.contains("code-block")) continue;
+    const box = el("div", "code-block");
+    pre.replaceWith(box);
+    const bar = el("div", "code-bar");
+    const lang = code.dataset.lang;
+    const btn = el("button", "copy-btn", "Copy");
+    btn.type = "button";
+    btn.title = "Copy code";
+    btn.setAttribute("aria-label", lang ? `Copy ${lang} code` : "Copy code");
+    let timer;
+    btn.onclick = async () => {
+      try {
+        await copyText(code.textContent);
+        btn.textContent = "Copied ✓";
+        btn.classList.add("done");
+      } catch {
+        btn.textContent = "Copy failed";
+      }
+      clearTimeout(timer);
+      timer = setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1600);
+    };
+    bar.append(el("span", "code-lang", lang || ""), btn);
+    box.append(bar, pre);
+  }
+}

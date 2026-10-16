@@ -122,8 +122,8 @@ _COMPANION_H        = 4    # 4 art rows
 _COMPANION_INTERVAL = 0.12  # seconds per animation tick
 
 from .companion import (  # noqa: E402  (shared with the web UI)
-    _MOMO_WR, _MOMO_WL, _MOMO_SIT, _MOMO_SIT_L, _MOMO_WR_BLINK, _MOMO_WL_BLINK,
-    _SPEECH_TEXTS, _SPEECH_TEXTS_DEFAULT, RecapPicker,
+    MOMO_WR, MOMO_WL, MOMO_SIT, MOMO_SIT_L, MOMO_WR_BLINK, MOMO_WL_BLINK,
+    SPEECH_TEXTS, SPEECH_TEXTS_DEFAULT, RecapPicker,
     CAT_W, bubble_dir, bubble_room, walk_max_x,
 )
 
@@ -137,7 +137,7 @@ class _Companion:
     state: str = "walk"          # "walk" | "sit"
     sit_ticks: int = 0
     step: int = 0                # walk leg frame, 0/1
-    frame: list = field(default_factory=lambda: _MOMO_SIT[0])
+    frame: list = field(default_factory=lambda: MOMO_SIT[0])
     blink_ticks: int = 0
     mew_ticks: int = 0
     mew_text: str = ""
@@ -157,9 +157,9 @@ class _Companion:
                 self._sit_down(cols, speech_key)
             if self.blink_ticks > 0:
                 self.blink_ticks -= 1
-                self.frame = _MOMO_WR_BLINK if self.dir > 0 else _MOMO_WL_BLINK
+                self.frame = MOMO_WR_BLINK if self.dir > 0 else MOMO_WL_BLINK
             else:
-                self.frame = (_MOMO_WR if self.dir > 0 else _MOMO_WL)[self.step]
+                self.frame = (MOMO_WR if self.dir > 0 else MOMO_WL)[self.step]
                 if random.random() < 0.03:
                     self.blink_ticks = 2
             return
@@ -169,7 +169,7 @@ class _Companion:
             self.dir = 1 if self.x <= 2 else -1 if self.x >= max_x - 2 else random.choice([-1, 1])
             self.state = "walk"
             self.mew_ticks = 0     # the bubble doesn't walk along
-        sit_frames = _MOMO_SIT_L if self.dir < 0 else _MOMO_SIT
+        sit_frames = MOMO_SIT_L if self.dir < 0 else MOMO_SIT
         self.frame = sit_frames[1 if random.random() < 0.08 else 0]   # [1] = blink
         if self.mew_ticks > 0:
             self.mew_ticks -= 1
@@ -183,7 +183,7 @@ class _Companion:
         recap = self.recaps.pick(time.monotonic(), room) if self.idle else None
         text = recap
         if not text and random.random() < 0.75:
-            pool = [t for t in _SPEECH_TEXTS.get(speech_key, _SPEECH_TEXTS_DEFAULT) if len(t) <= room]
+            pool = [t for t in SPEECH_TEXTS.get(speech_key, SPEECH_TEXTS_DEFAULT) if len(t) <= room]
             text = random.choice(pool) if pool else None
         if text:
             self.mew_text = text

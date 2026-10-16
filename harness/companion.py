@@ -5,26 +5,26 @@ import random
 import re
 import unicodedata
 
-_MOMO_WR = [   # walking right — two alternating leg frames
+MOMO_WR = [   # walking right — two alternating leg frames
     ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " /\\/\\/\\ "],
     ["\\    /\\ ", " )  ( ')", "( ¯¯  ) ", " \\/\\/\\/ "],
 ]
-_MOMO_WL = [   # walking left — two alternating leg frames
+MOMO_WL = [   # walking left — two alternating leg frames
     [" /\\   \\ ", "(' )  ( ", "(  ¯¯ ) ", " /\\/\\/\\ "],
     [" /\\   \\ ", "(' )  ( ", "(  ¯¯ ) ", " \\/\\/\\/ "],
 ]
-_MOMO_SIT = [  # sitting — normal, blink
+MOMO_SIT = [  # sitting — normal, blink
     ["\\    /\\ ", " )  ( ')", "(  /  ) ", " \\(__)| "],
     ["\\    /\\ ", " )  ( -)", "(  /  ) ", " \\(__)| "],
 ]
-_MOMO_SIT_L = [  # sitting facing left — normal, blink
+MOMO_SIT_L = [  # sitting facing left — normal, blink
     [" /\\   \\ ", "(' )  ( ", "(  \\  ) ", "|(__)/  "],
     [" /\\   \\ ", "(- )  ( ", "(  \\  ) ", "|(__)/  "],
 ]
-_MOMO_WR_BLINK = ["\\    /\\ ", " )  ( -)", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-right blink
-_MOMO_WL_BLINK = [" /\\   \\ ", "(- )  ( ", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-left blink
+MOMO_WR_BLINK = ["\\    /\\ ", " )  ( -)", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-right blink
+MOMO_WL_BLINK = [" /\\   \\ ", "(- )  ( ", "(  ¯  ) ", " /\\/\\/\\ "]  # walking-left blink
 # key: (mode, is_thinking)  value: list of strings each ≤ BUBBLE_MAX (40) visible chars
-_SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
+SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
     ("coding",  False): [
         "< mew~", "< purrr", "< found a bug!",
         "< git commit!", "< tests pass?", "< grep is love",
@@ -165,11 +165,11 @@ _SPEECH_TEXTS: dict[tuple[str, bool], list[str]] = {
         "< verifying...", "< *sniffs file*", "< mew!",
     ],
 }
-_SPEECH_TEXTS_DEFAULT = ["< mew~", "< purrr", "< mew mew"]  # fallback for unknown modes
+SPEECH_TEXTS_DEFAULT = ["< mew~", "< purrr", "< mew mew"]  # fallback for unknown modes
 
 # Longer lines (26–40 chars), mixed into the pools above so momo sometimes says a
 # whole little sentence instead of a two-word quip.
-_SPEECH_TEXTS_LONG: dict[tuple[str, bool], list[str]] = {
+SPEECH_TEXTS_LONG: dict[tuple[str, bool], list[str]] = {
     ("coding",  False): [
         "< tests green, time for a nap?",
         "< that diff looks tidy, purrr",
@@ -291,8 +291,8 @@ _SPEECH_TEXTS_LONG: dict[tuple[str, bool], list[str]] = {
         "< *stares intently at the code*",
     ],
 }
-for _key, _lines in _SPEECH_TEXTS_LONG.items():
-    _SPEECH_TEXTS[_key] = _SPEECH_TEXTS[_key] + _lines
+for _key, _lines in SPEECH_TEXTS_LONG.items():
+    SPEECH_TEXTS[_key] = SPEECH_TEXTS[_key] + _lines
 
 # ── bubble layout (shared by the TUI and, mirrored, the web UI) ──────────────
 # The speech bubble sits on the cat's head row, beside the frame: on the right
@@ -358,9 +358,9 @@ def _fit(s: str) -> str:
     return cut.rstrip(" ,;:-") + "…"
 
 
-_RECAP_REPEAT_SECS = 180    # the same recap line is never repeated within this window
-_RECAP_REUSE_CHANCE = 0.25  # once new recaps are spoken: chance a bubble reuses an old one
-_RECAP_REUSE_POOL = 5       # ... picked from this many most recent lines
+RECAP_REPEAT_SECS = 180    # the same recap line is never repeated within this window
+RECAP_REUSE_CHANCE = 0.25  # once new recaps are spoken: chance a bubble reuses an old one
+RECAP_REUSE_POOL = 5       # ... picked from this many most recent lines
 
 
 class RecapPicker:
@@ -368,7 +368,7 @@ class RecapPicker:
 
     New recap lines take preference: each is spoken once, in order, before any
     canned line. After that an older recap only comes back occasionally, and never
-    the same line within _RECAP_REPEAT_SECS — otherwise pick() returns None and the
+    the same line within RECAP_REPEAT_SECS — otherwise pick() returns None and the
     caller uses a canned line."""
 
     def __init__(self):
@@ -389,11 +389,11 @@ class RecapPicker:
         if line is not None:
             self._queue.remove(line)
         else:
-            if rng.random() >= _RECAP_REUSE_CHANCE:
+            if rng.random() >= RECAP_REUSE_CHANCE:
                 return None
-            pool = [line for line in self.lines[-_RECAP_REUSE_POOL:]
+            pool = [line for line in self.lines[-RECAP_REUSE_POOL:]
                     if len(line) <= max_len
-                    and now - self._last_shown.get(line, float("-inf")) >= _RECAP_REPEAT_SECS]
+                    and now - self._last_shown.get(line, float("-inf")) >= RECAP_REPEAT_SECS]
             if not pool:
                 return None
             line = rng.choice(pool)

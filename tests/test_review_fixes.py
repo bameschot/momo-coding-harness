@@ -224,12 +224,12 @@ class Dispatch(unittest.TestCase):
 
 class Companion(unittest.TestCase):
     def test_every_frame_is_cat_width_and_blinks_close_the_eye(self):
-        for frames in (companion._MOMO_WR, companion._MOMO_WL, companion._MOMO_SIT,
-                       companion._MOMO_SIT_L, [companion._MOMO_WR_BLINK, companion._MOMO_WL_BLINK]):
+        for frames in (companion.MOMO_WR, companion.MOMO_WL, companion.MOMO_SIT,
+                       companion.MOMO_SIT_L, [companion.MOMO_WR_BLINK, companion.MOMO_WL_BLINK]):
             for frame in frames:
                 self.assertTrue(all(len(line) == companion.CAT_W for line in frame), frame)
-        self.assertIn("-", companion._MOMO_WL_BLINK[1])
-        self.assertIn("-", companion._MOMO_WR_BLINK[1])
+        self.assertIn("-", companion.MOMO_WL_BLINK[1])
+        self.assertIn("-", companion.MOMO_WR_BLINK[1])
 
 
 if __name__ == "__main__":

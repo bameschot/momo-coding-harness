@@ -44,6 +44,9 @@ _MUTATING_TOOLS = {
     "edit_file", "append_to_file", "replace_symbol",
     "write_file", "delete_file", "move_file",
 }
+# Tools whose result a frontend may receive as DiffEvents instead of a
+# ToolResultEvent (edit_files: one diff per file).  Served to the web UI.
+DIFF_TOOLS = frozenset(_MUTATING_TOOLS | {"edit_files"})
 
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
 

@@ -1,10 +1,15 @@
 // momo web UI — mirrors the curses TUI (harness/tui.py) over SSE + JSON POSTs.
 // No dependencies. All model/tool text is HTML-escaped before it reaches the DOM.
+// This module holds the transcript, status bar, composer and popovers; the
+// drawers, notifications and the companion live in their own modules.
 
-import { esc, highlight, langFromPath } from "./highlight.js";
-import { renderMarkdown } from "./markdown.js";
+import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
+import { $, copyText, el, flash, formatSize, icon, loadJSON, saveJSON } from "./dom.js";
+import { initFiles, openFiles } from "./files.js";
+import { addCopyButtons, renderMarkdown } from "./markdown.js";
+import { initNotify, noteActivity, notify, signal, syncNotifyControls } from "./notify.js";
+import { initSessions, openSessions } from "./sessions.js";
 
-const $ = (sel) => document.querySelector(sel);
 const transcript = $("#transcript");
 const input = $("#input");
 
@@ -15,12 +20,7 @@ const view = { ...VIEW_DEFAULTS, ...loadJSON("momo.view", {}) };
 const VIEW_MAP = { tool_output: "tools", think_output: "think", md_render: "md",
                    diff_output: "diff", diff_style: "diffStyle", companion: "companion" };
 
-function loadJSON(key, dflt) {
-  try { return JSON.parse(localStorage.getItem(key)) ?? dflt; } catch { return dflt; }
-}
-function saveView() {
-  try { localStorage.setItem("momo.view", JSON.stringify(view)); } catch { /* private mode */ }
-}
+const saveView = () => saveJSON("momo.view", view);
 
 // ── light/dark theme (per browser; index.html applies the saved choice before paint) ──
 const darkQuery = matchMedia("(prefers-color-scheme: dark)");
@@ -38,7 +38,7 @@ function renderThemeBtn() {
 $("#theme-btn").onclick = () => {
   const next = currentTheme() === "dark" ? "light" : "dark";
   document.documentElement.dataset.theme = next;
-  try { localStorage.setItem("momo.theme", JSON.stringify(next)); } catch { /* private mode */ }
+  saveJSON("momo.theme", next);
   renderThemeBtn();
 };
 darkQuery.addEventListener("change", renderThemeBtn);  // follows the OS until the user picks
@@ -53,28 +53,15 @@ let history = [], histIdx = -1, histStash = "";
 let queue = [];             // messages typed while busy: {text, atts}
 let editing = null;         // {attachments: [names]} while editing the last message
 let connectedAt = 0;        // ignore backlog replay for notifications
-let unseen = false;         // new activity while the window was away
 let busySince = 0;
-let focused = document.hasFocus();  // a visible but unfocused window still counts as away
+// From /api/state, with the values they have today until it arrives: the tools
+// whose result can come as diffs instead (harness.DIFF_TOOLS), and the ending of
+// a /command's y/N question (controller.CONFIRM_SUFFIX).
+let diffTools = new Set(["append_to_file", "delete_file", "edit_file", "edit_files",
+                         "move_file", "replace_symbol", "write_file"]);
+let confirmSuffix = " [y/N]";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-// An icon from the SVG sprite in index.html (same size and stroke everywhere).
-function icon(name, cls = "icon") {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", cls);
-  svg.setAttribute("aria-hidden", "true");
-  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
-  use.setAttribute("href", `#i-${name}`);
-  svg.append(use);
-  return svg;
-}
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
 async function post(path, body = {}) {
   const r = await fetch(path, {
     method: "POST",
@@ -83,62 +70,12 @@ async function post(path, body = {}) {
   });
   if (!r.ok) {
     // JSON errors carry {error}; the rest are plain text.
-    const body = await r.text();
-    let msg = body;
-    try { msg = JSON.parse(body).error || body; } catch { /* plain text */ }
+    const text = await r.text();
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch { /* plain text */ }
     throw new Error(`${r.status} ${msg}`.trim());
   }
   return r.json();
-}
-
-// ── copy buttons on code blocks ───────────────────────────────────────────────
-async function copyText(text) {
-  // The async clipboard API needs a secure context: localhost is one, but plain
-  // http on a LAN address (--web-host 0.0.0.0) is not — fall back to execCommand.
-  if (navigator.clipboard && window.isSecureContext) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const ta = el("textarea");
-  ta.value = text;
-  ta.setAttribute("readonly", "");
-  ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
-  document.body.append(ta);
-  ta.select();
-  try {
-    if (!document.execCommand("copy")) throw new Error("copy command was refused");
-  } finally {
-    ta.remove();
-  }
-}
-
-function addCopyButtons(root) {
-  for (const pre of root.querySelectorAll("pre")) {
-    const code = pre.querySelector("code");
-    if (!code || pre.parentElement.classList.contains("code-block")) continue;
-    const box = el("div", "code-block");
-    pre.replaceWith(box);
-    const bar = el("div", "code-bar");
-    const lang = code.dataset.lang;
-    const btn = el("button", "copy-btn", "Copy");
-    btn.type = "button";
-    btn.title = "Copy code";
-    btn.setAttribute("aria-label", lang ? `Copy ${lang} code` : "Copy code");
-    let timer;
-    btn.onclick = async () => {
-      try {
-        await copyText(code.textContent);
-        btn.textContent = "Copied ✓";
-        btn.classList.add("done");
-      } catch {
-        btn.textContent = "Copy failed";
-      }
-      clearTimeout(timer);
-      timer = setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1600);
-    };
-    bar.append(el("span", "code-lang", lang || ""), btn);
-    box.append(bar, pre);
-  }
 }
 
 // ── transcript rendering ──────────────────────────────────────────────────────
@@ -207,7 +144,7 @@ function renderChat(role, text, extra = "") {
 // A /command confirmation (Controller._pending_confirm) arrives as a plain system
 // message, not as an ask_user event — both the renderer and the notifier need to
 // recognise it, so the test lives in one place.
-const isConfirmPrompt = (role, text) => role === "system" && / \[y\/N\]$/.test(text);
+const isConfirmPrompt = (role, text) => role === "system" && text.endsWith(confirmSuffix);
 
 function renderThink(text) {
   if (!view.think) return null;
@@ -287,10 +224,10 @@ function renderToolResult(name, result) {
 }
 
 const DIFF_MAX = 40;
-const MUTATING = new Set(["edit_file", "append_to_file", "write_file", "delete_file", "move_file"]);
 function renderDiff(ev) {
-  // A diff replaces the terse result of its mutating tool call.
-  const idx = pendingTools.findIndex((t) => MUTATING.has(t.name));
+  // A diff replaces the result of the file-changing call it follows (the latest
+  // such call still open; edit_files sends one diff per file after its call).
+  const idx = pendingTools.findLastIndex((t) => diffTools.has(t.name));
   if (idx >= 0 && view.tools) {
     const t = pendingTools.splice(idx, 1)[0];
     t.state.className = "tstate ok";
@@ -383,14 +320,6 @@ function msgActions(items, cls = "") {
   return bar;
 }
 
-// Briefly swap a button's label (its last text span, or the whole button).
-function flash(btn, text) {
-  const target = btn.querySelector(":scope > span:last-child") || btn;
-  const orig = target.dataset.label || target.textContent;
-  target.dataset.label = orig;
-  target.textContent = text;
-  setTimeout(() => { target.textContent = orig; }, 1400);
-}
 
 // Retry / Edit sit on the last message you typed (not answers or /commands).
 function refreshUserActions() {
@@ -411,10 +340,13 @@ async function startEdit() {
     info = await r.json();
   } catch (e) { return showError(e); }
   if (!info || info.typed === undefined) return;
-  editing = { attachments: info.attachments || [] };
-  input.value = info.typed;
-  $("#edit-atts").textContent = editing.attachments.length
-    ? ` (keeps ${editing.attachments.join(", ")})` : "";
+  showEdit(info.typed, info.attachments || []);
+}
+
+function showEdit(typed, attachmentNames) {
+  editing = { attachments: attachmentNames };
+  input.value = typed;
+  $("#edit-atts").textContent = attachmentNames.length ? ` (keeps ${attachmentNames.join(", ")})` : "";
   $("#edit-banner").hidden = false;
   autosize();
   input.focus();
@@ -558,6 +490,7 @@ function applyStatus(s) {
   applyThinkStatus(s);
   updateTitle();
   if (planChanged) refreshState();
+  else if (!$("#plan-drawer").hidden) schedulePlanRefresh();
 }
 
 // The THINK badge and its menu: the chosen level, what the model is actually
@@ -623,200 +556,15 @@ function applyIndexStatus(s) {
   $("#index-load").disabled = !on;
 }
 
-// Mirrors net.format_size in Python so the field shows what /net-max-bytes accepts.
-function formatSize(n) {
-  for (const [unit, size] of [["MB", 1048576], ["KB", 1024]]) {
-    if (n >= size) {
-      const v = n / size;
-      return (v >= 10 || v === Math.floor(v)) ? `${Math.round(v)}${unit}` : `${v.toFixed(1)}${unit}`;
-    }
-  }
-  return `${n}`;
-}
 
 function updateTitle() {
   const name = status.title ? ` · ${status.title}` : "";
-  document.title = `${unseen ? "(•) " : ""}momo · ${status.mode || ""}${name}${busy ? " …" : ""}`;
+  document.title = `${notify.unseen ? "(•) " : ""}momo · ${status.mode || ""}${name}${busy ? " …" : ""}`;
 }
 
-// ── notifications (only while the window is away) ─────────────────────────────
-// "Away" is hidden *or* unfocused: `document.hidden` alone misses the common
-// layout of the browser sitting open next to the editor — visible, but not the
-// window you are looking at.
-const away = () => document.hidden || !focused;
+// ── notifications (notify.js does the telling) ────────────────────────────────
 const live = () => Date.now() - connectedAt > 2000;  // skip the backlog replay after (re)connect
 const NOTIFY_MIN_TURN_MS = 2000;  // below this a turn is an echo, not news
-
-// `momo.notify` held a bare boolean before the sound option existed.
-function loadNotifyPrefs() {
-  const raw = loadJSON("momo.notify", null);
-  if (raw === true) return { desktop: true, sound: false };
-  if (raw && typeof raw === "object") return { desktop: !!raw.desktop, sound: !!raw.sound };
-  return { desktop: false, sound: false };
-}
-const notifyPrefs = loadNotifyPrefs();
-let desktopOn = notifyPrefs.desktop && "Notification" in window && Notification.permission === "granted";
-
-function saveNotifyPrefs() {
-  try { localStorage.setItem("momo.notify", JSON.stringify(notifyPrefs)); } catch { /* private mode */ }
-}
-
-// A kitten's mew, synthesised so the front end stays asset-free. A kitten is
-// high (~1 kHz), soft and nearly pure, so the source is a sine with a few soft
-// overtones; a lowpass opening and closing on it is the mouth ("m-ew"), and a
-// quick vibrato makes it wobble like a small voice. "ask" ends on an upturn (a
-// question), "finish" falls away (a resolution), so they tell apart by ear alone.
-const MEW = {
-  //         pitch (Hz) at 0, 30%, 65%, 100% of the mew
-  ask:    [900, 1200, 980, 1550],
-  finish: [950, 1300, 1150, 800],
-};
-const MEW_LEN = 0.4;  // short: a long mew turns into a wail
-let audioCtx = null;
-let mewWave = null;
-function audio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  return audioCtx;
-}
-
-function chime(kind) {
-  let ctx;
-  try { ctx = audio(); } catch { return; }  // no WebAudio in this browser
-  const play = () => {
-    try {
-      const at = ctx.currentTime, end = at + MEW_LEN;
-      const [p0, p1, p2, p3] = MEW[kind] || MEW.finish;
-
-      // Source: fundamental plus modest 2nd–4th harmonics — enough for the "ee"
-      // formant to have something to lift. A full sawtooth reads as a horn, a
-      // bare sine as a whistle.
-      if (!mewWave) mewWave = ctx.createPeriodicWave(
-        new Float32Array([0, 0, 0, 0, 0]), new Float32Array([0, 1, 0.35, 0.2, 0.08]));
-      const osc = ctx.createOscillator();
-      osc.setPeriodicWave(mewWave);
-      osc.frequency.setValueAtTime(p0, at);
-      osc.frequency.exponentialRampToValueAtTime(p1, at + MEW_LEN * 0.3);
-      osc.frequency.exponentialRampToValueAtTime(p2, at + MEW_LEN * 0.65);
-      osc.frequency.exponentialRampToValueAtTime(p3, end);
-      // Vibrato in cents, so it scales with the pitch.
-      const lfo = ctx.createOscillator();
-      const lfoDepth = ctx.createGain();
-      lfo.frequency.value = 6;
-      lfoDepth.gain.value = 12;
-      lfo.connect(lfoDepth).connect(osc.detune);
-
-      // The mouth: closed ("m") muffles the overtones, open lets them through.
-      const mouth = ctx.createBiquadFilter();
-      mouth.type = "lowpass";
-      mouth.Q.value = 0.7;  // no resonant peak: a peak is what made it shrill
-      mouth.frequency.setValueAtTime(700, at);
-      mouth.frequency.exponentialRampToValueAtTime(3800, at + MEW_LEN * 0.2);
-      mouth.frequency.exponentialRampToValueAtTime(1600, end);
-      // The vowel: a lift high up is "ee"; sliding it down turns it into "ew".
-      // Without it the open mouth alone says "aw".
-      const vowel = ctx.createBiquadFilter();
-      vowel.type = "peaking";
-      vowel.Q.value = 2;
-      vowel.gain.value = 10;
-      vowel.frequency.setValueAtTime(3600, at);
-      vowel.frequency.setValueAtTime(3600, at + MEW_LEN * 0.2);
-      vowel.frequency.exponentialRampToValueAtTime(1200, end);
-
-      // Warmth: a gentle lift under the fundamental gives the voice some body.
-      const warm = ctx.createBiquadFilter();
-      warm.type = "lowshelf";
-      warm.frequency.value = 1500;
-      warm.gain.value = 6;
-
-      // Soft onset for the "m", swell, then fade; ramped rather than switched,
-      // because a bare start/stop clicks.
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0, at);
-      gain.gain.linearRampToValueAtTime(0.025, at + 0.04);
-      gain.gain.linearRampToValueAtTime(0.04, at + MEW_LEN * 0.25);
-      gain.gain.setValueAtTime(0.04, at + MEW_LEN * 0.45);
-      gain.gain.exponentialRampToValueAtTime(0.0001, end);
-
-      osc.connect(warm).connect(vowel).connect(mouth).connect(gain).connect(ctx.destination);
-      osc.start(at); lfo.start(at);
-      osc.stop(end + 0.01); lfo.stop(end + 0.01);
-    } catch { /* the device went away */ }
-  };
-  // Scheduling into a suspended context loses the sound outright, so resume
-  // first and schedule in the callback.
-  if (ctx.state === "suspended") ctx.resume().then(play, () => {});
-  else play();
-}
-
-// A sound setting restored from an earlier visit has had no user gesture yet, and
-// the browser blocks audio until there is one — the first click or keypress is it.
-function unlockAudio() {
-  if (notifyPrefs.sound) { try { audio().resume(); } catch { /* ignore */ } }
-}
-addEventListener("pointerdown", unlockAudio, { once: true });
-addEventListener("keydown", unlockAudio, { once: true });
-
-let notifyThrew = false;  // the service-worker-only complaint is made once
-
-// kind: "ask" (momo needs an answer) | "finish" (the turn is over)
-// The sound is deliberately NOT gated on focus: a focused window does not mean
-// you are watching it, and being told without having to look is the whole point
-// of a cue you can hear. The desktop notification is gated, because notifying
-// about the window you are staring at is just noise.
-function signal(kind, title, body) {
-  if (!live()) return;
-  if (notifyPrefs.sound) chime(kind);
-  if (!away()) return;
-  unseen = true;
-  updateTitle();
-  if (!desktopOn) return;
-  try {
-    const n = new Notification(title, { body: body.slice(0, 180), tag: "momo", renotify: true });
-    n.onclick = () => { window.focus(); n.close(); };
-  } catch {
-    // A few browsers only allow notifications from a service worker. Say so once:
-    // failing silently here is indistinguishable from the feature being broken.
-    if (!notifyThrew) {
-      notifyThrew = true;
-      attNote("This browser needs a service worker for notifications — the sound still works.");
-    }
-  }
-}
-
-// Coming back clears the marker. Both events are wired: minimising fires blur,
-// switching tabs fires visibilitychange, and which arrives varies by platform.
-function onPresence() {
-  if (!away() && unseen) { unseen = false; updateTitle(); }
-}
-document.addEventListener("visibilitychange", onPresence);
-addEventListener("focus", () => { focused = true; onPresence(); });
-addEventListener("blur", () => { focused = false; });
-
-$("#notify-desktop").checked = desktopOn;
-$("#notify-desktop").onchange = async (e) => {
-  if (e.target.checked) {
-    // Plain HTTP on a LAN address is not a secure context, so the API is simply
-    // absent there — say so instead of blaming the browser's settings.
-    if (!isSecureContext) {
-      e.target.checked = false;
-      return attNote("Notifications need a secure origin — open http://localhost or tunnel over SSH.");
-    }
-    if (!("Notification" in window)) { e.target.checked = false; return attNote("This browser has no notifications."); }
-    const perm = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
-    desktopOn = perm === "granted";
-    e.target.checked = desktopOn;
-    if (!desktopOn) attNote("Notifications are blocked for this page in the browser settings.");
-  } else desktopOn = false;
-  notifyPrefs.desktop = desktopOn;
-  saveNotifyPrefs();
-};
-
-$("#notify-sound").checked = notifyPrefs.sound;
-$("#notify-sound").onchange = (e) => {
-  notifyPrefs.sound = e.target.checked;
-  saveNotifyPrefs();
-  if (notifyPrefs.sound) chime("ask");  // this click is the gesture that unlocks audio
-};
 
 function lastAssistantText() {
   for (let i = events.length - 1; i >= 0; i--) {
@@ -861,12 +609,13 @@ setInterval(() => {
 // which is exactly when you no longer need telling. Fall back to a timer there.
 const schedule = (fn) => (document.hidden ? setTimeout(fn, 0) : requestAnimationFrame(fn));
 
-let es;
 function connect() {
-  es = new EventSource("api/events");
+  const es = new EventSource("api/events");
   es.onopen = () => {
-    // Every (re)connect replays the full backlog: start from a clean slate.
+    // Every (re)connect replays the full backlog: start from a clean slate.  That
+    // includes a half-streamed reply: its stream_end is never replayed.
     connectedAt = Date.now();
+    endStream();
     events = [];
     rerenderAll();
     connected = true;
@@ -915,7 +664,7 @@ function handleEvents(evs) {
         if (ev.type === "ask_user") signal("ask", "momo has a question", ev.question);
         else if (ev.type === "chat" && isConfirmPrompt(ev.role, ev.text)) {
           signal("ask", "momo needs a confirmation", ev.text);
-        } else if (away() && live() && !unseen) { unseen = true; updateTitle(); }
+        } else noteActivity();
         const n = renderEvent(ev);
         if (n) nodes.push(n);
       }
@@ -936,6 +685,9 @@ function streamDelta(ev) {
   if (!live$) {
     live$ = { box: el("div", "live-stream"), think: null, thinkText: null, content: null, contentText: null };
     transcript.append(live$.box);
+    // A screen reader would read the reply piece by piece; it reads the final
+    // message once the stream is over.
+    transcript.setAttribute("aria-busy", "true");
   }
   if (ev.kind === "thinking") {
     if (!view.think) return;
@@ -965,6 +717,7 @@ function streamDelta(ev) {
 function endStream() {
   live$?.box.remove();
   live$ = null;
+  transcript.removeAttribute("aria-busy");
 }
 
 async function refreshState() {
@@ -982,12 +735,28 @@ async function refreshState() {
   if (histIdx === -1) history = [...state.history];
   applyStatus(state.status);
   applyBusy(state.busy, state.waiting);
+  const tools = new Set(state.diff_tools || []);
+  confirmSuffix = state.confirm_suffix || confirmSuffix;
+  if (tools.size && (tools.size !== diffTools.size || [...tools].some((t) => !diffTools.has(t)))) {
+    diffTools = tools;
+    rerenderAll();
+  }
+  renderPlan();
+  setCompanionFrames(state.companion);
+  renderSkills();
+}
+
+// The plan drawer: the plan, and the actions its phase allows.
+function renderPlan() {
   $("#plan-btn").hidden = !state.plan;
   $("#plan-body").innerHTML = state.plan ? renderMarkdown(state.plan) : "<p class='muted'>No active plan.</p>";
   addCopyButtons($("#plan-body"));
-  $("#plan-phase").textContent = state.plan_phase || "";
-  companion.frames = state.companion;
-  renderSkills();
+  const phase = state.plan_phase || "";
+  $("#plan-phase").textContent = phase;
+  const executing = phase === "executing";
+  $("#plan-run").hidden = !state.plan || executing;
+  $("#plan-resume").hidden = !executing;
+  $("#plan-cancel").hidden = !state.plan;
 }
 
 function renderSkills() {
@@ -1062,10 +831,20 @@ async function submitInput() {
     return;
   }
   if (editing && !isCmd) {
+    if (ready.length) {
+      // api/edit replaces the typed text only; new files would be left behind.
+      attNote("An edited message keeps its own attachments — send new files with a new message.");
+      return;
+    }
+    const was = editing;
     input.value = "";
     autosize();
     stopEdit();
-    try { await post("api/edit", { text }); } catch (e) { showError(e); input.value = text; autosize(); }
+    let ok = false;
+    try { ok = (await post("api/edit", { text })).ok; } catch (e) { showError(e); }
+    // Refused (momo is busy: the reason is in the transcript) or failed: the
+    // edit is still yours to send.
+    if (!ok && !input.value) showEdit(text, was.attachments);
     return;
   }
   if (!text.trim() && !ready.length) return;
@@ -1395,10 +1174,13 @@ $("#index-badge").onclick = (e) => {
 // Settings controls name their command in data-cmd: a checkbox sends on/off, a
 // text field sends its value.  Status events bring the server's value back.
 for (const c of document.querySelectorAll("input[data-cmd]")) {
-  c.onchange = () => {
-    if (c.type === "checkbox") return send(`${c.dataset.cmd} ${c.checked ? "on" : "off"}`);
-    const v = c.value.trim();
-    if (v) send(`${c.dataset.cmd} ${v}`);
+  c.onchange = async () => {
+    const v = c.type === "checkbox" ? (c.checked ? "on" : "off") : c.value.trim();
+    if (c.type !== "checkbox") c.blur();   // so the status below may write the field
+    if (v) await send(`${c.dataset.cmd} ${v}`);
+    // A refused value would stay in the control: show the server's again.  An
+    // accepted one's status event has normally arrived by now and wins.
+    setTimeout(() => applyStatus(status), 400);
   };
 }
 $("#index-save").onclick = () => send("/index save");
@@ -1484,8 +1266,7 @@ function syncViewMenu() {
   for (const r of document.querySelectorAll("input[name=diff-style]")) r.checked = r.value === view.diffStyle;
   $("#composer").classList.toggle("no-companion", !view.companion);
   $("#companion").hidden = !view.companion;
-  $("#notify-desktop").checked = desktopOn;
-  $("#notify-sound").checked = notifyPrefs.sound;
+  syncNotifyControls();
 }
 // Popover menus: [button, menu].  One is open at a time; a click outside closes it.
 const MENUS = [["#view-btn", "#view-menu"], ["#model-btn", "#model-menu"],
@@ -1532,7 +1313,19 @@ $("#plan-btn").onclick = () => { refreshState(); $("#plan-drawer").hidden = fals
 $("#plan-progress").onclick = $("#plan-btn").onclick;
 $("#plan-close").onclick = () => DRAWERS["#plan-drawer"]();
 for (const b of document.querySelectorAll("#plan-drawer [data-cmd]")) {
-  b.onclick = () => { send(b.dataset.cmd); DRAWERS["#plan-drawer"](); };
+  b.onclick = () => {
+    // Like deleting a session, discarding a plan asks first: it deletes .momo-plan.md.
+    if (b.id === "plan-cancel" && !confirm("Discard this plan? Its progress and .momo-plan.md are deleted.")) return;
+    send(b.dataset.cmd);
+    DRAWERS["#plan-drawer"]();
+  };
+}
+// While the drawer is open every status event may carry a plan change (a revised
+// draft keeps its phase), so it re-reads the plan, at most twice a second.
+let planRefreshTimer = null;
+function schedulePlanRefresh() {
+  if (planRefreshTimer) return;
+  planRefreshTimer = setTimeout(() => { planRefreshTimer = null; refreshState(); }, 500);
 }
 
 // ── model picker ──────────────────────────────────────────────────────────────
@@ -1910,408 +1703,21 @@ function openDrawer(id) {
 }
 for (const b of document.querySelectorAll(".drawer-close")) b.onclick = () => DRAWERS[`#${b.closest("aside").id}`]();
 
-const ago = (t) => {
-  const s = Math.max(0, Date.now() / 1000 - t);
-  if (s < 90) return "just now";
-  if (s < 5400) return `${Math.round(s / 60)} min ago`;
-  if (s < 129600) return `${Math.round(s / 3600)} h ago`;
-  return new Date(t * 1000).toLocaleDateString();
-};
-
-// Session drawer: click a row to load it; the trash button (or Select mode with
-// checkboxes) deletes saved sessions after an inline confirmation. The open
-// session can't be deleted, and the server refuses it too.
-const sessionsUI = { data: null, selecting: false, selected: new Set(), note: "" };
-
-async function loadSessions() {
-  const list = $("#sessions-list");
-  list.replaceChildren(el("div", "muted", "Loading…"));
-  try { sessionsUI.data = await (await fetch("api/sessions")).json(); } catch (e) { list.firstChild.textContent = e.message; return; }
-  const names = new Set(sessionsUI.data.sessions.map((x) => x.name));
-  for (const n of [...sessionsUI.selected]) if (!names.has(n)) sessionsUI.selected.delete(n);
-  renderSessions();
-}
-
-function iconButton(name, label, cls = "icon-btn") {
-  const b = el("button", cls);
-  b.type = "button";
-  b.title = label;
-  b.setAttribute("aria-label", label);
-  b.append(icon(name));
-  return b;
-}
-
-// Replace `host`'s children with "question [Delete] [Cancel]"; resolves on click.
-function inlineConfirm(host, question) {
-  return new Promise((resolve) => {
-    const saved = [...host.childNodes];
-    const box = el("div", "session-confirm");
-    const yes = el("button", "danger small", "Delete");
-    const no = el("button", "small", "Cancel");
-    yes.type = no.type = "button";
-    const done = (ok) => { host.replaceChildren(...saved); resolve(ok); };
-    yes.onclick = () => done(true);
-    no.onclick = () => done(false);
-    box.append(el("span", "", question), el("span", "spacer"), yes, no);
-    host.replaceChildren(box);
-    yes.focus();
-  });
-}
-
-async function deleteSessions(names) {
-  let res;
-  try { res = await post("api/sessions/delete", { names }); } catch (e) { sessionsUI.note = `Delete failed: ${e.message}`; renderSessions(); return; }
-  for (const n of res.deleted) sessionsUI.selected.delete(n);
-  const n = res.deleted.length;
-  sessionsUI.note = (n ? `Deleted ${n} session${n === 1 ? "" : "s"}.` : "")
-    + res.skipped.map((x) => ` Kept ${x.name}: ${x.reason}.`).join("");
-  await loadSessions();
-}
-
-function renderSessions() {
-  const { data, selecting, selected } = sessionsUI;
-  const list = $("#sessions-list");
-  const items = [];
-  if (sessionsUI.note) items.push(el("div", "session-note", sessionsUI.note.trim()));
-  if (!data.sessions.length) items.push(el("div", "muted", "No saved sessions yet."));
-  for (const x of data.sessions) {
-    const current = x.name === data.current;
-    const item = el("div", "session-item");
-    const row = el("button", `session-row${current ? " current" : ""}`);
-    row.type = "button";
-    const label = x.title || x.preview || "(no messages)";
-    const first = x.title && x.preview ? `\n${x.preview}` : "";
-    row.title = `${x.name}${current ? " (open now)" : ""}${first}\n${x.workdir}`;
-    row.append(el("span", "session-preview", label),
-               el("span", "session-meta", `${x.mode} · ${x.model} · ${x.messages} msgs · ${ago(x.mtime)}`));
-    if (selecting) {
-      const cb = el("input");
-      cb.type = "checkbox";
-      cb.disabled = current;
-      cb.checked = selected.has(x.name);
-      cb.setAttribute("aria-label", `Select ${x.title || x.preview || x.name}`);
-      cb.onchange = () => { cb.checked ? selected.add(x.name) : selected.delete(x.name); updateBulk(); };
-      row.onclick = () => { if (!current) { cb.checked = !cb.checked; cb.onchange(); } };
-      item.append(cb, row);
-    } else {
-      row.onclick = () => {
-        if (current) return;
-        DRAWERS["#sessions-drawer"]();
-        send(`/session ${x.name}`);
-      };
-      item.append(row);
-      if (!current) {
-        const del = iconButton("trash", "Delete this session", "icon-btn session-del");
-        del.onclick = async () => {
-          if (await inlineConfirm(item, "Delete this session?")) deleteSessions([x.name]);
-        };
-        item.append(del);
-      }
-    }
-    items.push(item);
-  }
-  list.replaceChildren(...items);
-  updateBulk();
-}
-
-function updateBulk() {
-  const { selecting, selected } = sessionsUI;
-  $("#sessions-bulk").hidden = !selecting;
-  $("#select-sessions").textContent = selecting ? "Done" : "Select";
-  $("#select-sessions").setAttribute("aria-pressed", String(selecting));
-  $("#sessions-count").textContent = `${selected.size} selected`;
-  $("#sessions-delete").disabled = selected.size === 0;
-}
-
-$("#sessions-btn").onclick = () => {
-  if (!openDrawer("#sessions-drawer")) return;
-  sessionsUI.note = "";
-  loadSessions();
-};
-$("#select-sessions").onclick = () => {
-  sessionsUI.selecting = !sessionsUI.selecting;
-  sessionsUI.selected.clear();
-  sessionsUI.note = "";
-  if (sessionsUI.data) renderSessions();
-};
-$("#sessions-all").onclick = () => {
-  const { data, selected } = sessionsUI;
-  const all = data.sessions.filter((x) => x.name !== data.current).map((x) => x.name);
-  const every = all.length && all.every((n) => selected.has(n));
-  selected.clear();
-  if (!every) for (const n of all) selected.add(n);
-  renderSessions();
-};
-$("#sessions-delete").onclick = async () => {
-  const names = [...sessionsUI.selected];
-  const bar = $("#sessions-bulk");
-  if (await inlineConfirm(bar, `Delete ${names.length} session${names.length === 1 ? "" : "s"}? This can't be undone.`)) {
-    await deleteSessions(names);
-  }
-};
-$("#new-session").onclick = () => { DRAWERS["#sessions-drawer"](); send("/new"); };
-
-
-async function loadDir(path, container) {
-  container.replaceChildren(el("div", "muted small", "Loading…"));
-  let data;
-  try {
-    const r = await fetch(`api/files?path=${encodeURIComponent(path)}&hidden=${$("#files-hidden").checked ? 1 : 0}`);
-    data = await r.json();
-    if (!r.ok) throw new Error(data.error);
-  } catch (e) { container.replaceChildren(el("div", "muted small", e.message)); return; }
-  if (!data.entries.length) { container.replaceChildren(el("div", "muted small", "(empty)")); return; }
-  container.replaceChildren(...data.entries.map((e) => {
-    const rel = path ? `${path}/${e.name}` : e.name;
-    const row = el("div", `tree-item ${e.type}`);
-    const btn = el("button", "tree-row");
-    btn.type = "button";
-    btn.title = rel;
-    const ti = el("span", "tree-icon");
-    ti.append(icon(e.type === "dir" ? "chevron-right" : "file", "icon sm"));
-    btn.append(ti, el("span", "tree-name", e.name),
-               el("span", "tree-size", e.type === "file" ? (e.size < 1024 ? `${e.size} B` : formatSize(e.size)) : ""));
-    row.append(btn);
-    if (e.type === "dir") {
-      const kids = el("div", "tree-kids");
-      kids.hidden = true;
-      row.append(kids);
-      btn.onclick = () => {
-        kids.hidden = !kids.hidden;
-        row.classList.toggle("open", !kids.hidden);
-        if (!kids.hidden && !kids.childElementCount) loadDir(rel, kids);
-      };
-    } else {
-      btn.onclick = () => openPreview(rel);
-    }
-    return row;
-  }));
-}
-
-$("#files-btn").onclick = () => {
-  if (!openDrawer("#files-drawer")) return;
-  $("#file-preview").hidden = true;
-  $("#files-tree").hidden = false;
-  loadDir("", $("#files-tree"));
-};
-$("#files-hidden").onchange = () => loadDir("", $("#files-tree"));
-
-// Drag the right edge to widen the workspace drawer (CSS clamps to 420px min).
-{
-  const drawer = $("#files-drawer"), grip = drawer.querySelector(".drawer-resize");
-  const setW = (w) => drawer.style.setProperty("--files-w", `${Math.round(w)}px`);
-  const saved = loadJSON("momo.filesWidth", 0);
-  if (saved) setW(saved);
-  grip.onpointerdown = (e) => {
-    e.preventDefault();
-    grip.setPointerCapture(e.pointerId);
-    grip.classList.add("dragging");
-    grip.onpointermove = (m) => setW(Math.max(420, Math.min(m.clientX, innerWidth)));
-    grip.onpointerup = () => {
-      grip.onpointermove = grip.onpointerup = null;
-      grip.classList.remove("dragging");
-      const w = drawer.getBoundingClientRect().width;
-      try { localStorage.setItem("momo.filesWidth", JSON.stringify(Math.round(w))); } catch { /* private mode */ }
-    };
-  };
-  grip.ondblclick = () => {
-    drawer.style.removeProperty("--files-w");
-    try { localStorage.removeItem("momo.filesWidth"); } catch { /* private mode */ }
-  };
-}
-
-let previewFile = null;
-async function openPreview(rel) {
-  let f;
-  try {
-    const r = await fetch(`api/file?path=${encodeURIComponent(rel)}`);
-    f = await r.json();
-    if (!r.ok) throw new Error(f.error);
-  } catch (e) { return attNote(e.message); }
-  previewFile = f;
-  $("#files-tree").hidden = true;
-  $("#file-preview").hidden = false;
-  $("#preview-name").textContent = rel;
-  $("#preview-name").title = rel;
-  const lines = f.text.split("\n").length;
-  $("#preview-meta").textContent = `${f.pages ? f.pages + " pages · " : ""}${lines} lines${f.truncated ? " · truncated" : ""}`;
-  // A big file shows its start first: the gutter and the highlighted copy of a
-  // multi-megabyte file would block the page.
-  const cut = f.text.length > PREVIEW_MAX_CHARS ? f.text.lastIndexOf("\n", PREVIEW_MAX_CHARS) : -1;
-  renderPreviewCode(f, rel, cut > 0 ? f.text.slice(0, cut) : f.text);
-  const all = $("#preview-all");
-  all.hidden = cut <= 0;
-  all.textContent = `Show all ${lines.toLocaleString("en-US")} lines`;
-  all.onclick = () => { renderPreviewCode(f, rel, f.text); all.hidden = true; };
-  const isMd = f.kind !== "pdf" && /\.(md|markdown|mdx)$/i.test(rel);
-  $("#preview-render").hidden = !isMd;
-  const md = $(".preview-md");
-  md.replaceChildren();
-  if (isMd) {
-    md.innerHTML = renderMarkdown(f.text);
-    addCopyButtons(md);
-  }
-  setPreviewRendered(isMd && loadJSON("momo.previewRendered", true));
-}
-const PREVIEW_MAX_CHARS = 200_000;  // also highlight.js's limit: beyond it, text is shown plain
-function renderPreviewCode(f, rel, text) {
-  const n = text.split("\n").length;
-  $(".preview-gutter").textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n");
-  $(".preview-code code").innerHTML = f.kind === "pdf" ? esc(text) : highlight(text, langFromPath(rel) || "none");
-  $(".preview-scroll").scrollTop = 0;
-}
-
-// Markdown files open rendered by default; the toggle choice is remembered.
-function setPreviewRendered(on) {
-  $(".preview-md").hidden = !on;
-  $(".preview-scroll").hidden = on;
-  $(".preview-md").scrollTop = 0;
-  const b = $("#preview-render");
-  b.textContent = on ? "Plain" : "Rendered";
-  b.title = on ? "Show plain text" : "Show rendered Markdown";
-}
-$("#preview-render").onclick = () => {
-  const on = $(".preview-md").hidden;
-  setPreviewRendered(on);
-  try { localStorage.setItem("momo.previewRendered", JSON.stringify(on)); } catch { /* private mode */ }
-};
-$("#preview-back").onclick = () => { $("#file-preview").hidden = true; $("#files-tree").hidden = false; };
-$("#preview-attach").onclick = () => {
-  const f = previewFile;
-  if (!f) return;
-  attachments.push({ id: ++attSeq, status: "ready", name: f.name, text: f.text, chars: f.chars,
-                     pages: f.pages, truncated: f.truncated, kind: f.kind });
-  renderChips();
-  flash($("#preview-attach"), "Attached ✓");
-};
-$("#preview-insert").onclick = () => { if (previewFile) { insertPath(previewFile.path); input.focus(); } };
-$("#preview-copy").onclick = async () => {
-  if (!previewFile) return;
-  try { await copyText(previewFile.text); flash($("#preview-copy"), "Copied ✓"); } catch { flash($("#preview-copy"), "Copy failed"); }
-};
-
-// ── momo companion (same frames and speech lines as the TUI) ─────────────────
-const companion = {
-  frames: null, x: 4, dir: 1, st: "walk", sitTicks: 0, step: 0,
-  blink: 0, mewTicks: 0, mew: "", frame: null,
-  idle: false,
-};
-// Idle recap bubbles — mirrors companion.RecapPicker in Python: new recap lines are
-// spoken once each, before canned lines; after that an older one only comes back
-// occasionally, and never the same line within REPEAT_MS.
-const recaps = {
-  REPEAT_MS: 180_000, REUSE_CHANCE: 0.25, REUSE_POOL: 5, MAX_NEW: 5,  // MAX_NEW = MAX_RECAP_LINES
-  lines: [], queue: [], lastShown: new Map(),
-  update(lines) {
-    const fresh = lines.slice(-this.MAX_NEW).filter((l) => !this.lines.includes(l) && !this.queue.includes(l));
-    this.queue = [...this.queue, ...fresh].filter((l) => lines.includes(l));
-    this.lines = [...lines];
-  },
-  // A line of at most maxLen chars (what fits beside momo right now), or null.
-  // A queued line that doesn't fit stays queued for a roomier spot.
-  pick(now, maxLen) {
-    let line = this.queue.find((l) => l.length <= maxLen);
-    if (line !== undefined) {
-      this.queue.splice(this.queue.indexOf(line), 1);
-    } else {
-      if (Math.random() >= this.REUSE_CHANCE) return null;
-      const pool = this.lines.slice(-this.REUSE_POOL)
-        .filter((l) => l.length <= maxLen && now - (this.lastShown.get(l) ?? -Infinity) >= this.REPEAT_MS);
-      if (!pool.length) return null;
-      line = pool[Math.floor(Math.random() * pool.length)];
-    }
-    this.lastShown.set(line, now);
-    return line;
-  },
-};
-function applyCompanion(ev) {
-  companion.idle = ev.idle;
-  recaps.update(ev.lines);
-  $("#idle-recap").checked = ev.enabled;
-  const secs = $("#idle-recap-secs");
-  if (document.activeElement !== secs) secs.value = ev.secs;  // don't clobber typing
-  secs.disabled = !ev.enabled;
-}
-// Bubble layout — mirrors walk_max_x / bubble_dir / bubble_room in companion.py.
-// The bubble sits beside the cat on its head row: right when facing right, left otherwise.
-const bubbleFits = (x, cols, catW, dir, n) =>
-  dir < 0 ? x >= n : x + 1 + catW + 1 + n < cols - 1;
-const bubbleDir = (x, cols, catW, dir, n) =>
-  [dir, -dir].find((d) => bubbleFits(x, cols, catW, d, n)) ?? null;
-const bubbleRoom = (x, cols, catW) => Math.max(0, x, cols - 2 - (x + 1 + catW + 1));
-
-// Measured monospace advance of the companion bar, so `cols` matches what fits.
-let charW = 0;
-function measureCharW(pre) {
-  const ctx = document.createElement("canvas").getContext("2d");
-  const cs = getComputedStyle(pre);  // longhands: the `font` shorthand can be "" (Firefox)
-  ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-  charW = ctx.measureText("M".repeat(10)).width / 10 || 6.6;
-}
-window.addEventListener("resize", () => { charW = 0; });
-
-function tickCompanion() {
-  const c = companion, F = c.frames, pre = $("#companion");
-  if (!F || !view.companion || pre.offsetParent === null) return;
-  if (!charW) measureCharW(pre);
-  const cols = Math.max(20, Math.floor(pre.clientWidth / charW));
-  const catW = F.cat_w, maxX = Math.max(0, cols - 2 - catW - (F.bubble_max + 2));
-  if (c.st === "walk") {
-    c.step ^= 1;
-    c.x = Math.max(0, Math.min(c.x + c.dir, maxX));
-    if (c.x === 0 || c.x === maxX || Math.random() < 0.02) {
-      c.st = "sit";
-      c.sitTicks = 50 + Math.floor(Math.random() * 50);
-      c.blink = 0;
-      // Only lines that fit beside momo here; it turns to face its bubble.
-      const room = bubbleRoom(c.x, cols, catW);
-      const recap = c.idle ? recaps.pick(Date.now(), room) : null;
-      let text = recap;
-      if (!text && Math.random() < 0.75) {
-        const pool = (F.speech[`${status.mode}|${busy && !waiting ? 1 : 0}`] || F.speech_default)
-          .filter((t) => t.length <= room);
-        if (pool.length) text = pool[Math.floor(Math.random() * pool.length)];
-      }
-      if (text) {
-        c.mew = text;
-        // Longer lines stay up longer; recaps a little longer still.
-        c.mewTicks = 18 + Math.floor(Math.random() * 15) + Math.floor(text.length / 2) + (recap ? 10 : 0);
-        c.sitTicks = Math.max(c.sitTicks, c.mewTicks + 10);
-        c.dir = bubbleDir(c.x, cols, catW, c.dir, text.length) ?? c.dir;
-      }
-    }
-    if (c.blink > 0) {
-      c.blink--;
-      c.frame = c.dir > 0 ? F.walk_right_blink : F.walk_left_blink;
-    } else {
-      c.frame = (c.dir > 0 ? F.walk_right : F.walk_left)[c.step];
-      if (Math.random() < 0.03) c.blink = 2;
-    }
-  } else {
-    if (--c.sitTicks <= 0) {
-      c.dir = c.x <= 2 ? 1 : c.x >= maxX - 2 ? -1 : (Math.random() < 0.5 ? -1 : 1);
-      c.st = "walk";
-      c.mewTicks = 0;
-    }
-    const sit = c.dir < 0 ? F.sit_left : F.sit;
-    c.frame = sit[Math.random() < 0.08 ? 1 : 0];
-    if (c.mewTicks > 0) c.mewTicks--;
-  }
-  const rows = c.frame.map((l) => " ".repeat(c.x + 1) + l);
-  if (c.mewTicks > 0 && c.st === "sit") {
-    if (c.dir < 0) {
-      const t = c.mew.startsWith("< ") ? c.mew.slice(2) + " >" : c.mew;
-      const mx = c.x + 1 - t.length - 1;
-      if (mx >= 0) rows[1] = " ".repeat(mx) + t + " " + c.frame[1];
-    } else if (bubbleFits(c.x, cols, catW, 1, c.mew.length)) {
-      rows[1] = rows[1].padEnd(c.x + 1 + catW) + " " + c.mew;
-    }
-  }
-  pre.textContent = rows.join("\n");
-}
-setInterval(tickCompanion, 120);
+$("#sessions-btn").onclick = () => { if (openDrawer("#sessions-drawer")) openSessions(); };
+$("#files-btn").onclick = () => { if (openDrawer("#files-drawer")) openFiles(); };
 
 // ── boot ──────────────────────────────────────────────────────────────────────
+initNotify({ note: attNote, isLive: live, onUnseenChange: updateTitle });
+initSessions({ send, post, close: DRAWERS["#sessions-drawer"] });
+initFiles({
+  note: attNote,
+  attach: (f) => {
+    attachments.push({ id: ++attSeq, status: "ready", ...f });
+    renderChips();
+  },
+  insertPath: (path) => { insertPath(path); input.focus(); },
+});
+startCompanion(() => ({ mode: status.mode, busy: busy && !waiting, enabled: view.companion }));
 syncViewMenu();
 autosize();
 connect();

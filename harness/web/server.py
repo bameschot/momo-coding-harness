@@ -1,7 +1,7 @@
 """Local web UI: a stdlib HTTP server exposing the shared Controller to a browser.
 
 Routes
-  GET  /              index.html (+ /app.css, /app.js)
+  GET  /              index.html (+ /app.css and the ES modules in _STATIC_FILES)
   GET  /api/events    Server-Sent Events: backlog replay, then live harness events
   GET  /api/state     snapshot for (re)initialising the page
   POST /api/submit    {"text": ...} → same path as typing in the TUI input box
@@ -62,7 +62,8 @@ from ..file_search import fuzzy_search, workspace_files
 from .. import session as session_mod
 from ..paths import SKIP_DIRS, safe_path
 from ..commands import export_markdown, help_commands
-from ..controller import Controller
+from ..controller import CONFIRM_SUFFIX, Controller
+from ..harness import DIFF_TOOLS
 from ..events import ErrorEvent, event_to_json
 from ..prompts import MODES
 
@@ -71,9 +72,9 @@ _STATIC_FILES = {
     "/":         ("index.html", "text/html; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
     "/app.css":  ("app.css",    "text/css; charset=utf-8"),
-    "/app.js":   ("app.js",     "text/javascript; charset=utf-8"),
-    "/markdown.js":  ("markdown.js",  "text/javascript; charset=utf-8"),
-    "/highlight.js": ("highlight.js", "text/javascript; charset=utf-8"),
+    **{f"/{name}": (name, "text/javascript; charset=utf-8")
+       for name in ("app.js", "dom.js", "markdown.js", "highlight.js", "notify.js",
+                    "companion.js", "sessions.js", "files.js")},
 }
 _MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
@@ -113,17 +114,22 @@ def _pdf_support() -> bool:
 @cache
 def _companion_data() -> dict:
     return {
-        "walk_right": companion._MOMO_WR,
-        "walk_left": companion._MOMO_WL,
-        "sit": companion._MOMO_SIT,
-        "sit_left": companion._MOMO_SIT_L,
-        "walk_right_blink": companion._MOMO_WR_BLINK,
-        "walk_left_blink": companion._MOMO_WL_BLINK,
+        "walk_right": companion.MOMO_WR,
+        "walk_left": companion.MOMO_WL,
+        "sit": companion.MOMO_SIT,
+        "sit_left": companion.MOMO_SIT_L,
+        "walk_right_blink": companion.MOMO_WR_BLINK,
+        "walk_left_blink": companion.MOMO_WL_BLINK,
         "speech": {f"{mode}|{int(busy)}": lines
-                   for (mode, busy), lines in companion._SPEECH_TEXTS.items()},
-        "speech_default": companion._SPEECH_TEXTS_DEFAULT,
+                   for (mode, busy), lines in companion.SPEECH_TEXTS.items()},
+        "speech_default": companion.SPEECH_TEXTS_DEFAULT,
         "bubble_max": companion.BUBBLE_MAX,
         "cat_w": companion.CAT_W,
+        # companion.RecapPicker's rules, which app.js mirrors.
+        "recap": {"repeat_secs": companion.RECAP_REPEAT_SECS,
+                  "reuse_chance": companion.RECAP_REUSE_CHANCE,
+                  "reuse_pool": companion.RECAP_REUSE_POOL,
+                  "max_new": companion.MAX_RECAP_LINES},
     }
 
 
@@ -267,6 +273,8 @@ class WebServer:
             "history": list(h.input_history[-200:]),
             "companion": _companion_data(),
             "can_switch_model": h.client.can_switch_model,
+            "diff_tools": sorted(DIFF_TOOLS),
+            "confirm_suffix": CONFIRM_SUFFIX,
             "session": h.session_path().stem,
         }
 

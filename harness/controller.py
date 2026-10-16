@@ -30,6 +30,9 @@ _MUTATING = ("/clear", "/compact", "/fast-compact", "/new", "/retry")
 # mode's prompt and rules would not match what the model can call.
 _MODE_COMMANDS = ("/code", "/design", "/chat", "/momo")
 _BUSY_MSG = "Busy — finish the response or interrupt before running that command."
+# Ends a /command's y/N question (it goes out as a system ChatEvent); the web UI
+# recognises confirmations by it (served in /api/state).
+CONFIRM_SUFFIX = " [y/N]"
 
 
 def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
@@ -509,7 +512,7 @@ class Controller:
             return SubmitOutcome()
         if result.confirm_prompt:
             self._pending_confirm = result.confirm_action
-            self._system(result.confirm_prompt + " [y/N]")
+            self._system(result.confirm_prompt + CONFIRM_SUFFIX)
         elif result.output:
             self._system(result.output)
         return SubmitOutcome()
