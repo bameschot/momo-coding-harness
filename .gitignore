@@ -5,3 +5,6 @@
 .venvpy
 # eval run cache (run_evals.py --cache)
 evals/.cache/
+
+# live checks with HOME=.scratch
+.scratch/

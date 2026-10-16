@@ -12,10 +12,15 @@ by run_command and command_output and unit-testable without a subprocess.
 """
 from __future__ import annotations
 
+import atexit
+import os
 import re
 import shutil
+import signal
+import subprocess
 import threading
 import time
+import weakref
 from pathlib import Path
 
 DEFAULT_LIMIT = 5000          # chars one run_command / command_output view may return
@@ -23,6 +28,7 @@ MIN_LIMIT = 500
 KEEP_LOGS = 20                # per session; older logs are deleted
 KEEP_BYTES = 256 * 2**20      # per session, however few logs that is
 STALE_SECS = 3 * 24 * 3600    # other sessions' run dirs older than this are removed
+MAX_BACKGROUND = 5            # background commands one session may keep running
 
 # Words that make a line worth a look.  A hint, not a verdict: "0 errors" counts too.
 _TROUBLE_RE = re.compile(r"\b(?:error|errors|fail|failed|failure|failures|fatal|panic|"
@@ -43,6 +49,78 @@ class RunStore:
         self.root = root
         self._n = 0
         self._lock = threading.Lock()
+        # run id -> {"command", "status"}: what made each log and how it ended, for
+        # command_output's footer and the list of logs.  In memory only: the logs
+        # go with the session, and one left by an earlier store just has none.
+        self._meta: dict[str, dict] = {}
+        self._cache: tuple[tuple, str] | None = None    # (path, size, mtime) -> text
+        self._procs: dict[str, subprocess.Popen] = {}     # run id -> live background command
+
+    def record(self, run_id: str, command: str, status: str) -> None:
+        self._meta[run_id] = {"command": command, "status": status}
+
+    def meta(self, path: Path) -> dict:
+        return self._meta.get(path.stem, {})
+
+    # ── background commands (run_command background=true) ──────────────────
+
+    def add_background(self, run_id: str, proc: subprocess.Popen) -> None:
+        with self._lock:
+            self._procs[run_id] = proc
+        _STORES.add(self)
+
+    def running(self) -> list[str]:
+        """Ids of the background commands still running; ones that ended get
+        their exit code recorded and are dropped."""
+        with self._lock:
+            for run_id, proc in list(self._procs.items()):
+                if proc.poll() is not None:
+                    del self._procs[run_id]
+                    if run_id in self._meta:
+                        self._meta[run_id]["status"] = f"exit code {proc.returncode}"
+            return list(self._procs)
+
+    def status(self, path: Path) -> str | None:
+        """How the command behind a log ended, or "still running"."""
+        self.running()
+        return self.meta(path).get("status")
+
+    def stop(self, path: Path) -> bool:
+        """Kill the background command behind a log (and all it started); False
+        when it is not running."""
+        with self._lock:
+            proc = self._procs.pop(path.stem, None)
+        if proc is None or proc.poll() is not None:
+            self.running()
+            return False
+        kill_group(proc)
+        if path.stem in self._meta:
+            self._meta[path.stem]["status"] = "stopped by stop_command"
+        return True
+
+    def stop_all(self) -> None:
+        with self._lock:
+            procs, self._procs = list(self._procs.values()), {}
+        for proc in procs:
+            kill_group(proc)
+
+    def describe(self, path: Path) -> str:
+        """A log as the list of saved logs shows it: its path, command and status."""
+        m = self.meta(path)
+        if not m:
+            return str(path)
+        return f"{path} (`{short_command(m['command'])}`, {m['status']})"
+
+    def read(self, path: Path, clean) -> str:
+        """The log's text through clean(), cached while the file is unchanged, so
+        a few command_output looks at one big log decode and clean it once."""
+        st = path.stat()
+        key = (str(path), st.st_size, st.st_mtime_ns)
+        if self._cache and self._cache[0] == key:
+            return self._cache[1]
+        text = clean(path.read_bytes().decode("utf-8", errors="replace"))
+        self._cache = (key, text)
+        return text
 
     def new_log(self) -> tuple[str, Path]:
         """A fresh log path (not created), after pruning the oldest logs."""
@@ -65,10 +143,11 @@ class RunStore:
         return [p for _, p in sorted(found)]
 
     def _prune(self, keep: int) -> None:
-        logs = self.logs()
+        live = set(self._procs)       # a running command's log stays
+        logs = [p for p in self.logs() if p.stem not in live]
         for p in logs[:max(0, len(logs) - keep)]:
             p.unlink(missing_ok=True)
-        logs = self.logs()
+        logs = [p for p in self.logs() if p.stem not in live]
         total = sum(p.stat().st_size for p in logs)
         for p in logs[:-1]:            # never the newest
             if total <= KEEP_BYTES:
@@ -92,9 +171,40 @@ class RunStore:
         return p
 
     def clear(self) -> None:
+        self.stop_all()
         with self._lock:
             shutil.rmtree(self.root, ignore_errors=True)
             self._n = 0
+            self._meta.clear()
+            self._cache = None
+
+
+def kill_group(proc: subprocess.Popen) -> None:
+    """Kill a command and everything it started (it leads its own session)."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+# Stores with background commands: whatever is still running when the harness
+# exits is killed, so a dev server never outlives the session that started it.
+_STORES: "weakref.WeakSet[RunStore]" = weakref.WeakSet()
+
+
+@atexit.register
+def _stop_everything() -> None:
+    for store in list(_STORES):
+        store.stop_all()
+
+
+def short_command(command: str, width: int = 80) -> str:
+    one = " ".join(command.split())
+    return one if len(one) <= width else one[:width - 1] + "…"
 
 
 def prune_stale(current: Path | None = None) -> None:
@@ -141,12 +251,26 @@ def _fit_tail(lines: list[str], budget: int) -> tuple[list[str], int]:
     return out, len(out)
 
 
-def window(text: str, limit: int, how: str = "") -> str:
+def _room(limit: int, how: str) -> int:
+    """The chars a cut view leaves for output once its note is written."""
+    return max(limit // 2, limit - len(how) - 60)
+
+
+def _gap(first: int, last: int) -> str:
+    """Lines first..last (1-based) as a note names them."""
+    return f"line {first:,}" if first == last else f"lines {first:,}-{last:,}"
+
+
+def window(text: str, limit: int, how: str = "", numbered: bool = False) -> str:
     """text whole when it fits in limit chars; otherwise its first quarter and
     last three quarters of the limit, cut on line boundaries, with a note of
-    what was left out in between.  how: what to pass for the missing part."""
+    what was left out in between.  how: what to pass for the missing part.
+    numbered: text is the output itself, so the note names the missing lines by
+    number (what start_line/end_line take); a grep or range view, whose lines
+    carry their own numbers, gets a count."""
     if len(text) <= limit:
         return text
+    limit = _room(limit, how)
     lines = text.split("\n")
     head, nh = _fit_head(lines, limit // 4)
     tail, nt = _fit_tail(lines[nh:], limit - limit // 4)
@@ -154,9 +278,63 @@ def window(text: str, limit: int, how: str = "") -> str:
     chars = sum(len(ln) + 1 for ln in omitted)
     if not omitted:                # one huge line, cut on both ends
         chars = len(text) - sum(len(ln) + 1 for ln in head + tail)
-    note = (f"[… {len(omitted):,} lines ({chars:,} chars) not shown"
-            + (f" — {how}" if how else "") + " …]")
+        what = f"{chars:,} chars"
+    elif numbered:
+        what = f"{_gap(nh + 1, len(lines) - nt)} ({chars:,} chars)"
+    else:
+        what = f"{len(omitted):,} lines ({chars:,} chars)"
+    note = f"[… {what} not shown" + (f" — {how}" if how else "") + " …]"
     return "\n".join(head + [note] + tail)
+
+
+def default_view(text: str, limit: int, how: str = "") -> tuple[str, bool]:
+    """(view, more_trouble): the view of a command's output when no part was
+    asked for.  Whole when it fits.  Otherwise the beginning (15% of limit) and
+    the end (50%), and in between the left-out lines that mention trouble,
+    numbered (35%): a build warning or a failure in the middle of a long run is
+    what the plain head and tail missed, and a small model rarely looks again.
+    Budget the trouble lines do not use goes to the end.  more_trouble: some
+    trouble lines are still not shown (the footer then says how to list them)."""
+    if len(text) <= limit:
+        return text, False
+    lines = text.split("\n")
+    if not any(_TROUBLE_RE.search(ln) for ln in lines):
+        return window(text, limit, how, numbered=True), False
+    full, limit = limit, _room(limit, how) - 100    # the longer note, "output continues"
+    hits = [i for i, ln in enumerate(lines) if _TROUBLE_RE.search(ln)]
+    head, nh = _fit_head(lines, limit * 15 // 100)
+    tail_budget = limit // 2
+    _, nt = _fit_tail(lines[nh:], tail_budget)
+    middle = [i for i in hits if nh <= i < len(lines) - nt]
+    if not middle:                      # all in view anyway
+        return window(text, full, how, numbered=True), False
+    budget = limit - limit * 15 // 100 - tail_budget
+    width = len(str(middle[-1] + 1))
+    rows: dict[int, str] = {}
+    used = 0
+    for i in middle:
+        row = f"{i + 1:>{width}}: {lines[i]}"
+        if len(row) > 300:
+            row = row[:300] + "…"
+        if used + len(row) + 1 > budget:
+            break
+        rows[i] = row
+        used += len(row) + 1
+    tail, nt = _fit_tail(lines[nh:], tail_budget + budget - used)
+    end = len(lines) - nt               # first line of the tail, 0-based
+    shown = [i for i in rows if i < end]
+    rest = sum(1 for i in hits if nh <= i < end) - len(shown)
+    if not shown:
+        return window(text, full, how, numbered=True), rest > 0
+    which = ("the 1 that mentions" if len(shown) == 1 and not rest else
+             f"the {len(shown):,} that mention" if not rest else
+             f"the first {len(shown):,} of {len(shown) + rest:,} that mention")
+    which += " error/fail/warning"
+    chars = sum(len(ln) + 1 for ln in lines[nh:end])
+    note = (f"[… {_gap(nh + 1, end)} ({chars:,} chars) not shown"
+            + (f" — {how}" if how else "") + f"; {which}:]")
+    return "\n".join(head + [note] + [rows[i] for i in shown] + [f"[… output continues at line {end + 1:,} …]"]
+                     + tail), rest > 0
 
 
 def tail(lines: list[str], n: int) -> str:
@@ -221,8 +399,10 @@ def grep(lines: list[str], pattern: str, context: int = 0, last: int | None = No
 
 
 def view(text: str, limit: int, *, tail_n: int | None = None, pattern: str | None = None,
-         context: int = 0, start_line: int | None = None, end_line: int | None = None) -> str:
-    """The part of a command's output the model asked for, capped at limit chars."""
+         context: int = 0, start_line: int | None = None, end_line: int | None = None,
+         how: str = "pass tail=, grep= or start_line/end_line to see it") -> str:
+    """The part of a command's output the model asked for, capped at limit chars.
+    how: what the note on a cut default view tells the model to pass."""
     lines = text.split("\n") if text else []
     if pattern:
         body = grep(lines, pattern, context, tail_n)
@@ -234,27 +414,25 @@ def view(text: str, limit: int, *, tail_n: int | None = None, pattern: str | Non
         body = line_range(lines, start_line, end_line)
         how = "ask for a smaller line range"
     else:
-        body = text
-        how = "pass tail=, grep= or start_line/end_line to see it"
+        return window(text, limit, how, numbered=True)
     return window(body, limit, how)
 
 
-def footer(path: Path, text: str, exit_code: int | None, hint: bool,
-           stopped: str | None = None) -> str:
-    """The closing lines of every new-mode result: where the log is, its size,
-    how the command ended, and (hint: a default view that hid lines) how to
-    look at the rest, pointing at the lines that mention trouble."""
+def footer(path: Path, text: str, status: str | None, hint: bool,
+           command: str | None = None) -> str:
+    """The closing lines of every new-mode result: where the log is (the full
+    path, always), the command that made it (command_output only — run_command's
+    caller just sent it), its size, how the command ended (status, e.g. "exit
+    code 1"), and (hint: trouble lines the view left out) how to list them."""
     n_lines = text.count("\n") + 1 if text else 0
     size = path.stat().st_size if path.exists() else 0
     kb = f"{size / 1024:,.0f} KB" if size >= 1024 else f"{size:,} bytes"
-    end = stopped or ("still running" if exit_code is None else f"exit code {exit_code}")
-    lines = [f"[output saved: {path} — {n_lines:,} lines, {kb}, {end}]"]
+    what = f"`{short_command(command)}` — " if command else ""
+    lines = [f"[output saved: {path} — {what}{n_lines:,} lines, {kb}"
+             + (f", {status}]" if status else "]")]
     if hint:
         trouble = sum(1 for ln in text.split("\n") if _TROUBLE_RE.search(ln))
-        if trouble:
-            lines.append(f'[{trouble:,} {"line mentions" if trouble == 1 else "lines mention"} error/fail/warning — '
-                         f'command_output(path="{path}", grep="{_TROUBLE_GREP}") lists them]')
-        else:
-            lines.append(f'[command_output(path="{path}", grep="...") searches it, '
-                         f'tail=N shows the end]')
+        lines.append(f'[{trouble:,} {"line mentions" if trouble == 1 else "lines mention"} '
+                     f'error/fail/warning — command_output(path="{path.stem}", '
+                     f'grep="{_TROUBLE_GREP}") lists them]')
     return "\n".join(lines)

@@ -55,6 +55,21 @@ class Views(unittest.TestCase):
         self.assertTrue(all(re.fullmatch(r"line \d{4}", ln) for ln in shown))
         self.assertIn(f"{2000 - len(shown):,} lines", note)
 
+    def test_numbered_note_names_the_missing_lines(self):
+        text = "\n".join(f"line {i:04d}" for i in range(1, 2001))
+        out = run_store.window(text, 1000, numbered=True)
+        head, note, tail = re.split(r"\n(\[… .* not shown.*\])\n", out)
+        first, last = (int(n.replace(",", "")) for n in
+                       re.search(r"lines ([\d,]+)-([\d,]+)", note).groups())
+        self.assertEqual(head.split("\n")[-1], f"line {first - 1:04d}")
+        self.assertEqual(tail.split("\n")[0], f"line {last + 1:04d}")
+
+    def test_default_view_without_trouble_is_the_plain_window(self):
+        text = "\n".join(f"line {i:04d}" for i in range(1, 2001))
+        self.assertEqual(run_store.default_view(text, 1000),
+                         (run_store.window(text, 1000, numbered=True), False))
+        self.assertEqual(run_store.default_view("short", 1000), ("short", False))
+
     def test_one_huge_line_is_cut_on_both_ends(self):
         out = run_store.window("x" * 50_000, 1000)
         self.assertLess(len(out), 1200)
@@ -141,12 +156,56 @@ class RunCommandNew(Base):
 
     def test_large_output_is_windowed_with_a_hint(self):
         out = self.cmd("seq 1 20000; echo 'FAILED test_x - AssertionError'", limit=2000)
-        self.assertLess(len(body(out)), 2100)
+        self.assertLessEqual(len(body(out)), 2000)
         self.assertTrue(body(out).startswith("1\n2\n"))
         self.assertIn("FAILED test_x", body(out))       # the ending survives
-        self.assertIn("not shown", out)
-        self.assertIn("1 line mentions error/fail/warning", out)
-        self.assertIn(f'command_output(path="{saved_path(out)}"', out)
+        # The note names the missing lines and the call that shows them.
+        m = re.search(r"\[… lines (\d+)-([\d,]+) \([\d,]+ chars\) not shown — "
+                      r'command_output\(path="r1", start_line=…, end_line=…\) shows them …\]', out)
+        self.assertTrue(m, out)
+        first = int(m.group(1))                          # seq: line N is "N"
+        self.assertEqual(body(out).split("\n")[first - 2], str(first - 1))
+        self.assertNotIn("lines mention", out)           # the one trouble line is in view
+
+    def test_trouble_in_the_middle_is_shown_numbered(self):
+        out = self.cmd("seq 1 5000; echo 'src/x.c:4: warning: unused'; seq 1 5000; "
+                       "echo 'Error 1'", limit=2000)
+        self.assertLessEqual(len(body(out)), 2000)
+        self.assertIn("5001: src/x.c:4: warning: unused", out)
+        self.assertIn("the 1 that mentions error/fail/warning:", out)
+        self.assertIn("[… output continues at line", out)
+        self.assertTrue(body(out).endswith("Error 1"))
+        self.assertNotIn("lines mention", out)           # all of them shown
+
+    def test_trouble_that_does_not_fit_is_counted_in_the_footer(self):
+        out = self.cmd("for i in $(seq 1 3000); do echo \"line $i\"; "
+                       "[ $((i % 10)) = 0 ] && echo \"ERROR number $i\"; done; echo end",
+                       limit=2000)
+        self.assertLessEqual(len(body(out)), 2000)
+        self.assertIn("the first ", out)
+        self.assertIn('lines mention error/fail/warning — command_output(path="r1", '
+                      'grep="error|fail|warning|traceback")', out)
+
+    def test_command_output_names_the_command_and_its_exit_code(self):
+        self.cmd("echo one; exit 4")
+        out = self.output("r1")
+        self.assertIn("— `echo one; exit 4` — 1 lines", out)
+        self.assertIn("exit code 4]", out)
+        missing = self.output("r7")
+        self.assertIn(f"{self.store.root / 'r1.log'} (`echo one; exit 4`, exit code 4)", missing)
+
+    def test_log_text_is_cached_until_the_file_changes(self):
+        self.cmd("seq 1 3")
+        store = run_store.RunStore(self.store.root)      # a cold cache
+        log = store.root / "r1.log"
+        clean = mock.Mock(side_effect=lambda t: t.strip())
+        self.assertEqual(store.read(log, clean), "1\n2\n3")
+        self.assertEqual(store.read(log, clean), "1\n2\n3")
+        self.assertEqual(clean.call_count, 1)
+        with open(log, "a") as f:
+            f.write("4\n")
+        self.assertEqual(store.read(log, clean), "1\n2\n3\n4")
+        self.assertEqual(clean.call_count, 2)
 
     def test_tail_and_grep_args(self):
         self.assertEqual(body(self.cmd("seq 1 1000", tail=2)),

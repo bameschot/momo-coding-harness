@@ -329,16 +329,15 @@ _RUN_COMMAND_FILE = _fn(
      "tail":    {"type": "integer", "description": "Only the last N lines (e.g. 30 for a test summary)"},
      "grep":    {"type": "string", "description": "Case-insensitive regex; only matching lines, numbered (e.g. \"error|fail\")"},
      "context": {"type": "integer", "description": "With grep: lines around each match"},
-     "timeout": {"type": "integer", "description": f"Seconds (default {_DEFAULT_COMMAND_TIMEOUT}, maximum {_MAX_COMMAND_TIMEOUT}); longer for a full build or test suite"}},
+     "timeout": {"type": "integer", "description": f"Seconds (default {_DEFAULT_COMMAND_TIMEOUT}, maximum {_MAX_COMMAND_TIMEOUT}); longer for a full build or test suite"},
+     "background": {"type": "boolean", "description": "Keep it running (a server, a watcher); stop_command ends it"},
+     "wait_for": {"type": "string", "description": "With background: regex printed once ready; waits up to timeout (default 30s)"}},
     ["command"])
 
 _COMMAND_OUTPUT = _fn(
     "command_output",
-    "Search the saved output of an earlier run_command without running it again. path: "
-    "the log path at the end of that result (or its id, e.g. r3). grep=\"regex\" for the "
-    "matching lines, tail=N for the last N, start_line/end_line for a range; none: the "
-    "beginning and end.",
-    {"path":       {"type": "string", "description": "Log path from the run_command result"},
+    "Search the saved output of an earlier run_command without running it again.",
+    {"path":       {"type": "string", "description": "Log path from the run_command result, or its id (e.g. r3)"},
      "grep":       {"type": "string", "description": "Case-insensitive regex"},
      "context":    {"type": "integer", "description": "With grep: lines around each match"},
      "tail":       {"type": "integer", "description": "Last N lines (with grep: last N matches)"},
@@ -346,22 +345,29 @@ _COMMAND_OUTPUT = _fn(
      "end_line":   {"type": "integer", "description": "Last line (inclusive)"}},
     ["path"])
 
+_STOP_COMMAND = _fn(
+    "stop_command",
+    "Stop a background run_command and all it started.",
+    {"path": {"type": "string", "description": "Log path or id (e.g. r3)"}},
+    ["path"])
+
 RUN_MODES = ("new", "classic")
 
 
 def with_run_mode(tools: list[dict], mode: str) -> list[dict]:
     """The tool list with the run_command variant for mode ("new" | "classic");
-    in new mode command_output follows run_command wherever that is offered."""
+    in new mode command_output and stop_command follow run_command wherever that
+    is offered."""
     out: list[dict] = []
     for t in tools:
         name = t["function"]["name"]
-        if name == "command_output":
+        if name in ("command_output", "stop_command"):
             continue
         if name == "run_command":
             if mode == "classic":
                 out.append(_RUN_COMMAND_CLASSIC)
             else:
-                out += [_RUN_COMMAND_FILE, _COMMAND_OUTPUT]
+                out += [_RUN_COMMAND_FILE, _COMMAND_OUTPUT, _STOP_COMMAND]
             continue
         out.append(t)
     return out
@@ -1069,16 +1075,7 @@ _OUTPUT_READ_BYTES = 4 * 2**20     # per stream, the tail read back into the res
 _STOPPED_TAIL_CHARS = 4000         # output shown after a timeout / interrupt
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
-    """Kill the command and everything it started (it leads its own session)."""
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except OSError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        pass
+_kill_group = run_store_mod.kill_group
 
 
 def _clean_output(text: str) -> str:
@@ -1180,10 +1177,11 @@ def _exec(command: str, timeout: int, workdir: Path, cancel, out, err):
 # was told "exit code 0" on failing suites), and each new slice meant running the
 # suite again.  Such a pipe is taken off and becomes a view of the output: the
 # same lines, the real exit code, and the whole output kept in the run log.
+# "tail - 20" (a 9B typo: to the shell that is stdin and a file named 20) counts too.
 _TAIL_PIPE = re.compile(
-    r"\s*(?:2>&1\s*)?\|&?\s*tail\s+(?:-n\s*(\d+)|-(\d+)|--lines[= ](\d+))\s*"
+    r"\s*(?:2>&1\s*)?\|&?\s*tail\s+(?:-n\s*(\d+)|-\s?(\d+)|--lines[= ](\d+))\s*"
     r"(?:;\s*echo\b[^;|&]*\$\{?PIPESTATUS\[0\]\}?[^;|&]*)?\s*$")
-_HEAD_N = r"head\s+(?:-n\s*(\d+)|-(\d+)|--lines[= ](\d+))"
+_HEAD_N = r"head\s+(?:-n\s*(\d+)|-\s?(\d+)|--lines[= ](\d+))"
 _HEAD_PIPE = re.compile(r"\s*(?:2>&1\s*)?\|&?\s*" + _HEAD_N + r"\s*$")
 # grep with only the flags a view can honour (-E/-i/-n need nothing; -A/-B/-C
 # become context), one pattern, and optionally a head after it, which is
@@ -1221,6 +1219,9 @@ def _split_view_pipe(command: str) -> tuple[str, dict | None, str]:
     return base, {"grep": pattern, "context": context}, m.group(0).strip()
 
 
+_TRAILING_AMP = re.compile(r"\s*(?<![&>|])&\s*$")
+
+
 def _view_note(taken: str, view: dict) -> str:
     if "grep" in view:
         what = f"the lines matching `{view['grep']}` (case-insensitive)"
@@ -1234,7 +1235,8 @@ def _view_note(taken: str, view: dict) -> str:
 
 
 def _run_command(command: str, timeout: int | None = None, tail: int | None = None,
-                 grep: str | None = None, context: int = 0, *, workdir: Path,
+                 grep: str | None = None, context: int = 0, background: bool = False,
+                 wait_for: str | None = None, *, workdir: Path,
                  net_access: str = "off", cancel=None, run_mode: str = "classic",
                  run_store: "run_store_mod.RunStore | None" = None,
                  run_output_limit: int = run_store_mod.DEFAULT_LIMIT,
@@ -1257,10 +1259,18 @@ def _run_command(command: str, timeout: int | None = None, tail: int | None = No
             note += _view_note(taken, piped)
     defaulted = timeout is None
     timeout = _clamp_timeout(timeout)
-    if run_mode != "classic" and run_store is not None:
+    new_mode = run_mode != "classic" and run_store is not None
+    if new_mode and _TRAILING_AMP.search(command):
+        # "npm run dev &": the shell returns at once and the server runs on,
+        # untracked and unstoppable.  Run it as the background command it is.
+        command, background = _TRAILING_AMP.sub("", command), True
+        note += "(ran without the trailing `&`, as background=true)\n"
+    if background and not new_mode:
+        return "ERROR: background=true needs /run-mode new"
+    if new_mode:
         return note + _run_to_log(command, timeout, workdir, cancel, run_store,
                                   run_output_limit, tail, grep, context, defaulted, run_exit,
-                                  end_line=head)
+                                  end_line=head, background=bool(background), wait_for=wait_for)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         proc, stopped = _exec(command, timeout, workdir, cancel, out, err)
         if proc is None:
@@ -1302,41 +1312,109 @@ def _longer(stopped: str, defaulted: bool) -> str:
             f"{_MAX_COMMAND_TIMEOUT}; a quick check that hangs is stuck, not slow)")
 
 
-def _read_log(path: Path) -> str:
+def _read_log(store: "run_store_mod.RunStore", path: Path) -> str:
     """A saved log as the model sees it: cleaned the same way every time, so the
     line numbers of one view hold for the next."""
-    return _clean_output(path.read_bytes().decode("utf-8", errors="replace"))
+    return store.read(path, _clean_output)
 
 
-def _log_view(text: str, limit: int, tail, grep, context, start_line=None, end_line=None):
+def _log_view(text: str, limit: int, tail, grep, context, start_line=None, end_line=None,
+              how: str = ""):
     """(view, hint): the requested part of a log, and whether the footer should
-    say how to see the rest (a default view that had to leave lines out)."""
-    body = run_store_mod.view(text, limit, tail_n=tail, pattern=grep, context=context or 0,
-                              start_line=start_line, end_line=end_line)
-    default = not (grep or tail or start_line is not None or end_line is not None)
-    return body, default and len(text) > limit
+    point at trouble lines a default view had to leave out.  how: what the note
+    on a cut default view says to pass for the rest."""
+    if not (grep or tail or start_line is not None or end_line is not None):
+        return run_store_mod.default_view(text, limit, how)
+    return run_store_mod.view(text, limit, tail_n=tail, pattern=grep, context=context or 0,
+                              start_line=start_line, end_line=end_line), False
+
+
+_BACKGROUND_SETTLE = 3     # seconds a background command gets to start, without wait_for
+_BACKGROUND_WAIT = 30      # seconds to wait for wait_for when no timeout is given
+
+
+def _start_background(command, timeout, defaulted, wait_for, workdir, cancel, log, store, path):
+    """Start a command that is meant to keep running (a server, a watcher) and
+    wait until it is ready: wait_for appears in its output, or a few seconds
+    pass.  Returns (proc, stopped, notice) like _exec, plus a line saying how
+    the wait ended; proc None: it could not start (stopped is the error)."""
+    # Python block-buffers stdout that is not a terminal: "Serving on …" would
+    # sit in the buffer and wait_for never see it.
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    try:
+        proc = subprocess.Popen(command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                                env=env)
+    except OSError as e:
+        return None, f"ERROR: {e}", ""
+    rx = run_store_mod.compile_pattern(wait_for)[0] if wait_for else None
+    wait = _BACKGROUND_SETTLE if rx is None else (_BACKGROUND_WAIT if defaulted else timeout)
+    deadline = time.monotonic() + wait
+    while proc.poll() is None:
+        if cancel is not None and cancel.is_set():
+            _kill_group(proc)
+            return proc, "command interrupted by the user", ""
+        if rx is not None and rx.search(_read_log(store, path)):
+            return proc, None, f"[ready: its output matched `{wait_for}`]\n"
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+    if proc.poll() is not None:
+        return proc, None, "[it exited during start-up, so it is not running in the background]\n"
+    if rx is not None:
+        return proc, None, (f"[`{wait_for}` did not appear in its output within {wait}s — it is "
+                            f"still running; check the output below and stop_command it if it "
+                            f"is stuck]\n")
+    return proc, None, ""
 
 
 def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, context,
-                defaulted=False, run_exit: dict | None = None, end_line: int | None = None) -> str:
+                defaulted=False, run_exit: dict | None = None, end_line: int | None = None,
+                background: bool = False, wait_for: str | None = None) -> str:
     """/run-mode new: stdout and stderr in order in one log file, and a bounded
-    view of it back, ending with the log's full path for command_output."""
+    view of it back, ending with the log's full path for command_output.
+    background: start it, wait until it is ready, and leave it running."""
+    if background and len(running := store.running()) >= run_store_mod.MAX_BACKGROUND:
+        return (f"ERROR: {len(running)} background commands are already running "
+                f"({', '.join(running)}) — stop_command one of them first")
     run_id, path = store.new_log()
     with open(path, "wb") as log:
-        proc, stopped = _exec(command, timeout, workdir, cancel, log, subprocess.STDOUT)
+        if background:
+            proc, stopped, notice = _start_background(command, timeout, defaulted, wait_for,
+                                                      workdir, cancel, log, store, path)
+        else:
+            (proc, stopped), notice = _exec(command, timeout, workdir, cancel, log,
+                                            subprocess.STDOUT), ""
     if proc is None:
         path.unlink(missing_ok=True)
         return stopped
-    if run_exit is not None and not stopped:
+    live = background and not stopped and proc.poll() is None
+    if run_exit is not None and not stopped and not live:
         run_exit["code"] = proc.returncode
-    text = _read_log(path)
-    body, hint = _log_view(text, limit, tail, grep, context,
-                           1 if end_line else None, end_line)
-    foot = run_store_mod.footer(path, text, proc.returncode, hint or bool(stopped), stopped)
+    status = stopped or ("still running" if live else f"exit code {proc.returncode}")
+    store.record(run_id, command, status)
+    if live:
+        store.add_background(run_id, proc)
+    text = _read_log(store, path)
+    body, hint = _log_view(text, limit, tail, grep, context, 1 if end_line else None, end_line,
+                           how=f'command_output(path="{run_id}", start_line=…, end_line=…) '
+                               f'shows them')
+    foot = run_store_mod.footer(path, text, status, hint)
+    if live:
+        foot += (f'\n[running in the background — command_output(path="{run_id}") shows its '
+                 f'output so far, stop_command(path="{run_id}") stops it]')
     if stopped:
         head = f"ERROR: {stopped}" + _longer(stopped, defaulted)    # the log path stays last
         return f"{head}\n[output before it stopped]\n{body}\n{foot}" if text else f"{head}\n{foot}"
-    return f"{body or '(no output)'}\n{foot}"
+    return f"{notice}{body or '(no output)'}\n{foot}"
+
+
+def _no_log(path: str, store: "run_store_mod.RunStore") -> str:
+    logs = store.logs()
+    have = ("Saved logs: " + "; ".join(store.describe(p) for p in logs[-5:])) if logs \
+        else "No command output is saved in this session — run the command with run_command."
+    return (f"ERROR: no saved command output at {path!r}. Pass the path printed at the "
+            f"end of a run_command result. {have}")
 
 
 def _command_output(path: str, grep: str | None = None, context: int = 0,
@@ -1348,17 +1426,33 @@ def _command_output(path: str, grep: str | None = None, context: int = 0,
         return "ERROR: command_output is only available in /run-mode new"
     log = run_store.resolve(path)
     if log is None:
-        logs = run_store.logs()
-        have = ("Saved logs: " + ", ".join(str(p) for p in logs[-5:])) if logs else \
-            "No command output is saved in this session — run the command with run_command."
-        return (f"ERROR: no saved command output at {path!r}. Pass the path printed at the "
-                f"end of a run_command result. {have}")
-    text = _read_log(log)
-    body, hint = _log_view(text, run_output_limit, tail, grep, context, start_line, end_line)
+        return _no_log(path, run_store)
+    status = run_store.status(log)        # first: a command that just ended has written all
+    text = _read_log(run_store, log)
+    body, hint = _log_view(text, run_output_limit, tail, grep, context, start_line, end_line,
+                           how="pass start_line/end_line, grep= or tail= to see them")
     if body.startswith("ERROR"):
         return body
-    return f"{body or '(no output)'}\n" + run_store_mod.footer(log, text, None, hint).replace(
-        ", still running]", "]")
+    return f"{body or '(no output)'}\n" + run_store_mod.footer(
+        log, text, status, hint, run_store.meta(log).get("command"))
+
+
+def _stop_command(path: str, *, workdir: Path,
+                  run_store: "run_store_mod.RunStore | None" = None,
+                  run_output_limit: int = run_store_mod.DEFAULT_LIMIT) -> str:
+    if run_store is None:
+        return "ERROR: stop_command is only available in /run-mode new"
+    log = run_store.resolve(path)
+    if log is None:
+        return _no_log(path, run_store)
+    stopped = run_store.stop(log)
+    status = run_store.status(log)
+    head = (f"Stopped {log.stem}." if stopped else
+            f"{log.stem} is not running in the background ({status or 'it has ended'}).")
+    text = _read_log(run_store, log)
+    body = run_store_mod.view(text, run_output_limit, tail_n=20) if text else "(no output)"
+    return f"{head}\n{body}\n" + run_store_mod.footer(
+        log, text, status, False, run_store.meta(log).get("command"))
 
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
@@ -1368,7 +1462,7 @@ def _command_output(path: str, grep: str | None = None, context: int = 0,
 _SCHEMAS = {t["function"]["name"]: t["function"]["parameters"]
             for t in (READ_ONLY_TOOLS + CODE_NAV_TOOLS + INDEX_TOOLS + SHARED_TOOLS
                       + CODING_ONLY_TOOLS + NET_TOOLS + [_RUN_COMMAND_FILE, _COMMAND_OUTPUT,
-                                                         _EDIT_FILE])}
+                                                         _STOP_COMMAND, _EDIT_FILE])}
 _REQUIRED_ARGS: dict[str, list[str]] = {n: p["required"] for n, p in _SCHEMAS.items()}
 _KNOWN_ARGS: dict[str, set[str]] = {n: set(p["properties"]) for n, p in _SCHEMAS.items()}
 _ARG_TYPES: dict[str, dict[str, str]] = {      # tool -> {arg: JSON schema type}
@@ -1391,6 +1485,7 @@ _EXECUTORS = {
     "delete_file":        _delete_file,
     "run_command":        _run_command,
     "command_output":     _command_output,
+    "stop_command":       _stop_command,
     "fetch_url":          net.fetch_url,
     "web_search":         search.web_search,
     "add_search_source":  search.add_search_source,
@@ -1426,6 +1521,7 @@ _INJECTED = {
     "run_command": ("net_access", "cancel", "run_mode", "run_store", "run_output_limit",
                     "run_exit"),
     "command_output": ("run_store", "run_output_limit"),
+    "stop_command": ("run_store", "run_output_limit"),
     "grep_files":  ("cancel",),
     "read_file":   ("read_budget",),
     **{n: ("index", "cancel") for n in INDEX_TOOL_NAMES},
@@ -1779,6 +1875,7 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "delete_file":    {"path": "old-file.py"},
     "run_command":    {"command": "python -m pytest"},
     "command_output": {"path": "r1", "grep": "FAILED|Error"},
+    "stop_command":   {"path": "r2"},
     "ask_user":       {"question": "Should I overwrite the existing file?"},
     "create_plan":    {"title": "Fix off-by-one in paginate()",
                        "goal": "Last page is dropped because paginate() uses < instead of <=.",

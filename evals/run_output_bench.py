@@ -85,7 +85,7 @@ def _make(rng: random.Random) -> Case:
     return Case("make", "\n".join(lines),
                 ("warning: unused variable 'scratch'", "error: 'tok' undeclared"),
                 {"grep": "error|warning"}, exit_code=2,
-                note="a warning in the middle: the default view cannot see it")
+                note="a warning in the middle: only the default view's trouble lines show it")
 
 
 def _git_log(rng: random.Random) -> Case:

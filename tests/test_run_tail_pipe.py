@@ -22,6 +22,7 @@ class SplitTail(unittest.TestCase):
             ("pytest -q 2>&1 | tail --lines=7", "pytest -q", 7),
             ('python3 -m unittest -v 2>&1 | tail -40; echo "exit=${PIPESTATUS[0]}"',
              "python3 -m unittest -v", 40),
+            ("pytest -q 2>&1 | tail - 20", "pytest -q", 20),      # a 9B typo
         ]:
             self.assertEqual(_split_view_pipe(cmd)[:2], (base, {"tail": n}), cmd)
 
@@ -29,6 +30,7 @@ class SplitTail(unittest.TestCase):
         for cmd, base, view in [
             ("pytest -v 2>&1 | head -80", "pytest -v", {"head": 80}),
             ("pytest | head -n 5", "pytest", {"head": 5}),
+            ("pytest | head - 5", "pytest", {"head": 5}),
             ('cd /w && python -m unittest 2>&1 | grep -E "^(FAIL|ERROR):"',
              "cd /w && python -m unittest", {"grep": "^(FAIL|ERROR):", "context": 0}),
             ('pytest 2>&1 | grep -A4 "^FAIL"', "pytest", {"grep": "^FAIL", "context": 4}),

@@ -275,6 +275,46 @@ through the real `run_command` and checks which facts survive each view:
 
 The new schema costs ≈ +640 tokens in every request (tool reference + JSON).
 
+**Failure-aware default view (2026-10-16).** When the default view has to cut, the left-out
+lines that mention error/fail/warning are listed with their line numbers (beginning 15%, those
+lines ≤35%, end 50%). The cut note now names the missing lines (`lines 18-320`) and the
+`command_output(path="rN", start_line=…, end_line=…)` call for them, and the note counts
+against the limit:
+
+| view | chars | facts |
+|---|---|---|
+| new, default view (before) | 26,816 | 7/10 |
+| new, default view (after) | 25,265 | **8/10**: the make warning mid-build is now in the first result |
+| new, default + one command_output | 25,948 | 10/10 |
+
+The remaining misses (a commit deep in `git log`, one path among 3,200 `find` lines) are not
+trouble lines; only a grep finds them. The schema is now ≈ +800 tokens over classic: +167
+for `background`/`wait_for` and `stop_command`, partly paid for by a shorter
+`command_output` description.
+
+**With the model** (Ornith-1.5-9B-Q8_0, llama.cpp, `--suite shell --run-mode new --runs 3`,
+HEAD vs the change, back to back on one server, 2026-10-16):
+
+| | before | after |
+|---|---|---|
+| facts found | 15/15 runs | 15/15 runs |
+| command output sent to the model | 3.9 KB/run (max 11.0) | **2.5 KB/run (max 5.5)** |
+| `command_output` calls | 13 | **3** |
+| tail=/grep= views · self-piped · re-runs | 11 · 2 · 0 | 9 · 2 · 0 |
+| tool calls | 50 | 62 |
+| wall time | ≈480 s | ≈500 s |
+
+- **Fewer follow-up looks.** Before, which-fail and warning runs took the tail and then
+  grepped the log 2–4 times. After, a plain `./run_tests.sh` got both failing tests listed
+  by line number in the first result (`48: test_restock_047 … FAIL`, `204: test_price_203 …
+  FAIL`, out of 15 KB of passing output), with 0 or 1 follow-ups.
+- **The model now passes the short id** (`r1`, `r1.log`) that the hint shows. Before, it
+  passed the full path, and twice a wrong, workdir-relative one.
+- **The extra calls are not from the change.** All 11 extra `read_file` calls come before the
+  first `run_command` (reading `run_tests.sh`, `build.sh`, `inventory.py` first), plus one
+  10-call shell-cause outlier. n=3 per task on a sampled model, so the call count is noise.
+- **Background commands are not covered:** no shell task starts a server.
+
 **With the model** (Qwen3.5-9B-Q4_0, llama.cpp, 3 runs × 5 tasks per mode, 2026-09-26):
 
 ```bash

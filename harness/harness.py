@@ -56,7 +56,7 @@ _TDD_MAX_REFUSALS = 3   # gate refusals in a row before the user is asked
 # Tools that cannot change files: a green run of the test command stays valid
 # across them (tdd gate reuse).  Any other call, run_command included, ends it.
 _KEEPS_GREEN = ({t["function"]["name"] for t in tools_mod.READ_ONLY_TOOLS + tools_mod.CODE_NAV_TOOLS}
-                | set(INDEX_TOOL_NAMES) | {"command_output", "ask_user", "complete_step"})
+                | set(INDEX_TOOL_NAMES) | {"command_output", "stop_command", "ask_user", "complete_step"})
 
 
 def _run_key(command: str) -> tuple | str:
@@ -2084,10 +2084,11 @@ class Harness:
                     # fetch_url windows its own output (net_max_chars) and says how to
                     # page on; a generic cut here would slice through the untrusted-
                     # content fence and point the model at read_file.
-                    # New-mode run_command / command_output window themselves too.
+                    # New-mode run_command / command_output / stop_command window
+                    # themselves too.
                     if (self.max_tool_result > 0 and len(result) > self.max_tool_result
                             and name not in ("fetch_url", "web_search")
-                            and not (name in ("run_command", "command_output")
+                            and not (name in ("run_command", "command_output", "stop_command")
                                      and self.run_mode == "new")):
                         total = len(result)
                         cutoff = result.rfind("\n", 0, self.max_tool_result)
