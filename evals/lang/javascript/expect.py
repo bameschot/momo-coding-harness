@@ -51,7 +51,7 @@ CHAINS = {
 
 IMPORTS = {
     "src/format.js": {"src/cart.js", "src/index.js", "src/legacy.js"},
-    "src/cart.js":   {"src/index.js"},
+    "src/cart.js":   {"src/index.js", "src/app.js"},   # app.js gets Cart through the index.js barrel
     "src/index.js":  {"src/app.js"},
     "src/legacy.js": {"src/app.js"},        # dynamic import()
 }

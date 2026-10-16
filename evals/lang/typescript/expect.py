@@ -57,7 +57,7 @@ CHAINS = {
 
 IMPORTS = {
     "src/types.ts":   {"src/pricing.ts", "src/index.ts", "src/main.ts"},
-    "src/pricing.ts": {"src/index.ts"},
+    "src/pricing.ts": {"src/index.ts", "src/main.ts"},   # main.ts gets FlatPricer through the index.ts barrel
     "src/index.ts":   {"src/main.ts"},
 }
 

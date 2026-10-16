@@ -30,6 +30,7 @@ import warnings
 from pathlib import Path
 
 from . import code_index, code_nav
+from .code_index.defdiff import _DEF_KINDS, _defs, _gone, _params, _same
 from .paths import safe_path, split_lines
 
 EDIT_FEATURES = frozenset({"feedback", "match", "symbol", "checks", "batch"})
@@ -680,53 +681,6 @@ def _replaced_lines(text: str, old: str, new: str) -> str:
     shown = ", ".join(map(str, rows[:_MAX_LINES_LISTED]))
     more = f" and {len(rows) - _MAX_LINES_LISTED} more" if len(rows) > _MAX_LINES_LISTED else ""
     return f" — at lines {shown}{more} (as the file reads now)"
-
-
-_DEF_KINDS = code_nav.CALLABLE_KINDS | code_nav.CONTAINER_KINDS if code_nav.AVAILABLE else set()
-
-
-def _defs(parsed) -> dict[str, list]:
-    """bare name -> its code definitions in a parsed file."""
-    out: dict[str, list] = {}
-    if parsed is None or parsed.lang in code_index.DATA_LANGS:
-        return out          # config keys and CSS rules have no callers
-    for s in parsed.symbols:
-        if s.kind in _DEF_KINDS:
-            out.setdefault(s.name, []).append(s)
-    return out
-
-
-def _gone(b: dict, a: dict) -> list:
-    """Definitions in b whose name a no longer has — a removed class, not also
-    each of its methods."""
-    gone = [v[0] for name, v in b.items() if name not in a]
-    quals = {s.qualname for s in gone}
-    return [s for s in gone if s.qualname.rsplit(".", 1)[0] not in quals or "." not in s.qualname]
-
-
-def _params(parsed, s) -> str:
-    """The parameter list on a definition's name line: `def f(a, b=1) -> int:`
-    -> '(a, b=1)'.  The whole rest of the line when it has no parenthesis."""
-    line = parsed.lines[s.name_line - 1] if 0 < s.name_line <= len(parsed.lines) else ""
-    at = line.find(s.name)
-    rest = line[at + len(s.name):] if at >= 0 else line
-    o = rest.find("(")
-    if o < 0:
-        return rest.strip()
-    depth = 0
-    for i in range(o, len(rest)):
-        if rest[i] == "(":
-            depth += 1
-        elif rest[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return rest[o:i + 1]
-    return rest[o:].strip()
-
-
-def _same(a: str, b: str) -> bool:
-    """Equal but for whitespace."""
-    return "".join(a.split()) == "".join(b.split())
 
 
 _ALIAS = re.compile(r"\bas\s+([A-Za-z_]\w*)")

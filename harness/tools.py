@@ -219,9 +219,11 @@ INDEX_TOOLS = [
         "ONE call. Lists every use grouped by the function it sits in, tagged (call), (import), "
         "(type) or (other); depth=2 or 3 also shows who uses THOSE functions: the blast radius of "
         "a change. Use it before renaming something or changing a signature. Write a method as "
-        "'Class.method'; a qualifier that is not a class filters by receiver ('JSON.parse').",
+        "'Class.method'; a qualifier that is not a class filters by receiver ('JSON.parse'). "
+        "direction='callees' lists what it CALLS instead, each call resolved to its definition.",
         {"name":  {"type": "string", "description": "What to look up, e.g. 'parse_config', 'Harness.send'"},
-         "depth": {"type": "integer", "description": "1 = direct uses (default); 2 or 3 = also the users of those functions"},
+         "depth": {"type": "integer", "description": "1 = direct uses (default); 2 or 3 = also the users of those functions (callees: 2 = also what those call)"},
+         "direction": {"type": "string", "description": "callers (default): who uses it; callees: what it calls"},
          "role":  {"type": "string", "description": "Only direct uses of this kind: call, import, type, other (default: all). Parameters/locals that share the name and C prototypes are never counted as uses."}},
         ["name"]),
 
@@ -230,7 +232,17 @@ INDEX_TOOLS = [
         "code uses them, each with its most-used definitions, fitted to a size budget. Start here "
         "in an unfamiliar codebase; pass path to zoom into one directory.",
         {"path":   {"type": "string", "description": "Only this directory (default: whole project)"},
-         "budget": {"type": "integer", "description": "Approximate size of the answer in tokens (default 1500)"}},
+         "budget": {"type": "integer", "description": "Approximate size of the answer in tokens (default 1500)"},
+         "show":   {"type": "string", "description": "files (default): the ranked map; unused: definitions nothing in the project uses"}},
+        []),
+
+    _fn("index_changes",
+        "What your changes touch, in one call: every definition the uncommitted edits (or the "
+        "changes since base) removed, re-signatured, changed or added — with the places outside "
+        "the change that still use it and the tests that cover it. Use it before running tests "
+        "or finishing a task.",
+        {"base": {"type": "string", "description": "Git revision to compare with (default: HEAD, i.e. the uncommitted changes)"},
+         "path": {"type": "string", "description": "Only changes under this directory or file (default: whole project)"}},
         []),
 
     _fn("index_file",
@@ -1504,6 +1516,7 @@ if code_nav.AVAILABLE:
         "index_map":          code_index.index_map,
         "index_file":         code_index.index_file,
         "index_status":       code_index.index_status,
+        "index_changes":      code_index.index_changes,
     })
 
 
@@ -1861,6 +1874,7 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "index_map":      {},
     "index_file":     {"path": "src/parser.py"},
     "index_status":   {},
+    "index_changes":  {},
     "write_file":     {"path": "hello.py", "content": "print('hello!')"},
     "edit_file":      {"path": "main.py", "old_string": "existing line", "new_string": "replacement line"},
     "edit_files":     {"edits": [{"path": "src/api.py", "old_string": "load(path)", "new_string": "load(path, strict=True)"},

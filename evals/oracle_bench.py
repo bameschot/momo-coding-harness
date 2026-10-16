@@ -14,6 +14,10 @@ the index with sources it has no say in:
            the files tree-sitter cannot parse cleanly (macro-heavy C)
   others   each grammar's own tags.scm query (definitions and call references),
            shipped with the tree-sitter wheel by the grammar's maintainers
+  python-resolve
+           not extraction but resolution, over a whole project: which file each
+           import means and which function each call reaches, from ast and
+           Python's import rules (evals/oracle/py_resolve.py)
 
 Every disagreement is either an index bug or an oracle quirk; the report lists
 samples of each kind so they can be triaged.  No model involved.
@@ -22,6 +26,7 @@ samples of each kind so they can be triaged.  No model involved.
     python evals/oracle_bench.py --python ~/src/proj --limit 300 --show 15
     python evals/oracle_bench.py --tags ~/src/cproj --langs c cpp
     python evals/oracle_bench.py --langs c-clang --clang ~/projects/mgba --limit 1000
+    python evals/oracle_bench.py --langs python-resolve --python-resolve ~/src/proj
 """
 from __future__ import annotations
 
@@ -165,16 +170,35 @@ def _index_calls(parsed) -> set:
     return out
 
 
-def _func_tables(st) -> dict:
-    """{def line: symtable of that function} for every function in a module."""
-    out = {}
+def _func_tables(st) -> tuple[dict, dict]:
+    """({def line: symtable of that function} for every function in a module,
+    {table id: enclosing table})."""
+    out, parent = {}, {}
     stack = [st]
     while stack:
         t = stack.pop()
         if t.get_type() == "function":
             out.setdefault(t.get_lineno(), t)
-        stack.extend(t.get_children())
-    return out
+        for c in t.get_children():
+            parent[c.get_id()] = t
+            stack.append(c)
+    return out, parent
+
+
+def _bound_by_import(table, name: str, parent: dict) -> bool:
+    """`name` in this function is (a closure over) a name an import bound."""
+    t = table
+    while t is not None:
+        try:
+            sym = t.lookup(name)
+        except KeyError:
+            return False
+        if sym.is_imported():
+            return True
+        if not sym.is_free():
+            return False
+        t = parent.get(t.get_id())
+    return False
 
 
 def _local_agreement(parsed, src: str, fname: str, tally: Tally, rel: str):
@@ -183,7 +207,7 @@ def _local_agreement(parsed, src: str, fname: str, tally: Tally, rel: str):
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            tables = _func_tables(symtable.symtable(src, fname, "exec"))
+            tables, parents = _func_tables(symtable.symtable(src, fname, "exec"))
     except (SyntaxError, ValueError):
         return
     truth, got = set(), set()
@@ -216,6 +240,10 @@ def _local_agreement(parsed, src: str, fname: str, tally: Tally, rel: str):
             sym = table.lookup(name)
             # A free variable is a closure over an enclosing function's local:
             # for the index that is a local too (not a use of a same-named global).
+            # An imported name is not: `from m import f` in a function makes f()
+            # a use of m.f (by design), so symtable's "local" is not compared.
+            if _bound_by_import(table, name, parents):
+                continue
             is_local = sym.is_local() or sym.is_parameter() or sym.is_free()
         except KeyError:
             is_local = False
@@ -712,11 +740,14 @@ def main() -> int:
                     help="download the Kotlin compiler jars for the kotlin oracle (~61 MB)")
     ap.add_argument("--clang", nargs="*", default=["~/projects/mgba"],
                     help="C roots to check against clang's AST")
+    ap.add_argument("--python-resolve", nargs="*", default=[str(REPO), stdlib],
+                    help="Python project roots whose import and call resolution is checked "
+                         "(each built as one index; --limit = functions sampled per root)")
     ap.add_argument("--html", nargs="*", default=["~/projects/momo-agent-workspaces"],
                     help="roots whose HTML files' inline <script> JavaScript is checked too")
     ap.add_argument("--langs", nargs="*", default=["python", "c", "cpp", "java", "javascript",
                                                    "typescript", "html-js", "kotlin", "yaml",
-                                                   "c-clang"])
+                                                   "c-clang", "python-resolve"])
     ap.add_argument("--limit", type=int, default=200, help="files per language (sampled)")
     ap.add_argument("--show", type=int, default=8, help="disagreements to print per category")
     args = ap.parse_args()
@@ -731,6 +762,11 @@ def main() -> int:
             report = run_kotlin(files_under(args.kotlin, (".kt", ".kts"), args.limit), args.show)
         elif lang == "c-clang":
             report = run_clang(args.clang, args.limit, args.show)
+        elif lang == "python-resolve":
+            from oracle import py_resolve
+            report = []
+            for root in args.python_resolve:
+                report += py_resolve.run(Path(root), args.limit, args.show, Tally)
         elif lang == "html-js":
             import tempfile
             tmp = Path(tempfile.mkdtemp(prefix="oracle_html_js_"))

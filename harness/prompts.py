@@ -106,9 +106,10 @@ _NAV_FIRST = {
 # What to reach for first, per role, with the index on.
 _INDEX_FIRST = {
     "coding":    "Start a task with index_map (unfamiliar code) or index_search (a named thing), "
-                 "not list_directory + read_file; before changing a definition, index_callers.",
+                 "not list_directory + read_file; before changing a definition, index_callers; "
+                 "before running tests, index_changes.",
     "plan-exec": "Start each step with index_search / index_file for what it touches; before "
-                 "changing a definition, index_callers.",
+                 "changing a definition, index_callers; before running tests, index_changes.",
     "plan":      "Investigate with index_map, index_search, index_file and index_callers — not "
                  "list_directory + read_file or grep; read_symbol reads one definition.",
     "momo":      "Start with index_map (unfamiliar code) or index_search (a named thing), not "

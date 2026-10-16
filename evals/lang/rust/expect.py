@@ -59,9 +59,10 @@ CHAINS = {
 }
 
 IMPORTS = {
-    "src/model.rs":   {"src/pricing.rs", "src/main.rs"},   # crate::model, shop::model
-    "src/pricing.rs": {"src/lib.rs", "src/main.rs"},       # pub use pricing::, shop::pricing
-    "src/util/mod.rs": {"src/pricing.rs"},                 # use crate::util:: -> util/mod.rs
+    # lib.rs's `pub mod x;` loads each module file, so it imports all three.
+    "src/model.rs":   {"src/lib.rs", "src/pricing.rs", "src/main.rs"},   # crate::model, shop::model
+    "src/pricing.rs": {"src/lib.rs", "src/main.rs"},       # shop::pricing
+    "src/util/mod.rs": {"src/lib.rs", "src/pricing.rs"},   # use crate::util:: -> util/mod.rs
 }
 
 FRESH = ("src/pricing.rs", "\npub fn fresh_marker() -> i64 { 1 }\n", "fresh_marker")

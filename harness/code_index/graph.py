@@ -3,14 +3,17 @@ imported files first) and index_file (one file's outline, imports and the
 files that import it)."""
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from pathlib import Path
 
 from .. import code_nav
 from ..paths import MAX_SCAN_FILE_BYTES, safe_path
-from .records import DATA_LANGS, _DECL_IMPORT_LANGS, lang_family
+from .records import DATA_LANGS, _DECL_IMPORT_LANGS, _WORD_STR, _trigram_ids, lang_family
+from .resolve import JsConfig, PyModules, is_stdlib, rust_candidates
 from .store import ProjectIndex
-from .common import _path_filter, _ready, _scope, _with_note
+from .common import _is_test, _path_filter, _read_source, _ready, _scope, _with_note
+from .text import _text_candidates
 
 # Definitions whose bare name says who uses them.  Methods are called through a
 # receiver (`x.join(...)` is str.join as often as ProjectIndex.join) and module
@@ -23,31 +26,204 @@ _HEADER_EXTS = (".h", ".hh", ".hpp", ".hxx", ".h++", ".inc")
 
 
 def _import_graph(index: ProjectIndex) -> dict[int, dict[int, int]]:
-    """{file: {file it imports: line of the import}}, cached per index version.
-
-    Resolution is textual, in order: the imported names as modules (`from pkg
-    import mod`); the longest dotted prefix that names a file
-    (`com.acme.Money.of` -> Money.java, `shop::model::Item` -> model.rs); for
-    Java/Kotlin, a top-level declaration of the imported name (`import
-    shop.Product` -> the file declaring Product).  A C/C++ header include only
-    matches headers, never the same-stem .c/.cpp.  A same-named module elsewhere
-    can still show up."""
+    """{file: {file it imports: line of the import}}, cached per index version:
+    every import's resolved targets (_resolved_imports), plus, for a name
+    imported through a re-export (`from pkg import f` where pkg/__init__.py got
+    f from .impl), the file that defines it."""
     cached = index._graph_cache
     if cached is not None and cached[0] == index.version:
         return cached[1]
-    cands, fqns = _module_names(index)
+    resolved = _resolved_imports(index)
     out: dict[int, dict[int, int]] = defaultdict(dict)
-    for fid, _ in index._alive():
-        e = index.files[fid]
+    for fid, imps in resolved.items():
+        for imp, targets in imps:
+            for d in targets:
+                out[fid].setdefault(d, imp.line)
+            for n in _bound_names(imp):
+                for t in targets:
+                    d = _definer(index, resolved, t, n)
+                    if d is not None and d != fid:
+                        out[fid].setdefault(d, imp.line)
+    index._graph_cache = (index.version, out)
+    return out
+
+
+def _resolved_imports(index: ProjectIndex) -> dict[int, list]:
+    """{file: [(Import, {target file ids})]}, cached per index version.
+
+    In order: imports written relative to the file (Python dots, JS ./x, C
+    "x.h"); Python's own rules over the project's import roots (resolve.py),
+    where a standard-library module is never a project file; then a textual
+    match — the imported names as modules (`from pkg import mod`), the longest
+    dotted prefix that names a file (`com.acme.Money.of` -> Money.java,
+    `shop::model::Item` -> model.rs), for Java/Kotlin a top-level declaration of
+    the imported name.  A C/C++ header include only matches headers.  A Python
+    import no root explains (a folder put on sys.path at run time) keeps a
+    textual match only when it names exactly one file."""
+    cached = index._imports_cache
+    if cached is not None and cached[0] == index.version:
+        return cached[1]
+    cands, fqns = _module_names(index)
+    py = PyModules(e.path for _, e in index._alive() if e.lang == "python")
+    js = JsConfig([e.path for _, e in index._alive() if e.lang == "json"], lambda rel: _read(index, rel)) \
+        if any(e.lang in code_nav._JS_LANGS for _, e in index._alive()) else None
+    by_path = index._by_path
+    out: dict[int, list] = {}
+    for fid, e in index._alive():
+        rows = []
         for imp in e.imports:
-            targets = _relative_import(imp, e, index)
+            targets = _relative_import(imp, e, index, js)
+            if targets is None and e.lang == "python" and imp.module != "__future__":
+                hit = py.resolve(e.path, imp.module, imp.names)
+                if hit is not None:
+                    targets = {by_path[r] for r in hit}
+                elif is_stdlib(imp.module):
+                    targets = set()
+                else:
+                    t = _resolve_import(imp, e.lang, cands, fqns, index)
+                    targets = t if len(t) == 1 else set()
             if targets is None:
                 targets = _resolve_import(imp, e.lang, cands, fqns, index)
             targets.discard(fid)
-            for d in targets:
-                out[fid].setdefault(d, imp.line)
-    index._graph_cache = (index.version, out)
+            rows.append((imp, targets))
+        out[fid] = rows
+    index._imports_cache = (index.version, out)
     return out
+
+
+def _hierarchy(index: ProjectIndex) -> tuple[dict, dict]:
+    """({type name: its direct bases}, {type name: [(FileEntry, Symbol) that
+    extend or implement it]}), cached per index version.  A Rust `impl Trait
+    for T` counts as T implementing Trait."""
+    cached = index._hierarchy_cache
+    if cached is not None and cached[0] == index.version:
+        return cached[1]
+    bases: dict[str, set[str]] = defaultdict(set)
+    subs: dict[str, list] = defaultdict(list)
+    for _, e in index._alive():
+        if not e.lang or e.lang in DATA_LANGS:
+            continue
+        for s in e.symbols:
+            if s.bases and s.kind in code_nav.CONTAINER_KINDS:
+                bases[s.name].update(s.bases)
+                for b in s.bases:
+                    subs[b].append((e, s))
+    index._hierarchy_cache = (index.version, (bases, subs))
+    return bases, subs
+
+
+def supertypes(index: ProjectIndex, name: str, depth: int = 6) -> set[str]:
+    """Every type `name` extends or implements, transitively (lock held)."""
+    bases, _ = _hierarchy(index)
+    out, todo = set(), [(name, 0)]
+    while todo:
+        n, d = todo.pop()
+        for b in bases.get(n, ()):
+            if b not in out and b != name and d < depth:
+                out.add(b)
+                todo.append((b, d + 1))
+    return out
+
+
+def subtypes(index: ProjectIndex, name: str, family: str | None = None, depth: int = 6) -> list:
+    """[(FileEntry, Symbol)] of the types that extend or implement `name`,
+    transitively, nearest first; only `family`'s languages when given (lock held)."""
+    _, subs = _hierarchy(index)
+    out, seen, todo = [], {name}, [(name, 0)]
+    while todo:
+        n, d = todo.pop(0)
+        for e, s in subs.get(n, ()):
+            if family is not None and lang_family(e.lang) != family:
+                continue
+            key = (e.path, s.qualname, s.start)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((e, s))
+            if s.name not in seen and d < depth:
+                seen.add(s.name)
+                todo.append((s.name, d + 1))
+    return out
+
+
+_ABSTRACT_KINDS = {"interface", "trait"}
+_MAX_SUBTYPES = 8
+
+
+def _places(items: list[str]) -> str:
+    more = f" and {len(items) - _MAX_SUBTYPES} more" if len(items) > _MAX_SUBTYPES else ""
+    return ", ".join(items[:_MAX_SUBTYPES]) + more
+
+
+def subtype_line(index: ProjectIndex, name: str, kind: str, lang: str | None) -> str:
+    """'Implemented by: Circle (shapes.py:L3-9), ...' for an interface or
+    trait, 'Subclasses: ...' for a class; '' when nothing extends it."""
+    with index._lock:
+        subs = subtypes(index, name, lang_family(lang))
+    if not subs:
+        return ""
+    label = "Implemented by" if kind in _ABSTRACT_KINDS else "Subclasses"
+    return f"{label}: " + _places([f"{s.qualname} ({e.path}:L{s.start}-{s.end})" for e, s in subs])
+
+
+def override_line(index: ProjectIndex, cls: str, member: str, lang: str | None) -> str:
+    """'Overridden in: Circle.area (shapes.py:L5-6), ...' — or 'Implemented
+    in:' when `cls` is an interface or trait — for cls.member."""
+    with index._lock:
+        kinds = {s.kind for f, i in index._sym_by_name.get(cls.lower(), ())
+                 if index.files[f] is not None and (s := index.files[f].symbols[i]).name == cls}
+        subs = {s.name for _, s in subtypes(index, cls, lang_family(lang))}
+        found = []
+        for f, i in index._sym_by_name.get(member.lower(), ()):
+            e = index.files[f]
+            if e is None:
+                continue
+            s = e.symbols[i]
+            if s.name == member and "." in s.qualname and s.qualname.rsplit(".", 2)[-2] in subs:
+                found.append(f"{s.qualname} ({e.path}:L{s.start}-{s.end})")
+    if not found:
+        return ""
+    label = "Implemented in" if kinds & _ABSTRACT_KINDS else "Overridden in"
+    return f"{label}: " + _places(sorted(found))
+
+
+def _read(index: ProjectIndex, rel: str) -> str | None:
+    try:
+        return (index.root / rel).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _bound_names(imp) -> list[str]:
+    """The names an import binds from its module (`from m import a, b`, JS
+    `import {a} from`), not a module itself; aliases map back to the original."""
+    alias_of = {alias for _, alias in imp.aliases}
+    return [n for n in imp.names if n != "*" and n not in alias_of]
+
+
+def _star(imp) -> bool:
+    return "*" in imp.names or imp.text.startswith("export *")
+
+
+def _definer(index: ProjectIndex, resolved: dict, fid: int, name: str, depth: int = 3):
+    """The file that defines `name` as module `fid` exposes it: fid itself, or
+    — through `from .x import name` / `export {name} from './x'` / a star
+    re-export — the file it came from, up to three hops.  None if neither."""
+    e = index.files[fid]
+    if e is None:
+        return None
+    if any(s.depth == 0 and s.name == name for s in e.symbols):
+        return fid
+    if depth == 0 or e.lang not in ("python", *code_nav._JS_LANGS):
+        return None
+    for imp, targets in resolved.get(fid, ()):
+        orig = next((o for o, a in imp.aliases if a == name), name)
+        if orig in imp.names or _star(imp):
+            for t in targets:
+                d = _definer(index, resolved, t, orig, depth - 1)
+                if d is not None:
+                    return d
+    return None
 
 
 def _module_names(index: ProjectIndex) -> tuple[dict[str, set[int]], dict[str, set[int]]]:
@@ -81,12 +257,14 @@ _JS_EXTS = ("", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".
             "/index.js", "/index.ts", "/index.tsx", "/index.jsx")
 
 
-def _relative_import(imp, e: "FileEntry", index: ProjectIndex) -> set[int] | None:
-    """Targets of an import written relative to the importing file — Python
-    `from . import x` / `from ..pkg import y`, JS/TS `./x` / `../x`, C/C++
-    `#include "x.h"` — resolved against that file's directory.  None when the
-    import is not relative (or, for C, nothing sits next to the includer), so
-    the textual resolver runs instead."""
+def _relative_import(imp, e: "FileEntry", index: ProjectIndex, js: JsConfig | None = None
+                     ) -> set[int] | None:
+    """Targets of an import resolved from where the importing file is — Python
+    `from . import x` / `from ..pkg import y`, JS/TS `./x` / `../x` and what
+    tsconfig paths / baseUrl / a local package name make of a bare specifier,
+    Rust `crate::` / `self::` / `super::` / `mod foo;`, C/C++ `#include "x.h"`.
+    None when the import is none of these (or nothing matches), so the textual
+    resolver runs instead."""
     here = Path(e.path).parent
     by_path = index._by_path
 
@@ -114,14 +292,28 @@ def _relative_import(imp, e: "FileEntry", index: ProjectIndex) -> set[int] | Non
         for _ in range(dots - 1):
             base = base.parent
         rest = mod.lstrip(".").replace(".", "/")
-        if rest:
-            return find(f"{base}/{rest}.py", f"{base}/{rest}/__init__.py")
-        out = set()
-        for n in imp.names:                     # from . import utils, models
-            out |= find(f"{base}/{n}.py", f"{base}/{n}/__init__.py")
-        return out or find(f"{base}/__init__.py")
+        pkg = f"{base}/{rest}" if rest else f"{base}"
+        # `from .web import tls` / `from . import utils`: a name that is a
+        # module means that module; any other name means the package's file.
+        out, loose = set(), not imp.names
+        for n in imp.names:
+            sub = find(f"{pkg}/{n}.py", f"{pkg}/{n}/__init__.py") if n != "*" else set()
+            out |= sub
+            loose = loose or not sub
+        if loose or not out:
+            out |= find(f"{pkg}.py", f"{pkg}/__init__.py") if rest else find(f"{base}/__init__.py")
+        return out
     if e.lang in code_nav._JS_LANGS and mod.startswith((".", "/")):
         return find(*(f"{here}/{mod}{ext}" for ext in _JS_EXTS))
+    if e.lang in code_nav._JS_LANGS and js is not None:
+        for base in js.candidates(e.path, mod):
+            hit = find(*(f"{base}{ext}" for ext in _JS_EXTS))
+            if hit:
+                return hit
+        return None
+    if e.lang == "rust":
+        cands = rust_candidates(e.path, mod.replace(" ", ""), imp.names, by_path)
+        return None if cands is None else find(*cands)
     if e.lang in ("c", "cpp") and '"' in imp.text:
         hit = find(f"{here}/{mod}")
         return hit or None                      # else: an -I include path, matched textually
@@ -229,7 +421,91 @@ def _ranks(index: ProjectIndex):
     return result
 
 
-def index_map(path: str | None = None, budget: int = 1500, *, workdir: Path,
+# ── unused definitions ───────────────────────────────────────────────────────
+# Top-level definitions nothing else in the project names: not as code (the
+# occurrence index) and not as text in code or config (a registry, getattr,
+# __all__, a route table).  Methods are not checked: a call through an object
+# cannot be tied to one class.  Entry points and public API are left out.
+
+_ENTRY_NAMES = {"main", "setUp", "tearDown", "setUpClass", "tearDownClass", "setUpModule",
+                "tearDownModule", "conftest"}
+_UNUSED_KINDS = (code_nav.CALLABLE_KINDS | code_nav.CONTAINER_KINDS
+                 | {"constant", "variable", "macro", "typedef", "type"}) - {"impl"}
+_MAX_UNUSED_CHECKED = 400   # candidates whose text mentions are looked for
+
+
+def _unused(index: ProjectIndex, keep) -> list | None:
+    """[(FileEntry, Symbol, note)] of the top-level definitions under `keep`
+    that nothing else refers to; None without the occurrence index."""
+    with index._lock:
+        if not index.components["idents"]:
+            return None
+        langs = {e.path: e.lang for _, e in index._alive()}
+        cands = []
+        for fid, e in index._alive():
+            if not e.lang or e.lang in DATA_LANGS or not keep(e.path) or _is_test(e.path):
+                continue
+            for s in e.symbols:
+                n = s.name
+                if (s.depth != 0 or s.kind not in _UNUSED_KINDS or len(n) < 3 or n in _ENTRY_NAMES
+                        or (n.startswith("__") and n.endswith("__")) or n.startswith("test")
+                        or (e.lang in code_nav._JS_LANGS and s.signature.startswith("export"))):
+                    continue
+                occ = index._occurrences(n)
+                if any(f != fid for f in occ) or set(occ.get(fid, ())) - {s.name_line}:
+                    continue
+                cands.append((e, s))
+    out = []
+    for e, s in cands[:_MAX_UNUSED_CHECKED]:
+        word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(s.name)}(?![A-Za-z0-9_])")
+        files, _ = _text_candidates(index, _trigram_ids(_WORD_STR.findall(s.name.lower())),
+                                    lambda rel: langs.get(rel) is not None)
+        if any(_names_as_text(index, rel, word, s.name_line if rel == e.path else 0)
+               for rel, _syms in files):
+            continue
+        decorated = e.lang == "python" and s.start < s.name_line
+        out.append((e, s, "decorated — may be registered" if decorated else ""))
+    return out
+
+
+def _names_as_text(index: ProjectIndex, rel: str, word, skip_line: int) -> bool:
+    try:
+        text = _read_source(index.root / rel)
+    except OSError:
+        return False
+    return any(word.search(line) for ln, line in enumerate(text.split("\n"), 1) if ln != skip_line)
+
+
+def _unused_map(index: ProjectIndex, path: str | None, keep, budget: int) -> str:
+    found = _unused(index, keep)
+    scope = f" under {path}" if path else ""
+    if found is None:
+        return _with_note("(the identifier index was dropped for memory, so unused definitions "
+                          "cannot be listed — /index-max-mem raises the budget)", index)
+    if not found:
+        return _with_note(f"No unused top-level definitions{scope}: everything is referred to "
+                          f"somewhere in the project.", index)
+    by_file: dict[str, list] = defaultdict(list)
+    for e, s, note in found:
+        by_file[e.path].append((s, note))
+    out = [f"{len(found)} unused top-level definition{'s' if len(found) != 1 else ''}{scope} — "
+           f"nothing in the project names them, in code or as text in code and config:"]
+    size, limit = len(out[0]), budget * 4
+    for rel in sorted(by_file):
+        block = [rel] + [f"  {s.kind} {s.qualname} (L{s.start}-{s.end})" + (f" — {note}" if note else "")
+                         for s, note in by_file[rel]]
+        cost = sum(len(b) + 1 for b in block)
+        if size + cost > limit and len(out) > 1:
+            out.append(f"... more in {len(by_file) - (len(out) - 1)} files — pass path= or a larger budget")
+            break
+        out.extend(block)
+        size += cost
+    out.append("(Not checked: methods, dunder names, main, tests, JS exports. A dynamic use the "
+               "project spells nowhere — plugins, reflection, another repository — is not seen.)")
+    return _with_note("\n".join(out), index)
+
+
+def index_map(path: str | None = None, budget: int = 1500, show: str = "files", *, workdir: Path,
               index: ProjectIndex | None = None, cancel=None) -> str:
     if (err := _ready(index, cancel)):
         return err
@@ -237,10 +513,15 @@ def index_map(path: str | None = None, budget: int = 1500, *, workdir: Path,
         budget = max(300, min(8000, int(budget)))
     except (TypeError, ValueError):
         budget = 1500
+    show = (show or "files").strip().lower()
+    if show not in ("files", "unused"):
+        return f"ERROR: show must be 'files' or 'unused', got: {show}"
     path, err = _scope(path, workdir, index)
     if err:
         return err
     keep = _path_filter(path)
+    if show == "unused":
+        return _unused_map(index, path, keep, budget)
     with index._lock:
         rank, used_by, sym_use = _ranks(index)
         entries = [(fid, e) for fid, e in index._alive() if keep(e.path)]
@@ -364,7 +645,20 @@ def index_file(path: str, *, workdir: Path, index: ProjectIndex | None = None, c
                 for n, i in used:
                     s = e.symbols[i]
                     out.append(f"  {s.kind} {s.qualname} (L{s.start}) — {n} files")
+            if not _is_test(e.path):
+                tops = [s.name for s in e.symbols if s.depth == 0 and len(s.name) >= 3]
+                tests = {index.files[o].path for o, _w in importers} | (
+                    {index.files[f].path for n in tops for f in index._ref_files(n)}
+                    if index.components["idents"] else set())
+                tests = sorted(t for t in tests if _is_test(t) and t != e.path)
+                out.append("Tests that reference this file: " + (", ".join(tests[:10])
+                           + (f" and {len(tests) - 10} more" if len(tests) > 10 else "") if tests
+                           else "none"))
         example = e.symbols[0].qualname if e.symbols else None
+    if e.lang and e.lang not in DATA_LANGS and (unused := _unused(index, lambda rel: rel == e.path)):
+        out.append("Unused in the project: " + ", ".join(
+            s.qualname + (" (decorated — may be registered)" if note else "") for _e, s, note in unused[:15])
+            + (" ..." if len(unused) > 15 else ""))
     if example:
         out.append(f'(next: read_symbol("{e.path}", "{example}") reads one definition'
                    + (f"; index_callers(\"{example.rsplit('.', 1)[-1]}\") shows its users)"

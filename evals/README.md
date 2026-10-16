@@ -253,6 +253,53 @@ land at file level and are listed as variables (most of the 9.7% extra
 definitions); K&R-style definitions (`int f(a, b) int a; ...`, all of zlib) are
 not parsed by tree-sitter-c at all.
 
+### Resolution across a project (`--langs python-resolve`, 2026-10-16)
+
+The oracles above check what each file contains. This one checks what the index
+*makes of it* over a whole project: which file each import means, and which
+project function each call reaches — the layer index_file's "Imported by",
+index_map's ranks and module-qualified `index_callers` stand on. Ground truth is
+`ast` plus Python's own import rules (`evals/oracle/py_resolve.py`): import roots
+(the project root, `src/`, the folder above each top-level package, a script's
+own folder), relative levels, `from pkg import mod` meaning the module, and a
+call resolved through the calling scope's bindings. A call on an object the
+oracle cannot type (`obj.f()`, `self.json.dumps()`) is not scored.
+
+| | import edges | re-export → defining file | calls (200 functions) |
+|---|---|---|---|
+| this repo, before | 99.7% / 92.4% | 0% | 91.5% / 99.0% |
+| this repo, after | 100% / 99.7% | 100% | 100% / 100% |
+| CPython `Lib/` (1,867 files), before | 99.5% / 82.5% | 8.1% | 98.5% / 96.5% |
+| CPython `Lib/`, after | 100% / 98.2% | 100% | 98.5% / 99.7% |
+
+(recall / precision.)  What it found, all fixed:
+
+- **Same-named modules.** Imports were matched on text, so `import abc` linked
+  every `abc.py` in the tree. Python imports now resolve through the import
+  roots, a nested project (`evals/x/project/shop`) through its own root first, and
+  a standard-library name is never a project file.
+- **`from .web import tls`** linked only the package's `__init__.py`, not the
+  submodule `tls.py`.
+- **Re-exports.** `from pkg import f`, where `pkg/__init__.py` got `f` from
+  `.impl`, did not count for `impl.py`; neither did `code_index.index_search()`
+  through the package.
+- **Aliases.** `from .commands import handle as handle_command` — every call of
+  `handle_command` was invisible to `index_callers("handle")`.
+- **Imports inside a function** (`def k(): from m import f; f()`) made `f` a local.
+- **A bare call in a file that merely imports the module** (`import inspect`, then
+  its own `iscoroutine()`) was credited to `inspect.iscoroutine`.
+- **`harness.tools.read_text` became a method query** because a test class
+  `Tools` exists: a module that defines the name now wins over a same-named
+  class, and a class counts only if it defines the member (any letter case:
+  `harness.send` is still `Harness.send`).
+
+What remains on `Lib/`: a few hundred edges to modules the oracle cannot see
+loaded (`sys.path` set at run time, `_frozen_importlib_external` imported as
+`_bootstrap_external`), and calls the oracle cannot resolve either way.
+JavaScript/TypeScript (tsconfig paths, package names) and Rust (crate paths,
+`mod foo;`) resolution have no independent oracle here; they are covered by
+fixtures in `tests/test_code_index.py` (`ConfigResolution`).
+
 ## Command output (`/run-mode`, `run_output_bench.py`, `--suite shell`)
 
 `/run-mode new` (the default) saves `run_command` output to

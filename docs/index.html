@@ -1136,9 +1136,10 @@ FAILED (failures=2)
       <tr><th>Tool</th><th>Description</th></tr>
       <tr><td><code>index_search</code></td><td class="wrap">Find a definition by exact, partial or approximate name, or by words from its docstring. <code>config parse</code> finds <code>parse_config</code>, and <code>database</code> finds <code>db</code>.</td></tr>
       <tr><td><code>index_text</code></td><td class="wrap">Fast full-text search of every file. Each hit names the definition it's in.</td></tr>
-      <tr><td><code>index_callers</code></td><td class="wrap">Uses of a name, grouped by the enclosing function. <code>depth=2</code> or <code>3</code> also follows the callers of those functions.</td></tr>
-      <tr><td><code>index_map</code></td><td class="wrap">Files ranked by how much the rest of the code uses them (PageRank), fitted to a token budget</td></tr>
-      <tr><td><code>index_file</code></td><td class="wrap">One file in one call: outline, imports, importers and its most-used definitions</td></tr>
+      <tr><td><code>index_callers</code></td><td class="wrap">Uses of a name, grouped by the enclosing function, with the tests that reach it, its overrides or implementations, and the files that name it only as text. <code>depth=2</code> or <code>3</code> also follows the callers of those functions; <code>direction="callees"</code> lists what it calls instead, each call resolved to its definition.</td></tr>
+      <tr><td><code>index_map</code></td><td class="wrap">Files ranked by how much the rest of the code uses them (PageRank), fitted to a token budget. <code>show="unused"</code> lists definitions nothing in the project names.</td></tr>
+      <tr><td><code>index_file</code></td><td class="wrap">One file in one call: outline, imports, importers, its most-used definitions, the tests that reference it and its unused definitions</td></tr>
+      <tr><td><code>index_changes</code></td><td class="wrap">What the uncommitted changes (or those since a git revision) touch: each removed, moved, re-signatured, changed or added definition, who outside the change still uses it, and which tests cover it</td></tr>
       <tr><td><code>index_status</code></td><td class="wrap">Coverage per language, skipped files and memory against the budget</td></tr>
     </table></div>
 <div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/index                <span class="com"># memory vs budget, per part and per language</span>
@@ -1164,7 +1165,7 @@ FAILED (failures=2)
     <ol>
       <li><strong>List &amp; skip.</strong> It walks the tree, keeps what the filter lets in, and skips binary files (the first 4 KB are checked) and files over 2 MB, remembering them so they aren't read again. A first build parses in worker processes (<code>/index-workers</code>, default one less than the CPU count, at most 8), since tree-sitter holds Python's GIL.</li>
       <li><strong>Parse.</strong> The extension picks a tree-sitter grammar; HTML's inline <code>&lt;script&gt;</code> is parsed as JavaScript at its real line numbers. A file with syntax errors is still indexed but marked incomplete, so a missing hit there isn't taken as proof.</li>
-      <li><strong>Definitions &amp; imports.</strong> <code>code_outline</code>'s extractor records each definition's kind, qualified name (<code>Class.method</code>), line range, signature and first docstring line, plus the file's imports.</li>
+      <li><strong>Definitions &amp; imports.</strong> <code>code_outline</code>'s extractor records each definition's kind, qualified name (<code>Class.method</code>), line range, signature and first docstring line, what a class, interface, trait or object extends or implements, plus the file's imports and their aliases. Imports resolve by each language's own rules: Python's import roots, <code>tsconfig</code> paths and local package names, Rust's crate root, and re-exports through a package's <code>__init__.py</code> or a JS barrel.</li>
       <li><strong>Identifier occurrences.</strong> One query collects every identifier, stored as 8-byte (file, line) pairs. Whether a use is a call, definition, import or type is worked out only when asked, and only in the files that contain the name.</li>
       <li><strong>Text signature.</strong> Each file's set of three-letter sequences lets <code>index_text</code> open only the files that could contain the query.</li>
     </ol>

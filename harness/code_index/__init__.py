@@ -34,14 +34,19 @@ Modules, lowest first (each imports only modules above it):
   text     index_text, find_line_text
   graph    the import graph and file ranks: index_map, index_file
   search   index_search, index_find_files
-  callers  index_callers, uses_of, query_target
+  callers  index_callers (callers and callees), uses_of, query_target
+  changes  index_changes: a git diff's definitions and who still uses them
   status   index_status, /index's status text and memory breakdown
+
+Under them: resolve (import resolution by each language's rules) and defdiff
+(a file's definitions before and after a change).
 
 The query modules work on ProjectIndex's internals under its lock (same
 package); the rest of the harness uses the names exported here and
 ProjectIndex's public methods (rel, has_file, ...).
 """
 from .callers import index_callers, query_target, uses_of
+from .changes import index_changes
 from .graph import index_file, index_map
 from .persist import filter_path, load_filter, pickle_path, save_filter
 from .records import DATA_LANGS, lang_family
@@ -53,11 +58,11 @@ from .text import find_line_text, index_text
 
 __all__ = ["DATA_LANGS", "DEFAULT_MAX_BYTES", "DEFAULT_MAX_FILES", "MAX_WORKERS", "WAIT_TOOLS",
            "ProjectIndex", "auto_workers", "breakdown", "filter_path", "find_line_text",
-           "index_callers", "index_file", "index_find_files", "index_map", "index_search",
-           "index_status", "index_text", "lang_family", "load_filter", "parse_max_files",
-           "parse_max_mem", "parse_workers", "pickle_path", "query_target", "save_filter",
-           "skip_label", "status_text", "uses_of", "workers_label"]
+           "index_callers", "index_changes", "index_file", "index_find_files", "index_map",
+           "index_search", "index_status", "index_text", "lang_family", "load_filter",
+           "parse_max_files", "parse_max_mem", "parse_workers", "pickle_path", "query_target",
+           "save_filter", "skip_label", "status_text", "uses_of", "workers_label"]
 
 # Tools that must see an up-to-date index before they run.
 WAIT_TOOLS = {"index_search", "index_text", "index_callers", "index_map", "index_file",
-              "code_outline", "find_symbol"}
+              "index_changes", "code_outline", "find_symbol"}

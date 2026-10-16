@@ -13,10 +13,10 @@ from ..paths import safe_path, split_lines
 from .records import DATA_LANGS
 from .store import ProjectIndex
 from .common import (_HTML_KINDS, _MAX_APPROX_AFTER_EXACT, _MAX_FUZZY, _MAX_INLINE_HITS,
-                     _MAX_INLINE_LINES, _MAX_INLINE_RANK, _MAX_SEARCH, _VALUE_KINDS, _path_filter,
-                     _read_source, _ready, _scope, _with_note)
+                     _MAX_INLINE_LINES, _MAX_INLINE_RANK, _MAX_SEARCH, _VALUE_KINDS, _is_test,
+                     _path_filter, _read_source, _ready, _scope, _with_note)
 from .text import _text_mentions
-from .graph import _module_names
+from .graph import _module_names, subtype_line
 
 _CAMEL = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+")
 
@@ -134,15 +134,6 @@ def _overlap(qtoks: tuple[str, ...], stoks: tuple[str, ...]) -> float:
                                  for st in stoks):
             hit += 0.75
     return hit / len(qtoks)
-
-
-# Test code: `tests/`, `test_x.py`, `x_test.go`, `x.test.ts`, `x.spec.js`, ...
-_TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|specs?|fixtures?|testdata|evals?)/"
-                        r"|(^|/)test_[^/]*$|_test\.[^/.]+$|\.(test|spec)\.[^/.]+$")
-
-
-def _is_test(rel: str) -> bool:
-    return bool(_TEST_PATH.search(rel))
 
 
 _PATHLIKE = re.compile(r"[/\\]|\.[A-Za-z0-9]{1,6}$")
@@ -327,6 +318,9 @@ def _search(query: str, kind: str | None, path: str | None, lang: str | None, wo
     if len(hits) > len(shown_hits):
         trailer.append(f"... ({len(shown_hits)} of {len(hits)} — narrow with kind=, lang= or path=)")
     best = hits[0][5]
+    if -hits[0][0] >= 90 and best.kind in code_nav.CONTAINER_KINDS:
+        if (subs := subtype_line(index, best.name, best.kind, hits[0][6])):
+            trailer.append(subs)
     if -hits[0][0] < 90 or hits[0][6] in DATA_LANGS:
         # No exact definition, or only a markup/config one: the answer may be
         # prose (docs, comments), which index_search cannot see.

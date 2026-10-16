@@ -4,12 +4,22 @@ small lookups over the store."""
 from __future__ import annotations
 
 import fnmatch
+import re
 from pathlib import Path
 
 from .. import code_nav
 from ..paths import safe_path
 from .records import DATA_LANGS, _fmt_size
 from .store import ProjectIndex
+
+
+# Test code: `tests/`, `test_x.py`, `x_test.go`, `x.test.ts`, `x.spec.js`, ...
+_TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|specs?|fixtures?|testdata|evals?)/"
+                        r"|(^|/)test_[^/]*$|_test\.[^/.]+$|\.(test|spec)\.[^/.]+$")
+
+
+def _is_test(rel: str) -> bool:
+    return bool(_TEST_PATH.search(rel))
 
 
 def _path_filter(path: str | None):

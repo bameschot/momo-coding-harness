@@ -139,6 +139,8 @@ class ProjectIndex:
         self._rank_cache: tuple | None = None
         self._graph_cache: tuple | None = None
         self._modules_cache: tuple | None = None
+        self._imports_cache: tuple | None = None
+        self._hierarchy_cache: tuple | None = None
         self.last_error = ""
         self._thread: threading.Thread | None = None
 

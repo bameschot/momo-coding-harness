@@ -276,6 +276,10 @@ class Symbol:
     signature: str   # first source line of the definition, stripped
     depth: int
     doc: str = ""    # first line of its docstring / leading doc comment, for search
+    # Classes, interfaces, traits, objects: the types it extends or implements,
+    # by their own name (`a.Base[T]` -> Base).  A Rust `impl Trait for T` symbol
+    # carries Trait; the code index merges it into T's.
+    bases: tuple = ()
 
 
 @dataclass
@@ -284,6 +288,9 @@ class Import:
     module: str       # as written: "os.path", ".tools", "stdio.h", "std::collections", "./m"
     names: list[str]  # names pulled out of the module, [] for a whole-module import
     text: str         # the statement's first source line, stripped
+    # (imported name, local alias): `from m import f as g` -> (f, g); `import a.b
+    # as m` -> (a.b, m); JS `import * as ns` -> (*, ns).  Python and JS/TS only.
+    aliases: tuple = ()
 
 
 @dataclass
@@ -654,6 +661,9 @@ def _extract(root, lang: str, lines: list[str],
             if imports_out is not None and lang in _JS_LANGS and _is_require_call(child):
                 imports_out.append(child)     # require("./m") / import("./m")
                 continue
+            if imports_out is not None and child.type == "mod_item" \
+                    and child.child_by_field_name("body") is None:
+                imports_out.append(child)     # Rust `mod foo;`: loads foo.rs (and is a definition)
             if lang in _JS_LANGS and child.type == "variable_declarator":
                 v, n = child.child_by_field_name("value"), child.child_by_field_name("name")
                 if v is not None and v.type in ("object", "class") and n is not None \
@@ -726,6 +736,7 @@ def _extract(root, lang: str, lines: list[str],
                 signature=lines[sig_row].strip()[:_MAX_SIGNATURE] if sig_row < len(lines) else "",
                 depth=depth,
                 doc=_doc_line(child, span),
+                bases=_bases(child, lang) if kind in CONTAINER_KINDS else (),
             ))
             if kind == "typedef":
                 # `typedef struct node {...} node_t;` defines node beside node_t,
@@ -736,6 +747,71 @@ def _extract(root, lang: str, lines: list[str],
 
     walk(root, "", None, 0)
     return out
+
+
+# ── type hierarchy ───────────────────────────────────────────────────────────
+# Where each grammar lists what a class extends or implements (checked against
+# the installed grammars): Python superclasses, Java superclass /
+# super_interfaces / extends_interfaces, Kotlin delegation_specifiers
+# (superclass call, interfaces, `I by d`), TS/JS class_heritage /
+# extends_type_clause, C++ base_class_clause, Rust trait_bounds.
+
+_HERITAGE = {"superclass", "super_interfaces", "extends_interfaces", "delegation_specifiers",
+             "class_heritage", "extends_type_clause", "base_class_clause", "trait_bounds"}
+_TYPE_REFS = {"identifier", "type_identifier", "attribute", "member_expression",
+              "scoped_type_identifier", "qualified_identifier", "generic_type", "user_type",
+              "subscript", "scoped_identifier", "template_type", "nested_type_identifier"}
+_NOT_BASES = {"keyword_argument", "access_specifier", "value_arguments", "arguments",
+              "type_arguments", "type_argument_list", "template_argument_list", "lifetime",
+              "comment", "removed_trait_bound",
+              "call_expression"}      # JS `extends mixin(B)`: computed, not a type name
+
+
+def _bases(node, lang: str) -> tuple:
+    if node.type == "impl_item":
+        t = node.child_by_field_name("trait")
+        return (n,) if t is not None and (n := _type_ref_name(t)) else ()
+    if lang == "python":
+        sc = node.child_by_field_name("superclasses")
+        holders = [sc] if sc is not None else []
+    else:
+        holders = [c for c in node.children if c.type in _HERITAGE]
+    out: list[str] = []
+    for h in holders:
+        stack = list(reversed(h.named_children))
+        while stack:
+            n = stack.pop()
+            if n.type in _NOT_BASES:
+                continue
+            if n.type in _TYPE_REFS:
+                name = _type_ref_name(n)
+                if name and name not in out:
+                    out.append(name)
+            elif n.type == "explicit_delegation":     # Kotlin `I by impl`: the type, not impl
+                stack.extend(n.named_children[:1])
+            else:
+                stack.extend(reversed(n.named_children))
+    return tuple(out)
+
+
+def _type_ref_name(ref) -> str | None:
+    """`pkg.Base`, `Base<T>`, `ns::Base`, `Generic[T]` -> the type's own name:
+    the last identifier outside any type arguments."""
+    last, stack = None, [ref]
+    while stack:
+        n = stack.pop()
+        if n.type in _NOT_BASES or n.type == "subscript" and n is not ref:
+            continue
+        if n.type == "subscript":           # Generic[T]: only the value part names the type
+            v = n.child_by_field_name("value")
+            stack.extend([v] if v is not None else [])
+            continue
+        if n.child_count == 0:
+            if _is_ident(n.type):
+                last = _text(n)
+        else:
+            stack.extend(reversed(n.children))
+    return last
 
 
 # ── config / markup / script "definitions" ──────────────────────────────────
@@ -1090,6 +1166,26 @@ def _leaf_names(node) -> list[str]:
     return out
 
 
+def _import_aliases(node) -> tuple:
+    """The (imported name, local alias) pairs of a Python or JS/TS import."""
+    out = []
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type in ("aliased_import", "import_specifier", "export_specifier"):
+            name, alias = n.child_by_field_name("name"), n.child_by_field_name("alias")
+            if name is not None and alias is not None:
+                out.append((_text(name), _text(alias)))
+            continue
+        if n.type == "namespace_import":
+            ident = next((c for c in n.named_children if _is_ident(c.type)), None)
+            if ident is not None:
+                out.append(("*", _text(ident)))
+            continue
+        stack.extend(reversed(n.children))
+    return tuple(out)
+
+
 def _py_import(node) -> list[tuple[str, list[str]]]:
     if node.type == "import_statement":
         mods = []
@@ -1152,6 +1248,9 @@ def _build_imports(found: list, lang: str, lines: list[str]) -> list[Import]:
         pairs: list[tuple[str, list[str]]]
         if lang == "python":
             pairs = _py_import(node)
+        elif node.type == "mod_item":       # `mod foo;` is `self::foo`, a file next to this one
+            name = node.child_by_field_name("name")
+            pairs = [(f"self::{_text(name)}", [])] if name is not None else []
         elif lang == "rust":
             pairs = _rust_import(node)
         elif lang in ("c", "cpp"):
@@ -1191,10 +1290,15 @@ def _build_imports(found: list, lang: str, lines: list[str]) -> list[Import]:
             clause = next((c for c in node.children
                            if c.type in ("import_clause", "export_clause")), None)
             pairs = [(_strip_quotes(_text(src)), _leaf_names(clause) if clause is not None else [])]
+        aliases = _import_aliases(node) if lang == "python" or lang in _JS_LANGS else ()
         for module, names in pairs:
             if module or names:
+                # `import a as x, b as y` is one Import per module: each keeps its own alias.
+                mine = tuple(a for a in aliases if node.type != "import_statement"
+                             or lang != "python" or a[0] == module)
                 out.append(Import(line=row + 1, module=module, names=names,
-                                  text=lines[row].strip()[:_MAX_SIGNATURE] if row < len(lines) else ""))
+                                  text=lines[row].strip()[:_MAX_SIGNATURE] if row < len(lines) else "",
+                                  aliases=mine))
     return out
 
 
@@ -1482,6 +1586,39 @@ def references_in(parsed: _Parsed, bare: str, rows: set[int] | None = None
                     out[r] = got
         else:
             stack.extend(node.children)
+    return out
+
+
+def calls_in(parsed: _Parsed, first_row: int, last_row: int) -> list[tuple[str, int, str | None, str | None]]:
+    """[(called name, 1-based row, receiver, receiver's declared type)] for the
+    calls in rows first_row..last_row (0-based, inclusive) — what a function
+    body calls, in source order, the first call of each (name, receiver) only."""
+    if parsed.sub is not None:
+        return calls_in(parsed.sub, first_row, last_row)   # HTML: its inline scripts
+    kw = _KEYWORDS.get(parsed.lang, ())
+    out, seen = [], set()
+    stack = [parsed.tree.root_node]
+    found = []
+    while stack:
+        node = stack.pop()
+        if node.end_point[0] < first_row or node.start_point[0] > last_row:
+            continue
+        if node.child_count:
+            stack.extend(node.children)
+        elif _is_ident(node.type) and first_row <= node.start_point[0] <= last_row:
+            found.append(node)
+    for node in sorted(found, key=lambda n: n.start_byte):
+        p = node.parent
+        if p is None or (p.type not in _CALL_NODES and p.type not in _MEMBER_NODES):
+            continue
+        name = _text(node)
+        if name in kw:
+            continue
+        role, recv, rtype = _classify(node, parsed.lang, False)
+        if role != "call" or (name, recv) in seen:
+            continue
+        seen.add((name, recv))
+        out.append((name, node.start_point[0] + 1, recv, rtype))
     return out
 
 
@@ -1933,8 +2070,16 @@ def _imported_name(node, lang: str) -> str | None:
 
 
 def _imported_binding(node) -> bool:
-    """`const { a } = await import("./m")`: `a` is the imported function, not a
-    local of its own."""
+    """A name an import pulls out of a module is that definition, not a local
+    of its own: Python `from m import f` inside a function, JS `const { a } =
+    await import("./m")`.  (`import m` binds a module: that stays a local name.)"""
+    p = node.parent
+    for _ in range(3):
+        if p is None:
+            break
+        if p.type == "import_from_statement":
+            return True
+        p = p.parent
     d, depth = node.parent, 0
     while d is not None and depth < 4 and d.type != "variable_declarator":
         d, depth = d.parent, depth + 1

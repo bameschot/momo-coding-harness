@@ -864,6 +864,245 @@ class ReviewFixes1016(Base):
         self.assertGreater(self.idx.mem["trigrams"], 0)
 
 
+class Resolution(Base):
+    """Import and call resolution by Python's own rules (the python-resolve
+    oracle in evals/oracle/py_resolve.py found each of these on real code)."""
+
+    files = {
+        "pkg/__init__.py": "from .impl import fetch\n",
+        "pkg/impl.py": "def fetch():\n    return 1\n\n\ndef grab():\n    return 2\n",
+        "pkg/web/__init__.py": "",
+        "pkg/web/tls.py": "def tls_fn():\n    return 3\n",
+        "app.py": ("from pkg import fetch\nfrom pkg.web import tls as tls_mod\n\n\n"
+                   "def run():\n    tls_mod.tls_fn()\n    return fetch()\n"),
+        "user2.py": "import pkg\n\n\ndef go():\n    return pkg.fetch()\n",
+        "alias.py": "from pkg.impl import grab as gg\n\n\ndef go():\n    return gg()\n",
+        "shadow.py": "import pkg.impl\n\n\ndef grab():\n    return 0\n\n\ndef h():\n    return grab()\n",
+        "late.py": "def k():\n    from pkg.impl import grab\n    return grab()\n",
+        "tests/test_impl.py": "class Impl:\n    def test_x(self):\n        pass\n",
+        "fixtures/json.py": "def loads(s):\n    return s\n",
+        "uses_json.py": "import json\n\n\ndef p(s):\n    return json.loads(s)\n",
+        "sub/project/shop/__init__.py": "",
+        "sub/project/shop/cart.py": "def total():\n    return 1\n",
+        "sub/project/main.py": "from shop.cart import total\n",
+        "other/shop/__init__.py": "",
+        "other/shop/cart.py": "def total():\n    return 2\n",
+    }
+
+    def importers(self, rel):
+        with self.idx._lock:
+            graph = ci.graph._import_graph(self.idx)
+            fid = self.idx._by_path[rel]
+            return {self.idx.files[r].path for r, t in graph.items() if fid in t}
+
+    def test_reexport_reaches_the_defining_file(self):
+        self.assertEqual(self.importers("pkg/impl.py"), {"pkg/__init__.py", "app.py", "alias.py",
+                                                         "shadow.py", "late.py"})
+        out = self.callers("pkg.impl.fetch")
+        self.assertIn("app.py:L5-7", out)       # from pkg import fetch; fetch()
+        self.assertIn("user2.py:L4-5", out)     # import pkg; pkg.fetch()
+        self.assertIn("app.py:L5-7", self.callers("pkg.fetch"))     # asked by the package
+
+    def test_from_package_import_submodule(self):
+        self.assertIn("app.py", self.importers("pkg/web/tls.py"))
+        self.assertIn("app.py", self.callers("pkg.web.tls.tls_fn"))     # tls_mod.tls_fn()
+
+    def test_alias_and_function_local_import_are_uses(self):
+        out = self.callers("pkg.impl.grab")
+        self.assertIn("L5 (call) return gg()", out)
+        self.assertIn("L3 (call) return grab()", out)     # imported inside k()
+        self.assertNotIn("shadow.py", out)      # its own grab(), though it imports pkg.impl
+
+    def test_module_wins_over_a_same_named_test_class(self):
+        self.assertEqual(ci.query_target(self.idx, "pkg.impl.grab"), ("grab", "pkg.impl", None))
+
+    def test_nested_project_uses_its_own_root(self):
+        self.assertEqual(self.importers("sub/project/shop/cart.py"), {"sub/project/main.py"})
+        self.assertEqual(self.importers("other/shop/cart.py"), set())
+
+    def test_stdlib_module_is_never_a_project_file(self):
+        self.assertEqual(self.importers("fixtures/json.py"), set())
+
+
+class ConfigResolution(Base):
+    """Bare specifiers through tsconfig paths / package names, and Rust paths
+    from the crate root — each with a same-named decoy a textual match took."""
+
+    files = {
+        "tsconfig.base.json": '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["web/src/*"] } } }\n',
+        "tsconfig.json": '{\n  // the app config\n  "extends": "./tsconfig.base",\n  "include": ["web"],\n}\n',
+        "web/src/util/fmt.ts": "export function fmtMoney(n: number) { return `${n}`; }\n",
+        "web/src/app.ts": 'import { fmtMoney } from "@/util/fmt";\nimport { Button } from "@acme/ui";\n'
+                          "export const shown = fmtMoney(1) + Button();\n",
+        "legacy/util/fmt.ts": "export function fmtMoney(n: number) { return 'old'; }\n",
+        "packages/ui/package.json": '{ "name": "@acme/ui", "main": "./src/index.ts" }\n',
+        "packages/ui/src/index.ts": "export function Button() { return 'b'; }\n",
+        "crate/Cargo.toml": '[package]\nname = "shop"\n',
+        "crate/src/lib.rs": "pub mod model;\npub mod util;\n",
+        "crate/src/model.rs": "use crate::util::round_ten;\npub fn price() -> i64 { round_ten(1) }\n",
+        "crate/src/util.rs": "pub fn round_ten(n: i64) -> i64 { n }\n",
+        "other/util.rs": "pub fn round_ten(n: i64) -> i64 { 0 }\n",
+    }
+
+    def importers(self, rel):
+        with self.idx._lock:
+            graph = ci.graph._import_graph(self.idx)
+            fid = self.idx._by_path[rel]
+            return {self.idx.files[r].path for r, t in graph.items() if fid in t}
+
+    def test_tsconfig_paths_through_extends(self):
+        self.assertEqual(self.importers("web/src/util/fmt.ts"), {"web/src/app.ts"})
+        self.assertEqual(self.importers("legacy/util/fmt.ts"), set())
+
+    def test_workspace_package_name(self):
+        self.assertEqual(self.importers("packages/ui/src/index.ts"), {"web/src/app.ts"})
+
+    def test_rust_crate_paths_and_mod_declarations(self):
+        self.assertEqual(self.importers("crate/src/util.rs"), {"crate/src/lib.rs", "crate/src/model.rs"})
+        self.assertEqual(self.importers("crate/src/model.rs"), {"crate/src/lib.rs"})
+        self.assertEqual(self.importers("other/util.rs"), set())
+
+
+class Hierarchy(Base):
+    """Bases from the syntax: classes, interfaces, traits, objects, `I by d`."""
+
+    files = {
+        "kt/Shapes.kt": ("sealed interface Shape {\n    fun area(): Double\n}\n"
+                         "interface Named {\n    fun label(): String\n}\n"
+                         "class Circle(val r: Double) : Shape, Named by Labels() {\n"
+                         "    override fun area() = r * r\n}\n"
+                         "object Unit : Shape {\n    override fun area() = 1.0\n}\n"
+                         "enum class Kind : Named {\n    A;\n    override fun label() = \"a\"\n}\n"),
+        "java/Base.java": ("interface Pricer extends Comparable<Pricer> { int price(); }\n"
+                           "interface Discounted extends Pricer {}\n"
+                           "class Flat implements Discounted { public int price() { return 1; } }\n"),
+        "ts/model.ts": ("export interface Entity { id(): string }\n"
+                        "export interface Order extends Entity { total(): number }\n"
+                        "export class WebOrder implements Order { id() { return 'w'; } total() { return 2; } }\n"),
+        "rs/lib.rs": ("pub trait Shape: Describe { fn area(&self) -> f64; }\n"
+                      "pub trait Describe { fn describe(&self) -> String; }\n"
+                      "pub struct Square;\n"
+                      "impl Shape for Square { fn area(&self) -> f64 { 1.0 } }\n"),
+        "py/animals.py": ("class Animal:\n    def speak(self):\n        return ''\n\n\n"
+                          "class Dog(Animal):\n    def speak(self):\n        return 'woof'\n"),
+    }
+
+    def test_bases_per_language(self):
+        with self.idx._lock:
+            bases = ci.graph._hierarchy(self.idx)[0]
+        self.assertEqual(bases["Circle"], {"Shape", "Named"})       # Named by Labels(): Named only
+        self.assertEqual(bases["Unit"], {"Shape"})                  # object
+        self.assertEqual(bases["Kind"], {"Named"})                  # enum class
+        self.assertEqual(bases["Discounted"], {"Pricer"})           # interface extends interface
+        self.assertEqual(bases["Order"], {"Entity"})                # TS interface extends
+        self.assertEqual(bases["Shape"], {"Describe"})              # Rust supertrait (and Kotlin: none)
+        self.assertEqual(bases["Square"], {"Shape"})                # impl Shape for Square
+        self.assertEqual(bases["Dog"], {"Animal"})
+
+    def test_search_lists_implementers(self):
+        out = self.search("Pricer", lang="java")
+        self.assertIn("Implemented by: Discounted", out)
+        self.assertIn("Flat (java/Base.java", out)                  # transitively
+        self.assertIn("Subclasses: Dog (py/animals.py", self.search("Animal"))
+
+    def test_callers_list_overrides_and_implementations(self):
+        self.assertIn("Overridden in: Dog.speak (py/animals.py:L7-8)", self.callers("Animal.speak"))
+        out = self.callers("Entity.id")
+        self.assertIn("Implemented in: WebOrder.id", out)
+        out = self.callers("Shape.area")
+        self.assertIn("Circle.area (kt/Shapes.kt", out)            # Kotlin and Rust both define Shape
+        self.assertIn("Square.area (rs/lib.rs", out)
+
+
+class TextMentions(Base):
+    """index_callers names the files that spell a name outside the syntax."""
+
+    files = {
+        "jobs.py": "def fetch_rows():\n    return []\n",
+        "registry.py": 'HANDLERS = {"rows": "fetch_rows"}\n\n\ndef run(name):\n    return getattr(jobs, HANDLERS[name])()\n',
+        "routes.yaml": "get:\n  handler: fetch_rows\n",
+        "other.py": "class Store:\n    def fetch_rows(self):\n        return 1\n",
+        "notes.txt": "fetch_rows_later is another thing\n",
+    }
+
+    def test_strings_and_config_but_not_code_or_substrings(self):
+        out = self.callers("jobs.fetch_rows")
+        self.assertIn("Also named as text in:", out)
+        line = next(l for l in out.splitlines() if l.startswith("Also named as text in:"))
+        self.assertIn("registry.py ×1", line)
+        self.assertIn("routes.yaml ×1", line)
+        self.assertNotIn("other.py", line)      # an identifier there: another definition
+        self.assertNotIn("notes.txt", line)     # fetch_rows_later is not the word
+
+
+class Capabilities(Base):
+    """index_callers direction='callees' and its tests line, index_map
+    show='unused', and index_changes over a git diff."""
+
+    files = {
+        "shop/__init__.py": "",
+        "shop/money.py": "def round_cents(x):\n    return round(x, 2)\n\n\ndef unused_helper():\n    return 0\n",
+        "shop/cart.py": ("from shop import money as m\n\n\nclass Base:\n    def check(self):\n        return True\n\n\n"
+                         "class Cart(Base):\n    def total(self, items):\n        self.check()\n"
+                         "        log = Logger()\n        log.note('t')\n"
+                         "        known = {}\n        known.update()\n"
+                         "        return m.round_cents(sum(items))\n\n\n"
+                         "class Logger:\n    def note(self, s):\n        return s\n"),
+        "app.py": "from shop.cart import Cart\n\n\ndef checkout(items):\n    return Cart().total(items)\n",
+        "shop/tools.py": "def multi(a,\n          b):\n    return a\n\n\ndef relocate():\n    return 1\n",
+        "tests/test_cart.py": ("from shop.cart import Cart\nfrom app import checkout\n\n\n"
+                               "def test_total():\n    assert Cart().total([1]) == 1\n\n\n"
+                               "def test_checkout():\n    assert checkout([1]) == 1\n"),
+    }
+
+    def test_callees_resolve_self_typed_and_module_receivers(self):
+        out = self.callers("Cart.total", direction="callees")
+        self.assertIn("self.check() → shop/cart.py:L5-6 method Base.check", out)      # inherited
+        self.assertIn("log.note() → shop/cart.py:L20-21 method Logger.note", out)     # log = Logger()
+        self.assertIn("m.round_cents() → shop/money.py:L1-2 function round_cents", out)  # module alias
+        self.assertIn("known.update", out.split("Not in the project")[1])            # a dict: unresolved
+        self.assertIn("ERROR", self.callers("Cart.total", direction="up"))
+
+    def test_tested_in_direct_and_through_callers(self):
+        out = self.callers("Cart.total", depth=2)
+        self.assertIn("Tested in: tests/test_cart.py (1 use)", out)
+        self.assertIn("Tested in: no test file uses it directly.", self.callers("shop.money.round_cents"))
+        out = ci.index_file("app.py", workdir=self.root, index=self.idx)
+        self.assertIn("Tests that reference this file: tests/test_cart.py", out)
+
+    def test_unused(self):
+        out = ci.index_map(show="unused", workdir=self.root, index=self.idx)
+        self.assertIn("function unused_helper (L5-6)", out)
+        self.assertNotIn("round_cents (L", out)
+        self.assertNotIn("test_total", out)             # tests are entry points
+        self.assertIn("Unused in the project: unused_helper",
+                      ci.index_file("shop/money.py", workdir=self.root, index=self.idx))
+
+    def test_index_changes_against_head(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not installed")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t"}
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "base"]):
+            subprocess.run(["git", "-C", str(self.root), *cmd], check=True, env=env, capture_output=True)
+        _write(self.root, "shop/money.py", "def round_cents(x, places=2):\n    return round(x, places)\n")
+        _write(self.root, "shop/cart.py", (self.root / "shop/cart.py").read_text().replace(
+            "        return True\n", "        return bool(1)\n"))
+        _write(self.root, "shop/new_module.py", "def fresh():\n    return 1\n\n\ndef relocate():\n    return 2\n")
+        _write(self.root, "shop/tools.py", "def multi(a,\n          b,\n          c=0):\n    return a\n")
+        out = ci.index_changes(workdir=self.root, index=self.idx)
+        self.assertIn("signature changed: shop/tools.py:L1-4 function multi (a, b) → (a, b, c=0)", out)
+        self.assertIn("moved: shop/tools.py:L6-7 function relocate → now shop/new_module.py:L5-6", out)
+        self.assertIn("removed: shop/money.py:L5-6 function unused_helper", out)
+        self.assertIn("signature changed: shop/money.py:L1-2 function round_cents (x) → (x, places=2)", out)
+        self.assertIn("still used — update these in 1 place outside the change: shop/cart.py:L16", out)
+        self.assertIn("changed: shop/cart.py:L5-6 method Base.check", out)
+        self.assertIn("New files, not committed: shop/new_module.py", out)
+        self.assertIn("No changes since HEAD under app.py", ci.index_changes(path="app.py", workdir=self.root,
+                                                                             index=self.idx))
+        self.assertTrue(ci.index_changes(base="--output=x", workdir=self.root, index=self.idx).startswith("ERROR"))
+
+
 class IndexRouting(Base):
     """/index-route (on by default): plain-text grep_files and file-name
     find_files are answered from the index; the rest still goes to the disk."""

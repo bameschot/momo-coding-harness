@@ -237,6 +237,32 @@ INDEX_TASKS: list[Task] = [
         must=("code_index/store.py", "controller.py", "harness.py", "server.py"),
         max_calls=1,
     ),
+    Task(
+        id="callees",
+        prompt="Which functions in harness/code_index/changes.py does index_changes call to turn "
+               "a git diff into the definitions it touched?",
+        ideal=frozenset({"index_callers", "read_symbol"}),
+        must=("_parse_diff", "_touched"),
+        note="index_callers(direction='callees') resolves each call; read_symbol + reading works too.",
+        max_calls=2,
+    ),
+    Task(
+        id="unused-constant",
+        prompt="Is there a module-level constant in harness/net.py that nothing in the project "
+               "uses? Name it.",
+        ideal=frozenset({"index_map", "index_file"}),
+        must=("_HARD_MAX_BYTES",),
+        note="index_map(show='unused', path='harness/net.py') or index_file's 'Unused' line.",
+        max_calls=2,
+    ),
+    Task(
+        id="tests-for",
+        prompt="Which test file exercises split_lines from harness/paths.py?",
+        ideal=frozenset({"index_callers", "index_file", "index_text", "grep_files"}),
+        must=("test_code_index.py",),
+        note="index_callers' 'Tested in:' line answers it in one call.",
+        max_calls=2,
+    ),
 ]
 
 
