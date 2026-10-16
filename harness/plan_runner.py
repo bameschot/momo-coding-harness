@@ -8,7 +8,7 @@ import re
 
 from . import tdd as tdd_mod
 from . import tools as tools_mod
-from .events import ChatEvent, DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
+from .events import ChatEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
 from .plan import (ACCEPTANCE_TAG, PLAN_FILENAME, Plan, Step, delete_plan_file, read_plan_file,
                    str_list, write_plan_file)
 from .tools import INDEX_TOOL_NAMES
@@ -482,12 +482,13 @@ class PlanRunnerMixin:
     def execute_plan_threaded(self):
         """Run (or resume) plan execution on a worker thread for /plan run|resume."""
         self._cancel.clear()
+        self._start_turn_stats()
         try:
             self._execute_plan()
         finally:
             self.emit_status()
             self._autosave()
-            self.event_queue.put(DoneEvent())
+            self.event_queue.put(self._done_event())
 
     def _plan_progress(self) -> str:
         # A running plan shows in every mode (it runs in coding mode); a draft only in plan mode.

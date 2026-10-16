@@ -1,13 +1,13 @@
 // The workspace drawer: a lazily loaded file tree, and a preview with
 // highlighting (Markdown rendered) from which a file is attached or its path inserted.
 
-import { $, copyText, el, flash, formatSize, icon, loadJSON, saveJSON } from "./dom.js";
+import { $, copyText, el, flash, formatSize, icon, loadJSON, makeResizable, saveJSON, toast } from "./dom.js";
 import { esc, highlight, langFromPath } from "./highlight.js";
 import { addCopyButtons, renderMarkdown } from "./markdown.js";
 
-// What app.js supplies: a one-line note, attach a file ({name, text, chars,
-// pages, truncated, kind}), and insert a path into the input box.
-const hooks = { note: () => {}, attach: () => {}, insertPath: () => {} };
+// What app.js supplies: attach a file ({name, text, chars, pages, truncated,
+// kind}), insert a path into the input box, and open the (left) drawer slot.
+const hooks = { attach: () => {}, insertPath: () => {}, open: () => true };
 
 async function loadDir(path, container) {
   container.replaceChildren(el("div", "muted small", "Loading…"));
@@ -49,13 +49,14 @@ async function loadDir(path, container) {
 
 const PREVIEW_MAX_CHARS = 200_000;  // also highlight.js's limit: beyond it, text is shown plain
 let previewFile = null;
+// Show rel in the preview; false (and a note) when it can't be read.
 async function openPreview(rel) {
   let f;
   try {
     const r = await fetch(`api/file?path=${encodeURIComponent(rel)}`);
     f = await r.json();
     if (!r.ok) throw new Error(f.error);
-  } catch (e) { return hooks.note(e.message); }
+  } catch (e) { toast(e.message, "error"); return false; }
   previewFile = f;
   $("#files-tree").hidden = true;
   $("#file-preview").hidden = false;
@@ -80,8 +81,10 @@ async function openPreview(rel) {
     addCopyButtons(md);
   }
   setPreviewRendered(isMd && loadJSON("momo.previewRendered", true));
+  return true;
 }
 function renderPreviewCode(f, rel, text) {
+  $(".preview-scroll .line-mark")?.remove();
   const n = text.split("\n").length;
   $(".preview-gutter").textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n");
   $(".preview-code code").innerHTML = f.kind === "pdf" ? esc(text) : highlight(text, langFromPath(rel) || "none");
@@ -98,6 +101,27 @@ function setPreviewRendered(on) {
   b.title = on ? "Show plain text" : "Show rendered Markdown";
 }
 
+// Open rel from a path shown in the conversation (`src/app.py`, `app.py:120`):
+// the drawer, the file, and — with a line — the plain text scrolled to it.
+export async function showFile(rel, line = 0) {
+  if (!hooks.open()) hooks.open();       // the slot toggles: make sure it ends open
+  if (!$("#files-tree").childElementCount) loadDir("", $("#files-tree"));  // for "back"
+  if (!(await openPreview(rel))) return;
+  if (!line) return;
+  setPreviewRendered(false);
+  if (!$("#preview-all").hidden && line > $(".preview-gutter").textContent.split("\n").length) {
+    $("#preview-all").click();           // the line is past the shown start
+  }
+  const scroll = $(".preview-scroll"), code = $(".preview-code");
+  const lh = parseFloat(getComputedStyle(code).lineHeight) || 18;
+  const top = parseFloat(getComputedStyle(code).paddingTop) + (line - 1) * lh;
+  const mark = el("div", "line-mark");
+  mark.style.top = `${top}px`;
+  mark.style.height = `${lh}px`;
+  scroll.append(mark);
+  scroll.scrollTop = Math.max(0, top - scroll.clientHeight / 3);
+}
+
 // The drawer was opened: the tree from the top.
 export function openFiles() {
   $("#file-preview").hidden = true;
@@ -108,27 +132,7 @@ export function openFiles() {
 export function initFiles(h) {
   Object.assign(hooks, h);
   $("#files-hidden").onchange = () => loadDir("", $("#files-tree"));
-  // Drag the right edge to widen the workspace drawer (CSS clamps to 420px min).
-  const drawer = $("#files-drawer"), grip = drawer.querySelector(".drawer-resize");
-  const setW = (w) => drawer.style.setProperty("--files-w", `${Math.round(w)}px`);
-  const saved = loadJSON("momo.filesWidth", 0);
-  if (saved) setW(saved);
-  grip.onpointerdown = (e) => {
-    e.preventDefault();
-    grip.setPointerCapture(e.pointerId);
-    grip.classList.add("dragging");
-    grip.onpointermove = (m) => setW(Math.max(420, Math.min(m.clientX, innerWidth)));
-    grip.onpointerup = () => {
-      grip.onpointermove = grip.onpointerup = null;
-      grip.classList.remove("dragging");
-      const w = drawer.getBoundingClientRect().width;
-      saveJSON("momo.filesWidth", Math.round(w));
-    };
-  };
-  grip.ondblclick = () => {
-    drawer.style.removeProperty("--files-w");
-    saveJSON("momo.filesWidth", undefined);
-  };
+  makeResizable($("#files-drawer"), "right", "momo.filesWidth", 420);
   $("#preview-render").onclick = () => {
     const on = $(".preview-md").hidden;
     setPreviewRendered(on);

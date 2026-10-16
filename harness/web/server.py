@@ -74,7 +74,7 @@ _STATIC_FILES = {
     "/app.css":  ("app.css",    "text/css; charset=utf-8"),
     **{f"/{name}": (name, "text/javascript; charset=utf-8")
        for name in ("app.js", "dom.js", "markdown.js", "highlight.js", "notify.js",
-                    "companion.js", "sessions.js", "files.js")},
+                    "companion.js", "sessions.js", "files.js", "chips.js", "palette.js")},
 }
 _MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text

@@ -324,6 +324,7 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         self._index_saved_version = -1
         self._schema_cache: tuple = (None, 0)
         self._turn_user: dict | None = None  # the user message the running turn answers
+        self._start_turn_stats()             # what the running turn cost (DoneEvent)
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
         ]
@@ -1402,10 +1403,20 @@ class Harness(CompactionMixin, PlanRunnerMixin):
 
     # ── send ──────────────────────────────────────────────────────────────────
 
+    def _start_turn_stats(self) -> None:
+        self._turn_stats = {"t0": time.monotonic(), "prompt": 0, "eval": 0, "calls": 0}
+
+    def _done_event(self) -> DoneEvent:
+        """The DoneEvent ending a model turn, with what the turn cost."""
+        st = self._turn_stats
+        return DoneEvent(secs=round(time.monotonic() - st["t0"], 1), prompt_tokens=st["prompt"],
+                         eval_tokens=st["eval"], tool_calls=st["calls"])
+
     def send(self, text: str):
         """Called from the harness worker thread."""
         self._cancel.clear()
         self._turn_count += 1
+        self._start_turn_stats()
         try:
             if self._plan_executing():
                 # A paused plan: the user's message is extra context for the step
@@ -1427,7 +1438,7 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         finally:
             self.emit_status()
             self._autosave()
-            self.event_queue.put(DoneEvent())
+            self.event_queue.put(self._done_event())
 
     def _append_user(self, text: str):
         """Append a user turn, keeping the history well-formed: bridge a tool→user
@@ -1529,6 +1540,8 @@ class Harness(CompactionMixin, PlanRunnerMixin):
             prompt_tokens = response.prompt_tokens
             eval_tokens = response.eval_tokens
             done_reason = response.done_reason  # "stop" | "length" | None
+            self._turn_stats["prompt"] = prompt_tokens or self._turn_stats["prompt"]
+            self._turn_stats["eval"] += eval_tokens or 0
 
             if prompt_tokens is not None:
                 self._token_estimate = (prompt_tokens or 0) + (eval_tokens or 0)
@@ -1687,6 +1700,7 @@ class Harness(CompactionMixin, PlanRunnerMixin):
                 ],
             })
 
+            self._turn_stats["calls"] += len(_calls)
             for name, args in _calls:
                 # complete_step ends the step: calls after it in the same batch are not
                 # run, but each still gets a result so the call/result pairing holds.

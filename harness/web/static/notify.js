@@ -1,7 +1,7 @@
 // Telling you when momo needs you: a synthesised mew (any time) and a desktop
 // notification (only while the window is away), plus the "(•)" unseen marker.
 
-import { $, loadJSON, saveJSON } from "./dom.js";
+import { $, loadJSON, saveJSON, toast } from "./dom.js";
 
 // "Away" is hidden *or* unfocused: `document.hidden` alone misses the common
 // layout of the browser sitting open next to the editor — visible, but not the
@@ -9,9 +9,9 @@ import { $, loadJSON, saveJSON } from "./dom.js";
 let focused = document.hasFocus();
 export const away = () => document.hidden || !focused;
 
-// What app.js supplies: a one-line note in the composer, whether events are live
-// (not the backlog replay after a reconnect), and a hook for the unseen marker.
-const hooks = { note: () => {}, isLive: () => true, onUnseenChange: () => {} };
+// What app.js supplies: whether events are live (not the backlog replay after a
+// reconnect), and a hook for the unseen marker.
+const hooks = { isLive: () => true, onUnseenChange: () => {} };
 export const notify = { unseen: false };   // new activity while the window was away
 
 function setUnseen(on) {
@@ -146,7 +146,7 @@ export function signal(kind, title, body) {
     // failing silently here is indistinguishable from the feature being broken.
     if (!notifyThrew) {
       notifyThrew = true;
-      hooks.note("This browser needs a service worker for notifications — the sound still works.");
+      toast("This browser needs a service worker for notifications — the sound still works.");
     }
   }
 }
@@ -180,16 +180,16 @@ export function initNotify(h) {
       // absent there — say so instead of blaming the browser's settings.
       if (!isSecureContext) {
         e.target.checked = false;
-        return hooks.note("Notifications need a secure origin — open http://localhost or tunnel over SSH.");
+        return toast("Notifications need a secure origin — open http://localhost or tunnel over SSH.");
       }
       if (!("Notification" in window)) {
         e.target.checked = false;
-        return hooks.note("This browser has no notifications.");
+        return toast("This browser has no notifications.");
       }
       const perm = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
       desktopOn = perm === "granted";
       e.target.checked = desktopOn;
-      if (!desktopOn) hooks.note("Notifications are blocked for this page in the browser settings.");
+      if (!desktopOn) toast("Notifications are blocked for this page in the browser settings.");
     } else desktopOn = false;
     notifyPrefs.desktop = desktopOn;
     saveNotifyPrefs();

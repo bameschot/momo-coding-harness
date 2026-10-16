@@ -42,7 +42,7 @@
   <div class="status-row">
     <button id="sessions-btn" class="icon-btn" type="button" title="Sessions" aria-label="Sessions"><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg></button>
     <button id="files-btn" class="icon-btn" type="button" title="Workspace files" aria-label="Workspace files"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></button>
-    <span class="brand"><span id="conn-dot" class="dot" title="Disconnected"></span>momo</span>
+    <span class="brand"><span id="conn-dot" class="dot" title="Disconnected"></span><span class="brand-name">momo</span></span>
     <label class="mode-pick">
       <span class="sr-only">Mode</span>
       <select id="mode" title="Mode (Shift+Tab cycles)"></select>
@@ -72,58 +72,32 @@
       <span id="ctx-pct" class="mono">0%</span>
     </button>
     <button id="think-badge" class="chip button" type="button" title="Thinking level (/think)" aria-haspopup="dialog" aria-expanded="false">THINK: on</button>
-    <button id="tools-badge" class="chip button warn" type="button" title="Tools are disabled — click to enable" hidden>TOOLS: off</button>
-    <button id="run-badge" class="chip button" type="button" title="Toggle run_command confirmation (Shift+P)">RUN: auto</button>
-    <button id="net-badge" class="chip button" type="button" title="Internet access is off — click to turn it on">NET: off</button>
-    <button id="index-badge" class="chip button" type="button" title="Code index is off — click to turn it on" aria-haspopup="dialog" aria-expanded="false">INDEX: off</button>
+    <button id="tools-badge" class="chip button warn" type="button" title="Tool calls are off" aria-haspopup="dialog" aria-expanded="false" hidden>TOOLS: off</button>
+    <button id="run-badge" class="chip button" type="button" title="Running commands" aria-haspopup="dialog" aria-expanded="false">RUN: auto</button>
+    <button id="net-badge" class="chip button" type="button" title="Internet access" aria-haspopup="dialog" aria-expanded="false">NET: off</button>
+    <button id="index-badge" class="chip button" type="button" title="Code index" aria-haspopup="dialog" aria-expanded="false">INDEX: off</button>
   </div>
   <div id="view-menu" class="menu" role="dialog" aria-label="View options" hidden>
     <div class="menu-title">View</div>
     <label><input type="checkbox" data-view="tools"> Tool output <kbd>/tool-output</kbd></label>
+    <label><input type="checkbox" data-view="group"> Group a turn's tool calls</label>
     <label><input type="checkbox" data-view="think"> Thinking <kbd>Shift+T</kbd></label>
     <label><input type="checkbox" data-view="md"> Markdown <kbd>Shift+M</kbd></label>
     <label><input type="checkbox" data-view="diff"> Edit diffs <kbd>Shift+D</kbd></label>
     <label><input type="checkbox" data-view="companion"> Companion <kbd>Shift+Q</kbd></label>
     <div class="menu-sub">Diff style</div>
-    <div class="seg" role="radiogroup">
+    <div class="seg" role="radiogroup" aria-label="Diff style">
       <label><input type="radio" name="diff-style" value="compact"> compact</label>
       <label><input type="radio" name="diff-style" value="git"> git</label>
     </div>
-    <div class="menu-sub">Companion</div>
-    <label><input type="checkbox" id="idle-recap" data-cmd="/companion-idle-recap"> Recap when I'm idle <kbd>/companion-idle-recap</kbd></label>
-    <label class="menu-num">Idle for <input type="number" id="idle-recap-secs" min="10" step="10" value="90"> seconds</label>
-    <div class="menu-sub">Context</div>
-    <label><input type="checkbox" id="guides" data-cmd="/guides"> Load AGENTS.md / CLAUDE.md <kbd>/guides</kbd></label>
-    <label><input type="checkbox" id="run-mode" data-cmd="/run-mode"> Save command output, return a view <kbd>/run-mode</kbd></label>
-    <label class="menu-num">Command view <input type="text" id="run-output-limit" data-cmd="/run-output-limit" size="7" placeholder="5000"> chars</label>
-    <label class="menu-num" title="Most tokens one model reply may take, reasoning included — stops a model stuck in a loop. 'off' = no cap.">Reply cap <input type="text" id="max-output-tokens" data-cmd="/max-output-tokens" size="7" placeholder="25000"> tokens</label>
-    <div class="menu-sub">Network</div>
-    <label><input type="checkbox" id="net-on"> Internet access <kbd>/net</kbd></label>
-    <label><input type="checkbox" id="net-local"> Allow localhost and LAN <kbd>/net local</kbd></label>
-    <label><input type="checkbox" id="net-confirm" data-cmd="/net-confirm"> Confirm POST/PUT/DELETE <kbd>/net-confirm</kbd></label>
-    <label class="menu-num">Max download <input type="text" id="net-max-bytes" data-cmd="/net-max-bytes" size="7" placeholder="2mb"></label>
-    <label class="menu-num">Text per fetch <input type="text" id="net-max-chars" data-cmd="/net-max-chars" size="7" placeholder="24000"></label>
-    <div class="menu-sub">Code index</div>
-    <label><input type="checkbox" id="index-on" data-cmd="/index"> Code index <kbd>/index</kbd></label>
-    <label><input type="checkbox" id="index-persist" data-cmd="/index-persist"> Save/load to disk <kbd>/index-persist</kbd></label>
-    <label><input type="checkbox" id="index-route" data-cmd="/index-route"> Answer grep/find from the index <kbd>/index-route</kbd></label>
-    <label class="menu-num">Memory budget <input type="text" id="index-max-mem" data-cmd="/index-max-mem" size="7" placeholder="100mb"></label>
-    <label class="menu-num">Max files <input type="text" id="index-max-files" data-cmd="/index-max-files" size="7" placeholder="100000"></label>
-    <label class="menu-num">Build workers <input type="text" id="index-workers" data-cmd="/index-workers" size="7" placeholder="auto"></label>
     <div class="menu-row">
-      <button type="button" id="index-save" class="menu-link">Save now</button>
-      <button type="button" id="index-load" class="menu-link">Load</button>
-      <button type="button" id="index-filter-open" class="menu-link">Filter…</button>
+      <button type="button" id="expand-all" class="link-btn">Expand all</button>
+      <button type="button" id="collapse-all" class="link-btn">Collapse all</button>
     </div>
-    <div class="menu-sub">Skills</div>
-    <div id="skills-list" class="skills-list"><span class="muted">No skills found.</span></div>
-    <div class="menu-sub">Notifications</div>
-    <label><input type="checkbox" id="notify-sound"> Play a sound</label>
-    <label><input type="checkbox" id="notify-desktop"> Desktop notification <span class="muted">(when away)</span></label>
-    <div class="menu-sub">Other</div>
-    <button type="button" id="prompt-open" class="menu-link"><svg class="icon sm" aria-hidden="true"><use href="#i-file"/></svg> System prompt… <kbd>/system-prompt</kbd></button>
-    <a id="export-link" class="menu-link" href="api/export" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download conversation (.md)</a>
-    <a id="export-full-link" class="menu-link" href="api/export?full=1" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download full log (.md)</a>
+    <div class="menu-foot">
+      <button type="button" id="settings-open" class="link-btn"><svg class="icon sm" aria-hidden="true"><use href="#i-sliders"/></svg> All settings…</button>
+      <button type="button" id="palette-open" class="link-btn">Commands <kbd>Ctrl+K</kbd></button>
+    </div>
   </div>
   <div id="tools-menu" class="menu tools-menu" role="dialog" aria-label="Tools for this mode" hidden></div>
   <div id="tool-tip" role="tooltip" hidden></div>
@@ -139,6 +113,9 @@
     <label title="The model sees its reasoning since your last message — its current tool loop"><input type="radio" name="think-history" value="turn"> this turn</label>
     <label title="The model sees its reasoning from every turn still in history — uses more context"><input type="radio" name="think-history" value="all"> all turns</label>
   </div>
+  <div id="run-menu" class="menu chip-menu" role="dialog" aria-label="Running commands" hidden></div>
+  <div id="net-menu" class="menu chip-menu" role="dialog" aria-label="Internet access" hidden></div>
+  <div id="tools-off-menu" class="menu chip-menu" role="dialog" aria-label="Tool calls" hidden></div>
 </header>
 
 <main id="transcript" tabindex="-1" aria-live="polite" aria-label="Conversation"></main>
@@ -148,16 +125,17 @@
   <div class="drawer-head">
     <strong>Sessions</strong>
     <span class="spacer"></span>
-    <button id="select-sessions" type="button" class="small" aria-pressed="false" title="Select sessions to delete">Select</button>
-    <button id="new-session" type="button" class="primary small with-icon"><svg class="icon sm" aria-hidden="true"><use href="#i-plus"/></svg> New</button>
+    <button id="select-sessions" type="button" class="btn small" aria-pressed="false" title="Select sessions to delete">Select</button>
+    <button id="new-session" type="button" class="btn primary small with-icon"><svg class="icon sm" aria-hidden="true"><use href="#i-plus"/></svg> New</button>
     <button class="icon-btn drawer-close" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
+  <div class="drawer-filter"><input id="sessions-filter" type="search" placeholder="Filter by title, folder or model…" aria-label="Filter sessions"></div>
   <div id="sessions-list" class="drawer-body"></div>
   <div id="sessions-bulk" class="drawer-actions sessions-bulk" hidden>
     <span id="sessions-count" class="muted small">0 selected</span>
     <span class="spacer"></span>
-    <button id="sessions-all" type="button" class="small">Select all</button>
-    <button id="sessions-delete" type="button" class="danger small with-icon" disabled><svg class="icon sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</button>
+    <button id="sessions-all" type="button" class="btn small">Select all</button>
+    <button id="sessions-delete" type="button" class="btn danger small with-icon" disabled><svg class="icon sm" aria-hidden="true"><use href="#i-trash"/></svg> Delete</button>
   </div>
 </aside>
 
@@ -169,18 +147,17 @@
     <button class="icon-btn drawer-close" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
   <div id="files-tree" class="drawer-body tree"></div>
-  <div class="drawer-resize" role="separator" aria-orientation="vertical" aria-label="Resize workspace drawer" title="Drag to resize · double-click to reset"></div>
   <div id="file-preview" class="file-preview" hidden>
     <div class="preview-head">
       <button id="preview-back" class="icon-btn" type="button" title="Back to files" aria-label="Back to files"><svg class="icon" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
       <span id="preview-name" class="mono field"></span>
     </div>
     <div class="preview-actions">
-      <button id="preview-attach" type="button" class="primary small with-icon"><svg class="icon sm" aria-hidden="true"><use href="#i-paperclip"/></svg> Attach</button>
-      <button id="preview-insert" type="button" class="small">Insert path</button>
-      <button id="preview-copy" type="button" class="small">Copy</button>
-      <button id="preview-render" type="button" class="small" hidden>Plain</button>
-      <button id="preview-all" type="button" class="small" hidden>Show all</button>
+      <button id="preview-attach" type="button" class="btn primary small with-icon"><svg class="icon sm" aria-hidden="true"><use href="#i-paperclip"/></svg> <span>Attach</span></button>
+      <button id="preview-insert" type="button" class="btn small">Insert path</button>
+      <button id="preview-copy" type="button" class="btn small">Copy</button>
+      <button id="preview-render" type="button" class="btn small" hidden>Plain</button>
+      <button id="preview-all" type="button" class="btn small" hidden>Show all</button>
       <span id="preview-meta" class="muted small"></span>
     </div>
     <div class="preview-scroll"><pre class="preview-gutter" aria-hidden="true"></pre><pre class="preview-code"><code></code></pre></div>
@@ -199,9 +176,9 @@
   <textarea id="filter-text" spellcheck="false" autocomplete="off" aria-label="Filter rules"></textarea>
   <p id="filter-msg" class="filter-hint small" role="status"></p>
   <div class="drawer-actions">
-    <button type="button" id="filter-save" class="primary">Save</button>
-    <button type="button" id="filter-cancel">Cancel</button>
-    <button type="button" id="filter-reset" title="Replace the filter with one built from the current .gitignore files">Reset from .gitignore</button>
+    <button type="button" id="filter-save" class="btn primary">Save</button>
+    <button type="button" id="filter-cancel" class="btn">Cancel</button>
+    <button type="button" id="filter-reset" class="btn" title="Replace the filter with one built from the current .gitignore files">Reset from .gitignore</button>
   </div>
 </aside>
 
@@ -211,11 +188,74 @@
     <span id="prompt-mode" class="chip"></span>
     <span id="prompt-tokens" class="chip"></span>
     <span class="spacer"></span>
-    <button id="prompt-copy" type="button" class="small with-icon" title="Copy the whole prompt text"><svg class="icon sm" aria-hidden="true"><use href="#i-copy"/></svg> Copy</button>
+    <button id="prompt-copy" type="button" class="btn small with-icon" title="Copy the whole prompt text"><svg class="icon sm" aria-hidden="true"><use href="#i-copy"/></svg> <span>Copy</span></button>
     <button id="prompt-close" class="icon-btn" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
   <p class="filter-hint muted small">Exactly what the model gets as its system message, part by part. Token counts are estimates (~4 chars/token).</p>
   <div id="prompt-body"></div>
+</aside>
+
+<aside id="settings-drawer" class="side-drawer" aria-label="Settings" hidden>
+  <div class="drawer-head">
+    <strong>Settings</strong>
+    <span class="spacer"></span>
+    <button id="settings-close" class="icon-btn" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <div id="settings-body" class="drawer-body settings">
+    <details data-section="companion">
+      <summary>Companion</summary>
+      <label><input type="checkbox" id="idle-recap" data-cmd="/companion-idle-recap"> Recap when I'm idle <kbd>/companion-idle-recap</kbd></label>
+      <label class="menu-num">Idle for <input type="number" id="idle-recap-secs" min="10" step="10" value="90"> seconds</label>
+    </details>
+    <details data-section="context">
+      <summary>Context</summary>
+      <label><input type="checkbox" id="guides" data-cmd="/guides"> Load AGENTS.md / CLAUDE.md <kbd>/guides</kbd></label>
+      <label class="menu-num" title="Most tokens one model reply may take, reasoning included — stops a model stuck in a loop. 'off' = no cap.">Reply cap <input type="text" id="max-output-tokens" data-cmd="/max-output-tokens" size="7" placeholder="25000"> tokens</label>
+    </details>
+    <details data-section="run">
+      <summary>Running commands</summary>
+      <label><input type="checkbox" id="run-confirm" data-cmd="/run-confirm"> Ask before each command <kbd>Shift+P</kbd></label>
+      <label><input type="checkbox" id="run-mode" data-cmd="/run-mode"> Save command output, return a view <kbd>/run-mode</kbd></label>
+      <label class="menu-num">Command view <input type="text" id="run-output-limit" data-cmd="/run-output-limit" size="7" placeholder="5000"> chars</label>
+    </details>
+    <details data-section="network">
+      <summary>Network</summary>
+      <label><input type="checkbox" id="net-on"> Internet access <kbd>/net</kbd></label>
+      <label><input type="checkbox" id="net-local"> Allow localhost and LAN <kbd>/net local</kbd></label>
+      <label><input type="checkbox" id="net-confirm" data-cmd="/net-confirm"> Confirm POST/PUT/DELETE <kbd>/net-confirm</kbd></label>
+      <label class="menu-num">Max download <input type="text" id="net-max-bytes" data-cmd="/net-max-bytes" size="7" placeholder="2mb"></label>
+      <label class="menu-num">Text per fetch <input type="text" id="net-max-chars" data-cmd="/net-max-chars" size="7" placeholder="24000"></label>
+    </details>
+    <details data-section="index">
+      <summary>Code index</summary>
+      <label><input type="checkbox" id="index-on" data-cmd="/index"> Code index <kbd>/index</kbd></label>
+      <label><input type="checkbox" id="index-persist" data-cmd="/index-persist"> Save/load to disk <kbd>/index-persist</kbd></label>
+      <label><input type="checkbox" id="index-route" data-cmd="/index-route"> Answer grep/find from the index <kbd>/index-route</kbd></label>
+      <label class="menu-num">Memory budget <input type="text" id="index-max-mem" data-cmd="/index-max-mem" size="7" placeholder="100mb"></label>
+      <label class="menu-num">Max files <input type="text" id="index-max-files" data-cmd="/index-max-files" size="7" placeholder="100000"></label>
+      <label class="menu-num">Build workers <input type="text" id="index-workers" data-cmd="/index-workers" size="7" placeholder="auto"></label>
+      <div class="menu-row">
+        <button type="button" id="index-save" class="link-btn">Save now</button>
+        <button type="button" id="index-load" class="link-btn">Load</button>
+        <button type="button" id="index-filter-open" class="link-btn">Filter…</button>
+      </div>
+    </details>
+    <details data-section="skills">
+      <summary>Skills</summary>
+      <div id="skills-list" class="skills-list"><span class="muted">No skills found.</span></div>
+    </details>
+    <details data-section="notifications">
+      <summary>Notifications</summary>
+      <label><input type="checkbox" id="notify-sound"> Play a sound</label>
+      <label><input type="checkbox" id="notify-desktop"> Desktop notification <span class="muted">(when away)</span></label>
+    </details>
+    <details data-section="other">
+      <summary>Conversation</summary>
+      <button type="button" id="prompt-open" class="link-btn"><svg class="icon sm" aria-hidden="true"><use href="#i-file"/></svg> System prompt… <kbd>/system-prompt</kbd></button>
+      <a id="export-link" class="link-btn" href="api/export" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download conversation (.md)</a>
+      <a id="export-full-link" class="link-btn" href="api/export?full=1" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download full log (.md)</a>
+    </details>
+  </div>
 </aside>
 
 <aside id="plan-drawer" class="side-drawer" aria-label="Plan" hidden>
@@ -227,9 +267,9 @@
   </div>
   <div id="plan-body" class="md"></div>
   <div class="drawer-actions">
-    <button type="button" id="plan-run" data-cmd="/plan run" class="primary">Run</button>
-    <button type="button" id="plan-resume" data-cmd="/plan resume" class="primary" hidden>Resume</button>
-    <button type="button" id="plan-cancel" data-cmd="/plan cancel" class="danger">Cancel plan</button>
+    <button type="button" id="plan-run" data-cmd="/plan run" class="btn primary">Run</button>
+    <button type="button" id="plan-resume" data-cmd="/plan resume" class="btn primary" hidden>Resume</button>
+    <button type="button" id="plan-cancel" data-cmd="/plan cancel" class="btn danger">Cancel plan</button>
   </div>
 </aside>
 
@@ -243,19 +283,28 @@
   </div>
   <div id="attachments" class="attachments" aria-live="polite" hidden></div>
   <div class="input-wrap">
-    <button id="attach" class="attach-btn" type="button" title="Attach text files or PDFs (or drop / paste them here)" aria-label="Attach files"><svg class="icon" aria-hidden="true"><use href="#i-paperclip"/></svg></button>
+    <button id="attach" class="icon-btn sm" type="button" title="Attach text files or PDFs (or drop / paste them here)" aria-label="Attach files"><svg class="icon" aria-hidden="true"><use href="#i-paperclip"/></svg></button>
     <input id="file-input" type="file" multiple hidden>
     <textarea id="input" rows="1" placeholder="Message momo…  (/ for commands)" autocomplete="off" spellcheck="false"></textarea>
   </div>
   <div id="drop-hint" class="drop-hint" hidden>Drop files to attach — text files and PDFs</div>
   <div class="composer-bar">
     <span id="busy" class="busy"></span>
-    <span class="hint muted">Enter to send · Shift+Enter newline · / commands · @ files · Esc to interrupt</span>
+    <span class="hint muted">Enter to send · Shift+Enter newline · / commands · @ files · Ctrl+K palette · ? shortcuts</span>
     <span class="spacer"></span>
-    <button id="stop" type="button" class="danger with-icon" hidden><svg class="icon sm" aria-hidden="true"><use href="#i-stop"/></svg> Stop</button>
-    <button id="send" type="button" class="primary with-icon">Send <svg class="icon sm" aria-hidden="true"><use href="#i-arrow-up"/></svg></button>
+    <button id="stop" type="button" class="btn danger with-icon" hidden><svg class="icon sm" aria-hidden="true"><use href="#i-stop"/></svg> Stop</button>
+    <button id="send" type="button" class="btn primary with-icon"><span id="send-label">Send</span> <svg class="icon sm" aria-hidden="true"><use href="#i-arrow-up"/></svg></button>
   </div>
 </footer>
+
+<div id="toast" class="toast-box" aria-live="polite"></div>
+
+<div id="palette-backdrop" class="palette-backdrop" hidden>
+  <div id="palette" class="palette" role="dialog" aria-label="Commands and shortcuts">
+    <input id="palette-input" type="text" placeholder="Type a command or setting…" autocomplete="off" spellcheck="false" aria-label="Search commands" aria-controls="palette-list">
+    <div id="palette-list" class="palette-list" role="listbox"></div>
+  </div>
+</div>
 
 <script type="module" src="app.js"></script>
 </body>

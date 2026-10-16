@@ -2,7 +2,7 @@
 // Select mode with checkboxes) deletes saved sessions after an inline confirmation.
 // The open session can't be deleted, and the server refuses it too.
 
-import { $, el, icon } from "./dom.js";
+import { $, confirmInline, el, icon } from "./dom.js";
 
 // What app.js supplies: send a line as if typed, close the drawer, POST JSON.
 const hooks = { send: async () => false, close: () => {}, post: async () => ({}) };
@@ -15,7 +15,7 @@ const ago = (t) => {
   return new Date(t * 1000).toLocaleDateString();
 };
 
-const sessionsUI = { data: null, selecting: false, selected: new Set(), note: "" };
+const sessionsUI = { data: null, selecting: false, selected: new Set(), note: "", filter: "" };
 
 async function loadSessions() {
   const list = $("#sessions-list");
@@ -35,21 +35,35 @@ function iconButton(name, label, cls = "icon-btn") {
   return b;
 }
 
-// Replace `host`'s children with "question [Delete] [Cancel]"; resolves on click.
-function inlineConfirm(host, question) {
-  return new Promise((resolve) => {
-    const saved = [...host.childNodes];
-    const box = el("div", "session-confirm");
-    const yes = el("button", "danger small", "Delete");
-    const no = el("button", "small", "Cancel");
-    yes.type = no.type = "button";
-    const done = (ok) => { host.replaceChildren(...saved); resolve(ok); };
-    yes.onclick = () => done(true);
-    no.onclick = () => done(false);
-    box.append(el("span", "", question), el("span", "spacer"), yes, no);
-    host.replaceChildren(box);
-    yes.focus();
-  });
+// The open session's title, edited in place: Enter sends /title (empty: back
+// to automatic titles), Esc keeps the old one.
+function renameInPlace(item, title) {
+  const saved = [...item.childNodes];
+  const field = el("input", "rename-field");
+  field.type = "text";
+  field.value = title;
+  field.placeholder = "Title — empty for an automatic one";
+  field.setAttribute("aria-label", "Session title");
+  const restore = () => item.replaceChildren(...saved);
+  field.onkeydown = async (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); restore(); }
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      const v = field.value.trim();
+      await hooks.send(v ? `/title ${v}` : "/title auto");
+      loadSessions();
+    }
+  };
+  field.onblur = restore;
+  item.replaceChildren(field);
+  field.focus();
+  field.select();
+}
+
+// Whether a row matches the filter box: title, first message, folder, model, name.
+function matches(x, q) {
+  return !q || [x.title, x.preview, x.workdir, x.model, x.mode, x.name]
+    .some((v) => String(v || "").toLowerCase().includes(q));
 }
 
 async function deleteSessions(names) {
@@ -67,8 +81,11 @@ function renderSessions() {
   const list = $("#sessions-list");
   const items = [];
   if (sessionsUI.note) items.push(el("div", "session-note", sessionsUI.note.trim()));
+  const q = sessionsUI.filter.trim().toLowerCase();
+  const shown = data.sessions.filter((x) => matches(x, q));
   if (!data.sessions.length) items.push(el("div", "muted", "No saved sessions yet."));
-  for (const x of data.sessions) {
+  else if (!shown.length) items.push(el("div", "muted", "No session matches the filter."));
+  for (const x of shown) {
     const current = x.name === data.current;
     const item = el("div", "session-item");
     const row = el("button", `session-row${current ? " current" : ""}`);
@@ -94,10 +111,14 @@ function renderSessions() {
         hooks.send(`/session ${x.name}`);
       };
       item.append(row);
-      if (!current) {
+      if (current) {
+        const ren = iconButton("pencil", "Rename this session", "icon-btn session-del");
+        ren.onclick = () => renameInPlace(item, x.title || "");
+        item.append(ren);
+      } else {
         const del = iconButton("trash", "Delete this session", "icon-btn session-del");
         del.onclick = async () => {
-          if (await inlineConfirm(item, "Delete this session?")) deleteSessions([x.name]);
+          if (await confirmInline(item, "Delete this session?")) deleteSessions([x.name]);
         };
         item.append(del);
       }
@@ -121,10 +142,15 @@ function updateBulk() {
 export function openSessions() {
   sessionsUI.note = "";
   loadSessions();
+  $("#sessions-filter").focus();
 }
 
 export function initSessions(h) {
   Object.assign(hooks, h);
+  $("#sessions-filter").oninput = (e) => {
+    sessionsUI.filter = e.target.value;
+    if (sessionsUI.data) renderSessions();
+  };
   $("#select-sessions").onclick = () => {
     sessionsUI.selecting = !sessionsUI.selecting;
     sessionsUI.selected.clear();
@@ -133,7 +159,9 @@ export function initSessions(h) {
   };
   $("#sessions-all").onclick = () => {
     const { data, selected } = sessionsUI;
-    const all = data.sessions.filter((x) => x.name !== data.current).map((x) => x.name);
+    // The ones the filter shows: "select all" never reaches rows you can't see.
+    const q = sessionsUI.filter.trim().toLowerCase();
+    const all = data.sessions.filter((x) => x.name !== data.current && matches(x, q)).map((x) => x.name);
     const every = all.length && all.every((n) => selected.has(n));
     selected.clear();
     if (!every) for (const n of all) selected.add(n);
@@ -142,7 +170,7 @@ export function initSessions(h) {
   $("#sessions-delete").onclick = async () => {
     const names = [...sessionsUI.selected];
     const bar = $("#sessions-bulk");
-    if (await inlineConfirm(bar, `Delete ${names.length} session${names.length === 1 ? "" : "s"}? This can't be undone.`)) {
+    if (await confirmInline(bar, `Delete ${names.length} session${names.length === 1 ? "" : "s"}? This can't be undone.`)) {
       await deleteSessions(names);
     }
   };

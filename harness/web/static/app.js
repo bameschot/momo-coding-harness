@@ -3,18 +3,21 @@
 // This module holds the transcript, status bar, composer and popovers; the
 // drawers, notifications and the companion live in their own modules.
 
+import { initChips, refreshChipMenus, renderChipMenu } from "./chips.js";
 import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
-import { $, copyText, el, flash, formatSize, icon, loadJSON, saveJSON } from "./dom.js";
-import { initFiles, openFiles } from "./files.js";
+import { $, closeLayer, confirmInline, copyWithFeedback, el, formatSize, icon, loadJSON,
+         makeResizable, openLayer, saveJSON, toast } from "./dom.js";
+import { initFiles, openFiles, showFile } from "./files.js";
 import { addCopyButtons, renderMarkdown } from "./markdown.js";
 import { initNotify, noteActivity, notify, signal, syncNotifyControls } from "./notify.js";
+import { initPalette, openPalette } from "./palette.js";
 import { initSessions, openSessions } from "./sessions.js";
 
 const transcript = $("#transcript");
 const input = $("#input");
 
 // ── view options (per browser, like the TUI's local toggles) ──────────────────
-const VIEW_DEFAULTS = { tools: true, think: true, md: true, diff: true, diffStyle: "compact", companion: true };
+const VIEW_DEFAULTS = { tools: true, group: true, think: true, md: true, diff: true, diffStyle: "compact", companion: true };
 const view = { ...VIEW_DEFAULTS, ...loadJSON("momo.view", {}) };
 // CommandResult view fields → our keys
 const VIEW_MAP = { tool_output: "tools", think_output: "think", md_render: "md",
@@ -60,6 +63,7 @@ let busySince = 0;
 let diffTools = new Set(["append_to_file", "delete_file", "edit_file", "edit_files",
                          "move_file", "replace_symbol", "write_file"]);
 let confirmSuffix = " [y/N]";
+let lastServerError = null;   // {text, at}: the newest ERROR line, for settings feedback
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 async function post(path, body = {}) {
@@ -79,13 +83,39 @@ async function post(path, body = {}) {
 }
 
 // ── transcript rendering ──────────────────────────────────────────────────────
-// Render context: tool calls waiting for their result, and the open ask card.
+// Render context: tool calls waiting for their result, the open ask card, and
+// the group the current stretch of tool calls goes into (view.group).
 let pendingTools = [];
 let openAsk = null;
+let group = null;   // {el, body, calls, names: Map, files: Set, errors}
 
-function resetRenderContext() { pendingTools = []; openAsk = null; }
+function resetRenderContext() { pendingTools = []; openAsk = null; group = null; }
+
+// Tool calls, their results and diffs — and the thinking between them — collect
+// in one collapsible group per stretch of a turn; any other event ends it.
+const GROUPED = new Set(["tool_call", "tool_result", "diff", "think"]);
 
 function renderEvent(ev) {
+  if (!GROUPED.has(ev.type)) closeGroup();
+  const node = renderOne(ev);
+  if (!node || !view.group || !GROUPED.has(ev.type)) return node;
+  if (!group && ev.type === "think") return node;   // thinking before a plain reply
+  const fresh = !group;
+  if (fresh) group = newGroup();
+  group.body.append(node);
+  if (ev.type === "tool_call") {
+    group.calls++;
+    group.names.set(ev.name, (group.names.get(ev.name) || 0) + 1);
+    const pending = pendingTools[pendingTools.length - 1];
+    if (pending?.el === node) pending.group = group;
+  } else if (ev.type === "diff" && ev.path) {
+    group.files.add(ev.path);
+  }
+  updateGroup(group);
+  return fresh ? group.el : null;
+}
+
+function renderOne(ev) {
   switch (ev.type) {
     case "user": return renderUser(ev.text);
     case "chat": return renderChat(ev.role, ev.text);
@@ -95,8 +125,36 @@ function renderEvent(ev) {
     case "tool_result": return renderToolResult(ev.name, ev.result);
     case "diff": return renderDiff(ev);
     case "ask_user": return renderAsk(ev.question);
+    case "done": return renderTurnMeta(ev);
   }
   return null;
+}
+
+function newGroup() {
+  const d = el("details", "tool-group");
+  d.open = true;                      // open while its turn runs
+  const sum = el("summary");
+  sum.append(el("span", "group-count"), el("span", "group-names"), el("span", "group-err"));
+  const body = el("div", "tool-group-body");
+  d.append(sum, body);
+  return { el: d, sum, body, calls: 0, names: new Map(), files: new Set(), errors: 0 };
+}
+
+function updateGroup(g) {
+  const s = (n) => (n === 1 ? "" : "s");
+  const files = g.files.size ? ` · ${g.files.size} file${s(g.files.size)} changed` : "";
+  g.sum.querySelector(".group-count").textContent = `${g.calls} tool call${s(g.calls)}${files}`;
+  g.sum.querySelector(".group-names").textContent =
+    [...g.names].map(([n, k]) => (k > 1 ? `${n} ×${k}` : n)).join(", ");
+  g.sum.querySelector(".group-err").textContent = g.errors ? `${g.errors} failed` : "";
+  g.el.classList.toggle("single", g.calls <= 1);
+}
+
+// The stretch is over: a long, clean one folds up to its summary line.
+function closeGroup() {
+  if (!group) return;
+  if (group.calls >= 3 && !group.errors) group.el.open = false;
+  group = null;
 }
 
 function renderUser(text) {
@@ -130,14 +188,13 @@ function renderChat(role, text, extra = "") {
       wrap.classList.add("plain");
       wrap.textContent = text;
     }
-    wrap.append(msgActions([["copy", "Copy", "Copy this reply as Markdown", async (btn) => {
-      try { await copyText(text); flash(btn, "Copied ✓"); } catch { flash(btn, "Copy failed"); }
-    }]]));
+    wrap.append(msgActions([["copy", "Copy", "Copy this reply as Markdown", (btn) => copyWithFeedback(btn, text)]]));
     return wrap;
   }
   wrap.textContent = text;
+  if (role === "system" && text.startsWith("ERROR")) wrap.classList.add("error");
   // `[y/N]` confirmation prompts from /commands get quick-answer buttons.
-  if (isConfirmPrompt(role, text)) return askCard(text, true, "Confirm");
+  if (isConfirmPrompt(role, text)) return askCard(text, true, "Confirm", false);
   return wrap;
 }
 
@@ -154,13 +211,22 @@ function renderThink(text) {
   return d;
 }
 
-function argsBrief(args) {
-  const parts = Object.entries(args || {}).map(([k, v]) => {
+function argsBrief(args, skip = []) {
+  const parts = Object.entries(args || {}).filter(([k]) => !skip.includes(k)).map(([k, v]) => {
     let s = typeof v === "string" ? v : JSON.stringify(v);
     if (s.length > 60) s = s.slice(0, 57) + "…";
     return `${k}=${JSON.stringify(s)}`;
   });
   return parts.join("  ");
+}
+
+// A clickable workspace path (app-wide [data-path] handler opens the preview).
+function pathLink(path, line = 0, cls = "tpath") {
+  const a = el("span", cls, path);
+  a.dataset.path = path;
+  if (line > 0) a.dataset.line = String(line);
+  a.title = "Open in the workspace preview";
+  return a;
 }
 
 function renderToolCall(name, args) {
@@ -176,7 +242,10 @@ function renderToolCall(name, args) {
   const d = el("details", "tool");
   const s = el("summary");
   const st = el("span", "tstate run", "running");
-  s.append(el("span", "", "▶"), el("span", "tname", name), el("span", "targs", argsBrief(args)), st);
+  const path = typeof args?.path === "string" ? "path" : typeof args?.src === "string" ? "src" : null;
+  s.append(el("span", "", "▶"), el("span", "tname", name));
+  if (path) s.append(pathLink(args[path], Number(args.start_line) || 0));
+  s.append(el("span", "targs", argsBrief(args, path ? [path] : [])), st);
   const body = el("div", "tool-body");
   body.append(el("pre", "args", JSON.stringify(args, null, 2)));
   d.append(s, body);
@@ -190,12 +259,19 @@ function clampedPre(text, maxLines) {
   const pre = el("pre", "", lines.slice(0, maxLines).join("\n") || "(empty)");
   frag.append(pre);
   if (lines.length > maxLines) {
-    const more = el("button", "more", `show all (${lines.length - maxLines} more lines)`);
+    const more = el("button", "link-btn more", `show all (${lines.length - maxLines} more lines)`);
     more.type = "button";
     more.onclick = () => { pre.textContent = text; more.remove(); };
     frag.append(more);
   }
   return frag;
+}
+
+function copyButton(text, label = "Copy output") {
+  const b = el("button", "btn small quiet", label);
+  b.type = "button";
+  b.onclick = () => copyWithFeedback(b, text);
+  return b;
 }
 
 function renderToolResult(name, result) {
@@ -208,8 +284,11 @@ function renderToolResult(name, result) {
     const t = pendingTools.splice(idx, 1)[0];
     t.state.className = `tstate ${isErr ? "err" : "ok"}`;
     t.state.textContent = isErr ? "✗ error" : `${lines} line${lines === 1 ? "" : "s"}`;
-    t.body.append(clampedPre(text, 20));
-    if (isErr) t.el.open = true;
+    t.body.append(clampedPre(text, 20), copyButton(text));
+    if (isErr) {
+      t.el.open = true;
+      if (t.group) { t.group.errors++; updateGroup(t.group); }
+    }
     return null;
   }
   // Orphan result (e.g. replay without its call) — render standalone.
@@ -218,7 +297,7 @@ function renderToolResult(name, result) {
   s.append(el("span", "", "→"), el("span", "tname", name || "result"),
            el("span", "targs", ""), el("span", `tstate ${isErr ? "err" : "ok"}`, `${lines} lines`));
   const body = el("div", "tool-body");
-  body.append(clampedPre(text, 20));
+  body.append(clampedPre(text, 20), copyButton(text));
   d.append(s, body);
   return d;
 }
@@ -237,18 +316,23 @@ function renderDiff(ev) {
   const box = el("div", "diff");
   if (ev.op === "move") {
     const h = el("div", "diff-head");
-    h.textContent = `± renamed ${ev.path} → ${ev.dst}`;
+    h.append("± renamed ", ev.path, " → ", pathLink(ev.dst, 0, "dpath"));
     box.append(h);
     return box;
   }
   const head = el("div", "diff-head");
+  const link = ev.op === "delete" ? el("span", "", ev.path) : pathLink(ev.path, 0, "dpath");
   if (view.diffStyle === "git") {
     head.classList.add("git");
-    head.append(el("div", "", `diff --git a/${ev.path} b/${ev.path}`),
+    const first = el("div", "", "diff --git ");
+    first.append(link);
+    head.append(first,
                 el("div", "minus", `--- ${ev.is_new ? "/dev/null" : "a/" + ev.path}`),
                 el("div", "plus", `+++ ${ev.op === "delete" ? "/dev/null" : "b/" + ev.path}`));
   } else {
-    head.append(el("span", "", `± ${ev.path}`));
+    const name = el("span", "", "± ");
+    name.append(link);
+    head.append(name);
     const stat = el("span", "stat");
     if (ev.is_new) stat.innerHTML = `(new file <span class="add">+${ev.added}</span>)`;
     else if (ev.op === "delete") stat.innerHTML = `(deleted <span class="del">−${ev.removed}</span>)`;
@@ -270,7 +354,7 @@ function renderDiff(ev) {
   addLines(ev.body.slice(0, DIFF_MAX));
   box.append(body);
   if (ev.body.length > DIFF_MAX) {
-    const more = el("button", "more", `show ${ev.body.length - DIFF_MAX} more diff lines`);
+    const more = el("button", "link-btn more", `show ${ev.body.length - DIFF_MAX} more diff lines`);
     more.type = "button";
     more.onclick = () => { addLines(ev.body.slice(DIFF_MAX)); more.remove(); };
     box.append(more);
@@ -278,31 +362,60 @@ function renderDiff(ev) {
   return box;
 }
 
-function renderAsk(question) {
-  const yn = /Reply 'y'|y = run it|\[y\/N\]/.test(question);
-  return askCard(question, yn, "momo asks");
+// What a finished turn cost, under its reply (DoneEvent; zero for compaction).
+function renderTurnMeta(ev) {
+  if (!ev.secs && !ev.eval_tokens && !ev.tool_calls) return null;
+  const parts = [ev.secs >= 0.1 ? `${ev.secs.toFixed(1)} s` : "<0.1 s"];
+  if (ev.prompt_tokens || ev.eval_tokens) parts.push(`${fmtTok(ev.prompt_tokens)} → ${fmtTok(ev.eval_tokens)} tokens`);
+  if (ev.tool_calls) parts.push(`${ev.tool_calls} tool call${ev.tool_calls === 1 ? "" : "s"}`);
+  const meta = el("div", "turn-meta", parts.join(" · "));
+  meta.title = "Time for the turn · the last request's prompt → tokens generated in the turn · tool calls";
+  return meta;
 }
 
-function askCard(question, yn, title) {
+function renderAsk(question) {
+  const yn = /Reply 'y'|y = run it|\[y\/N\]/.test(question);
+  return askCard(question, yn, "momo asks", true);
+}
+
+// A question card.  yn: Yes/No buttons; answerable: a field for a typed answer
+// (ask_user can take any text — guidance, a choice, plan feedback).
+function askCard(question, yn, title, answerable) {
   const card = el("div", "ask");
   card.append(el("div", "ask-title", `? ${title}`), el("div", "ask-q", question));
+  const controls = el("div", "ask-controls");
+  if (answerable) {
+    const form = el("div", "ask-answer");
+    const field = el("input");
+    field.type = "text";
+    field.placeholder = yn ? "…or type an answer" : "Type your answer";
+    field.setAttribute("aria-label", "Your answer");
+    const go = el("button", "btn small primary", "Answer");
+    go.type = "button";
+    const answer = () => { if (field.value.trim()) send(field.value.trim()); };
+    go.onclick = answer;
+    field.onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); answer(); } };
+    form.append(field, go);
+    controls.append(form);
+  }
   if (yn) {
     const actions = el("div", "ask-actions");
-    const yes = el("button", "primary", "Yes (y)");
-    const no = el("button", "", "No");
+    const yes = el("button", "btn primary", "Yes (y)");
+    const no = el("button", "btn", "No");
     yes.type = no.type = "button";
     yes.onclick = () => send("y");
     no.onclick = () => send("n");
     actions.append(yes, no);
-    card.append(actions);
+    controls.append(actions);
   }
+  if (controls.childElementCount) card.append(controls);
   openAsk = card;
   return card;
 }
 
 function markAnswered(card, answer) {
   card.classList.add("answered");
-  card.querySelector(".ask-actions")?.remove();
+  card.querySelector(".ask-controls")?.remove();
   card.querySelector(".ask-title").textContent += ` — answered: ${answer.length > 40 ? answer.slice(0, 40) + "…" : answer}`;
 }
 
@@ -310,7 +423,7 @@ function markAnswered(card, answer) {
 function msgActions(items, cls = "") {
   const bar = el("div", `msg-actions ${cls}`.trim());
   for (const [ic, label, title, fn] of items) {
-    const b = el("button");
+    const b = el("button", "btn small quiet");
     b.append(icon(ic, "icon sm"), el("span", "", label));
     b.type = "button";
     b.title = title;
@@ -319,7 +432,6 @@ function msgActions(items, cls = "") {
   }
   return bar;
 }
-
 
 // Retry / Edit sit on the last message you typed (not answers or /commands).
 function refreshUserActions() {
@@ -403,10 +515,12 @@ function rerenderAll() {
   }
   transcript.append(frag);
   if (keep) transcript.append(keep);
+  if (!busy) closeGroup();   // a finished turn's last stretch folds like the others
+  renderWelcome();
   refreshUserActions();
   if (openAsk && !waiting && !openAsk.classList.contains("answered")) {
     // Replayed question that has since been answered elsewhere — keep, but no buttons.
-    openAsk.querySelector(".ask-actions")?.remove();
+    openAsk.querySelector(".ask-controls")?.remove();
   }
   if (atBottom) transcript.scrollTop = transcript.scrollHeight;
 }
@@ -430,7 +544,9 @@ function updateConnDot() {
 
 function applyStatus(s) {
   const planChanged = s.plan_progress !== status.plan_progress;
+  const modeChanged = s.mode !== status.mode;
   status = s;
+  if (modeChanged) renderWelcome();
   const modeSel = $("#mode");
   if (modeSel.value !== s.mode) modeSel.value = s.mode;
   const pp = $("#plan-progress");
@@ -460,14 +576,19 @@ function applyStatus(s) {
   $("#tools-btn").title = off.length ? `Tools for this mode — ${off.length} off: ${off.join(", ")}`
                                      : "Tools for this mode (/tools)";
   $("#tools-badge").hidden = s.tools_enabled;
+  // Chip colours: .active = a setting you turned on, .warn = something off or
+  // less safe than the default.
   const run = $("#run-badge");
   run.textContent = s.run_confirm ? "RUN: confirm" : "RUN: auto";
-  run.classList.toggle("on", s.run_confirm);
+  run.classList.toggle("active", s.run_confirm);
+  run.title = s.run_confirm ? "Running commands — momo asks before each one" : "Running commands — without asking";
   const netOn = s.net_access !== "off";
   const net = $("#net-badge");
-  net.classList.toggle("warn", netOn);
+  net.classList.toggle("active", netOn && s.net_confirm);
+  net.classList.toggle("warn", netOn && !s.net_confirm);
   net.textContent = netOn ? `NET: ${s.net_access}${s.net_confirm ? "" : " (writes: auto)"}` : "NET: off";
-  net.title = netOn ? "Internet access is on — click to turn it off" : "Internet access is off — click to turn it on";
+  net.title = netOn ? `Internet access: ${s.net_access === "local" ? "public and local" : "public"}` : "Internet access: off";
+  $("#run-confirm").checked = !!s.run_confirm;
   $("#net-on").checked = netOn;
   $("#net-local").checked = s.net_access === "local";
   $("#net-local").disabled = !netOn;
@@ -488,6 +609,7 @@ function applyStatus(s) {
   mc.disabled = !netOn;
   applyIndexStatus(s);
   applyThinkStatus(s);
+  refreshChipMenus();
   updateTitle();
   if (planChanged) refreshState();
   else if (!$("#plan-drawer").hidden) schedulePlanRefresh();
@@ -540,9 +662,9 @@ function applyIndexStatus(s) {
     : s.index_progress ? `INDEX: ${s.index_state} ${s.index_progress}`
     : s.index_state === "stopped" ? "INDEX: stopped"
     : `INDEX: ${s.index_files} files · ${formatSize(s.index_mem)}/${formatSize(s.index_max_bytes)}`;
-  badge.title = !on ? "Code index is off — click to turn it on"
+  badge.title = !on ? "Code index: off"
     : (s.index_degraded ? "Code index is over its memory budget and dropped a part. " : "")
-      + "Code index — click for what it holds";
+      + "Code index — what it holds";
   $("#index-on").checked = on;
   $("#index-persist").checked = !!s.index_persist;
   $("#index-route").checked = s.index_route !== false;
@@ -586,14 +708,20 @@ function applyBusy(b, w) {
     if (queue.length) setTimeout(sendNextQueued, 150);
   }
   $("#stop").hidden = !(busy && !waiting);
+  // Enter while momo works queues the message: the button says so.
+  $("#send-label").textContent = busy && !waiting ? "Queue" : "Send";
+  $("#send").title = busy && !waiting ? "momo is working — this is sent when it's done" : "Send (Enter)";
+  if (wasBusy && !busy) closeGroup();
   updatePlanKind();
   const bz = $("#busy");
   bz.classList.toggle("waiting", waiting);
   if (!busy) bz.textContent = "";
   else if (waiting) bz.textContent = "? waiting for your answer";
   input.placeholder = waiting ? "Answer momo…" : busy ? "momo is working… (Esc to interrupt)" : "Message momo…  (/ for commands)";
-  if (!waiting && openAsk && !openAsk.classList.contains("answered")) openAsk.querySelector(".ask-actions")?.remove();
-  if (waiting) input.focus();
+  if (!waiting && openAsk && !openAsk.classList.contains("answered")) openAsk.querySelector(".ask-controls")?.remove();
+  // A question with an answer field takes the focus; otherwise the input box.
+  // After this batch is on the page: the card may be in the same batch.
+  if (waiting) setTimeout(() => (openAsk?.querySelector(".ask-answer input") || input).focus(), 0);
   updateTitle();
 }
 
@@ -649,7 +777,12 @@ function handleEvents(evs) {
       case "status": applyStatus(ev); break;
       case "busy": applyBusy(ev.busy, ev.waiting); break;
       case "companion": applyCompanion(ev); break;
-      case "done": break;
+      case "done": {                 // the turn footer (kept in events[] for re-renders)
+        events.push(ev);
+        const n = renderEvent(ev);
+        if (n) nodes.push(n);
+        break;
+      }
       case "delta": streamDelta(ev); break;
       case "stream_end": endStream(); break;
       case "reset":
@@ -658,9 +791,14 @@ function handleEvents(evs) {
         transcript.replaceChildren();
         nodes.length = 0;
         resetRenderContext();
+        renderWelcome();
         break;
       default: {
         events.push(ev);
+        if (ev.type === "user") $(".welcome")?.remove();
+        if (ev.type === "error" || (ev.type === "chat" && ev.role === "system" && ev.text.startsWith("ERROR"))) {
+          lastServerError = { text: ev.type === "error" ? ev.text : ev.text.replace(/^ERROR:\s*/, ""), at: Date.now() };
+        }
         if (ev.type === "ask_user") signal("ask", "momo has a question", ev.question);
         else if (ev.type === "chat" && isConfirmPrompt(ev.role, ev.text)) {
           signal("ask", "momo needs a confirmation", ev.text);
@@ -744,6 +882,7 @@ async function refreshState() {
   renderPlan();
   setCompanionFrames(state.companion);
   renderSkills();
+  restoreDraft();
 }
 
 // The plan drawer: the plan, and the actions its phase allows.
@@ -819,6 +958,26 @@ function autosize() {
   input.style.height = "auto";
   input.style.height = input.scrollHeight + "px";
   input.classList.toggle("cmd", input.value.startsWith("/"));
+  saveDraft();
+}
+
+// What you were typing survives a reload, per session (not while editing a
+// sent message: that text is already in the conversation).
+const draftKey = () => (state?.session ? `momo.draft.${state.session}` : null);
+let draftTimer = null;
+function saveDraft() {
+  if (editing) return;
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    const key = draftKey();
+    if (key) saveJSON(key, input.value.trim() ? input.value : undefined);
+  }, 300);
+}
+function restoreDraft() {
+  const key = draftKey();
+  if (!key || input.value || editing) return;
+  const draft = loadJSON(key, "");
+  if (draft) { input.value = draft; autosize(); }
 }
 
 async function submitInput() {
@@ -1158,29 +1317,37 @@ function updatePlanKind() {
   sel.disabled = busy || (status.plan_progress || "").startsWith("exec");
 }
 $("#plan-kind").onchange = (e) => send(`/plan ${e.target.value}`);
-$("#run-badge").onclick = () => send(`/run-confirm ${status.run_confirm ? "off" : "on"}`);
-$("#tools-badge").onclick = () => send("/tools on");
-$("#net-badge").onclick = () => send(`/net ${status.net_access !== "off" ? "off" : "on"}`);
+// Every chip opens its popover (chips.js; THINK and INDEX here) — none toggles
+// on a bare click.
+for (const [chip, menu] of [["#run-badge", "#run-menu"], ["#net-badge", "#net-menu"],
+                            ["#tools-badge", "#tools-off-menu"]]) {
+  $(chip).onclick = (e) => toggleMenu(e, menu, null, () => renderChipMenu(menu));
+}
 $("#net-on").onchange = (e) => send(`/net ${e.target.checked ? "on" : "off"}`);
 $("#net-local").onchange = (e) => send(`/net ${e.target.checked ? "local" : "on"}`);
 $("#think-badge").onclick = (e) => toggleMenu(e, "#think-menu");
 for (const r of document.querySelectorAll("input[name=think-history]")) {
   r.onchange = () => send(`/think-history ${r.value}`);
 }
-$("#index-badge").onclick = (e) => {
-  if (!status.index_enabled) { e.stopPropagation(); return send("/index on"); }
-  toggleMenu(e, "#index-menu", "Code index", refreshIndexMenu);
-};
+$("#index-badge").onclick = (e) => toggleMenu(e, "#index-menu", "Code index", refreshIndexMenu);
 // Settings controls name their command in data-cmd: a checkbox sends on/off, a
 // text field sends its value.  Status events bring the server's value back.
 for (const c of document.querySelectorAll("input[data-cmd]")) {
   c.onchange = async () => {
     const v = c.type === "checkbox" ? (c.checked ? "on" : "off") : c.value.trim();
     if (c.type !== "checkbox") c.blur();   // so the status below may write the field
+    const sentAt = Date.now();
     if (v) await send(`${c.dataset.cmd} ${v}`);
-    // A refused value would stay in the control: show the server's again.  An
-    // accepted one's status event has normally arrived by now and wins.
-    setTimeout(() => applyStatus(status), 400);
+    // A refused value would stay in the control: show the server's again (an
+    // accepted one's status event has normally arrived by now), and say which.
+    setTimeout(() => {
+      applyStatus(status);
+      const refused = lastServerError && lastServerError.at >= sentAt;
+      if (refused) toast(lastServerError.text, "error");
+      if (c.type === "checkbox") return;
+      c.classList.add(refused ? "rejected" : "saved");
+      setTimeout(() => c.classList.remove("rejected", "saved"), 1500);
+    }, 400);
   };
 }
 $("#index-save").onclick = () => send("/index save");
@@ -1204,14 +1371,15 @@ async function loadFilter() {
     filterMsg(`Could not load the filter: ${err.message}`, true);
   }
 }
-function closeFilter() {
+async function closeFilter() {
   const dirty = $("#filter-text").value !== filterLoaded;
-  if (dirty && !confirm("Discard your changes to the index filter?")) return;
-  $("#filter-drawer").hidden = true;
+  const bar = $("#filter-drawer .drawer-actions");
+  if (dirty && !(await confirmInline(bar, "Discard your changes to the filter?", "Discard"))) return;
+  closeLayer($("#filter-drawer"));
 }
 function openFilter() {
   closeMenu();
-  $("#filter-drawer").hidden = false;
+  openLayer($("#filter-drawer"), undefined, false);
   loadFilter().then(() => $("#filter-text").focus());
 }
 $("#index-filter-open").onclick = openFilter;
@@ -1230,7 +1398,8 @@ $("#filter-save").onclick = async () => {
   }
 };
 $("#filter-reset").onclick = async () => {
-  if (!confirm("Replace the filter with one built from the project's current .gitignore files?")) return;
+  const bar = $("#filter-drawer .drawer-actions");
+  if (!(await confirmInline(bar, "Replace the filter with one built from the .gitignore files?", "Replace"))) return;
   await send("/index-filter reset");
   await loadFilter();
 };
@@ -1239,6 +1408,25 @@ $("#filter-text").addEventListener("keydown", (e) => {
   else if (e.key === "s" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#filter-save").click(); }
 });
 $("#index-load").onclick = () => send("/index load");
+
+// Ctrl/Cmd+K opens the palette from anywhere, the input box included.
+document.addEventListener("keydown", (e) => {
+  if (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+    e.preventDefault();
+    closeMenu();
+    openPalette();
+  }
+});
+
+// Esc from a field inside a popover or panel closes that popover or panel (the
+// input box keeps its own Esc: interrupt; fields that handle Esc themselves win).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented || e.target === input
+      || !e.target.matches?.("input, select, textarea")) return;
+  if (MENUS.some(([, m]) => !$(m).hidden)) return closeMenu();
+  const panel = e.target.closest("aside");
+  if (panel && DRAWERS[`#${panel.id}`]) DRAWERS[`#${panel.id}`]();
+});
 
 // Shift+letter shortcuts when focus is outside the text box (TUI: chat focus).
 document.addEventListener("keydown", (e) => {
@@ -1252,13 +1440,26 @@ document.addEventListener("keydown", (e) => {
     if (busy && !waiting) post("api/cancel").catch(() => {});
     return;
   }
+  if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    return openPalette({ shortcuts: true });
+  }
   if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
   const map = { T: "think", M: "md", D: "diff", Q: "companion" };
   if (map[e.key]) { e.preventDefault(); toggleView(map[e.key]); }
-  else if (e.key === "P") { e.preventDefault(); $("#run-badge").click(); }
+  else if (e.key === "P") { e.preventDefault(); send(`/run-confirm ${status.run_confirm ? "off" : "on"}`); }
   else if (e.key === "C") { e.preventDefault(); post("api/cancel").catch(() => {}); }
+  else if (e.key === "E") { e.preventDefault(); setAllOpen(true); }
+  else if (e.key === "W") { e.preventDefault(); setAllOpen(false); }
   else if (e.key === "Tab") { e.preventDefault(); cycleMode(); }
 });
+
+// Expand or collapse every tool call, tool group and thinking block.
+function setAllOpen(open) {
+  for (const d of transcript.querySelectorAll("details.tool, details.tool-group, details.think")) d.open = open;
+}
+$("#expand-all").onclick = () => setAllOpen(true);
+$("#collapse-all").onclick = () => setAllOpen(false);
 
 // ── view menu ─────────────────────────────────────────────────────────────────
 function syncViewMenu() {
@@ -1271,11 +1472,13 @@ function syncViewMenu() {
 // Popover menus: [button, menu].  One is open at a time; a click outside closes it.
 const MENUS = [["#view-btn", "#view-menu"], ["#model-btn", "#model-menu"],
                ["#ctx-btn", "#ctx-menu"], ["#index-badge", "#index-menu"],
-               ["#tools-btn", "#tools-menu"], ["#think-badge", "#think-menu"]];
+               ["#tools-btn", "#tools-menu"], ["#think-badge", "#think-menu"],
+               ["#run-badge", "#run-menu"], ["#net-badge", "#net-menu"],
+               ["#tools-badge", "#tools-off-menu"]];
 function closeMenu() {
   hideToolTip();
   for (const [b, m] of MENUS) {
-    $(m).hidden = true;
+    closeLayer($(m));
     $(b).setAttribute("aria-expanded", "false");
   }
 }
@@ -1288,9 +1491,11 @@ function toggleMenu(e, menu, title = null, load = null) {
   if (!m.hidden) return closeMenu();
   closeMenu();
   if (title) m.replaceChildren(el("div", "menu-title", title), el("div", "muted", "Loading…"));
-  m.hidden = false;
-  $(MENUS.find(([, x]) => x === menu)[0]).setAttribute("aria-expanded", "true");
-  load?.();
+  const button = $(MENUS.find(([, x]) => x === menu)[0]);
+  m.hidden = false;                 // loaders check menu.hidden before painting
+  load?.();                         // a synchronous painter fills it before focus moves in
+  openLayer(m, button);
+  button.setAttribute("aria-expanded", "true");
 }
 $("#view-btn").onclick = (e) => toggleMenu(e, "#view-menu");
 document.addEventListener("click", (e) => {
@@ -1309,13 +1514,14 @@ $("#idle-recap-secs").onchange = (e) => {
 };
 
 // ── plan drawer ───────────────────────────────────────────────────────────────
-$("#plan-btn").onclick = () => { refreshState(); $("#plan-drawer").hidden = false; };
+$("#plan-btn").onclick = (e) => { refreshState(); openLayer($("#plan-drawer"), e.currentTarget); };
 $("#plan-progress").onclick = $("#plan-btn").onclick;
 $("#plan-close").onclick = () => DRAWERS["#plan-drawer"]();
 for (const b of document.querySelectorAll("#plan-drawer [data-cmd]")) {
-  b.onclick = () => {
+  b.onclick = async () => {
     // Like deleting a session, discarding a plan asks first: it deletes .momo-plan.md.
-    if (b.id === "plan-cancel" && !confirm("Discard this plan? Its progress and .momo-plan.md are deleted.")) return;
+    const bar = $("#plan-drawer .drawer-actions");
+    if (b.id === "plan-cancel" && !(await confirmInline(bar, "Discard this plan and .momo-plan.md?", "Discard"))) return;
     send(b.dataset.cmd);
     DRAWERS["#plan-drawer"]();
   };
@@ -1352,7 +1558,21 @@ async function refreshModelMenu() {
     b.onclick = () => { closeMenu(); send(`/model ${m}`); };
     rows.push(b);
   }
+  // A long list (Ollama can serve dozens) gets a filter field.
+  let filter = null;
+  if (info.models.length > 8) {
+    filter = el("input", "menu-filter");
+    filter.type = "search";
+    filter.placeholder = "Filter models…";
+    filter.setAttribute("aria-label", "Filter models");
+    filter.oninput = () => {
+      const q = filter.value.trim().toLowerCase();
+      for (const b of menu.querySelectorAll(".menu-item")) b.hidden = !!q && !b.textContent.toLowerCase().includes(q);
+    };
+    rows.splice(1, 0, filter);
+  }
   menu.replaceChildren(...rows);
+  if (filter && (menu.contains(document.activeElement) || document.activeElement === document.body)) filter.focus();
 }
 
 // ── context breakdown ─────────────────────────────────────────────────────────
@@ -1420,7 +1640,27 @@ function renderCtxMenu(menu, b) {
     bar, rows,
     el("div", "muted small", meta.join(" · ")),
     el("div", "muted small", `Categories are estimates (~4 chars/token), total ~${fmtTok(b.estimated)}. Thinking stays in the transcript; only what /think-history sends back counts.`),
+    compactActions(b.pct),
     promptLink());
+}
+
+// Compact now — the summary kind and the instant one; suggested once the context
+// is three-quarters full (compaction starts by itself at the limit).
+function compactActions(pct) {
+  const row = el("div", "menu-row");
+  const high = pct >= 75;
+  for (const [label, cmd, title] of [
+    ["Compact", "/compact", "Drop old history, keeping a model-written summary of it"],
+    ["Fast compact", "/fast-compact", "Drop old history without a summary (instant)"],
+  ]) {
+    const b = el("button", `btn small${high && cmd === "/compact" ? " primary" : ""}`, label);
+    b.type = "button";
+    b.title = title;
+    b.disabled = busy;
+    b.onclick = () => { closeMenu(); send(cmd); };
+    row.append(b);
+  }
+  return row;
 }
 $("#ctx-btn").onclick = (e) => toggleMenu(e, "#ctx-menu", "Context", refreshCtxMenu);
 
@@ -1534,14 +1774,14 @@ function schedulePromptRefresh() {
   promptRefreshTimer = setTimeout(() => { promptRefreshTimer = null; loadPrompt(); }, 300);
 }
 function promptLink() {
-  const b = el("button", "menu-link", "View system prompt");
+  const b = el("button", "link-btn", "View system prompt");
   b.type = "button";
   b.onclick = openPromptDrawer;
   return b;
 }
 function openPromptDrawer() {
   closeMenu();
-  $("#prompt-drawer").hidden = false;
+  openRight("#prompt-drawer", false);
   loadPrompt();
 }
 async function loadPrompt() {
@@ -1574,16 +1814,7 @@ async function loadPrompt() {
 }
 $("#prompt-open").onclick = openPromptDrawer;
 $("#prompt-close").onclick = () => DRAWERS["#prompt-drawer"]();
-$("#prompt-copy").onclick = async () => {
-  const b = $("#prompt-copy");
-  try {
-    await copyText(promptText);
-    b.lastChild.textContent = " Copied";
-  } catch (err) {
-    b.lastChild.textContent = " Copy failed";
-  }
-  setTimeout(() => { b.lastChild.textContent = " Copy"; }, 1500);
-};
+$("#prompt-copy").onclick = () => copyWithFeedback($("#prompt-copy"), promptText);
 
 // ── code index composition ────────────────────────────────────────────────────
 // Clicking the INDEX badge (while the index is on) shows what the index's memory
@@ -1606,8 +1837,25 @@ async function refreshIndexMenu() {
     return;
   }
   if (menu.hidden) return;
-  if (!b.enabled) return closeMenu();
+  if (!b.enabled) return renderIndexOff(menu);
   renderIndexMenu(menu, b);
+}
+// The INDEX chip while the index is off: what it is, and the switch.
+function renderIndexOff(menu) {
+  const on = el("button", "btn primary small", "Turn the code index on");
+  on.type = "button";
+  on.onclick = () => { closeMenu(); send("/index on"); };
+  const more = el("button", "link-btn", "Index settings…");
+  more.type = "button";
+  more.onclick = () => { closeMenu(); openSettings("index"); };
+  const foot = el("div", "menu-foot");
+  foot.append(more);
+  menu.replaceChildren(
+    el("div", "menu-title", "Code index: off"),
+    el("div", "menu-note", "With the index on, the model finds definitions, callers and text in one call "
+      + "(index_* tools) instead of grepping file by file."),
+    on, foot);
+  on.focus();
 }
 function renderIndexMenu(menu, b) {
   const used = b.used || 1;
@@ -1650,12 +1898,12 @@ function renderIndexMenu(menu, b) {
   const phase = b.progress ? `${b.state} ${b.progress}` : b.state;
   const actions = el("div", "menu-row");
   const act = (label, cmd) => {
-    const btn = el("button", "menu-link", label);
+    const btn = el("button", "link-btn", label);
     btn.type = "button";
     btn.onclick = () => send(cmd);
     return btn;
   };
-  const filterBtn = el("button", "menu-link", "Filter…");
+  const filterBtn = el("button", "link-btn", "Filter…");
   filterBtn.type = "button";
   filterBtn.title = "Choose which files are indexed (gitignore syntax)";
   filterBtn.onclick = openFilter;
@@ -1686,31 +1934,178 @@ function renderIndexMenu(menu, b) {
 
 // ── drawers ───────────────────────────────────────────────────────────────────
 // Each drawer's close action, in the order Esc closes them.  The filter's asks
-// before discarding unsaved edits.
-const hideDrawer = (id) => () => { $(id).hidden = true; };
+// before discarding unsaved edits.  Closing gives focus back to what opened it.
+const hideDrawer = (id) => () => closeLayer($(id));
 const DRAWERS = {
   "#filter-drawer": closeFilter,
+  "#settings-drawer": hideDrawer("#settings-drawer"),
   "#prompt-drawer": hideDrawer("#prompt-drawer"),
   "#plan-drawer": hideDrawer("#plan-drawer"),
   "#sessions-drawer": hideDrawer("#sessions-drawer"),
   "#files-drawer": hideDrawer("#files-drawer"),
 };
 
-// The left drawers (sessions, workspace files) share one slot: opening one closes the other.
+// The left drawers (sessions, workspace files) share one slot: opening one
+// closes the other, and the button of the open one closes it.  True when `id`
+// ends up open.
+const LEFT = ["#sessions-drawer", "#files-drawer"];
 function openDrawer(id) {
-  for (const d of ["#sessions-drawer", "#files-drawer"]) $(d).hidden = d !== id || !$(d).hidden;
-  return !$(id).hidden;
+  const opening = $(id).hidden;
+  for (const d of LEFT) if (d !== id) closeLayer($(d));
+  if (opening) openLayer($(id), undefined, false);
+  else closeLayer($(id));
+  return opening;
+}
+// The right drawers (settings, system prompt, plan) share theirs the same way;
+// an index filter with unsaved edits stays until it is closed on purpose.
+const RIGHT = ["#settings-drawer", "#prompt-drawer", "#plan-drawer"];
+function openRight(id, focusFirst = true) {
+  for (const d of RIGHT) if (d !== id) closeLayer($(d));
+  if ($(id).hidden) openLayer($(id), undefined, focusFirst);
 }
 for (const b of document.querySelectorAll(".drawer-close")) b.onclick = () => DRAWERS[`#${b.closest("aside").id}`]();
 
 $("#sessions-btn").onclick = () => { if (openDrawer("#sessions-drawer")) openSessions(); };
 $("#files-btn").onclick = () => { if (openDrawer("#files-drawer")) openFiles(); };
 
+// ── settings drawer ───────────────────────────────────────────────────────────
+// Every setting, in collapsible sections whose open/closed state is remembered.
+// openSettings(section) opens the drawer at one section (chip popovers, palette).
+function openSettings(section = null) {
+  closeMenu();
+  openRight("#settings-drawer", !section);
+  if (!section) return;
+  const det = $("#settings-drawer").querySelector(`details[data-section="${section}"]`);
+  if (!det) return;
+  det.open = true;
+  det.scrollIntoView({ block: "start" });
+  det.classList.add("flash");
+  setTimeout(() => det.classList.remove("flash"), 1200);
+  requestAnimationFrame(() => det.querySelector("summary").focus());
+}
+{
+  const sections = [...$("#settings-body").querySelectorAll("details")];
+  const open = loadJSON("momo.settingsOpen", ["context", "run"]);
+  for (const det of sections) {
+    det.open = open.includes(det.dataset.section);
+    det.addEventListener("toggle", () =>
+      saveJSON("momo.settingsOpen", sections.filter((d) => d.open).map((d) => d.dataset.section)));
+  }
+}
+$("#settings-open").onclick = () => openSettings();
+$("#settings-close").onclick = () => DRAWERS["#settings-drawer"]();
+$("#palette-open").onclick = () => { closeMenu(); openPalette(); };
+
+// ── welcome card ──────────────────────────────────────────────────────────────
+// Until the first message: what this mode is for, a few things to try, and the
+// keys worth knowing.  Not part of events[]; re-made on mode changes.
+const WELCOME = {
+  design: ["Design mode", "Talk a feature or a project through: momo asks questions, then writes the spec.",
+           ["Help me design a small CLI that …", "Review how this project is structured", "Write a spec for …"]],
+  chat:   ["Chat mode", "Ask about the code or anything else: momo reads files but changes nothing.",
+           ["Explain what this project does", "Where is … handled?", "How does … work?"]],
+  plan:   ["Plan mode", "Describe a feature or a bug: momo investigates and proposes a plan you approve before anything changes.",
+           ["Plan how to add …", "Find out why … fails and plan a fix", "/plan tdd"]],
+  coding: ["Coding mode", "momo reads, edits and runs things in the workspace to do what you ask.",
+           ["Run the tests and fix what fails", "Add … to …", "Refactor … so that …"]],
+  momo:   ["Momo mode", "Keep the cat company — it helps when you ask.",
+           ["Hi momo! What are you up to?", "Tell me about this project", "Cheer me on, I'm debugging"]],
+};
+function renderWelcome() {
+  transcript.querySelector(".welcome")?.remove();
+  if (events.some((e) => e.type === "user")) return;
+  const [title, what, examples] = WELCOME[status.mode] || WELCOME.coding;
+  const card = el("div", "welcome");
+  const ex = el("div", "examples");
+  for (const text of examples) {
+    const b = el("button", "btn", text);
+    b.type = "button";
+    b.onclick = () => {
+      input.value = text;
+      autosize();
+      input.focus();
+      const gap = text.indexOf("…");      // select the blank so typing fills it
+      if (gap >= 0) input.setSelectionRange(gap, gap + 1);
+    };
+    ex.append(b);
+  }
+  const tips = el("p", "tips");
+  for (const [k, what2] of [["/", "commands"], ["@", "files"], ["Shift+Tab", "next mode"],
+                             ["Ctrl+K", "palette"], ["?", "shortcuts"]]) {
+    if (tips.childNodes.length) tips.append(" · ");
+    tips.append(el("kbd", "", k), ` ${what2}`);
+  }
+  card.append(el("h2", "", title), el("p", "", what), ex, tips);
+  transcript.prepend(card);
+}
+
+// ── clickable paths ───────────────────────────────────────────────────────────
+// [data-path] marks a workspace path in a reply (markdown.js), a tool row or a
+// diff header; a click opens it in the workspace preview, at its line if given.
+for (const host of [transcript, $("#plan-body")]) {
+  host.addEventListener("click", (e) => {
+    const p = e.target.closest("[data-path]");
+    if (!p) return;
+    e.preventDefault();      // inside a <summary>: open the file, not the row
+    e.stopPropagation();
+    showFile(p.dataset.path, Number(p.dataset.line) || 0);
+  });
+}
+
+// The composer's height, for what floats above it (new-messages pill, toasts).
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty("--composer-h", `${$("#composer").offsetHeight}px`);
+}).observe($("#composer"));
+
+// ── command palette ───────────────────────────────────────────────────────────
+const fakeClick = { stopPropagation() {} };
+function paletteActions() {
+  const show = (key, what, keys) => ({
+    label: `${view[key] ? "Hide" : "Show"} ${what}`, desc: "View", keys, run: () => toggleView(key) });
+  const sections = [["companion", "Companion"], ["context", "Context"], ["run", "Running commands"],
+                    ["network", "Network"], ["index", "Code index"], ["skills", "Skills"],
+                    ["notifications", "Notifications"], ["other", "Conversation and downloads"]];
+  return [
+    { label: "Settings", desc: "Every setting, in sections", run: () => openSettings() },
+    ...sections.map(([s, name]) => ({ label: `Settings: ${name}`, desc: "Open the settings here", run: () => openSettings(s) })),
+    { label: "Sessions", desc: "Open, rename or delete saved sessions", run: () => $("#sessions-btn").click() },
+    { label: "Workspace files", desc: "Browse and preview the workspace", run: () => $("#files-btn").click() },
+    ...(state?.plan ? [{ label: "Plan", desc: "The current plan", run: () => $("#plan-btn").click() }] : []),
+    { label: "System prompt", desc: "What the model gets as its system message", run: openPromptDrawer },
+    { label: "Context breakdown", desc: "Where the context is spent; compact it", run: () => toggleMenu(fakeClick, "#ctx-menu", "Context", refreshCtxMenu) },
+    { label: "Tools for this mode", desc: "Turn single tools on or off", run: () => toggleMenu(fakeClick, "#tools-menu", "Tools", refreshToolsMenu) },
+    { label: "Expand all", desc: "Tool calls, groups and thinking", keys: "Shift+E", run: () => setAllOpen(true) },
+    { label: "Collapse all", desc: "Tool calls, groups and thinking", keys: "Shift+W", run: () => setAllOpen(false) },
+    { label: view.group ? "Ungroup tool calls" : "Group tool calls", desc: "View", run: () => toggleView("group") },
+    show("tools", "tool output"), show("think", "thinking", "Shift+T"), show("diff", "edit diffs", "Shift+D"),
+    show("companion", "companion", "Shift+Q"),
+    { label: view.md ? "Plain text replies" : "Markdown replies", desc: "View", keys: "Shift+M", run: () => toggleView("md") },
+    { label: `Switch to ${currentTheme() === "dark" ? "light" : "dark"} mode`, desc: "Theme", run: () => $("#theme-btn").click() },
+    { label: "Download conversation", desc: "Markdown file", run: () => $("#export-link").click() },
+    { label: "Download full log", desc: "With system prompt, thinking and tool calls", run: () => $("#export-full-link").click() },
+    { label: "Keyboard shortcuts", desc: "Every key the UI knows", keys: "?", run: () => openPalette({ shortcuts: true }) },
+  ];
+}
+
 // ── boot ──────────────────────────────────────────────────────────────────────
-initNotify({ note: attNote, isLive: live, onUnseenChange: updateTitle });
+initNotify({ isLive: live, onUnseenChange: updateTitle });
+initChips({
+  send, status: () => status, openSettings, closeMenu,
+  openToolsMenu: () => toggleMenu(fakeClick, "#tools-menu", "Tools", refreshToolsMenu),
+});
+initPalette({
+  commands: () => state?.commands || [],
+  actions: paletteActions,
+  run: (cmd) => send(cmd),
+  fill: (text) => { input.value = text; autosize(); input.focus(); },
+});
+makeResizable($("#sessions-drawer"), "right", "momo.sessionsWidth", 320);
+for (const [id, min] of [["#settings-drawer", 360], ["#prompt-drawer", 420], ["#plan-drawer", 360], ["#filter-drawer", 420]]) {
+  makeResizable($(id), "left", `momo.width.${id.slice(1)}`, min);
+}
 initSessions({ send, post, close: DRAWERS["#sessions-drawer"] });
 initFiles({
-  note: attNote,
+  open: () => openDrawer("#files-drawer"),
   attach: (f) => {
     attachments.push({ id: ++attSeq, status: "ready", ...f });
     renderChips();

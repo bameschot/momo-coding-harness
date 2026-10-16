@@ -84,7 +84,12 @@ class ErrorEvent:
 
 @dataclass
 class DoneEvent:
-    pass
+    """A turn (or compaction, or plan run) is over.  After a model turn it carries
+    what the turn cost; all zero otherwise (the web UI's per-reply footer)."""
+    secs: float = 0.0          # wall-clock time of the turn
+    prompt_tokens: int = 0     # the last request's prompt, as the server counted it
+    eval_tokens: int = 0       # generated tokens over the whole turn, reasoning included
+    tool_calls: int = 0
 
 @dataclass
 class AskUserEvent:

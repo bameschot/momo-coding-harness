@@ -2,7 +2,7 @@
 // lists (task items too), quotes, fenced code, tables, rules, links, bold, italic,
 // strikethrough and inline code.  (md_render.py, the TUI's, does a smaller set.)
 // Output is safe for innerHTML: all source text is escaped before any markup is added.
-import { copyText, el } from "./dom.js";
+import { copyWithFeedback, el } from "./dom.js";
 import { esc, highlight } from "./highlight.js";
 
 // Placeholders for spans taken out before the emphasis pass: inline code
@@ -33,7 +33,19 @@ export function mdInline(src) {
       return `${LINK_MARK}${links.push(html) - 1}${LINK_MARK}`;
     });
   s = emphasis(s).replace(/\u0001(\d+)\u0001/g, (_, i) => links[+i]);
-  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[+i]}</code>`);
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => codeSpan(codes[+i]));
+}
+
+// Inline code that names a workspace file (`src/app.py`, `README.md:12`) can be
+// clicked to open it (app.js handles [data-path]).  A known extension, or a
+// folder part, keeps "e.g." and "v1.2" plain.
+const FILE_EXT = /\.(py|pyi|js|mjs|cjs|jsx|ts|tsx|json|ya?ml|toml|md|txt|rst|html?|css|scss|java|kt|kts|rs|go|c|h|cc|cpp|hpp|sh|bash|sql|cfg|ini|xml|gradle|rb|php|swift|lock|env|conf|csv|dockerfile)$/i;
+function codeSpan(c) {
+  const m = c.match(/^((?:[\w.-]+\/)*[\w.-]+\.\w{1,10})(?::(\d+))?$/);
+  if (m && !m[1].startsWith(".") && (m[1].includes("/") || FILE_EXT.test(m[1])) && !/^\d/.test(m[1])) {
+    return `<code data-path="${m[1]}"${m[2] ? ` data-line="${m[2]}"` : ""}>${c}</code>`;
+  }
+  return `<code>${c}</code>`;
 }
 
 export function renderMarkdown(text) {
@@ -132,22 +144,11 @@ export function addCopyButtons(root) {
     pre.replaceWith(box);
     const bar = el("div", "code-bar");
     const lang = code.dataset.lang;
-    const btn = el("button", "copy-btn", "Copy");
+    const btn = el("button", "btn small quiet copy-btn", "Copy");
     btn.type = "button";
     btn.title = "Copy code";
     btn.setAttribute("aria-label", lang ? `Copy ${lang} code` : "Copy code");
-    let timer;
-    btn.onclick = async () => {
-      try {
-        await copyText(code.textContent);
-        btn.textContent = "Copied ✓";
-        btn.classList.add("done");
-      } catch {
-        btn.textContent = "Copy failed";
-      }
-      clearTimeout(timer);
-      timer = setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1600);
-    };
+    btn.onclick = () => copyWithFeedback(btn, code.textContent);
     bar.append(el("span", "code-lang", lang || ""), btn);
     box.append(bar, pre);
   }
