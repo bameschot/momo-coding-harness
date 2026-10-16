@@ -147,7 +147,7 @@ Each run is stored under a fingerprint of everything that can change its outcome
 the task (prompt, expected facts, ideal tools), the files of the project it runs
 in, model / mode / think / index, the rendered system prompt and tool schemas,
 and the harness code behind the tool output (`tools.py`, `code_nav.py`,
-`harness.py`, `net.py`, plus `code_index.py` with `--index`). A matching run is
+`harness.py`, `net.py`, plus the `code_index/` package with `--index`). A matching run is
 reused; any change to those inputs makes the next invocation run it fresh.
 Asking for more runs than are stored tops up (`--runs 5` after 3 cached runs
 runs 2). `--refresh` ignores stored runs. Runs that ended in a transport error

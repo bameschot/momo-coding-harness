@@ -1198,9 +1198,11 @@ def _build_imports(found: list, lang: str, lines: list[str]) -> list[Import]:
     return out
 
 
-def parse(path: Path) -> _Parsed | None:
+def parse(path: Path, cache: bool = True) -> _Parsed | None:
     """Parse a supported file (cached by mtime+size).  Returns None for
-    unsupported extensions.  Raises OSError if the file cannot be read."""
+    unsupported extensions.  Raises OSError if the file cannot be read.
+    cache=False uses a cached tree but adds none: a scan over many files must
+    not evict the trees read_symbol works on."""
     lang = language_for(path)
     if lang is None:
         return None
@@ -1212,10 +1214,13 @@ def parse(path: Path) -> _Parsed | None:
         _cache.move_to_end(key)
         return hit[1]
     parsed = parse_bytes(lang, path.read_bytes())
+    if not cache:
+        return parsed
     while len(_cache) >= _MAX_CACHE:
         _cache.popitem(last=False)
     _cache[key] = (stamp, parsed)
-    _put_index(key, stamp, parsed)
+    if _index_provider is None:     # the project index already holds the symbols
+        _put_index(key, stamp, parsed)
     return parsed
 
 
@@ -1232,7 +1237,7 @@ def _put_index(key: str, stamp: tuple[int, int], parsed: _Parsed) -> None:
 # second copy of the same symbols in _index_cache.
 _index_provider = None  # callable(key: str, stamp) -> _Index | None
 # ...and its file list, so a directory scan sees the same files the index does
-# (git-tracked, not git-ignored) instead of walking the disk itself.
+# (those its /index-filter lets in) instead of walking the disk itself.
 _index_files = None     # callable(root: Path) -> list[Path] | None
 
 
@@ -2385,8 +2390,13 @@ def _norm_module(module: str) -> str:
 
 def _module_candidates(p: Path, workdir: Path) -> tuple[str, set[str]]:
     """(bare stem, dotted paths) that an import of `p` could plausibly name."""
-    rel = _rel(p, workdir)
-    stem = p.stem
+    return module_candidates_rel(_rel(p, workdir))
+
+
+def module_candidates_rel(rel: str) -> tuple[str, set[str]]:
+    """_module_candidates for a workdir-relative path — string work only, so the
+    project index can run it over every file without a syscall each."""
+    stem = Path(rel).stem
     dotted = rel.rsplit(".", 1)[0].replace("/", ".").replace("\\", ".")
     cands = {dotted, stem}
     parts = dotted.split(".")

@@ -172,7 +172,8 @@ def _nav_rules(role: str, tool_names: set[str], index: bool) -> str:
         bullets.append(f"Indexed: {code_nav.SUPPORTED_EXTENSIONS} (definitions and uses), and "
                        "every other text file for index_text. Use grep_files, grep_file or "
                        "find_files only when an index tool found nothing, for a regex, for another "
-                       "file type, or for a file the index skips (git-ignored, binary, over 2 MB).")
+                       "file type, or for a file the index skips (git-ignored or filtered out, "
+                       "binary, over 2 MB).")
     elif has("code_outline"):
         bullets.append("The structure tools cover source files and config keys. For anything else "
                        "(Markdown, plain text, other languages) `read_file` a small file whole, or "

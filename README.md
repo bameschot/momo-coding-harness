@@ -779,10 +779,12 @@ The index is **on by default**; `/index off` or `--no-index` turns it off, and t
 **What is indexed.** Every file the project's **index filter** lets in. The filter uses gitignore syntax: the last matching line wins, `!pattern` re-includes, and a trailing `/` matches folders only. To index only `src/`, write `/*` and then `!/src/`. It lives next to the saved index in `~/.momo-harness/index/<hash of the workdir>.filter` (mode `0600`), not in your repo. The first time the index starts for a project, the filter is created from:
 
 - the usual noise folders (`node_modules/`, `.venv/`, `__pycache__/`, …);
-- every `.gitignore` in the tree, with nested ones rewritten to their folder;
-- `.git/info/exclude`.
+- `.git/info/exclude`;
+- every `.gitignore` in the tree, with nested ones rewritten to their folder.
 
-Outside a git repository it also excludes hidden files. After that **only the filter decides**, and later `.gitignore` edits are not picked up. `/index-filter reset` re-seeds it. `.git/` is always excluded. Edit the filter with:
+They are written in that order, so as in git a `.gitignore` overrides `.git/info/exclude`.
+
+Outside a git repository it also excludes hidden files. After that **only the filter decides**, and later `.gitignore` edits are not picked up. `/index-filter reset` re-seeds it. `.git/` is always excluded, and so is the `.git` file of a worktree or submodule. Edit the filter with:
 
 - `/index-filter add|remove <pattern>`;
 - `/index-filter edit`, which opens `$VISUAL`/`$EDITOR` in the TUI;

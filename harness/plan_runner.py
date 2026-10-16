@@ -220,6 +220,8 @@ class PlanRunnerMixin:
         None when no marker could be removed."""
         self.event_queue.put(ToolCallEvent("tdd_switch_on", {"tag": step.tag}))
         removed, left, changed = tdd_mod.switch_on(self.workdir, step.tag)
+        if changed and self.index is not None:
+            self.index.invalidate(list(changed))
         for rel, old in changed.items():   # shown like any other edit
             self._emit_diff("edit_file", {"path": rel}, "OK", old, True)
         if not removed:

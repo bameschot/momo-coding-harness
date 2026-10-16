@@ -188,7 +188,7 @@ INDEX_TASKS: list[Task] = [
         prompt="What is the default memory limit of the code index (the value /index-max-mem "
                "starts at), and in which file and constant is that default defined?",
         ideal=frozenset({"index_search", "find_symbol", "grep_files"}),
-        must=("DEFAULT_MAX_BYTES", "code_index.py", "100"),
+        must=("DEFAULT_MAX_BYTES", "code_index/store.py", "100"),
         note="A module-level constant; net.py has a same-named 2 MB one (the trap). Reworded "
              "2026-09-23: 'memory budget' alone also matched index_map's budget=1500 parameter.",
         max_calls=2,
@@ -234,7 +234,7 @@ INDEX_TASKS: list[Task] = [
         id="regex-text",
         prompt="Which files under harness/ start a thread with threading.Thread(...)? List the files.",
         ideal=frozenset({"index_text", "grep_files"}),
-        must=("code_index.py", "controller.py", "harness.py", "server.py"),
+        must=("code_index/store.py", "controller.py", "harness.py", "server.py"),
         max_calls=1,
     ),
 ]

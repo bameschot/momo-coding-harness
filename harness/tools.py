@@ -260,7 +260,7 @@ _FALLBACK_NOTES = {
     "find_files": "Do NOT use this to find source or config files while the code index is on — "
                   "call index_search(query, kind=\"file\") (fuzzy name; returns language, size and "
                   "definitions) or index_map. Only for files the index does not cover: images, "
-                  "binaries, git-ignored paths. ",
+                  "binaries, git-ignored or filtered-out paths. ",
 }
 
 
@@ -1612,9 +1612,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
     if index is not None:
         if name in _WRITES_PATHS:
             index.invalidate([args.get(k) for k in _WRITES_PATHS[name] if isinstance(args.get(k), str)])
-        elif name == "edit_files":
-            index.invalidate(edit_paths(args))
-        elif name == "run_command":
+        elif name == "run_command":      # (edit_files invalidates its own writes)
             index.mark_dirty()
     return result
 
@@ -1624,7 +1622,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
 # of habit.  A plain-text grep and a file-name glob are answered from the index
 # instead — the same hits, plus the definition each one sits in — with a first
 # line that says so and names the index tool to call next time.  Regex searches,
-# and anything the index has no answer for (git-ignored, binary, not indexed),
+# and anything the index has no answer for (filtered out, binary, not indexed),
 # still go to the disk.
 
 _NO_PYTHON_RE = re.compile(r"\bpython: (?:command )?not found")

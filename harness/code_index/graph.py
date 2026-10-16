@@ -7,7 +7,6 @@ from collections import defaultdict
 from pathlib import Path
 
 from .. import code_nav
-from ..net import format_size
 from ..paths import MAX_SCAN_FILE_BYTES, safe_path
 from .records import DATA_LANGS, _DECL_IMPORT_LANGS, lang_family
 from .store import ProjectIndex
@@ -284,7 +283,7 @@ def index_map(path: str | None = None, budget: int = 1500, *, workdir: Path,
 
 
 _SKIP_REASONS = {"binary": "a binary file",
-                 "too_big": f"over {format_size(MAX_SCAN_FILE_BYTES)}",
+                 "too_big": f"over {MAX_SCAN_FILE_BYTES // 1_000_000} MB",   # decimal, like everywhere else
                  "budget": "left out: the memory budget is reached (/index-max-mem)",
                  "error": "it could not be read or parsed"}
 

@@ -379,7 +379,7 @@ class ChecksWithIndex(Base):
                                   "    print(format_price(3))\n")
         self.write("app/ledger.py", "class Ledger:\n    def calc_tax(self):\n        return 0\n\n\n"
                                     "def booked(ledger):\n    return ledger.calc_tax()\n")
-        self._patches = [mock.patch.object(ci, "_STAT_THROTTLE_S", 0.0),
+        self._patches = [mock.patch.object(ci.store, "_STAT_THROTTLE_S", 0.0),
                          mock.patch.dict(os.environ, {"HOME": self.home.name})]
         for p in self._patches:
             p.start()

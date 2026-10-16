@@ -159,8 +159,9 @@ class Rules:
         return rel.rsplit("/", 1)[-1] == ".git" or self._match(rel, True)
 
     def file_excluded(self, rel: str) -> bool:
-        """Likewise, for a file whose parent directories are included."""
-        return self._match(rel, False)
+        """Likewise, for a file whose parent directories are included.  A `.git`
+        file (a worktree's or submodule's link) is excluded like the folder."""
+        return rel.rsplit("/", 1)[-1] == ".git" or self._match(rel, False)
 
     def excluded(self, rel: str, is_dir: bool = False) -> bool:
         """Full check: any excluded parent directory excludes the path."""
@@ -171,6 +172,9 @@ class Rules:
             if self._match("/".join(parts[:k]), True):
                 return True
         return self._match(rel, is_dir)
+
+
+_GLOB_CHARS = re.compile(r"[\\\[\]*?]")
 
 
 def _rewrite_nested(line: str, prefix: str) -> str | None:
@@ -184,6 +188,7 @@ def _rewrite_nested(line: str, prefix: str) -> str | None:
     core = body.rstrip("/") if dir_only else body
     if not core:
         return None
+    prefix = _GLOB_CHARS.sub(r"\\\g<0>", prefix)     # a folder named `a[1]` is not a class
     if "/" in core:
         new = f"/{prefix}/{core.lstrip('/')}"
     else:
@@ -199,8 +204,8 @@ def _read(p: Path) -> str:
 
 
 def seed_text(root: Path) -> str:
-    """The first filter for a project: defaults + every .gitignore (nested ones
-    rewritten to their directory) + .git/info/exclude.  Directories that the
+    """The first filter for a project: defaults + .git/info/exclude + every
+    .gitignore (nested ones rewritten to their directory).  Directories that the
     rules so far exclude are not searched for more .gitignore files, as in git.
     The search stops after _MAX_SEED_DIRS folders."""
     root = Path(root)
@@ -212,6 +217,12 @@ def seed_text(root: Path) -> str:
              "", "# defaults", *DEFAULT_EXCLUDES]
     if not is_repo:
         lines.append(".*")          # outside git, hidden files were never indexed
+    # Lowest precedence first, as in git: .git/info/exclude, then the root
+    # .gitignore, then nested ones (the last matching line wins).
+    exclude = _read(root / ".git" / "info" / "exclude")
+    body = [l for l in exclude.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    if body:
+        lines += ["", "# .git/info/exclude", *body]
     root_gi = _read(root / ".gitignore")
     if root_gi.strip():
         lines += ["", "# .gitignore", *root_gi.splitlines()]
@@ -236,8 +247,4 @@ def seed_text(root: Path) -> str:
         dirnames[:] = sorted(d for d in dirnames
                              if not rules.dir_excluded(f"{rel_dir}/{d}" if rel_dir else d))
     lines += nested
-    exclude = _read(root / ".git" / "info" / "exclude")
-    body = [l for l in exclude.splitlines() if l.strip() and not l.lstrip().startswith("#")]
-    if body:
-        lines += ["", "# .git/info/exclude", *body]
     return "\n".join(lines) + "\n"

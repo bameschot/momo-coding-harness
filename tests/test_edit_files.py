@@ -123,7 +123,7 @@ class WithIndex(Base):
     def setUp(self):
         super().setUp()
         self.home = tempfile.TemporaryDirectory()
-        self._patches = [mock.patch.object(ci, "_STAT_THROTTLE_S", 3600.0),
+        self._patches = [mock.patch.object(ci.store, "_STAT_THROTTLE_S", 3600.0),
                          mock.patch.dict(os.environ, {"HOME": self.home.name})]
         for p in self._patches:
             p.start()

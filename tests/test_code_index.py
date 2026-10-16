@@ -1,4 +1,4 @@
-"""Tests for the in-memory code index (harness/code_index.py) and the index_*
+"""Tests for the in-memory code index (harness/code_index/) and the index_*
 tools, /index commands and web status that sit on it.
 
 Run with HOME pointed at a scratch dir — the pickle tests write to
@@ -55,7 +55,7 @@ class Base(unittest.TestCase):
         self.root = Path(self.tmp.name).resolve()
         for rel, text in self.files.items():
             _write(self.root, rel, text)
-        self._patches = [mock.patch.object(ci, "_STAT_THROTTLE_S", 0.0),
+        self._patches = [mock.patch.object(ci.store, "_STAT_THROTTLE_S", 0.0),
                          mock.patch.dict(os.environ, {"HOME": self.home.name})]
         for p in self._patches:
             p.start()
@@ -165,7 +165,7 @@ class Refresh(Base):
 
     def test_harness_write_visible_without_stat_diff(self):
         # With a long throttle only dispatch's invalidation can make this visible.
-        with mock.patch.object(ci, "_STAT_THROTTLE_S", 3600.0):
+        with mock.patch.object(ci.store, "_STAT_THROTTLE_S", 3600.0):
             self.idx._dirty = False
             self.idx._last_diff = time.monotonic()
             out = tools.dispatch("edit_file", {"path": "a.py", "old_string": "def leaf():",
@@ -175,7 +175,7 @@ class Refresh(Base):
             self.assertIn("function leaf_edited", self.search("leaf_edited"))
 
     def test_run_command_forces_a_stat_diff(self):
-        with mock.patch.object(ci, "_STAT_THROTTLE_S", 3600.0):
+        with mock.patch.object(ci.store, "_STAT_THROTTLE_S", 3600.0):
             self.idx._dirty = False
             self.idx._last_diff = time.monotonic()
             tools.dispatch("run_command",
@@ -242,12 +242,12 @@ class Blocking(Base):
 class Budget(Base):
 
     def test_file_limit_can_change_live(self):
-        with mock.patch.object(ci, "MIN_MAX_FILES", 1):
+        with mock.patch.object(ci.store, "MIN_MAX_FILES", 1):
             self.idx.set_max_files(2)
             self.assertIsNone(self.idx.wait_fresh())
             self.assertEqual(self.idx.live_count(), 2)
             self.assertTrue(self.idx.skipped["limit"])
-            self.assertIn("more than 2 files", ci._degraded_note(self.idx))
+            self.assertIn("more than 2 files", ci.common._degraded_note(self.idx))
             self.idx.set_max_files(1000)
             self.assertIsNone(self.idx.wait_fresh())
             self.assertEqual(self.idx.live_count(), len(CHAIN))
@@ -256,7 +256,7 @@ class Budget(Base):
     def test_degrade_order_and_recovery(self):
         m = dict(self.idx.mem)
         self.assertTrue(all(v > 0 for v in m.values()), m)
-        with mock.patch.object(ci, "MIN_MAX_BYTES", 1):
+        with mock.patch.object(ci.store, "MIN_MAX_BYTES", 1):
             self.idx.set_max_bytes(m["files"] + m["idents"] + m["trigrams"] - 1)
             self.assertEqual(self.idx.components, {"trigrams": False, "idents": True})
             self.assertIn("scanning files", self.text("retry_delay"))
@@ -292,7 +292,7 @@ class Budget(Base):
         self.assertEqual(sum(l["files"] for l in b["languages"]), len(CHAIN))
         langs = {l["lang"] for l in b["languages"]}
         self.assertEqual(langs, {"python", "yaml", "text"})
-        with mock.patch.object(ci, "MIN_MAX_BYTES", 1):
+        with mock.patch.object(ci.store, "MIN_MAX_BYTES", 1):
             self.idx.set_max_bytes(b["used"] - 1)
         b = ci.breakdown(self.idx)
         self.assertFalse({c["key"]: c["enabled"] for c in b["categories"]}["trigrams"])
@@ -303,7 +303,7 @@ class Budget(Base):
         _write(self.root, "big.py", "".join(f"def f{i}(x):\n    return g{i}(x)\n" for i in range(200)))
         self.assertIsNone(self.idx.wait_fresh())
         grown = self.idx.mem_used() - before
-        self.assertGreater(grown, 200 * ci._C_SYMBOL)
+        self.assertGreater(grown, 200 * ci.records._C_SYMBOL)
         (self.root / "big.py").unlink()
         self.assertIsNone(self.idx.wait_fresh())
         self.assertLess(abs(self.idx.mem_used() - before), 2000)
@@ -318,8 +318,8 @@ class Parallel(Base):
 
     def setUp(self):
         super().setUp()
-        for p in (mock.patch.object(ci, "_PARALLEL_MIN", 5),
-                  mock.patch.object(ci, "_PARALLEL_CHUNK", 4)):
+        for p in (mock.patch.object(ci.store, "_PARALLEL_MIN", 5),
+                  mock.patch.object(ci.store, "_PARALLEL_CHUNK", 4)):
             p.start()
             self._patches.append(p)
 
@@ -328,7 +328,7 @@ class Parallel(Base):
         with idx._lock:
             by_path = {e.path: (e.symbols, e.imports, e.sig, e.sig_bits, e.names and sorted(e.names))
                        for _, e in idx._alive()}
-            occ = {name: sorted((idx.files[v >> ci._LINE_BITS].path, v & ci._LINE_MASK)
+            occ = {name: sorted((idx.files[v >> ci.records._LINE_BITS].path, v & ci.records._LINE_MASK)
                                 for v in arr) for name, arr in idx._idents.items()}
             return by_path, occ, dict(idx.mem)
 
@@ -359,7 +359,7 @@ class Parallel(Base):
         self.assertEqual(multiprocessing.active_children(), [])
 
     def test_pool_failure_falls_back_to_serial(self):
-        with mock.patch.object(ci, "ProcessPoolExecutor", side_effect=OSError("no processes")):
+        with mock.patch.object(ci.store, "ProcessPoolExecutor", side_effect=OSError("no processes")):
             idx = self.make_index(workers=2)
         try:
             self.assertTrue(idx._pool_broken)
@@ -371,7 +371,7 @@ class Parallel(Base):
             idx.join(5)
 
     def test_budget_reached_during_batch(self):
-        with mock.patch.object(ci, "MIN_MAX_BYTES", 1):
+        with mock.patch.object(ci.store, "MIN_MAX_BYTES", 1):
             idx = self.make_index(workers=2, max_bytes=20_000)
         try:
             self.assertTrue(idx.partial)
@@ -382,21 +382,21 @@ class Parallel(Base):
             idx.join(5)
 
     def test_worker_error_is_an_error_skip(self):
-        with mock.patch.object(ci, "_build_entry", side_effect=RecursionError):
-            self.assertEqual(ci._build_many(str(self.root), ["a.py", "b.py"], True, True),
+        with mock.patch.object(ci.build, "_build_entry", side_effect=RecursionError):
+            self.assertEqual(ci.build._build_many(str(self.root), ["a.py", "b.py"], True, True),
                              [None, None])
         self.idx._apply_built(["a.py"], [None])
         self.assertEqual(self.idx.skipped["error"], 1)
         self.assertNotIn("a.py", self.idx._by_path)
 
     def test_in_flight_file_requeued_by_a_diff_is_not_built_twice(self):
-        built = ci._build_entry(self.root, "b.py", True, True)
+        built = ci.build._build_entry(self.root, "b.py", True, True)
         with self.idx._cond:
             self.idx._queue["b.py"] = None      # a query's stat-diff saw it in flight
         self.idx._apply_built(["b.py"], [built])
         self.assertNotIn("b.py", self.idx._queue)
         _write(self.root, "c.py", "def changed():\n    pass\n")
-        stale = ci._build_entry(self.root, "a.py", True, True)
+        stale = ci.build._build_entry(self.root, "a.py", True, True)
         with self.idx._cond:
             self.idx._queue["a.py"] = None
         _write(self.root, "a.py", "def leaf2():\n    return 2\n")   # changed after the build
@@ -431,7 +431,7 @@ class Pickle(Base):
 
     def test_version_mismatch_rebuilds(self):
         self.idx.save()
-        with mock.patch.object(ci, "FORMAT_VERSION", ci.FORMAT_VERSION + 1):
+        with mock.patch.object(ci.persist, "FORMAT_VERSION", ci.persist.FORMAT_VERSION + 1):
             self.assertIn("discarded", self._reload_notice())
         self.assertIn("function leaf", self.search("leaf"))
 
@@ -458,7 +458,7 @@ class Pickle(Base):
         path = ci.pickle_path(self.root)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
-            pickle.dump(ci._header(self.root), f)
+            pickle.dump(ci.persist._header(self.root), f)
             pickle.dump({"files": [], "idents": {}, "x": Evil()}, f)
         os.chmod(path, 0o600)
         notice = self._reload_notice()
@@ -566,10 +566,10 @@ class Tools(Base):
         self.assertIn("every indexed file was scanned", out)
 
     def test_regex_literals_are_conservative(self):
-        self.assertEqual(ci._regex_literals(r"foo|bar"), [])
-        self.assertEqual(ci._regex_literals(r"(abc)?def"), [])
-        self.assertEqual(ci._regex_literals(r"colou?r_name"), ["colo", "r_name"])
-        self.assertEqual(ci._regex_literals(r"\x41bcd"), ["bcd"])
+        self.assertEqual(ci.text._regex_literals(r"foo|bar"), [])
+        self.assertEqual(ci.text._regex_literals(r"(abc)?def"), [])
+        self.assertEqual(ci.text._regex_literals(r"colou?r_name"), ["colo", "r_name"])
+        self.assertEqual(ci.text._regex_literals(r"\x41bcd"), ["bcd"])
 
     def test_callers_depth_two_follows_the_chain(self):
         out = self.callers("leaf", depth=2)
@@ -642,7 +642,7 @@ class ReviewFixes(Base):
 
     def test_imports_stay_within_a_language(self):
         with self.idx._lock:
-            graph = ci._import_graph(self.idx)
+            graph = ci.graph._import_graph(self.idx)
             fam = {self.idx.files[a].path: {self.idx.files[b].path for b in t} for a, t in graph.items()}
         self.assertNotIn("native/util.c", fam.get("src/Cart.java", set()))
 
@@ -675,7 +675,7 @@ class ReviewFixes(Base):
         _write(self.root, "many.txt", "".join(f"needle line {i} " + "x" * 150 + "\n"
                                               for i in range(300)))
         out = self.text("needle")
-        self.assertLess(len(out), ci._MAX_TEXT_CHARS + 600)
+        self.assertLess(len(out), ci.common._MAX_TEXT_CHARS + 600)
         self.assertIn("narrow with path=", out)
 
     def test_find_symbol_sees_the_indexed_files_and_kind_equivalence(self):
@@ -691,9 +691,9 @@ class ReviewFixes(Base):
             code_nav.set_index_provider(None)
 
     def test_constructor_parameters_are_not_bases(self):
-        self.assertEqual(ci._drop_params("(val item: Circle) : Shape()"), " : Shape()")
-        self.assertEqual(ci._drop_params("(int x, int y) implements P {"), " implements P {")
-        self.assertEqual(ci._drop_params(" extends Shape {"), " extends Shape {")
+        self.assertEqual(ci.callers._drop_params("(val item: Circle) : Shape()"), " : Shape()")
+        self.assertEqual(ci.callers._drop_params("(int x, int y) implements P {"), " implements P {")
+        self.assertEqual(ci.callers._drop_params(" extends Shape {"), " extends Shape {")
 
     def test_module_receivers_are_not_class_callers(self):
         _write(self.root, "use_mod.py", "from . import shop as shop_mod\n\n\n"
@@ -702,7 +702,7 @@ class ReviewFixes(Base):
         self.assertIn("use_mod.py", self.callers("total"))
 
     def test_pickle_header_fingerprints_the_extractor(self):
-        self.assertIn("source", ci._header(self.root))
+        self.assertIn("source", ci.persist._header(self.root))
 
 
 class ReviewFixes0926(Base):
@@ -727,12 +727,12 @@ class ReviewFixes0926(Base):
         self.assertIn("   8: ", tools._grep_file("foo", "ff.py", workdir=self.root))
 
     def test_regex_prefilter_keeps_real_matches(self):
-        self.assertEqual(ci._regex_literals(r"(?!foo)bar"), ["bar"])
-        self.assertEqual(ci._regex_literals(r"(?<!abc)def"), ["def"])
-        self.assertEqual(ci._regex_literals(r"(?P<word>\w+)"), [])
-        self.assertEqual(ci._regex_literals(r"x{3,100}"), [])
-        self.assertEqual(ci._regex_literals(r"ab{0,3}cde"), ["cde"])
-        self.assertEqual(ci._regex_literals(r"(?x) foo # bar"), [])
+        self.assertEqual(ci.text._regex_literals(r"(?!foo)bar"), ["bar"])
+        self.assertEqual(ci.text._regex_literals(r"(?<!abc)def"), ["def"])
+        self.assertEqual(ci.text._regex_literals(r"(?P<word>\w+)"), [])
+        self.assertEqual(ci.text._regex_literals(r"x{3,100}"), [])
+        self.assertEqual(ci.text._regex_literals(r"ab{0,3}cde"), ["cde"])
+        self.assertEqual(ci.text._regex_literals(r"(?x) foo # bar"), [])
         self.assertIn("ff.py", self.text(r"(?!zzz)return foo", regex=True))
 
     def test_module_qualified_callers(self):
@@ -757,6 +757,111 @@ class ReviewFixes0926(Base):
         out = self.text("needle")
         self.assertIn("... 35 more in this file", out)
         self.assertIn("z_one.txt (1)", out)
+
+
+class ReviewFixes1016(Base):
+    """Regressions from the 2026-10-16 review of the index."""
+
+    def _throttled(self):
+        """Act as a slow tree: queries trust the last stat-diff."""
+        self.idx._dirty = False
+        self.idx._last_diff = time.monotonic()
+        return mock.patch.object(ci.store, "_STAT_THROTTLE_S", 3600.0)
+
+    def test_relisting_blocks_queries(self):
+        # rebuild() empties the index; until the worker's re-listing has queued
+        # the files again, a query must wait instead of answering from nothing.
+        gate, entered = threading.Event(), threading.Event()
+        real = self.idx._diff
+
+        def held_diff():
+            if threading.current_thread() is self.idx._thread:
+                entered.set()
+                gate.wait(5)
+            real()
+        res = {}
+        with self._throttled(), mock.patch.object(self.idx, "_diff", side_effect=held_diff):
+            self.idx.rebuild()
+            self.assertTrue(entered.wait(5))
+            self.assertFalse(self.idx.is_fresh())
+            t = threading.Thread(target=lambda: res.setdefault("out", self.search("leaf")))
+            t.start()
+            t.join(0.5)
+            self.assertTrue(t.is_alive())
+            gate.set()
+            t.join(5)
+        self.assertIn("function leaf", res["out"])
+
+    def test_unindexable_files_are_not_requeued(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root reads mode-000 files")
+        _write(self.root, ".git", "gitdir: /elsewhere/.git/worktrees/x\n")
+        locked = _write(self.root, "locked.py", "def hidden():\n    pass\n")
+        locked.chmod(0)
+        self.idx.set_filter("")                 # no `.*` rule: the .git file is listed
+        self.assertIsNone(self.idx.wait_fresh())
+        self.assertEqual(self.idx.skipped["error"], 1)
+        self.idx._diff()
+        with self.idx._lock:
+            self.assertEqual(list(self.idx._queue), [])
+        self.assertIn("could not be read", ci.index_file("locked.py", workdir=self.root,
+                                                         index=self.idx))
+
+    def test_folder_move_is_seen_under_throttle(self):
+        _write(self.root, "pkg1/mod.py", "def moved_fn():\n    pass\n")
+        self.assertIn("pkg1/mod.py", self.search("moved_fn"))
+        with self._throttled():
+            out = tools.dispatch("move_file", {"src": "pkg1", "dst": "pkg2"}, self.root,
+                                 index=self.idx)
+            self.assertNotIn("ERROR", out)
+            got = self.search("moved_fn")
+        self.assertIn("pkg2/mod.py", got)
+        self.assertNotIn("pkg1/", got)
+
+    def test_scope_path_may_be_absolute(self):
+        self.assertEqual(self.text("port", path=str(self.root / "conf")),
+                         self.text("port", path="conf"))
+        self.assertIn("conf/app.yaml", self.search("port", path=str(self.root / "conf")))
+        self.assertIn("conf/app.yaml", ci.index_map(path=f"{self.root}/conf", workdir=self.root,
+                                                    index=self.idx))
+        self.assertTrue(self.text("port", path="/elsewhere").startswith("ERROR"))
+
+    def test_index_scans_leave_code_nav_caches_alone(self):
+        code_nav.set_index_provider(self.idx.provide)
+        try:
+            for rel in ("b.py", "c.py"):
+                code_nav._cache.pop(str(self.root / rel), None)
+                code_nav._index_cache.pop(str(self.root / rel), None)
+            code_nav.parse(self.root / "c.py")
+            self.assertNotIn(str(self.root / "c.py"), code_nav._index_cache)
+            code_nav.parse(self.root / "b.py", cache=False)
+            self.assertNotIn(str(self.root / "b.py"), code_nav._cache)
+        finally:
+            code_nav.set_index_provider(None)
+
+    def test_regex_class_starting_with_bracket(self):
+        self.assertEqual(ci.text._regex_literals("[]abc]x"), [])
+        self.assertEqual(ci.text._regex_literals("[^]abc]def"), ["def"])
+
+    def test_file_named_by_basename(self):
+        _write(self.root, "src/util_mod.py", "def helper():\n    pass\n")
+        self.assertIsNone(self.idx.wait_fresh())
+        self.assertEqual(ci.callers._files_named(self.idx, "util_mod.py"), ["src/util_mod.py"])
+
+    def test_index_file_says_why_a_file_is_left_out(self):
+        _write(self.root, "blob.dat", "a\x00b")
+        self.assertIn("a binary file", ci.index_file("blob.dat", workdir=self.root, index=self.idx))
+
+    def test_load_with_a_larger_budget_restores_dropped_parts(self):
+        m = dict(self.idx.mem)
+        with mock.patch.object(ci.store, "MIN_MAX_BYTES", 1):
+            self.idx.set_max_bytes(m["files"] + m["idents"] + m["trigrams"] - 1)
+            self.assertFalse(self.idx.components["trigrams"])
+            self.assertIn("saved", self.idx.save())
+            self.idx.stop()
+            self.idx = self.make_index(load_pickle=True)
+        self.assertEqual(self.idx.components, {"trigrams": True, "idents": True})
+        self.assertGreater(self.idx.mem["trigrams"], 0)
 
 
 class IndexRouting(Base):
@@ -894,7 +999,7 @@ class HarnessIndex(unittest.TestCase):
         hmod.make_client = lambda *a, **k: FakeClient("http://fake", "fake")
         self._patches = [mock.patch.object(session_mod, "_PREFS_PATH", Path(self.home.name) / "prefs.json"),
                          mock.patch.dict(os.environ, {"HOME": self.home.name}),
-                         mock.patch.object(ci, "_STAT_THROTTLE_S", 0.0)]
+                         mock.patch.object(ci.store, "_STAT_THROTTLE_S", 0.0)]
         for p in self._patches:
             p.start()
         self.h = hmod.Harness(host="http://fake", model="fake", workdir=self.wd)

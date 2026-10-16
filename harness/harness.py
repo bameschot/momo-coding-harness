@@ -834,7 +834,8 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         idx = code_index.ProjectIndex(self.workdir, self.index_max_bytes,
                                       on_change=self._on_index_change,
                                       max_files=self.index_max_files,
-                                      workers=self.index_workers)
+                                      workers=self.index_workers,
+                                      on_wait=self._on_index_wait)
         self.index = idx
         self._index_saved_version = -1
         code_nav.set_index_provider(idx.provide, idx.paths_under)
@@ -925,11 +926,12 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         idx = self.index
         if idx is None or name not in code_index.WAIT_TOOLS:
             return None
+        return idx.wait_fresh(self._cancel)
 
-        def on_wait(done: int, total: int) -> None:
-            prog = f" ({done}/{total} files)" if total else ""
-            self.event_queue.put(ChatEvent("system", f"Waiting for the code index{prog}…"))
-        return idx.wait_fresh(self._cancel, on_wait=on_wait)
+    def _on_index_wait(self, done: int, total: int) -> None:
+        # Any query that blocks on the index — also a routed grep or an edit hint.
+        prog = f" ({done}/{total} files)" if total else ""
+        self.event_queue.put(ChatEvent("system", f"Waiting for the code index{prog}…"))
 
     def _dispatch(self, name: str, args: dict) -> str:
         err = self._wait_index(name)

@@ -315,7 +315,9 @@ def _reruns(calls) -> int:
 # tool schemas are fingerprinted separately, as rendered.
 _CODE_FILES = ("harness/tools.py", "harness/code_nav.py", "harness/harness.py",
                "harness/net.py", "harness/run_store.py", "harness/editing.py")
-_INDEX_CODE_FILES = ("harness/code_index.py",)
+# The index package (and the single module it was before, for an older worktree).
+_INDEX_CODE_FILES = ("harness/code_index.py",) + tuple(
+    sorted(p.relative_to(REPO).as_posix() for p in (REPO / "harness" / "code_index").glob("*.py")))
 
 
 def _project_hash(workdir: Path) -> str:

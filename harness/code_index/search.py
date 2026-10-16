@@ -376,8 +376,8 @@ def index_find_files(pattern: str, directory: str | None, *, index: ProjectIndex
                      cancel=None) -> str | None:
     """find_files answered from the index's file list: a bare glob ('*.py',
     'config*') matched against file names under `directory`.  None when no
-    indexed file matches, so the caller can look on disk (images, git-ignored
-    files); an ERROR string when the wait for the index was cancelled."""
+    indexed file matches, so the caller can look on disk (images, files the
+    index filter leaves out); an ERROR string when the wait for the index was cancelled."""
     if (err := _ready(index, cancel)):
         return err
     keep = _path_filter(directory)

@@ -362,7 +362,7 @@ class Guards(Base):
 
 class IndexFilterLoading(Base):
     def test_filter_is_not_seeded_on_the_constructing_thread(self):
-        with mock.patch.object(ci, "load_filter", side_effect=AssertionError("walked")) as lf:
+        with mock.patch.object(ci.persist, "load_filter", side_effect=AssertionError("walked")) as lf:
             idx = ci.ProjectIndex(self.root)
         lf.assert_not_called()
         self.assertTrue(idx.filter_pending)

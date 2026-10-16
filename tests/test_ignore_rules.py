@@ -128,6 +128,30 @@ class Seed(unittest.TestCase):
     def test_outside_git_hidden_files_are_excluded(self):
         self.assertIn("\n.*\n", ir.seed_text(self.root))
 
+    def test_info_exclude_ranks_below_gitignore(self):
+        # As in git: a .gitignore negation overrides .git/info/exclude.
+        (self.root / ".git" / "info").mkdir(parents=True)
+        self.w(".git/info/exclude", "*.log\n")
+        self.w(".gitignore", "!keep.log\n")
+        r = ir.Rules.parse(ir.seed_text(self.root))
+        self.assertTrue(r.excluded("x.log"))
+        self.assertFalse(r.excluded("keep.log"))
+
+    def test_nested_folder_names_are_not_patterns(self):
+        (self.root / ".git").mkdir()
+        self.w("foo[1]/.gitignore", "*.tmp\n")
+        self.w("foo1/a.tmp")
+        r = ir.Rules.parse(ir.seed_text(self.root))
+        self.assertTrue(r.excluded("foo[1]/a.tmp"))
+        self.assertFalse(r.excluded("foo1/a.tmp"))
+
+    def test_git_link_file_is_excluded_by_the_walk_too(self):
+        # A worktree's or submodule's `.git` file: the walk's check must agree
+        # with the full one, or the index re-queues it at every stat-diff.
+        r = ir.Rules.parse("")
+        self.assertTrue(r.file_excluded("sub/.git"))
+        self.assertEqual(r.file_excluded(".git"), r.excluded(".git"))
+
 
 if __name__ == "__main__":
     unittest.main()
