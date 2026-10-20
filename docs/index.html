@@ -1134,7 +1134,7 @@ FAILED (failures=2)
     <div class="table-scroll"><table>
       <tr><th>Setting</th><th>Description</th></tr>
       <tr><td><code>/run-mode new|classic</code></td><td class="wrap"><code>new</code> (default): log, views and <code>command_output</code>. <code>classic</code>: return the whole output, as before. Remembered between runs; also <code>--run-mode</code> and View → Context.</td></tr>
-      <tr><td><code>/run-output-limit [n]</code></td><td class="wrap">Size of the default view in characters (default 5000, minimum 500)</td></tr>
+      <tr><td><code>/run-output-limit [n|off]</code></td><td class="wrap">Size of the default view in characters (minimum 500; default off: the whole output)</td></tr>
     </table></div>
     <p class="note"><strong>Measured</strong> on Qwen3.5-9B with five command tasks: both modes found every fact, but <code>new</code> sent 62 KB of command output to the model instead of 436 KB and finished 35% sooner. <code>evals/run_output_bench.py</code> measures the views without a model.</p>
   </section>

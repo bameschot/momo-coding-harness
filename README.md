@@ -48,7 +48,7 @@ Options:
 | `--mode` | `design` | Starting mode (`design`, `chat`, `plan`, `coding`, or `momo`) |
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--run-mode` | last `/run-mode`, else `new` | `new`: `run_command` saves its output to a log and returns a view of it; `classic`: returns all of it (see [Command output](#command-output)) |
-| `--run-output-limit` | last setting, else `5000` | Characters in `run_command`'s default view in run mode `new` |
+| `--run-output-limit` | last setting, else `0` (off) | Characters in `run_command`'s default view in run mode `new`; `0` = the whole output |
 | `--think` | last used / `on` | Thinking level: `off`, `on`, or an effort level (`low`, `medium`, `high`, `xhigh`, …) for models that take one. See [Thinking level](#thinking-level) |
 | `--no-think` | off | Same as `--think off` |
 | `--think-history` | last used / `turn` | Send the model's own reasoning back to it: `off`, `turn` (since your last message) or `all`. See [Sending reasoning back](#sending-reasoning-back) |
@@ -759,7 +759,7 @@ The model passes that path (or just `r1`) to **`command_output`** to look again 
 |---|---|
 | `/run-mode` | Show the current mode |
 | `/run-mode new\|classic` | `new`: log + views + `command_output` + background commands. `classic`: return the whole output, as before. Saved in `prefs.json`; refused while a reply is running, because it changes the tool set. `on`/`off` also work. |
-| `/run-output-limit [n]` | Show or set the default view's size in characters (minimum 500, default 5000) |
+| `/run-output-limit [n\|off]` | Show or set the default view's size in characters (minimum 500; default off: the whole output) |
 
 The same settings are in the web UI under View → Context, and on the command line as `--run-mode` and `--run-output-limit`. `/tool-result` does not cut these results, because they are sized already.
 
@@ -1282,7 +1282,7 @@ Type any command in the input bar:
 | `/tool-result` | Show the current tool result character cap |
 | `/tool-result <n>` | Set the cap (e.g. `/tool-result 8000`); `0` = unlimited |
 | `/run-mode [new\|classic]` | How `run_command` returns output: saved to a log with a view (`new`, default) or all of it (`classic`). See [Command output](#command-output) |
-| `/run-output-limit [n]` | Characters in `run_command`'s default view (default 5000) |
+| `/run-output-limit [n\|off]` | Characters in `run_command`'s default view (default off) |
 | `/max-output-tokens [n\|off]` | Most tokens one model reply may take, reasoning included (default 25000, saved; `--max-output-tokens N`, 0 = off). A model caught in a repetition loop is cut off there; the harness then retries without thinking. Without a cap, one eval reply ran to 125k tokens and held the turn for 80 minutes |
 | `/compact` | Compact context — removes old messages and summarises them with the LLM |
 | `/fast-compact` | Compact context without LLM summarisation (instant) |

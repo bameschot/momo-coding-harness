@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .paths import momo_home
 
-DEFAULT_LIMIT = 5000          # chars one run_command / command_output view may return
+DEFAULT_LIMIT = 0             # chars one run_command / command_output view may return; 0 = off: the whole output
 MIN_LIMIT = 500
 KEEP_LOGS = 20                # per session; older logs are deleted
 KEEP_BYTES = 256 * 2**20      # per session, however few logs that is
@@ -269,8 +269,8 @@ def window(text: str, limit: int, how: str = "", numbered: bool = False) -> str:
     what was left out in between.  how: what to pass for the missing part.
     numbered: text is the output itself, so the note names the missing lines by
     number (what start_line/end_line take); a grep or range view, whose lines
-    carry their own numbers, gets a count."""
-    if len(text) <= limit:
+    carry their own numbers, gets a count.  limit 0: no limit."""
+    if not limit or len(text) <= limit:
         return text
     limit = _room(limit, how)
     lines = text.split("\n")
@@ -296,8 +296,9 @@ def default_view(text: str, limit: int, how: str = "") -> tuple[str, bool]:
     numbered (35%): a build warning or a failure in the middle of a long run is
     what the plain head and tail missed, and a small model rarely looks again.
     Budget the trouble lines do not use goes to the end.  more_trouble: some
-    trouble lines are still not shown (the footer then says how to list them)."""
-    if len(text) <= limit:
+    trouble lines are still not shown (the footer then says how to list them).
+    limit 0: no limit, the whole text."""
+    if not limit or len(text) <= limit:
         return text, False
     lines = text.split("\n")
     if not any(_TROUBLE_RE.search(ln) for ln in lines):

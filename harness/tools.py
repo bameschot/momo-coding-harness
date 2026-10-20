@@ -1408,6 +1408,8 @@ def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, con
     if live:
         store.add_background(run_id, proc)
     text = _read_log(store, path)
+    if stopped and not limit:      # limit off: a runaway or timed-out command still gets a bounded view
+        limit = _STOPPED_TAIL_CHARS
     body, hint = _log_view(text, limit, tail, grep, context, 1 if end_line else None, end_line,
                            how=f'command_output(path="{run_id}", start_line=…, end_line=…) '
                                f'shows them')

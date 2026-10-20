@@ -588,8 +588,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
         def _mode_state() -> str:
             if harness.run_mode == "classic":
                 return "run_command output: classic (the whole output is returned)"
+            n = harness.run_output_limit
             return (f"run_command output: new (saved to a log; tail=/grep= views and "
-                    f"command_output; default view {harness.run_output_limit} chars)")
+                    f"command_output; default view {f'{n:,} chars' if n else 'the whole output'})")
         if not arg:
             return CommandResult(handled=True, output=_mode_state())
         mode = arg.strip().lower()
@@ -643,21 +644,27 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return CommandResult(handled=True, output=_cap())
 
     if cmd == "/run-output-limit":
+        def _limit() -> str:
+            n = harness.run_output_limit
+            return (f"run_command output view: {n:,} chars (beginning, error lines and end "
+                    f"when longer)" if n else
+                    "run_command output view: off (the whole output is returned)")
         if not arg:
-            return CommandResult(handled=True, output=(
-                f"run_command output view: {harness.run_output_limit} chars "
-                f"(first 25% and last 75% when longer)"))
-        try:
-            n = int(arg)
-        except ValueError:
-            return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
-        if n < run_store_mod.MIN_LIMIT:
-            return CommandResult(handled=True,
-                                 output=f"ERROR: the limit must be at least {run_store_mod.MIN_LIMIT} chars")
+            return CommandResult(handled=True, output=_limit())
+        if arg.lower() in ("off", "0", "none"):
+            n = 0
+        else:
+            try:
+                n = int(arg.replace(",", "").replace("_", ""))
+            except ValueError:
+                return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
+            if n < run_store_mod.MIN_LIMIT:
+                return CommandResult(handled=True, output=(
+                    f"ERROR: the limit must be at least {run_store_mod.MIN_LIMIT} chars, or off"))
         harness.run_output_limit = n
         session_mod.save_prefs(run_output_limit=n)
         harness.emit_status()
-        return CommandResult(handled=True, output=f"run_command output view: {n} chars")
+        return CommandResult(handled=True, output=_limit())
 
     if cmd == "/net":
         def _net_state() -> str:
@@ -1365,7 +1372,7 @@ Available commands:
   /run-confirm on|off Ask y/N before each run_command  (Shift+P toggles)
   /run-mode [new|classic]  new: save command output to a log, return a view
                       (tail=/grep=, command_output); classic: return it all
-  /run-output-limit [n]    Chars in run_command's default view (default 5000)
+  /run-output-limit [n|off]  Chars in run_command's default view (default off)
   /max-output-tokens [n|off]  Most tokens one model reply may take, reasoning
                       included (default 25000; stops a model stuck in a loop)
   /tool-ref [full|compact]  How the system prompt describes the tools: full, or

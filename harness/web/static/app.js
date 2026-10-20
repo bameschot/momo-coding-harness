@@ -741,7 +741,8 @@ function applyStatus(s) {
   $("#guides").checked = s.guides;
   $("#run-mode").checked = s.run_mode !== "classic";
   const rl = $("#run-output-limit");
-  if (document.activeElement !== rl && s.run_output_limit) rl.value = String(s.run_output_limit);
+  if (document.activeElement !== rl && s.run_output_limit != null)
+    rl.value = s.run_output_limit ? String(s.run_output_limit) : "off";
   const mo = $("#max-output-tokens");
   if (document.activeElement !== mo && s.max_output_tokens != null)
     mo.value = s.max_output_tokens ? String(s.max_output_tokens) : "off";

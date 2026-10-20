@@ -304,8 +304,8 @@ fixtures in `tests/test_code_index.py` (`ConfigResolution`).
 
 `/run-mode new` (the default) saves `run_command` output to
 `~/.momo-harness/runs/<session>/rN.log` and returns a view: `tail=N`, `grep=`,
-or by default the whole output up to `/run-output-limit` (5000 chars), else its
-first 25% and last 75%. Every result ends with the log's full path, which
+or by default the whole output up to `/run-output-limit` (off by default; the
+bench runs used 5000 chars), else its first 25% and last 75%. Every result ends with the log's full path, which
 `command_output` takes to search it again. `/run-mode classic` is the old
 whole-output behaviour, kept for comparison.
 

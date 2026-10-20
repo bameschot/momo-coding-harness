@@ -107,6 +107,13 @@ class Views(unittest.TestCase):
         self.assertIn("5,000 matching", out)
         self.assertTrue(out.endswith("error 4999"))
 
+    def test_limit_zero_is_no_limit(self):
+        text = "\n".join(f"line {i}" for i in range(5000)) + "\nFAILED x"
+        self.assertEqual(run_store.window(text, 0), text)
+        self.assertEqual(run_store.default_view(text, 0), (text, False))
+        self.assertEqual(run_store.view(text, 0), text)
+        self.assertEqual(run_store.view(text, 0, tail_n=4000).count("\n"), 4000)
+
     def test_no_match(self):
         self.assertIn("no matching lines in 2", run_store.view("a\nb", 5000, pattern="zzz"))
 
@@ -364,11 +371,18 @@ class HarnessWiring(unittest.TestCase):
         self.assertNotIn("command_output", self.names())
 
     def test_output_limit_command(self):
+        self.assertEqual(self.h.run_output_limit, 0)      # off by default
+        out = self.h._dispatch("run_command", {"command": "seq 1 20000"})
+        self.assertEqual(body(out), "\n".join(map(str, range(1, 20001))))
+        self.assertIn("off", commands.handle("/run-output-limit", self.h).output)
         self.assertIn("ERROR", commands.handle("/run-output-limit 10", self.h).output)
         commands.handle("/run-output-limit 800", self.h)
         self.assertEqual(self.h.run_output_limit, 800)
         out = self.h._dispatch("run_command", {"command": "seq 1 5000"})
         self.assertLess(len(body(out)), 900)
+        commands.handle("/run-output-limit off", self.h)
+        self.assertEqual(self.h.run_output_limit, 0)
+        self.assertIn("whole output", commands.handle("/run-mode", self.h).output)
 
     def test_logs_live_in_the_session_dir_and_go_with_it(self):
         out = self.h._dispatch("run_command", {"command": "echo hi"})

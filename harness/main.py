@@ -62,8 +62,8 @@ def main():
                         help="most tokens one model reply may take, 0 = no cap "
                              "(default: last /max-output-tokens setting, else 25000)")
     parser.add_argument("--run-output-limit", type=int, default=None, metavar="N",
-                        help="Chars in run_command's default view in run mode new "
-                             "(default: last /run-output-limit setting, else 5000)")
+                        help="Chars in run_command's default view in run mode new, 0 = off "
+                             "(default: last /run-output-limit setting, else off)")
     parser.add_argument("--fresh", action="store_true", default=False,
                         help="Start a new session instead of restoring the last one")
     parser.add_argument("--think", choices=THINK_LEVELS, default=None,
@@ -247,9 +247,9 @@ def main():
     harness.tool_ref = tool_ref if tool_ref in ("full", "compact") else "compact"
     limit = args.run_output_limit if args.run_output_limit is not None \
         else prefs.get("run_output_limit", harness.run_output_limit)
-    if not isinstance(limit, int) or limit < run_store_mod.MIN_LIMIT:
+    if not isinstance(limit, int) or (limit != 0 and limit < run_store_mod.MIN_LIMIT):
         if args.run_output_limit is not None:
-            parser.error(f"--run-output-limit: expected at least {run_store_mod.MIN_LIMIT}")
+            parser.error(f"--run-output-limit: expected 0 (off) or at least {run_store_mod.MIN_LIMIT}")
         limit = run_store_mod.DEFAULT_LIMIT
     harness.run_output_limit = limit
     cap = args.max_output_tokens if args.max_output_tokens is not None \

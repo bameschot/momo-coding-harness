@@ -47,7 +47,7 @@ class StatusEvent:
     tools_enabled: bool = True
     run_confirm: bool = False
     run_mode: str = "new"         # /run-mode: "new" (saved log + view) | "classic"
-    run_output_limit: int = 5000  # /run-output-limit: chars per run_command view
+    run_output_limit: int = 0     # /run-output-limit: chars per run_command view (0 = off)
     max_output_tokens: int = 25000  # /max-output-tokens: cap on one model reply (0 = off)
     net_access: str = "off"     # "off" | "on" | "local"
     net_confirm: bool = True    # ask y/N before a write request
