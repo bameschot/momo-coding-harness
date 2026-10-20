@@ -293,7 +293,7 @@ class PlanRunnerMixin:
             code, self._last_run_exit = self._last_run_exit, None
             self._tdd_green = code == 0 and tdd_mod.same_command(
                 str(args.get("command") or ""), self.plan.test_command)
-        elif name not in KEEPS_GREEN:
+        elif name not in KEEPS_GREEN and not self._mcp_keeps_green(name):
             self._tdd_green = False
 
     def _check_step_command(self, idx: int):

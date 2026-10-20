@@ -177,6 +177,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - The **`THINK`** badge shows the [thinking level](#thinking-level). Clicking it opens a menu of the values the current model takes (e.g. off / on / low / medium / xhigh for Qwen3.8), plus your current choice, greyed out if the model can't take it. When the model gets something other than your choice, the badge shows both (`THINK: high→on`) and turns yellow. It shows `THINK: n/a` for a model that takes no thinking setting. Below the levels, **Send reasoning back** picks off / this turn / all turns ([`/think-history`](#sending-reasoning-back)).
   - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on. A **`NET: on`** / **`NET: local`** badge appears when internet access is on; click it to turn it off. Both are also in View → Network. The **`INDEX`** badge shows the [code index](#code-index): `off`, build progress (`building 812/1873`), or files and memory against the budget (`312 files · 4MB/100MB`). While the index is off, clicking it turns it on. While it is on, clicking it opens a popover like the CTX one: a meter of memory against the budget, a stacked bar and one row per part of the index (file records, definitions, imports, identifiers, text signatures), the same split per language, and Rebuild / Save now / Turn off. It turns yellow when the index is over its memory budget and has dropped a part.
   - **Tools** (wrench icon) opens the [tool picker](#turning-tools-on-and-off) for the current mode: one checkbox per tool, grouped, with the **Tool calls** master switch on top. Hovering a tool shows its description. A small count on the icon says how many tools are off in this mode.
+  - **Skills** (book icon, right of the wrench) opens the [skills](#skills) menu: every skill with a checkbox, its title, what it covers and roughly how many tokens it adds to the system prompt. Active skills are listed first, a filter narrows the list, and a count on the icon says how many are active.
   - **View options** (sliders icon, far right) opens the view options (below).
 - **Conversation**
   - Replies **stream in** as they're generated, with a blinking cursor. Reasoning streams into an open *thinking…* block that folds away once the answer starts. When the reply is complete, it's re-rendered as markdown. Use `--no-stream` to turn streaming off.
@@ -204,7 +205,7 @@ The browser and the terminal are two views of **the same session**, not separate
 
 The layout adapts to phone-width screens: the status bar collapses to mode, CTX and the view-options button. It follows the system light or dark theme.
 
-All buttons use one set of built-in line icons, drawn as inline SVG rather than emoji. They're the same size and stroke everywhere and follow the light or dark theme. The icon buttons in the top bar are, from left to right: **Sessions** (clock with arrow), **Workspace files** (folder), then on the right **Plan** (checklist, only while a plan exists), **Tools** (wrench) and **View options** (sliders). Hover over any icon button for its name.
+All buttons use one set of built-in line icons, drawn as inline SVG rather than emoji. They're the same size and stroke everywhere and follow the light or dark theme. The icon buttons in the top bar are, from left to right: **Sessions** (clock with arrow), **Workspace files** (folder), then on the right **Plan** (checklist, only while a plan exists), **Theme**, **MCP servers** (plug), **Tools** (wrench), **Skills** (book) and **View options** (sliders). Hover over any icon button for its name.
 
 ### Attaching files
 
@@ -391,6 +392,10 @@ The page talks to the harness through a small JSON API, which can also be script
 | `POST /api/sessions/delete` `{"names": [...]}` | Delete saved sessions (and their logs) by name. Returns `{deleted, skipped: [{name, reason}]}`; the current session and anything that isn't a plain session name are skipped |
 | `GET /api/tools` | The current mode's tools: `{mode, tools_enabled, tools: [{name, group, enabled, locked, note, desc, params}]}` |
 | `GET /api/system-prompt` | The composed system prompt: `{mode, text, total_tokens, sections: [{key, label, tokens, text}], schemas: {label, tokens, text}}` |
+| `GET /api/mcp` | MCP servers: `{enabled, confirm, servers: [{name, source, transport, target, state, error, tools, tool_list, resources, confirm, …}], errors, files, schema_tokens}` |
+| `GET /api/mcp/resources?server=` | One MCP server's resources: `{resources: [{uri, name, mime, desc}]}` |
+| `GET /api/mcp/resource?server=&uri=` | A resource as `{name, text, chars}`, for attaching to a message |
+| `POST /api/mcp/servers` `{"action": "add"\|"remove", "name", "entry"}` | Add or remove a server in `~/.momo-harness/mcp.json` (needs an `Origin` header, unlike the other POSTs) |
 | `GET /api/export` | The conversation as a Markdown download; `?full=1` for the full log |
 | `GET /api/files?path=&hidden=0\|1` | Workspace directory listing |
 | `GET /api/file?path=` | A workspace file converted to text (same conversion as uploads) |
@@ -879,6 +884,63 @@ The timeout is enforced across the whole redirect chain, not per hop, so a chain
 
 Secret request headers (`Authorization`, `Cookie`, `X-API-Key`, and any name containing auth, token, key, secret, cookie, session or passw) are masked to `***` in the transcript, the session file and the log, but are sent as given.
 
+## MCP servers
+
+momo is an [MCP](https://modelcontextprotocol.io) client: the tools and resources of external MCP servers become tools the model can call. Both transports are supported, a local command speaking **stdio** and a remote **streamable HTTP** endpoint (header or bearer-token auth; no OAuth). Like the rest of momo it uses only the standard library.
+
+Servers are configured in the common `mcpServers` format (the same as Claude Desktop and Claude Code), in two files:
+
+- `~/.momo-harness/mcp.json`, your own servers
+- `<workdir>/.mcp.json`, a project's servers, which **only start after you approve them** (`/mcp approve <name>`)
+
+The approval is remembered per workdir and per server entry, so editing the entry asks again. A cloned repository's `.mcp.json` can never run a command you did not approve.
+
+```json
+{"mcpServers": {
+  "git":    {"command": "uvx", "args": ["mcp-server-git", "--repository", "."]},
+  "github": {"type": "http", "url": "https://api.githubcopilot.com/mcp/",
+             "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
+             "confirm": "always", "tools": {"include": ["get_*", "list_*", "search_*"]}}
+}}
+```
+
+`${VAR}` and `${VAR:-default}` are read from momo's environment when a server starts, so tokens stay out of the file. `--mcp-config PATH` adds another file. momo adds a few optional keys of its own:
+
+| Key | Default | |
+|---|---|---|
+| `confirm` | `writes` | `always`, `writes` (ask unless the tool is annotated read-only) or `never` |
+| `tools` | all | `{"include": [...], "exclude": [...]}`, fnmatch patterns on the server's tool names |
+| `timeout` | `120` | Seconds per call |
+| `untrusted` | `true` for http | Wrap results in an untrusted-content fence, like `fetch_url` |
+| `enabled` | `true` | `false` keeps the server configured but stopped |
+
+**What the model sees.** Each tool is named `mcp__<server>__<tool>` and appears in the generated tool reference like any built-in. The system prompt gets an **MCP servers** section with each server's own instructions. Read-only modes (design, chat, plan investigation, momo) only get tools the server annotates `readOnlyHint`. Servers that offer resources add `mcp_list_resources` and `mcp_read_resource`. Every MCP tool can also be turned off per mode with `/tools`, where each server has its own section. Tool schemas cost context, and `/mcp` warns when they pass 25% of the limit.
+
+**Confirmation.** Under the default `writes` policy, a call to a tool that isn't annotated read-only shows the server, the tool and its arguments and waits. Answer `y`, `n`, or `a` (always allow this tool for the rest of the session); the web UI shows the buttons **Yes**, **Always** and **No**. `/mcp-confirm off` skips the prompts for the session; like `/net-confirm`, it resets to on at every launch.
+
+**Managing servers.**
+
+- **TUI:** `/mcp` opens a server picker. Space turns a server on or off, `r` restarts it, `a`/`d` approves or denies it, `l` shows its log, and Enter lists its tools. A status-bar part `MCP 2/3` shows how many servers are connected, ending in `!` when one failed or is waiting for approval.
+- **Web UI:** the plug button left of the wrench shows how many servers are connected (in the warn colour when one failed or waits for approval). It opens an overview of every server with its state, version and confirm policy, its tools with read-only/writes/destructive tags and an on/off checkbox per tool for the current mode, its resources, and Restart / Turn off / Approve. **Settings → MCP servers** lists each server with its tools (read-only, writes or destructive tags, and on/off per tool) and its resources (**Attach** puts one into your next message), and has an **Add server** form.
+
+| Command | |
+|---|---|
+| `/mcp list` | Servers, their state and tool counts |
+| `/mcp on\|off` | Connect servers and offer their tools (saved) |
+| `/mcp reload` | Re-read both files; changed servers restart, unchanged ones keep running |
+| `/mcp tools <server>` | The tools as the model sees them, with descriptions (review them: they go into the prompt) |
+| `/mcp restart\|enable\|disable <server>` | `disable` is saved |
+| `/mcp approve\|deny <server>` | For project servers |
+| `/mcp log <server>` | The server's stderr, which is also kept in `~/.momo-harness/mcp-logs/` |
+| `/mcp resources [server]`, `/mcp read <server> <uri>` | Browse resources |
+| `/mcp add <name> [--env K=V] <command> [args…]` | Add a stdio server to `~/.momo-harness/mcp.json` |
+| `/mcp add <name> --http <url> [--header K=V]` | Add an HTTP server |
+| `/mcp rm <name>` | Remove one |
+
+Servers start in the background, so momo never waits for one at launch. Your first message waits up to 10 s for servers that are still starting (an `npx`/`uvx` server downloads itself the first time). A server that crashes after it was working is restarted with backoff, up to 5 times. Plain `http://` is only allowed to this machine or the LAN, and redirects are not followed, so a token can't be sent on to another host. Everything a server sends (names, descriptions, instructions, results) has control characters stripped before it reaches the prompt or the terminal.
+
+**Not supported yet:** OAuth, MCP prompts, sampling and elicitation requests from a server, the legacy SSE transport, and image results (they are named, not shown).
+
 ## Web search
 
 `web_search` gives the model discovery without a search engine, an API key or Docker. It queries keyless domain APIs and checks URLs the model proposes. It is offered alongside `fetch_url` while `/net` is on and uses the same guard: the same address checks, pinning, size cap, cancel and untrusted-content fence.
@@ -1012,7 +1074,7 @@ Skills are `.md` files in the `skills/` folder that get appended to the active r
 /unload-skill python      # remove it
 ```
 
-Active skills are saved with the session and restored on restart. Skills stack — multiple can be active at once. On a mode switch (`/code`, `/plan`, etc.) the role prompt is rebuilt with all currently active skills still included.
+In the web UI the book button in the header does the same with checkboxes, showing each skill's sections and token cost. Active skills are saved with the session and restored on restart. Skills stack — multiple can be active at once. On a mode switch (`/code`, `/plan`, etc.) the role prompt is rebuilt with all currently active skills still included.
 
 ### Built-in skills
 

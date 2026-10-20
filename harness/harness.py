@@ -17,6 +17,7 @@ from .logger import Logger
 from .compaction import CompactionMixin, calls_tokens, content_text, format_for_summary, text_tokens
 from .plan import Plan
 from .plan_runner import KEEPS_GREEN, TDD_MAX_REFUSALS, PlanRunnerMixin
+from .mcp_mixin import MCPMixin
 from .tools import (ALL_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, NET_TOOLS,
                     PLAN_EXECUTE_TOOLS, PLAN_INVESTIGATE_TOOLS, PLAN_TDD_EXECUTE_TOOLS,
                     PLAN_TDD_INVESTIGATE_TOOLS, dispatch, render_tool_reference,
@@ -78,7 +79,18 @@ _GROUP_ORDER = ("files", "code nav", "index", "edit & shell", "net", "ask & plan
 
 
 def _tool_group(name: str) -> str:
+    if name.startswith("mcp__"):          # mcp__<server>__<tool>: one section per server
+        return "mcp · " + name[5:].split("__", 1)[0]
+    if name.startswith("mcp_"):
+        return "mcp"
     return next((g for g, names in _TOOL_GROUPS if name in names), "edit & shell")
+
+
+def _group_rank(group: str) -> tuple[int, str]:
+    """Picker section order: _GROUP_ORDER, then the MCP sections by name."""
+    if group in _GROUP_ORDER:
+        return _GROUP_ORDER.index(group), ""
+    return len(_GROUP_ORDER), group
 
 # Project guide files for coding agents, read from the workdir root (matched
 # case-insensitively) when /guides is on, in this order.
@@ -213,7 +225,7 @@ def _has_model(available: list[str], name: str) -> bool:
     return name in available or f"{name}:latest" in available
 
 
-class Harness(CompactionMixin, PlanRunnerMixin):
+class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
     def __init__(self, host: str, model: str, workdir: Path, provider: str = "ollama"):
         self.workdir = workdir.resolve()
         self.mode = "design"
@@ -325,6 +337,7 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         self._schema_cache: tuple = (None, 0)
         self._turn_user: dict | None = None  # the user message the running turn answers
         self._start_turn_stats()             # what the running turn cost (DoneEvent)
+        self._init_mcp()                     # before the first prompt: it lists MCP tools
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
         ]
@@ -703,6 +716,7 @@ class Harness(CompactionMixin, PlanRunnerMixin):
                              for t in NET_TOOLS]
         if self.index is not None:
             tools = with_index_tools(tools)
+        tools = tools + self._mcp_tools()
         off = self.disabled_tools.get(self.mode, set()) - _LOCKED_TOOLS
         if off:
             tools = [t for t in tools if t["function"]["name"] not in off]
@@ -719,7 +733,7 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         else:
             base = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
         return (with_edit_features(with_run_mode(base, self.run_mode), self.edit_features)
-                + NET_TOOLS + INDEX_TOOLS)
+                + NET_TOOLS + INDEX_TOOLS + self._mcp_tools())
 
     def tool_choices(self) -> list[dict]:
         """The current role's tools for the frontends' pickers:
@@ -728,7 +742,7 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         off = self.disabled_tools.get(self.mode, set())
         out = []
         universe = sorted(self._role_universe(),
-                          key=lambda t: _GROUP_ORDER.index(_tool_group(t["function"]["name"])))
+                          key=lambda t: _group_rank(_tool_group(t["function"]["name"])))
         for t in universe:
             name = t["function"]["name"]
             if name == "web_search":   # its description lists the loaded sources
@@ -1036,6 +1050,8 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         # mode's tool set, so it is always in sync with the real tools (the role
         # .md files carry no tool tables).  Kept so the context breakdown can
         # attribute it to tools without re-rendering.
+        if (mcp := self._mcp_prompt_section(names)):
+            add("mcp", "MCP servers", mcp)
         self._tool_ref = render_tool_reference(tools, self.tool_ref)
         add("tools", f"Tool reference ({len(tools)} tools, {self.tool_ref})", self._tool_ref)
         role_name = "plan-exec" if self._plan_executing() else self.mode
@@ -1420,6 +1436,7 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         self._turn_count += 1
         self._start_turn_stats()
         try:
+            self._mcp_before_turn()
             if self._plan_executing():
                 # A paused plan: the user's message is extra context for the step
                 # being resumed, and execution continues where it stopped.
@@ -1795,15 +1812,18 @@ class Harness(CompactionMixin, PlanRunnerMixin):
                                       "they would like to do instead.")
                     elif name == "add_search_source":
                         result = self._add_search_source(args)
+                    elif self._is_mcp_tool(name):
+                        result = self._mcp_call(name, args)
                     else:
                         result = self._dispatch(name, args)
                     # fetch_url windows its own output (net_max_chars) and says how to
                     # page on; a generic cut here would slice through the untrusted-
                     # content fence and point the model at read_file.
-                    # New-mode run_command / command_output / stop_command window
-                    # themselves too.
+                    # New-mode run_command / command_output / stop_command and MCP
+                    # results (fenced when untrusted) window themselves too.
                     if (self.max_tool_result > 0 and len(result) > self.max_tool_result
                             and name not in ("fetch_url", "web_search")
+                            and not self._is_mcp_tool(name)
                             and not (name in ("run_command", "command_output", "stop_command")
                                      and self.run_mode == "new")):
                         total = len(result)
@@ -2027,7 +2047,9 @@ class Harness(CompactionMixin, PlanRunnerMixin):
             think_known=self.client.thinking_caps().known,
             think_history=self.think_history,
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
+            skills=list(self.active_skills),
             **self._index_status_fields(),
+            **self._mcp_status_fields(),
         )
 
     def _index_status_fields(self) -> dict:
@@ -2047,6 +2069,41 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         if not _SKILLS_DIR.exists():
             return []
         return sorted(p.stem for p in _SKILLS_DIR.glob("*.md"))
+
+    def skill_choices(self) -> list[dict]:
+        """Every skill for the web UI's Skills menu: [{name, title, summary,
+        tokens, active}].  The title comes from the "# Skill: …" heading; the
+        summary is the first prose paragraph, else the section headings."""
+        out = []
+        for name in self.list_available_skills():
+            try:
+                text = (_SKILLS_DIR / f"{name}.md").read_text(encoding="utf-8")
+            except OSError:
+                continue
+            lines = text.strip().splitlines()
+            title = name
+            if lines and lines[0].startswith("# "):
+                title = lines[0][2:].removeprefix("Skill:").strip() or name
+            prose, heads, in_body = [], [], False
+            for line in lines[1:]:
+                s = line.strip()
+                if s.startswith("## "):
+                    in_body = True
+                    # "Common mistakes (these are …)" → "Common mistakes"; every
+                    # skill has a "Core rules" section, so it says nothing.
+                    head = re.split(r"\s+(?:\(|—|-\s)", s[3:].strip())[0]
+                    if not head.lower().endswith("core rules"):
+                        heads.append(head)
+                elif not in_body and s and not s.startswith(("#", "-", "*", "|", "`", ">")):
+                    prose.append(s)
+                elif prose and not s:
+                    break
+            summary = " ".join(prose) if prose else " · ".join(heads)
+            summary = re.sub(r"[*`]", "", summary)
+            out.append({"name": name, "title": title,
+                        "summary": summary[:220] + ("…" if len(summary) > 220 else ""),
+                        "tokens": text_tokens(text.strip()), "active": name in self.active_skills})
+        return out
 
     def load_skill(self, name: str) -> str:
         name = name.removesuffix(".md")
@@ -2188,6 +2245,8 @@ class Harness(CompactionMixin, PlanRunnerMixin):
         if self.index_enabled and (self.index is None or self.index.root != self.workdir.resolve()):
             self._stop_index()
             self._start_index()
+        if self.mcp.workdir != self.workdir:
+            self.mcp_reload()
         # Always rebuild the system prompt from the current role files and skills on
         # disk — saved sessions carry a snapshot; role/skill edits must take effect.
         self.rebuild_system_prompt()

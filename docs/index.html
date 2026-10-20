@@ -470,6 +470,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
   <symbol id="i-server" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="16" height="6.5" rx="1.5"/><path d="M7.5 7.25h.01M7.5 16.75h.01M11 7.25h5M11 16.75h5"/></symbol>
   <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3.5h6M10 3.5v6l-5.2 8.6A2 2 0 0 0 6.5 21h11a2 2 0 0 0 1.7-2.9L14 9.5v-6"/><path d="M7.4 15h9.2"/></symbol>
   <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v4M15 3v4"/><path d="M6.5 7h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 16v5"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
 </svg>
 
@@ -498,7 +499,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     <div>
       <div class="eyebrow">lightweight · local · AI coding harness</div>
       <h1>A coding assistant that stays <span class="accent">on your machine</span>.</h1>
-      <p class="lede">momo connects to a local <strong>Ollama</strong> or <strong>llama.cpp</strong> server and gives the model tools to read, search, edit and run your project. Use it from a split-pane terminal UI, a browser window, or both at once. It runs on the Python standard library in about 40 MB of RAM, and it <strong>sends nothing anywhere except to the model server you point it at</strong>. A small black cat keeps you company.</p>
+      <p class="lede">momo connects to a local <strong>Ollama</strong> or <strong>llama.cpp</strong> server and gives the model tools to read, search, edit and run your project. Use it from a split-pane terminal UI, a browser window, or both at once. It runs on the Python standard library in about 40 MB of RAM, and it <strong>sends nothing anywhere except to the model server you point it at</strong> (and any MCP servers you add yourself). A small black cat keeps you company.</p>
       <div class="hero-actions">
         <a class="btn primary" href="#start">Get started <svg class="icon sm" aria-hidden="true"><use href="#i-arrow-right"/></svg></a>
         <a class="btn" href="#features">Features</a>
@@ -564,10 +565,23 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     </div>
   </div>
 
+  <div class="feature-pair">
+    <div class="card" style="--c: var(--focus)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>Guarded internet access</h3>
+      <p>Opt-in <code>fetch_url</code> and <code>web_search</code>, off by default. Search needs no API key and can return just the passages that answer the question. Private addresses are blocked and content is fenced off as untrusted.</p>
+      <a class="more" href="#search">Web search →</a>
+    </div>
+    <div class="card" style="--c: var(--tool)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg>MCP servers</h3>
+      <p>Plug in any <strong>Model Context Protocol</strong> server, a local command or a remote HTTP endpoint, in the same <code>mcpServers</code> format Claude Desktop uses. Its tools and resources join momo's own. Tools that change things ask first, and a project's <code>.mcp.json</code> never runs until you approve it.</p>
+      <a class="more" href="#mcp">MCP servers →</a>
+    </div>
+  </div>
+
   <div class="features">
     <div class="card" style="--c: var(--ok)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>Your code goes only to your model</h3>
-      <p>momo talks to one server: the Ollama or llama.cpp you point it at. No telemetry, accounts or update checks, and the web UI loads nothing from the internet. The internet tools stay off until you turn them on. With a local model server, nothing leaves the machine.</p>
+      <p>momo talks to one server: the Ollama or llama.cpp you point it at. No telemetry, accounts or update checks, and the web UI loads nothing from the internet. The internet tools stay off until you turn them on, and MCP servers only run when you configure them. With a local model server, nothing leaves the machine.</p>
       <a class="more" href="#net">Internet access →</a>
     </div>
     <div class="card" style="--c: var(--user)">
@@ -594,11 +608,6 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       <h3><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>In-memory code index</h3>
       <p>On by default. It supports fuzzy definition search, full-text search, callers grouped by function and a ranked project map, and it waits for pending changes before answering so results are never stale.</p>
       <a class="more" href="#index">Code index →</a>
-    </div>
-    <div class="card" style="--c: var(--focus)">
-      <h3><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>Guarded internet access</h3>
-      <p>Opt-in <code>fetch_url</code> and <code>web_search</code>, off by default. Search needs no API key and can return just the passages that answer the question. Private addresses are blocked and content is fenced off as untrusted.</p>
-      <a class="more" href="#search">Web search →</a>
     </div>
     <div class="card" style="--c: var(--danger)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Confined to your project</h3>
@@ -991,7 +1000,7 @@ ollama serve</code></pre></div>
           <li>mode and model pickers;</li>
           <li>the CTX meter: click it for the per-category breakdown and a link to the <a href="#system-prompt">system prompt</a>;</li>
           <li><code>THINK</code> / <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges for those settings;</li>
-          <li>a wrench button for <a href="#tool-choices">this mode's tools</a>.</li>
+          <li>a plug button for <a href="#mcp">MCP servers</a> (with a count of connected servers) a wrench button for <a href="#tool-choices">this mode's tools</a>, and a book button for <a href="#skills">skills</a> (with a count of active ones).</li>
         </ul></li>
       <li><strong>Transcript:</strong> streamed markdown replies, collapsible thinking, one-line tool calls that expand to show arguments and results, coloured diffs and question cards with Yes/No buttons.</li>
       <li><strong>Input:</strong> <kbd>/</kbd> command autocomplete, <kbd>@</kbd> fuzzy path search, a queue for messages sent while the model is busy, and Retry / Edit on your last message.</li>
@@ -1018,6 +1027,7 @@ ollama serve</code></pre></div>
 <div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/list-skills
 /load-skill python
 /unload-skill python</code></pre></div>
+    <p>In the web UI, the book button next to the wrench lists every skill with a checkbox, what it covers and roughly how many tokens it adds. Active ones come first, and a filter narrows the list.</p>
     <p>Built in: <code>bash</code>, <code>c</code>, <code>code-review</code>, <code>data-analysis</code>, <code>document-editing</code>, <code>html-javascript</code>, <code>java</code>, <code>kotlin</code>, <code>maven-dependency-updates</code>, <code>python</code>, <code>rust</code>, <code>software-design</code>, <code>sql</code>, <code>storytelling</code>, <code>tdd</code>, <code>text-based-game-design</code>, <code>typescript</code>. To add your own, drop a <code>.md</code> file into the folder.</p>
     <p><strong>Project guides</strong> (<code>/guides on</code>) load the workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>MOMO.md</code>, <code>GEMINI.md</code>, <code>.github/copilot-instructions.md</code> or <code>.cursorrules</code> into the system prompt, where compaction can't drop them. They're re-read on a new session, <code>/clear</code>, compaction and workdir changes.</p>
   </section>
@@ -1434,6 +1444,58 @@ FAILED (failures=2)
     </table></div>
   </section>
 
+  <section id="mcp" data-voice="mcp">
+    <h2>MCP servers</h2>
+    <p>momo is a <a href="https://modelcontextprotocol.io">Model Context Protocol</a> client. Add a server and its tools become tools the model can call, next to momo's own. It speaks both transports, a local command over <strong>stdio</strong> and a remote <strong>streamable HTTP</strong> endpoint, and like the rest of momo it needs no packages.</p>
+    <h3>Adding a server</h3>
+    <p>Servers live in the common <code>mcpServers</code> format (the same as Claude Desktop and Claude Code), in two files:</p>
+    <ul>
+      <li><code>~/.momo-harness/mcp.json</code>: your own servers. <code>/mcp add</code> and the web UI's <strong>Add server</strong> form write here.</li>
+      <li><code>&lt;workdir&gt;/.mcp.json</code>: a project's servers. These <strong>only start after you approve them</strong> with <code>/mcp approve &lt;name&gt;</code>, and editing an entry asks again, so a cloned repository can't run a command you didn't agree to.</li>
+    </ul>
+<div class="code-block"><div class="code-bar"><span class="code-lang">~/.momo-harness/mcp.json</span></div><pre><code>{"mcpServers": {
+  "git":    {"command": "uvx", "args": ["mcp-server-git", "--repository", "."]},
+  "github": {"type": "http", "url": "https://api.githubcopilot.com/mcp/",
+             "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
+             "confirm": "always", "tools": {"include": ["get_*", "list_*"]}}
+}}</code></pre></div>
+    <p><code>${VAR}</code> and <code>${VAR:-default}</code> are read from your environment when the server starts, so tokens stay out of the file. Besides the standard keys, momo reads a few of its own:</p>
+    <div class="table-scroll"><table>
+      <tr><th>Key</th><th>Default</th><th>Description</th></tr>
+      <tr><td><code>confirm</code></td><td><code>writes</code></td><td class="wrap">When to ask before a call: <code>always</code>, <code>writes</code> (unless the server marks the tool read-only) or <code>never</code></td></tr>
+      <tr><td><code>tools</code></td><td>all</td><td class="wrap"><code>{"include": [...], "exclude": [...]}</code>: patterns on the server's tool names, to keep a big server from filling a small context</td></tr>
+      <tr><td><code>timeout</code></td><td><code>120</code></td><td class="wrap">Seconds per call</td></tr>
+      <tr><td><code>untrusted</code></td><td>on for HTTP</td><td class="wrap">Fence results as untrusted content, like <a href="#net"><code>fetch_url</code></a></td></tr>
+      <tr><td><code>enabled</code></td><td><code>true</code></td><td class="wrap"><code>false</code> keeps the server configured but stopped</td></tr>
+    </table></div>
+    <h3>What the model sees</h3>
+    <ul>
+      <li>Each tool is named <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> and appears in the generated tool reference like any built-in one. The <a href="#system-prompt">system prompt</a> gets an <strong>MCP servers</strong> part with each server's own instructions.</li>
+      <li>Read-only modes (design, chat, plan investigation, momo) only get the tools a server marks read-only, so they stay read-only.</li>
+      <li>Servers that offer resources add <code>mcp_list_resources</code> and <code>mcp_read_resource</code>.</li>
+      <li>Every MCP tool can be turned off per mode in the <a href="#tool-choices">tool picker</a>, where each server has its own section. Tool schemas cost context: <code>/mcp</code> warns when they pass a quarter of the limit.</li>
+    </ul>
+    <h3>Confirming calls</h3>
+    <p>Under the default <code>writes</code> policy, a tool that isn't marked read-only shows the server, the tool and its arguments and waits. Answer <code>y</code>, <code>n</code>, or <code>a</code> to allow that tool for the rest of the session; the web UI has <strong>Yes</strong>, <strong>Always</strong> and <strong>No</strong> buttons. <code>/mcp-confirm off</code> skips the prompts and, like <code>/net-confirm</code>, resets to on at every launch.</p>
+    <h3>Managing servers</h3>
+    <ul>
+      <li><strong>Web UI:</strong> the plug button left of the wrench shows how many servers are connected, amber when one failed or waits for approval. It opens an overview of every server with its tools (read-only, writes or destructive), an on/off switch per tool, and Restart / Turn off / Approve. <strong>Settings → MCP servers</strong> has the same as cards, plus each server's resources (<strong>Attach</strong> puts one into your next message) and an <strong>Add server</strong> form.</li>
+      <li><strong>TUI:</strong> <code>/mcp</code> opens a server picker: <kbd>Space</kbd> on/off, <kbd>r</kbd> restart, <kbd>a</kbd>/<kbd>d</kbd> approve or deny, <kbd>l</kbd> log, <kbd>Enter</kbd> tools. The status bar shows <code>MCP 2/3</code>, ending in <code>!</code> when one needs attention.</li>
+    </ul>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>/mcp list                          <span class="com"># servers, state, tool counts</span>
+/mcp add git uvx mcp-server-git    <span class="com"># a stdio server (--env K=V before the command)</span>
+/mcp add web --http https://h/mcp  <span class="com"># an HTTP server (--header K=V after the URL)</span>
+/mcp tools git                     <span class="com"># what the model sees, with descriptions</span>
+/mcp approve|deny &lt;server&gt;         <span class="com"># project servers</span>
+/mcp restart|enable|disable &lt;server&gt;
+/mcp log &lt;server&gt;                  <span class="com"># the server's stderr</span>
+/mcp resources [server]            <span class="com"># and /mcp read &lt;server&gt; &lt;uri&gt;</span>
+/mcp reload                        <span class="com"># re-read both files; only changed servers restart</span>
+/mcp on|off                        <span class="com"># all MCP servers (remembered)</span></code></pre></div>
+    <p>Servers start in the background, so momo never waits for one at launch; your first message waits up to 10 seconds for any still starting (an <code>npx</code> or <code>uvx</code> server downloads itself the first time). A server that crashes after it worked is restarted with backoff, up to five times.</p>
+    <p class="note">An MCP server is code you chose to run, with your permissions, and a remote one sees whatever the model sends it. momo keeps its side tidy: plain <code>http://</code> only to this machine or the LAN, no redirects (so a token can't be passed on), control characters stripped from everything a server sends, and its stderr kept in <code>~/.momo-harness/mcp-logs/</code> rather than on your screen. Review a server's tool descriptions with <code>/mcp tools</code>: they go into the prompt. Not supported yet: OAuth, MCP prompts, sampling and elicitation, the legacy SSE transport, and image results.</p>
+  </section>
+
   <section id="security" data-voice="security">
     <h2>Access &amp; security</h2>
     <p>The web UI can do everything momo can, including editing files and running commands, so what matters is who can reach it. By default that's <strong>only this computer</strong>; every other setup is opt-in at startup.</p>
@@ -1553,6 +1615,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>--headless</code></td><td>off</td><td class="wrap">Web UI only, with no terminal UI</td></tr>
       <tr><td><code>--no-index</code></td><td>index on</td><td class="wrap">Start with the code index off. <code>--index-max-mem</code>, <code>--index-max-files</code>, <code>--index-workers</code> and <code>--index-persist</code> set its budget, file limit, build processes and persistence.</td></tr>
       <tr><td><code>--net</code></td><td><code>off</code></td><td class="wrap"><code>off</code>, <code>on</code> or <code>local</code> at startup (<code>--net-confirm</code>, <code>--net-max-bytes</code> and <code>--net-max-chars</code> go with it)</td></tr>
+      <tr><td><code>--mcp</code> / <code>--no-mcp</code></td><td>last used / on</td><td class="wrap">Start the configured <a href="#mcp">MCP servers</a>. <code>--mcp-config PATH</code> adds another config file (repeatable).</td></tr>
       <tr><td><code>--guides</code></td><td>off</td><td class="wrap">Load the project's guide files into the system prompt</td></tr>
       <tr><td><code>--companion-idle-recap</code></td><td>off</td><td class="wrap">Let momo recap recent turns when you're idle (<code>--companion-idle-recap-secs</code>)</td></tr>
     </table></div>
@@ -1605,6 +1668,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/index …</code></td><td class="wrap">See <a href="#index">Code index</a></td></tr>
       <tr><td><code>/net …</code></td><td class="wrap">See <a href="#net">Internet access</a></td></tr>
       <tr><td><code>/search-sources …</code></td><td class="wrap">See <a href="#search">Web search</a></td></tr>
+      <tr><td><code>/mcp …</code>, <code>/mcp-confirm on|off</code></td><td class="wrap">See <a href="#mcp">MCP servers</a></td></tr>
       <tr><td><code>/guides on|off|reload</code></td><td class="wrap">Project guide files in the system prompt</td></tr>
       <tr><td><code>/system-prompt</code>, <code>/system-prompt list</code></td><td class="wrap">Show the composed system prompt, or list its parts and sizes. Alias <code>/prompt</code>. See <a href="#system-prompt">The system prompt</a></td></tr>
       <tr><td><code>/list-skills</code>, <code>/load-skill</code>, <code>/unload-skill</code></td><td class="wrap">Manage <a href="#skills">skills</a></td></tr>
@@ -1635,6 +1699,9 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>GET /api/sessions</code></td><td class="wrap">Recent sessions</td></tr>
       <tr><td><code>POST /api/sessions/delete</code></td><td class="wrap"><code>{"names": [...]}</code>: delete saved sessions and their logs. The current one is always kept.</td></tr>
       <tr><td><code>GET /api/export</code></td><td class="wrap">The conversation as a Markdown download; <code>?full=1</code> for the full log</td></tr>
+      <tr><td><code>GET /api/mcp</code></td><td class="wrap">MCP servers with their state, tools and config files</td></tr>
+      <tr><td><code>GET /api/mcp/resource</code></td><td class="wrap"><code>?server=&amp;uri=</code>: a resource as <code>{name, text}</code> (<code>/api/mcp/resources?server=</code> lists them)</td></tr>
+      <tr><td><code>POST /api/mcp/servers</code></td><td class="wrap"><code>{"action": "add"|"remove", "name", "entry"}</code>: edit <code>mcp.json</code>. Needs an <code>Origin</code> header.</td></tr>
     </table></div>
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>curl -s localhost:8765/api/state | jq .status
 curl -s -X POST localhost:8765/api/submit -H 'Content-Type: application/json' -d '{"text": "/context"}'
@@ -1643,7 +1710,7 @@ curl -sN localhost:8765/api/events</code></pre></div>
 
   <section id="storage" data-voice="storage">
     <h2>Where momo stores data</h2>
-    <p>Everything momo keeps between runs lives in one folder in your home directory. None of it is sent anywhere (momo only talks to your model server), and deleting the folder resets momo completely.</p>
+    <p>Everything momo keeps between runs lives in one folder in your home directory. None of it is sent anywhere (momo only talks to your model server, and to MCP servers you add), and deleting the folder resets momo completely.</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">~/.momo-harness/</span></div><pre><code>~/.momo-harness/
 ├── prefs.json            <span class="com"># remembered settings</span>
 ├── sessions/
@@ -1656,6 +1723,10 @@ curl -sN localhost:8765/api/events</code></pre></div>
 │   └── 2026-09-23T18-04-11/r1.log  <span class="com"># saved run_command output, per session</span>
 ├── search_sources/
 │   └── docsrs.json       <span class="com"># your web_search sources (/search-sources save)</span>
+├── mcp.json              <span class="com"># your MCP servers (/mcp add)</span>
+├── mcp-approved.json     <span class="com"># project MCP servers you approved or denied</span>
+├── mcp-logs/
+│   └── git.log           <span class="com"># each stdio server's stderr (/mcp log)</span>
 └── tls/                  <span class="com"># only with --web-tls auto</span>
     ├── momo-ca.pem       <span class="com"># the CA certificate you trust on your devices</span>
     ├── momo-ca.key       <span class="com"># the CA's private key: never share</span>
@@ -1665,12 +1736,15 @@ curl -sN localhost:8765/api/events</code></pre></div>
     └── server.json       <span class="com"># the names it covers, and its expiry</span></code></pre></div>
     <div class="table-scroll"><table>
       <tr><th>Path</th><th>Notes</th></tr>
-      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode and output view, reply cap. Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/tools on|off</code>, <code>/run-confirm</code>) are never saved and reset at every start.</td></tr>
+      <tr><td><code>prefs.json</code></td><td class="wrap">Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode and output view, reply cap, MCP on/off and the servers you turned off. Security switches (<code>/net</code>, <code>/net-confirm</code>, <code>/mcp-confirm</code>, <code>/tools on|off</code>, <code>/run-confirm</code>) are never saved and reset at every start.</td></tr>
       <tr><td><code>sessions/*.json</code></td><td class="wrap">See <a href="#sessions">Sessions</a> below.</td></tr>
       <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line, for auditing what the model did. Secret request headers are masked.</td></tr>
       <tr><td><code>index/*.pickle</code></td><td class="wrap">Named by a hash of the workdir. Written by <code>/index save</code>, and on exit with <code>/index-persist</code> (on by default). Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
       <tr><td><code>index/*.filter</code></td><td class="wrap">Created from the project's <code>.gitignore</code> files the first time the index starts. Edit it with <code>/index-filter</code> or View → Code index → Filter…. Mode 0600.</td></tr>
       <tr><td><code>runs/&lt;session&gt;/rN.log</code></td><td class="wrap">Last 20 per session (<a href="#run-output">Command output</a>). Deleted on <code>/clear</code>, <code>/new</code> and session load; other sessions' folders go after 3 days.</td></tr>
+      <tr><td><code>mcp.json</code></td><td class="wrap">Your <a href="#mcp">MCP servers</a>, in the <code>mcpServers</code> format. A project's servers live in its own <code>.mcp.json</code> instead.</td></tr>
+      <tr><td><code>mcp-approved.json</code></td><td class="wrap">Fingerprints of approved and denied project servers (workdir, name and launch settings). Mode 0600.</td></tr>
+      <tr><td><code>mcp-logs/*.log</code></td><td class="wrap">stderr of each stdio server, capped at about 1 MB with one rotated copy.</td></tr>
       <tr><td><code>search_sources/*.json</code></td><td class="wrap">Your own <a href="#search">web_search sources</a>. Loaded after the shipped sources; a file with a shipped name overrides it. Never read from the workdir.</td></tr>
       <tr><td><code>tls/</code></td><td class="wrap">Folder 0700, keys 0600. Deleting it makes a new CA on the next <code>--web-tls auto</code> start, and every device must then trust the new one.</td></tr>
     </table></div>
@@ -1957,6 +2031,10 @@ const SPEECH = {
     "< off by default!", "< /net local for the lan", "< 127.1 is still blocked",
     "< every hop re-checked", "< no file:// sneaking", "< cookies stay home",
     "< untrusted content fence", "< /run-confirm on pls",
+  ],
+  mcp: [
+    "< plug in a server~", "< mcp__git__log, purrr", "< writes ask first", "< 'a' for always",
+    "< project servers? approve!", "< ${TOKEN}, not the token", "< too many tools? include:",
   ],
   search: [
     "< no api key needed!", "< read=true: just the answer", "< a bad guess costs one line",

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from . import code_index, ignore_rules
+from .mcp import config as mcp_config
 from . import net as net_mod
 from . import run_store as run_store_mod
 from . import search as search_mod
@@ -99,6 +101,7 @@ class CommandResult:
     edit_index_filter: str | None = None    # TUI opens $EDITOR on this filter file
     send_prompt: str | None = None          # controller sends this to the model as a user turn
     tool_picker: bool | None = None         # frontend opens its per-role tool picker
+    mcp_picker: bool | None = None          # frontend opens its MCP server picker / popover
     show_system_prompt: bool | None = None  # frontend shows the composed system prompt
 
 
@@ -416,8 +419,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 harness.set_mode(harness.mode)
                 guides_note = harness.reload_guides()
                 index_note = harness.restart_index()
+                mcp_note = harness.mcp_reload()
                 return (f"Created and set working directory: {p}"
-                        + "".join(f"\n{n}" for n in (guides_note, index_note) if n))
+                        + "".join(f"\n{n}" for n in (guides_note, index_note, mcp_note) if n))
             return CommandResult(
                 handled=True,
                 confirm_prompt=f"Directory does not exist: {p}\nCreate it?",
@@ -427,9 +431,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.set_mode(harness.mode)  # always refresh system prompt with new workdir
         guides_note = harness.reload_guides()
         index_note = harness.restart_index()
+        mcp_note = harness.mcp_reload()     # the project's .mcp.json changes with it
         harness.emit_status()
         return CommandResult(handled=True, output=f"Working directory set to: {p}"
-                             + "".join(f"\n{n}" for n in (guides_note, index_note) if n))
+                             + "".join(f"\n{n}" for n in (guides_note, index_note, mcp_note) if n))
 
     if cmd in _VIEW_TOGGLES:
         on = _on_off(arg)
@@ -677,6 +682,14 @@ def handle(line: str, harness: Harness) -> CommandResult:
             extra += ("\nlocalhost and the LAN are now reachable, including this harness's "
                       "own web UI. Writes to private addresses always ask first.")
         return CommandResult(handled=True, output=_net_state() + extra)
+
+    if cmd == "/mcp":
+        return _mcp_command(harness, arg)
+
+    if cmd == "/mcp-confirm":
+        return _toggle(harness, "mcp_confirm", arg, "MCP call confirmation",
+                       " (each server's confirm policy applies: writes by default)",
+                       " (MCP tools run without asking, whatever the server's policy)")
 
     if cmd == "/net-confirm":
         return _toggle(harness, "net_confirm", arg, "fetch_url write confirmation",
@@ -1035,6 +1048,156 @@ def handle(line: str, harness: Harness) -> CommandResult:
     return CommandResult(handled=False)
 
 
+_MCP_USAGE = ("usage: /mcp [list|on|off|reload|tools <server>|resources [server]|read <server> <uri>|"
+              "log <server>|restart|enable|disable|approve|deny <server>|add …|rm <server>]")
+
+
+def _mcp_status_text(harness) -> str:
+    view = harness.mcp_view()
+    rows = view["servers"]
+    ready = sum(r["state"] == "ready" for r in rows)
+    lines = [f"MCP: {'on' if view['enabled'] else 'off'} · confirm "
+             f"{'on' if view['confirm'] else 'off'} · {ready}/{len(rows)} connected"]
+    width = max((len(r["name"]) for r in rows), default=0)
+    for r in rows:
+        state = r["state"]
+        if state == "ready":
+            detail = (f"{r['tools']} tools ({r['read_only']} read-only)"
+                      + (", resources" if r["resources"] else "")
+                      + f" · confirm {r['confirm']}")
+        elif state == "needs-approval":
+            detail = f"project server, not started — /mcp approve {r['name']} to run: {r['target']}"
+        elif state == "denied":
+            detail = f"denied — /mcp approve {r['name']} to allow it"
+        else:
+            detail = r["error"] or r["target"]
+        lines.append(f"  {r['name']:<{width}}  {state:<14} {r['transport']:<5}  {detail}"
+                     + ("" if r["source"] == "global" else f"  [{r['source']}]"))
+    if not rows:
+        lines.append(f"  No servers configured. Add one with /mcp add, or edit {view['files']['global']}"
+                     f" or {view['files']['project']}")
+    for err in view["errors"]:
+        lines.append(f"ERROR: {err}")
+    if view["schema_tokens"]:
+        pct = view["schema_tokens"] * 100 // max(view["context_limit"], 1)
+        lines.append(f"MCP tool schemas: ~{view['schema_tokens']:,} tokens ({pct}% of the context limit)")
+        if pct >= 25:
+            lines.append("  That is a lot for a small context: turn tools off with /tools, or list the "
+                         "ones you need under \"tools\": {\"include\": [...]} in the config.")
+    return "\n".join(lines)
+
+
+def _mcp_add(harness, rest: str) -> str:
+    """/mcp add <name> --http <url> [--header K=V]… | /mcp add <name> [--env K=V]… <command> [args…]"""
+    try:
+        words = shlex.split(rest)
+    except ValueError as e:
+        return f"ERROR: {e}"
+    if len(words) < 2:
+        return ("ERROR: usage: /mcp add <name> [--env K=V]… <command> [args…]  or  "
+                "/mcp add <name> --http <url> [--header K=V]…")
+    name, words = words[0], words[1:]
+    entry: dict = {}
+    env, headers = {}, {}
+    while words and words[0].startswith("--"):
+        flag = words.pop(0)
+        if flag in ("--env", "--header") and words and "=" in words[0]:
+            k, _, v = words.pop(0).partition("=")
+            (env if flag == "--env" else headers)[k] = v
+        elif flag == "--http" and words:
+            entry = {"type": "http", "url": words.pop(0)}
+        elif flag == "--confirm" and words:
+            entry["confirm"] = words.pop(0)
+        else:
+            return f"ERROR: bad option {flag}"
+    if entry.get("type") == "http":
+        if words:
+            return f"ERROR: unexpected words after the URL: {' '.join(words)}"
+        if headers:
+            entry["headers"] = headers
+    else:
+        if not words:
+            return "ERROR: no command given"
+        entry = {**entry, "command": words[0], "args": words[1:]}
+        if env:
+            entry["env"] = env
+    try:
+        note = mcp_config.add_server(name, entry)
+    except mcp_config.ConfigError as e:
+        return f"ERROR: {e}"
+    return note + "\n" + harness.mcp_reload()
+
+
+def _mcp_command(harness, arg: str) -> CommandResult:
+    if not arg:
+        return CommandResult(handled=True, output=_mcp_status_text(harness), mcp_picker=True)
+    sub, _, rest = arg.partition(" ")
+    sub, rest = sub.lower(), rest.strip()
+    if sub == "list":
+        return CommandResult(handled=True, output=_mcp_status_text(harness))
+    if (on := _on_off(sub)) is not None and not rest:
+        return CommandResult(handled=True, output=harness.set_mcp_enabled(on))
+    if sub == "reload":
+        if not harness.mcp_enabled:
+            return CommandResult(handled=True, output="ERROR: MCP is off (/mcp on)")
+        return CommandResult(handled=True, output=harness.mcp_reload() or "No MCP servers configured.")
+    if sub == "add":
+        return CommandResult(handled=True, output=_mcp_add(harness, rest))
+    if sub == "rm":
+        try:
+            note = mcp_config.remove_server(rest)
+        except mcp_config.ConfigError as e:
+            return CommandResult(handled=True, output=f"ERROR: {e}")
+        return CommandResult(handled=True, output=note + "\n" + harness.mcp_reload())
+    if sub == "resources":
+        return CommandResult(handled=True, output=harness.mcp.list_resources(rest or None))
+    if sub == "read":
+        server, _, uri = rest.partition(" ")
+        if not uri.strip():
+            return CommandResult(handled=True, output="ERROR: usage: /mcp read <server> <uri>")
+        try:
+            name, text = harness.mcp.resource_text(server, uri.strip())
+        except ValueError as e:
+            return CommandResult(handled=True, output=f"ERROR: {e}")
+        return CommandResult(handled=True, output=f"{name}:\n{text}")
+    if sub not in ("tools", "log", "restart", "enable", "disable", "approve", "deny"):
+        return CommandResult(handled=True, output=f"ERROR: {_MCP_USAGE}")
+    if not rest:
+        return CommandResult(handled=True, output=f"ERROR: usage: /mcp {sub} <server>")
+    try:
+        client = harness.mcp.get(rest)
+    except KeyError as e:
+        return CommandResult(handled=True, output=f"ERROR: {e.args[0]}")
+    if sub == "tools":
+        rows = harness.mcp.tool_rows(rest)
+        if not rows:
+            return CommandResult(handled=True, output=f"{rest}: no tools ({client.state})")
+        off = harness.disabled_tools.get(harness.mode, set())
+        lines = [f"{rest}: {len(rows)} tools (as the model sees them; turn one off with /tools <name> off)"]
+        for r in rows:
+            tags = ["read-only" if r["read_only"] else "destructive" if r["destructive"] else "writes"]
+            if r["name"] in off:
+                tags.append(f"off in {harness.mode} mode")
+            lines.append(f"  {r['name']}  [{', '.join(tags)}]")
+            lines.append(f"      {r['desc']}")
+        return CommandResult(handled=True, output="\n".join(lines))
+    if sub == "log":
+        tail = client.log_tail(40)
+        from .mcp.client import log_path
+        where = f" (full log: {log_path(rest)})" if client.cfg.transport == "stdio" else ""
+        return CommandResult(handled=True, output=(f"{rest} stderr{where}:\n" + "\n".join(tail))
+                             if tail else f"{rest}: nothing logged{where}")
+    if sub == "restart":
+        note = harness.mcp.restart(rest)
+    elif sub in ("enable", "disable"):
+        note = harness.mcp.set_enabled(rest, sub == "enable")
+        harness.save_mcp_disabled()
+    else:
+        note = harness.mcp.decide(rest, sub == "approve")
+    harness.emit_status()
+    return CommandResult(handled=True, output=note)
+
+
 def mask_token(t: str) -> str:
     n = len(t)
     if n <= 5:
@@ -1223,6 +1386,24 @@ Available commands:
   /net-max-bytes <n>  Set it, in bytes or with a unit: 200000, 500kb, 2mb (saved)
   /net-max-chars      Show how much page text one fetch_url call returns
   /net-max-chars <n>  Set it in characters (default 24000; saved); the rest is paged
+  /mcp                MCP servers: status (TUI: opens the server picker)
+  /mcp list           List MCP servers, their state and tool counts
+  /mcp on|off         Connect MCP servers and offer their tools (saved)
+  /mcp reload         Re-read mcp.json / .mcp.json and restart changed servers
+  /mcp tools <server>  The server's tools with descriptions and read-only/destructive tags
+  /mcp resources [server]  List the resources MCP servers offer
+  /mcp read <server> <uri>  Show one resource
+  /mcp log <server>   The server's last stderr lines
+  /mcp restart <server>  Restart a server
+  /mcp enable <server>  Start a server you disabled (saved)
+  /mcp disable <server>  Stop a server and keep it off (saved)
+  /mcp approve <server>  Allow a project server (.mcp.json) to start
+  /mcp deny <server>  Keep a project server from starting
+  /mcp add <name> <command>  Add a stdio server to ~/.momo-harness/mcp.json (--env K=V before the command)
+  /mcp add <name> --http <url>  Add an HTTP server (--header K=V after the URL)
+  /mcp rm <name>      Remove a server from ~/.momo-harness/mcp.json
+  /mcp-confirm        Show whether MCP calls ask for confirmation
+  /mcp-confirm on|off Ask y/N before MCP calls per the server's policy (default on)
   /search-sources     List web_search sources (shipped, user, session)
   /search-sources suggest [focus]  Have the model analyse the project and add fitting sources
   /search-sources save <name>|all  Keep session sources for future sessions

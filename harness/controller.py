@@ -22,7 +22,7 @@ from .llm import make_client
 
 # CommandResult fields that change how a frontend renders, not harness state.
 VIEW_FIELDS = ("tool_output", "think_output", "md_render", "diff_output", "diff_style", "companion",
-               "tool_picker", "show_system_prompt")
+               "tool_picker", "mcp_picker", "show_system_prompt")
 
 # Commands that mutate harness.messages — refused while a worker thread runs.
 _MUTATING = ("/clear", "/compact", "/fast-compact", "/new", "/retry")
@@ -43,7 +43,10 @@ def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
             or (cmd in ("/session", "/workspace", "/workdir", "/run-mode",
                         "/search-sources", "/host", "/model") and bool(arg))
             # a per-tool change (/tools <name> on|off) alters the running turn's tools
-            or (cmd == "/tools" and len(parts) > 1 and len(parts[1].split()) > 1))
+            or (cmd == "/tools" and len(parts) > 1 and len(parts[1].split()) > 1)
+            # every /mcp change alters the tool set; the read-only ones are fine
+            or (cmd == "/mcp" and arg.split(" ")[0] not in ("", "list", "tools", "resources",
+                                                           "read", "log")))
 
 # Idle recap: how often the watcher checks, and the minimum gap between two recap
 # attempts (on top of "once per user turn" and "once per idle period").
@@ -246,6 +249,13 @@ class Controller:
     def _idle_tick(self):
         try:
             self._backend_tick()
+        except Exception:
+            pass
+        try:
+            # Restart MCP servers that crashed after working (with backoff).  Only
+            # starts threads; the new tools reach the prompt at the next turn.
+            if not self._busy and self.harness.mcp_enabled:
+                self.harness.mcp.tick()
         except Exception:
             pass
         try:

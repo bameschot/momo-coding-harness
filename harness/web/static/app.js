@@ -4,6 +4,8 @@
 // drawers, notifications and the companion live in their own modules.
 
 import { initChips, refreshChipMenus, renderChipMenu } from "./chips.js";
+import { applyMcpStatus, initMcp, refreshMcpMenu } from "./mcp.js";
+import { applySkillsStatus, initSkills, refreshSkillsMenu } from "./skills.js";
 import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
 import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, formatSize, icon, loadJSON,
          makeResizable, openLayer, saveJSON, toast } from "./dom.js";
@@ -288,6 +290,16 @@ function pathLink(path, line = 0, cls = "tpath") {
   return a;
 }
 
+// mcp__github__create_issue → "github › create_issue" with an MCP tag.
+function toolName(name) {
+  const m = /^mcp__(.+?)__(.+)$/.exec(name);
+  if (!m) return el("span", "tname", name);
+  const span = el("span", "tname");
+  span.title = name;
+  span.append(el("span", "mcp-tag", "MCP"), ` ${m[1]} › ${m[2]}`);
+  return span;
+}
+
 function renderToolCall(name, args) {
   if (!view.tools) {
     // Collapsed tool output: one abbreviated line, like the TUI.
@@ -302,7 +314,7 @@ function renderToolCall(name, args) {
   const s = el("summary");
   const st = el("span", "tstate run", "running");
   const path = typeof args?.path === "string" ? "path" : typeof args?.src === "string" ? "src" : null;
-  s.append(el("span", "", "▶"), el("span", "tname", name));
+  s.append(el("span", "", "▶"), toolName(name));
   if (path) s.append(pathLink(args[path], Number(args.start_line) || 0));
   s.append(el("span", "targs", argsBrief(args, path ? [path] : [])), st);
   const body = el("div", "tool-body");
@@ -499,12 +511,12 @@ function renderTurnMeta(ev) {
 
 function renderAsk(question) {
   const yn = /Reply 'y'|y = run it|\[y\/N\]/.test(question);
-  return askCard(question, yn, "momo asks", true);
+  return askCard(question, yn, "momo asks", true, /'a' to always allow/.test(question));
 }
 
 // A question card.  yn: Yes/No buttons; answerable: a field for a typed answer
 // (ask_user can take any text — guidance, a choice, plan feedback).
-function askCard(question, yn, title, answerable) {
+function askCard(question, yn, title, answerable, always = false) {
   const card = el("div", "ask");
   card.append(el("div", "ask-title", `? ${title}`), el("div", "ask-q", question));
   const controls = el("div", "ask-controls");
@@ -529,7 +541,15 @@ function askCard(question, yn, title, answerable) {
     yes.type = no.type = "button";
     yes.onclick = () => send("y");
     no.onclick = () => send("n");
-    actions.append(yes, no);
+    actions.append(yes);
+    if (always) {
+      const all = el("button", "btn", "Always (a)");
+      all.type = "button";
+      all.title = "Allow this tool for the rest of the session";
+      all.onclick = () => send("a");
+      actions.append(all);
+    }
+    actions.append(no);
     controls.append(actions);
   }
   if (controls.childElementCount) card.append(controls);
@@ -734,6 +754,8 @@ function applyStatus(s) {
   mc.disabled = !netOn;
   applyIndexStatus(s);
   applyThinkStatus(s);
+  applyMcpStatus(s);
+  applySkillsStatus(s);
   refreshChipMenus();
   updateTitle();
   if (planChanged) refreshState();
@@ -1158,6 +1180,7 @@ function applyView(v) {
   if (v.tool_picker && $("#tools-menu").hidden) {
     toggleMenu({ stopPropagation() {} }, "#tools-menu", "Tools", refreshToolsMenu);
   }
+  if (v.mcp_picker) openSettings("mcp");
   let changed = false;
   for (const [k, val] of Object.entries(v)) {
     const key = VIEW_MAP[k];
@@ -1467,6 +1490,8 @@ async function argValues(cmd) {
       for (const s of cmd === "/load-skill" ? available.filter((x) => !active.includes(x)) : active) out.set(s, "");
     } else if (cmd === "/think") {
       for (const v of status.think_choices || []) out.set(v, `${status.model} takes this`);
+    } else if (cmd === "/mcp") {
+      for (const m of status.mcp || []) out.set(m.name, `${m.state}${m.tools ? ` · ${m.tools} tools` : ""}`);
     }
   } catch { /* offline: the static choices still help */ }
   return [...out];
@@ -1623,6 +1648,8 @@ for (const r of document.querySelectorAll("input[name=think-history]")) {
   r.onchange = () => send(`/think-history ${r.value}`);
 }
 $("#index-badge").onclick = (e) => toggleMenu(e, "#index-menu", "Code index", refreshIndexMenu);
+$("#mcp-btn").onclick = (e) => toggleMenu(e, "#mcp-menu", "MCP servers", refreshMcpMenu);
+$("#skills-btn").onclick = (e) => toggleMenu(e, "#skills-menu", "Skills", refreshSkillsMenu);
 // Settings controls name their command in data-cmd: a checkbox sends on/off, a
 // text field sends its value.  Status events bring the server's value back.
 for (const c of document.querySelectorAll("input[data-cmd]")) {
@@ -1789,7 +1816,7 @@ const MENUS = [["#view-btn", "#view-menu"], ["#model-btn", "#model-menu"],
                ["#ctx-btn", "#ctx-menu"], ["#index-badge", "#index-menu"],
                ["#tools-btn", "#tools-menu"], ["#think-badge", "#think-menu"],
                ["#run-badge", "#run-menu"], ["#net-badge", "#net-menu"],
-               ["#tools-badge", "#tools-off-menu"]];
+               ["#tools-badge", "#tools-off-menu"], ["#mcp-btn", "#mcp-menu"], ["#skills-btn", "#skills-menu"]];
 function closeMenu() {
   hideToolTip();
   for (const [b, m] of MENUS) {
@@ -2434,7 +2461,7 @@ function paletteActions() {
   const show = (key, what, keys) => ({
     label: `${view[key] ? "Hide" : "Show"} ${what}`, desc: "View", keys, run: () => toggleView(key) });
   const sections = [["appearance", "Appearance"], ["companion", "Companion"], ["context", "Context"], ["run", "Running commands"],
-                    ["network", "Network"], ["index", "Code index"], ["skills", "Skills"],
+                    ["network", "Network"], ["index", "Code index"], ["mcp", "MCP servers"], ["skills", "Skills"],
                     ["notifications", "Notifications"], ["other", "Conversation and downloads"]];
   return [
     { label: "Settings", desc: "Every setting, in sections", run: () => openSettings() },
@@ -2445,6 +2472,7 @@ function paletteActions() {
     { label: "System prompt", desc: "What the model gets as its system message", run: openPromptDrawer },
     { label: "Context breakdown", desc: "Where the context is spent; compact it", run: () => toggleMenu(fakeClick, "#ctx-menu", "Context", refreshCtxMenu) },
     { label: "Tools for this mode", desc: "Turn single tools on or off", run: () => toggleMenu(fakeClick, "#tools-menu", "Tools", refreshToolsMenu) },
+    { label: "Skills", desc: "Load or unload skills", run: () => toggleMenu(fakeClick, "#skills-menu", "Skills", refreshSkillsMenu) },
     { label: "Expand all", desc: "Tool calls, groups and thinking", keys: "Shift+E", run: () => setAllOpen(true) },
     { label: "Collapse all", desc: "Tool calls, groups and thinking", keys: "Shift+W", run: () => setAllOpen(false) },
     { label: view.group ? "Ungroup tool calls" : "Group tool calls", desc: "View", run: () => toggleView("group") },
@@ -2471,6 +2499,11 @@ initChips({
   send, status: () => status, openSettings, closeMenu,
   openToolsMenu: () => toggleMenu(fakeClick, "#tools-menu", "Tools", refreshToolsMenu),
 });
+initMcp({
+  send, post, status: () => status, openSettings, closeMenu,
+  attach: (f) => { attachments.push({ id: ++attSeq, status: "ready", ...f }); renderChips(); },
+});
+initSkills({ send, status: () => status, closeMenu, openPrompt: openPromptDrawer, changed: refreshState });
 initFind();
 initPalette({
   commands: () => state?.commands || [],

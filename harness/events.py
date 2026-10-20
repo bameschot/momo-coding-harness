@@ -65,6 +65,7 @@ class StatusEvent:
     think_known: bool = False     # the server said what the model takes
     think_history: str = "turn"   # /think-history: off | turn | all
     tools_off: list = field(default_factory=list)  # tools turned off for the current mode
+    skills: list = field(default_factory=list)     # active skills, in load order
     index_enabled: bool = False   # /index: the code index and its index_* tools
     index_state: str = "off"      # off | building | refreshing | idle | stopped
     index_progress: str = ""      # "812/1873" while building/refreshing
@@ -78,6 +79,12 @@ class StatusEvent:
     index_persist: bool = True    # /index-persist: load/save a pickle
     index_route: bool = True      # /index-route: answer grep_files/find_files from the index
     index_degraded: bool = False  # over budget: a component was dropped
+    mcp_enabled: bool = True      # /mcp on|off
+    mcp_confirm: bool = True      # /mcp-confirm: ask before MCP calls (per server policy)
+    mcp_ready: int = 0            # servers connected
+    mcp_total: int = 0            # servers configured
+    mcp_attention: bool = False   # one failed, waits for approval, or a config error
+    mcp: list = field(default_factory=list)  # [{name, state, tools, error}]
 
 @dataclass
 class ErrorEvent:

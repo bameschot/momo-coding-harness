@@ -99,6 +99,11 @@ def main():
     parser.add_argument("--guides", action=argparse.BooleanOptionalAction, default=None,
                         help="Put the workdir's AGENTS.md / CLAUDE.md / ... in the system prompt "
                              "(default: last /guides setting, else off)")
+    parser.add_argument("--mcp", action=argparse.BooleanOptionalAction, default=None,
+                        help="Connect the MCP servers in ~/.momo-harness/mcp.json and the "
+                             "workdir's .mcp.json (default: last /mcp setting, else on)")
+    parser.add_argument("--mcp-config", action="append", default=[], metavar="PATH",
+                        help="An extra MCP config file (mcpServers format); may be repeated")
     parser.add_argument("--index", action=argparse.BooleanOptionalAction, default=None,
                         help="Index the workdir in memory and give the model the index_* search "
                              "tools (default: last /index setting, else on)")
@@ -235,6 +240,7 @@ def main():
     harness.index_persist = flag_or_pref(args.index_persist, "index_persist", True)
     harness.index_route = flag_or_pref(args.index_route, "index_route", True)
     index_on = flag_or_pref(args.index, "index", True)
+    harness.mcp_enabled = flag_or_pref(args.mcp, "mcp", True)
     run_mode = args.run_mode or prefs.get("run_mode", "new")
     harness.run_mode = run_mode if run_mode in ("new", "classic") else "new"
     tool_ref = args.tool_ref or prefs.get("tool_ref", "compact")
@@ -295,6 +301,10 @@ def main():
     # Start the index only now, so a restored session's workdir is the one indexed.
     if index_on:
         harness.event_queue.put(ChatEvent("system", harness.set_index(True, clear_choices=False)))
+
+    # After the restore, so project servers come from the session's workdir.
+    if (mcp_note := harness.start_mcp([Path(p).expanduser() for p in args.mcp_config])):
+        harness.event_queue.put(ChatEvent("system", mcp_note))
 
     # One Controller drives the harness for every frontend (TUI and web).
     controller = Controller(harness)
@@ -361,6 +371,7 @@ def main():
         if web is not None:
             web.close()
         harness.shutdown_index()
+        harness.shutdown_mcp()
         harness.logger.close()
 
 

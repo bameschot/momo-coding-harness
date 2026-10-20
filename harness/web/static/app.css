@@ -237,8 +237,8 @@ button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border)
 }
 .tool-tip-name { font-weight: 600; margin-bottom: 2px; }
 .tool-tip-lock { color: var(--warn); margin-bottom: 4px; }
-#tools-btn { position: relative; }
-#tools-btn .count {
+#tools-btn, #mcp-btn, #skills-btn { position: relative; }
+#tools-btn .count, #mcp-btn .count, #skills-btn .count {
   position: absolute; top: 0; right: 0; min-width: 14px; height: 14px; padding: 0 3px;
   border-radius: var(--r-sm); background: var(--warn); color: var(--surface);
   font-size: 10px; line-height: 14px; text-align: center; font-weight: 600;
@@ -726,3 +726,125 @@ mark.find-hit.current { background: var(--warn); color: var(--surface); }
   .tool > summary, details.tool-group > summary { padding: 8px; }
 }
 
+
+/* MCP servers: the header overview popover and the settings section (mcp.js) */
+.mcp-menu { min-width: 320px; max-width: min(440px, calc(100vw - 24px)); }
+#mcp-btn .count { background: var(--ok); }
+#mcp-btn .count.warn { background: var(--warn); }
+#mcp-btn.muted-btn .icon { opacity: .55; }
+.mcp-ov-title { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+.mcp-ov-title .small { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.mcp-ov-server { border-top: 1px solid var(--border); padding: 6px 0; }
+.mcp-ov-server > summary { cursor: pointer; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mcp-ov-body { padding: 4px 0 0 14px; }
+.mcp-ov-body .mcp-tools { max-height: 180px; margin: 4px 0; }
+.mcp-ov-body .mcp-actions, .mcp-ov-body .mcp-detail { margin-left: 0; }
+.mcp-ov-cost { border-top: 1px solid var(--border); padding-top: 6px; }
+.mcp-detail { color: var(--muted); margin: 2px 0 0 14px; overflow-wrap: anywhere; }
+.mcp-detail.err { color: var(--danger); }
+.mcp-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 2px 0 0 14px; align-items: center; }
+.dot.muted-dot { background: var(--muted); }
+.mcp-log { max-height: 120px; overflow: auto; font-size: var(--fs-xs); margin: 6px 0 0; white-space: pre-wrap; }
+.mcp-tools { display: flex; flex-direction: column; max-height: 220px; overflow-y: auto; }
+.mcp-tag { font: 600 10px var(--mono); padding: 0 4px; border-radius: var(--r-sm);
+  border: 1px solid currentColor; color: var(--muted); vertical-align: 1px; }
+.mcp-tag.read-only { color: var(--ok); }
+.mcp-tag.destructive { color: var(--danger); }
+.mcp-tag.writes { color: var(--warn); }
+.mcp-res { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+
+/* Settings → MCP servers.  The drawer's generic `.settings details / summary /
+   label` rules would also hit these nested elements, so each is reset here. */
+.mcp-h { font-weight: 600; font-size: var(--fs-sm); }
+.mcp-meta { color: var(--muted); font-size: var(--fs-sm); font-weight: 400; }
+.mcp-k { color: var(--muted); font-size: var(--fs-sm); }
+.mcp-hint { color: var(--muted); font-size: var(--fs-xs); margin-top: 3px; line-height: 1.4; }
+.mcp-hint code { font-size: inherit; }
+.mcp-list-head { display: flex; align-items: baseline; gap: 8px; margin: 12px 0 6px; }
+.mcp-list { display: flex; flex-direction: column; gap: 8px; }
+.mcp-empty { color: var(--muted); font-size: var(--fs-sm); padding: 10px 12px;
+  border: 1px dashed var(--border); border-radius: var(--r); margin-bottom: 4px; }
+.settings .mcp-card, .settings .mcp-add-card {
+  border: 1px solid var(--border); border-radius: var(--r); padding: 0; background: var(--surface); }
+.settings .mcp-card[open] { background: var(--surface-2); }
+.settings .mcp-card > summary, .settings .mcp-add-card > summary {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; list-style: none;
+  font-weight: 400; margin: 0; }
+/* #settings-body: the open section's `.settings details[open] summary::before`
+   matches every summary inside it, so the reset needs an id to win. */
+#settings-body .mcp-card > summary::before, #settings-body .mcp-add-card > summary::before { content: none; }
+.settings .mcp-card > summary::-webkit-details-marker, .settings .mcp-add-card > summary::-webkit-details-marker { display: none; }
+.settings .mcp-card > summary:hover { background: color-mix(in srgb, var(--surface-2) 70%, transparent); border-radius: var(--r); }
+.mcp-name { font-size: var(--fs); }
+.mcp-chev { color: var(--muted); transition: transform .15s; font-size: 1.1em; line-height: 1; }
+.mcp-card[open] .mcp-chev { transform: rotate(90deg); }
+.mcp-pill { font-size: var(--fs-xs); padding: 0 7px; border-radius: var(--r-pill); line-height: 1.6;
+  color: var(--muted); background: color-mix(in srgb, var(--muted) 14%, transparent); }
+.mcp-pill.ready { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.mcp-pill.connecting, .mcp-pill.needs-approval { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.mcp-pill.error { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.mcp-card-body { padding: 2px 12px 10px 26px; border-top: 1px solid var(--border); }
+.mcp-kv-grid, .mcp-form-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; align-items: baseline; }
+.mcp-kv-grid { margin: 10px 0 4px; font-size: var(--fs-sm); }
+.mcp-ellipsis { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-res-cell { display: flex; align-items: baseline; gap: 6px; }
+.mcp-resources:empty { display: none; }
+.mcp-resources { margin: 4px 0; }
+.mcp-error { color: var(--danger); font-size: var(--fs-sm); overflow-wrap: anywhere; margin: 8px 0 4px;
+  padding: 6px 10px; border-radius: var(--r-sm); background: color-mix(in srgb, var(--danger) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); }
+.mcp-error .mcp-log { color: var(--text); }
+.mcp-card-body .mcp-h { display: block; margin: 12px 0 4px; }
+.mcp-tools-box { border: 1px solid var(--border); border-radius: var(--r-sm); padding: 2px 8px; background: var(--surface); }
+.settings .mcp-tools-box label { padding: 3px 0; gap: 6px; }
+.mcp-card-actions { display: flex; align-items: center; gap: 14px; margin-top: 10px; flex-wrap: wrap; }
+.link-btn.danger { color: var(--danger); }
+.mcp-info { color: var(--muted); font-size: var(--fs-xs); margin: 10px 2px 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.mcp-info .warn { color: var(--warn); }
+.mcp-plus { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid var(--focus); color: var(--focus); font-weight: 600; line-height: 1; }
+.settings .mcp-add-card > summary { color: var(--focus); font-weight: 600; }
+.settings .mcp-add-card > summary .mcp-meta { margin-left: auto; }
+.settings .mcp-add-card[open] > summary { border-bottom: 1px solid var(--border); }
+.mcp-form { padding: 12px; }
+/* A fixed label column, so switching Command ↔ HTTP URL (Environment ↔ Headers)
+   doesn't shift the fields sideways. */
+.mcp-form-grid { grid-template-columns: 7.5em minmax(0, 1fr); }
+.settings .mcp-form label { display: block; padding: 0; cursor: default; }
+.settings .mcp-form .seg label { display: flex; padding: 0; cursor: pointer; }
+.mcp-form-grid .mcp-k { padding-top: 5px; align-self: start; }
+.mcp-form input:not([type=radio]), .mcp-form select, .mcp-form textarea {
+  width: 100%; box-sizing: border-box; padding: 4px 8px; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--r-sm); }
+.mcp-form textarea { resize: vertical; min-height: 3.6em; }
+.mcp-form input.mono, .mcp-form textarea.mono { font-family: var(--mono); font-size: var(--fs-sm); }
+.mcp-form input:focus, .mcp-form select:focus, .mcp-form textarea:focus { outline: none; border-color: var(--focus); }
+.mcp-form input:user-invalid { border-color: var(--danger); }
+.mcp-form-error { color: var(--danger); font-size: var(--fs-sm); margin-top: 10px; }
+.mcp-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+/* The drawer is at least 360px wide, where the two columns still fit, so the
+   grids stay two-column on narrow screens; only the card indent shrinks. */
+@container (max-width: 400px) { .mcp-card-body { padding-left: 12px; } }
+#settings-body { container-type: inline-size; }
+
+/* Skills: the header's book button and its popover (skills.js) */
+#skills-btn .count { background: var(--focus); }
+.skills-menu { width: min(400px, calc(100vw - 24px)); }
+.skills-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.skills-title .small { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.skills-filter { width: 100%; box-sizing: border-box; margin: 4px 0 2px; padding: 4px 8px; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); }
+.skills-filter:focus { outline: none; border-color: var(--focus); }
+.skills-box { max-height: min(56vh, 460px); overflow-y: auto; margin: 0 -6px; padding: 0 6px; }
+.menu label.skill-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 10px;
+  align-items: start; padding: 6px 6px; margin: 0 -6px; border-radius: var(--r-sm); cursor: pointer; }
+.menu label.skill-row:hover { background: var(--surface-2); }
+.skill-row input { margin-top: 3px; }
+.skill-text { display: flex; flex-direction: column; min-width: 0; }
+.skill-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.skill-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-name { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
+.skill-summary { color: var(--muted); font-size: var(--fs-sm); line-height: 1.4; margin-top: 1px; }
+.skill-cost { color: var(--muted); font-size: var(--fs-xs); padding-top: 3px; }
+.skills-none { padding: 10px 0; }
+.skills-menu .menu-foot { flex-wrap: wrap; gap: 6px 12px; }

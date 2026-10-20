@@ -242,6 +242,14 @@ def _draw_vbar(win, x: int, h: int, total: int, first: int, color: int):
             pass
 
 
+def _tool_label(name: str) -> str:
+    """mcp__github__create_issue → github › create_issue; other names as they are."""
+    if name.startswith("mcp__") and "__" in name[5:]:
+        server, tool = name[5:].split("__", 1)
+        return f"{server} › {tool}"
+    return name
+
+
 def _brief_args(args) -> str:
     """Tool-call arguments for the transcript, each value cut to _ARG_MAX chars
     (the web UI's argsBrief): a write_file body is in the diff, not here."""
@@ -825,17 +833,59 @@ class TUI:
             _put(win, content_h - n + row, 0, (" " + label).ljust(width), width, attr)
         win.noutrefresh()
 
-    # ── /tools picker ─────────────────────────────────────────────────────────
+    # ── /tools and /mcp pickers ───────────────────────────────────────────────
 
-    def _open_picker(self):
+    def _picker_items(self, kind: str) -> list[dict]:
+        if kind == "tools":
+            return self.harness.tool_choices()
+        items = []
+        for r in self.harness.mcp.status_rows():
+            info = f"{r['transport']} · {r['state']}"
+            if r["state"] == "ready":
+                info += f" · {r['tools']} tools" + (" · resources" if r["resources"] else "")
+            items.append({"name": r["name"], "enabled": r["state"] not in ("disabled", "denied"),
+                          "locked": False, "group": info,
+                          "note": "a to approve" if r["state"] == "needs-approval" else "",
+                          "desc": (f"{r['error']}  —  " if r["error"] else "")
+                                  + f"{r['target']}  [{r['source']}, confirm {r['confirm']}]"})
+        return items
+
+    def _open_picker(self, kind: str = "tools"):
         self._close_suggest()
-        self._picker = {"items": self.harness.tool_choices(), "idx": 0}
+        self._picker = {"kind": kind, "items": self._picker_items(kind), "idx": 0}
 
     def _reload_picker(self):
         if self._picker is not None:
-            items = self.harness.tool_choices()
-            self._picker = {"items": items,
+            items = self._picker_items(self._picker["kind"])
+            self._picker = {**self._picker, "items": items,
                             "idx": min(self._picker["idx"], max(0, len(items) - 1))}
+
+    def _picker_run(self, command: str, close: bool = False):
+        if close:
+            self._picker = None
+        self.controller.submit(command, source="tui")
+        self._drain_events()        # the notice, and the StatusEvent that reloads
+        self._reload_picker()
+
+    def _mcp_picker_key(self, key, item: dict) -> bool:
+        """Server picker keys: Space enable/disable, r restart, a approve, d deny,
+        l log, Enter/? the server's tools."""
+        name = item["name"]
+        if key == " ":
+            self._picker_run(f"/mcp {'disable' if item['enabled'] else 'enable'} {name}")
+        elif key in ("r", "R"):
+            self._picker_run(f"/mcp restart {name}")
+        elif key in ("a", "A"):
+            self._picker_run(f"/mcp approve {name}")
+        elif key in ("d", "D"):
+            self._picker_run(f"/mcp deny {name}")
+        elif key in ("l", "L"):
+            self._picker_run(f"/mcp log {name}", close=True)
+        elif key in ("?", 13, curses.KEY_ENTER):
+            self._picker_run(f"/mcp tools {name}", close=True)
+        else:
+            return False
+        return True
 
     def _picker_key(self, key) -> str | None:
         """Keys while the picker is open: ↑/↓ move, Space/Enter toggle, ? prints the
@@ -848,6 +898,9 @@ class TUI:
             self._picker = None
         elif key in (curses.KEY_UP, curses.KEY_DOWN) and n:
             p["idx"] = (p["idx"] + (1 if key == curses.KEY_DOWN else -1)) % n
+        elif p["kind"] == "mcp":
+            if not (n and self._mcp_picker_key(key, p["items"][p["idx"]])):
+                return None
         elif key == "?" and n:
             name = p["items"][p["idx"]]["name"]
             self._picker = None
@@ -872,7 +925,14 @@ class TUI:
         cols = self._layout["cols"]
         content_h = self._layout["chat_h"] - 1  # bottom row is the h-scrollbar
         items = p["items"]
-        header = f" Tools — {self.harness.mode} mode   ↑↓ move · Space toggle · ? details · Esc close"
+        if p["kind"] == "mcp":
+            header = (" MCP servers   ↑↓ move · Space on/off · r restart · a approve · d deny"
+                      " · l log · Enter tools · Esc close")
+            if not items:
+                items = [{"name": "(none configured — /mcp add, or edit mcp.json / .mcp.json)",
+                          "enabled": False, "locked": True, "group": "", "note": "", "desc": ""}]
+        else:
+            header = f" Tools — {self.harness.mode} mode   ↑↓ move · Space toggle · ? details · Esc close"
         name_w = max((len(c["name"]) for c in items), default=0)
         rows = [f" [{'x' if c['enabled'] else ' '}] {c['name'].ljust(name_w)}  {c['group']}"
                 + (f" · {c['note']}" if c["note"] else "") for c in items]
@@ -956,7 +1016,7 @@ class TUI:
 
     def _render_tool_call(self, name: str, args: dict):
         cols = max(20, self._layout["cols"] - 2)
-        full = f"▶ {name}({_brief_args(args)})"
+        full = f"▶ {_tool_label(name)}({_brief_args(args)})"
         if self._view["tool_output"]:
             for line in textwrap.wrap(full, width=cols) or [full]:
                 self._chat_buf.append(line, _C_TOOL_NAME)
@@ -1154,6 +1214,8 @@ class TUI:
             parts.append(idx)
         if ev.guides:
             parts.append("GUIDES")
+        if ev.mcp_enabled and ev.mcp_total:
+            parts.append(f"MCP {ev.mcp_ready}/{ev.mcp_total}" + (" !" if ev.mcp_attention else ""))
         # Only a non-default level, or one the model can't honour, earns a slot.
         eff = ev.think_effective
         if ev.think_level != "on" or eff != "on":
@@ -1277,6 +1339,8 @@ class TUI:
         v = outcome.view
         if v.pop("tool_picker", None):
             self._open_picker()
+        if v.pop("mcp_picker", None):
+            self._open_picker("mcp")
         if v.pop("show_system_prompt", None):
             self._drain_events()  # the echoed command first
             self._show_system_prompt()

@@ -17,7 +17,12 @@ Routes
   GET  /api/context   context usage broken down per category (system, tools, …)
   GET  /api/index     code index memory broken down per category and language
   GET  /api/tools     the current mode's tools and whether each is on (/tools)
+  GET  /api/skills    every skill: title, summary, token estimate, active (/load-skill)
   GET  /api/system-prompt the composed system prompt in its parts (/system-prompt)
+  GET  /api/mcp       MCP servers: state, tools, config files (/mcp)
+  GET  /api/mcp/resources ?server= → that server's resources
+  GET  /api/mcp/resource  ?server=&uri= → {name, text} to attach to a message
+  POST /api/mcp/servers   {"action": "add"|"remove", "name", "entry"} → edit ~/.momo-harness/mcp.json
   GET  /api/export    the conversation as a Markdown download (?full=1: the full log)
   GET  /api/files     ?path= → directory listing (read-only, confined to the workspace)
   GET  /api/file      ?path= → file contents as text (same conversion as uploads)
@@ -65,6 +70,7 @@ from ..commands import export_markdown, help_commands
 from ..controller import CONFIRM_SUFFIX, Controller
 from ..harness import DIFF_TOOLS
 from ..events import ErrorEvent, event_to_json
+from ..mcp import config as mcp_config
 from ..prompts import MODES
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -74,7 +80,8 @@ _STATIC_FILES = {
     "/app.css":  ("app.css",    "text/css; charset=utf-8"),
     **{f"/{name}": (name, "text/javascript; charset=utf-8")
        for name in ("app.js", "dom.js", "markdown.js", "highlight.js", "notify.js",
-                    "companion.js", "sessions.js", "files.js", "chips.js", "palette.js", "find.js")},
+                    "companion.js", "sessions.js", "files.js", "chips.js", "palette.js", "find.js",
+                    "mcp.js", "skills.js")},
 }
 _MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
@@ -276,6 +283,7 @@ class WebServer:
             "diff_tools": sorted(DIFF_TOOLS),
             "confirm_suffix": CONFIRM_SUFFIX,
             "session": h.session_path().stem,
+            "mcp_servers": list(h.mcp.clients),
         }
 
     def _make_handler(self):
@@ -419,6 +427,19 @@ class WebServer:
                     self._json(h.index_breakdown())
                 elif path == "/api/system-prompt":
                     self._json(h.system_prompt_view())
+                elif path == "/api/mcp":
+                    self._json(h.mcp_view())
+                elif path in ("/api/mcp/resources", "/api/mcp/resource"):
+                    try:
+                        if path == "/api/mcp/resources":
+                            self._json({"resources": h.mcp.resource_rows(arg("server"))})
+                        else:
+                            name, text = h.mcp.resource_text(arg("server"), arg("uri"))
+                            self._json({"name": name, "text": text, "chars": len(text)})
+                    except ValueError as e:
+                        self._json({"error": str(e)}, HTTPStatus.BAD_GATEWAY)
+                elif path == "/api/skills":
+                    self._json({"skills": h.skill_choices()})
                 elif path == "/api/tools":
                     self._json({"mode": h.mode, "tools_enabled": h.tools_enabled,
                                 "tools": h.tool_choices()})
@@ -589,6 +610,31 @@ class WebServer:
                         self._json({"error": msg}, HTTPStatus.INTERNAL_SERVER_ERROR)
                         return
                     c._system(msg)      # the change shows in every frontend's transcript
+                    self._json({"ok": True, "message": msg})
+                elif path == "/api/mcp/servers":
+                    # Adding a stdio server means momo will run that command, so
+                    # unlike the other POSTs a missing Origin is refused too: only
+                    # this page (a browser always sends Origin on a fetch POST) may.
+                    if not self.headers.get("Origin"):
+                        self._send(HTTPStatus.FORBIDDEN, b"Forbidden: Origin header required\n")
+                        return
+                    name, action, entry = data.get("name"), data.get("action"), data.get("entry")
+                    if (not isinstance(name, str) or action not in ("add", "remove")
+                            or (action == "add" and not isinstance(entry, dict))):
+                        self._send(HTTPStatus.BAD_REQUEST, b"Expected {action: add|remove, name, entry}\n")
+                        return
+                    if c.busy:
+                        self._json({"error": "Busy: finish or interrupt the turn first"}, HTTPStatus.CONFLICT)
+                        return
+                    try:
+                        msg = (mcp_config.add_server(name, entry) if action == "add"
+                               else mcp_config.remove_server(name))
+                    except mcp_config.ConfigError as e:
+                        self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+                        return
+                    if (note := c.harness.mcp_reload()):
+                        msg += "\n" + note
+                    c._system(msg)
                     self._json({"ok": True, "message": msg})
                 elif path == "/api/edit":
                     text = data.get("text")
