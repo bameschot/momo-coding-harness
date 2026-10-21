@@ -68,6 +68,16 @@ _WRITE_MODES = ("coding", "momo", "design")
 _WRITE_TOOLS = {"write_file", "edit_file", "append_to_file", "move_file", "delete_file",
                 "replace_symbol", "edit_files"}
 _EDIT_TOOLS = {"edit_file", "replace_symbol", "write_file", "append_to_file", "edit_files"}
+
+
+def _in_momo_dir(args) -> bool:
+    """Whether a write tool's call aims at momo's own folder (the scratchpad)."""
+    paths = [args.get(k) for k in ("path", "dst")] if isinstance(args, dict) else []
+    if isinstance(args, dict) and isinstance(args.get("edits"), list):
+        paths += [e.get("path") for e in args["edits"] if isinstance(e, dict)]
+    paths = [p.removeprefix("./") for p in paths if isinstance(p, str)]
+    return bool(paths) and all(p.startswith(".momo/") for p in paths)
+
 # Tools that read a file back: after a successful edit of that file, a re-read
 # is what post-edit feedback is meant to save.
 _READ_BACK = {"read_file", "read_symbol", "grep_file", "code_outline", "index_file"}
@@ -90,7 +100,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         scratch = tempfile.TemporaryDirectory(prefix="momo_eval_wd_")
         workdir = Path(scratch.name) / "project"
         shutil.copytree(REPO / task.workdir, workdir,
-                        ignore=shutil.ignore_patterns("__pycache__", ".venv", ".cache"))
+                        ignore=shutil.ignore_patterns("__pycache__", ".venv", ".cache", ".momo"))
     h = Harness(host=host, model=model, workdir=workdir, provider=provider)
     h.mode = mode
     h.run_mode = run_mode
@@ -187,7 +197,11 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         # Harness repairs, counted as model errors rather than successes.
         "repairs": sum(1 for r in results if r.startswith("(note: routed")),
         "shell_calls": sum(1 for n in names if n == "run_command"),
-        "file_changes": sum(1 for n in names if n in _WRITE_TOOLS),
+        # The scratchpad (scratch_write, or any write under .momo/) is where a
+        # stray result belongs, so it is not a change to the project.
+        "file_changes": sum(1 for n, a in calls if n in _WRITE_TOOLS and not _in_momo_dir(a)),
+        "scratch_writes": sum(1 for n, a in calls
+                              if n == "scratch_write" or (n in _WRITE_TOOLS and _in_momo_dir(a))),
         # Index-first search: how often the model reached for the index itself,
         # for grep/find (directly or through the shell), and how many of those
         # the harness answered from the index anyway (/index-route).

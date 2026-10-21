@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 
 from . import code_nav
+from .momo_dir import SCRATCH_REL
 from .tools import ALL_TOOLS, CHAT_TOOLS, DESIGN_TOOLS, PLAN_INVESTIGATE_TOOLS
 
 _ROLES_DIR = Path(__file__).parent.parent / "roles"
@@ -286,6 +287,12 @@ def _environment(workdir: Path, tool_names: set[str], net_access: str) -> str:
         if (py := _python_line()):
             lines.append(f"- Python: {py}")
         lines.append(f"- Git: {_git_state(workdir)}")
+    if "scratch_write" in tool_names:
+        lines.append(f"- Scratchpad: `{SCRATCH_REL}/` — your folder for temporary scripts, notes and "
+                     "intermediate results; write them with scratch_write, never into the project "
+                     "tree. Git-ignored, not indexed, skipped by project-wide searches, kept "
+                     "between sessions."
+                     + (" In run_command it is `$MOMO_SCRATCH`." if "run_command" in tool_names else ""))
     net_tools = [n for n in ("fetch_url", "web_search") if n in tool_names]
     if net_access != "off" and net_tools:
         lines.append(f"- Internet: on — use {' / '.join(net_tools)} for documentation, APIs and "

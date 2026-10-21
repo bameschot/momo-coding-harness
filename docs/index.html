@@ -591,7 +591,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     </div>
     <div class="card" style="--c: var(--ok)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg>Plan, approve, execute</h3>
-      <p>Plan mode investigates first and writes a step-by-step plan to <code>.momo-plan.md</code>. Nothing changes until you approve it. Then it runs one step at a time and can pause and resume.</p>
+      <p>Plan mode investigates first and writes a step-by-step plan to <code>.momo/plan.md</code>. Nothing changes until you approve it. Then it runs one step at a time and can pause and resume.</p>
       <a class="more" href="#plan">Plan mode →</a>
     </div>
     <div class="card" style="--c: var(--tool)">
@@ -611,7 +611,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     </div>
     <div class="card" style="--c: var(--danger)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Confined to your project</h3>
-      <p>File tools can't reach outside the working directory. Shell commands can, so <code>/run-confirm on</code> has you approve each one. The web UI listens on this machine only unless you open it up, and then it needs a token.</p>
+      <p>File tools can't reach outside the working directory, and the model's throwaway scripts go to a git-ignored scratchpad, not your tree. Shell commands can reach further, so <code>/run-confirm on</code> has you approve each one. The web UI listens on this machine only unless you open it up, and then it needs a token.</p>
       <a class="more" href="#security">Security →</a>
     </div>
     <div class="card" style="--c: var(--user)">
@@ -853,7 +853,7 @@ ollama serve</code></pre></div>
 
   <section id="plan" data-voice="plan">
     <h2>Plan mode</h2>
-    <p>For changes you want to see before they happen. momo investigates, writes a step-by-step plan to <code>.momo-plan.md</code>, and changes nothing until you approve it.</p>
+    <p>For changes you want to see before they happen. momo investigates, writes a step-by-step plan to <code>.momo/plan.md</code>, and changes nothing until you approve it.</p>
     <p>There are two kinds of plan, and both follow the lifecycle below:</p>
     <ul>
       <li><strong>Normal</strong> (<code>/plan</code> or <code>/plan normal</code>, the default). Each step says what to change and how to check it. The last step runs the project's tests, and the model reports when a step is done.</li>
@@ -861,7 +861,7 @@ ollama serve</code></pre></div>
     </ul>
     <p>The choice is saved with the session. The status bar shows <code>plan (tdd)</code>, and in the web UI a <strong>normal plan / TDD plan</strong> selector sits next to the mode picker while you're in plan mode. It is locked while a plan runs; a draft that isn't approved yet takes the new type the next time the model submits it.</p>
     <figure class="flow" aria-label="Plan mode lifecycle">
-      <div class="flow-row"><div class="box model">1 Investigate<small>read the code, reproduce, <code>ask_user</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">2 Plan<small><code>create_plan</code> writes <code>.momo-plan.md</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">3 Confirm<small><code>y</code> runs it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">4 Execute<small>one step at a time, ▶ in the prompt</small></div><span class="arrow" aria-hidden="true">→</span><div class="box end">Done<small>the plan file is deleted</small></div></div>
+      <div class="flow-row"><div class="box model">1 Investigate<small>read the code, reproduce, <code>ask_user</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">2 Plan<small><code>create_plan</code> writes <code>.momo/plan.md</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">3 Confirm<small><code>y</code> runs it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">4 Execute<small>one step at a time, ▶ in the prompt</small></div><span class="arrow" aria-hidden="true">→</span><div class="box end">Done<small>the plan file is deleted</small></div></div>
       <ul class="flow-edges">
         <li><span class="from">Confirm</span><span class="via">— any other reply (feedback) →</span><span class="to">Plan, revised</span></li>
         <li><span class="from">Confirm</span><span class="via">— <code>n</code> →</span><span class="to">Kept — <code>/plan run</code> → Execute</span></li>
@@ -869,15 +869,15 @@ ollama serve</code></pre></div>
         <li><span class="from">Execute</span><span class="via">— <code>revise_plan</code> →</span><span class="to">the remaining steps are replaced</span></li>
         <li><span class="from">Any</span><span class="via">— <code>/plan cancel</code> →</span><span class="to">the plan and its file are discarded</span></li>
       </ul>
-      <figcaption>Step checkboxes in <code>.momo-plan.md</code>: <code>[ ]</code> pending · <code>[~]</code> in progress · <code>[x]</code> done · <code>[-]</code> skipped.</figcaption>
+      <figcaption>Step checkboxes in <code>.momo/plan.md</code>: <code>[ ]</code> pending · <code>[~]</code> in progress · <code>[x]</code> done · <code>[-]</code> skipped.</figcaption>
     </figure>
     <ol>
       <li><strong>Investigate.</strong> The model follows the code the change touches, reproduces a bug if there is one, finds out how the project is tested, and asks you only what would change the plan.</li>
-      <li><strong>Plan.</strong> <code>create_plan</code> writes a goal and ordered steps to <code>.momo-plan.md</code>; each step names the file and function, the change and how to verify it.</li>
+      <li><strong>Plan.</strong> <code>create_plan</code> writes a goal and ordered steps to <code>.momo/plan.md</code>; each step names the file and function, the change and how to verify it.</li>
       <li><strong>Confirm.</strong> <code>y</code> runs it, <code>n</code> keeps it for <code>/plan run</code>, and anything else is feedback the model revises it with. You can edit the file by hand first; <code>[-]</code> skips a step.</li>
       <li><strong>Execute.</strong> Approving switches to coding mode, which runs the plan with its own tools and loaded skills and stays on when the plan is done. One step at a time, with the plan (<code>▶</code> on the current step) in the system prompt so the model keeps its place even after compaction. <code>revise_plan</code> replaces the remaining steps. A paused plan carries on with <code>/plan resume</code> or any message, even after a restart.</li>
     </ol>
-    <p>You can edit <code>.momo-plan.md</code> freely before approving: reword or reorder steps, add or delete them, or mark one <code>[-]</code> to skip it. In a test-driven plan the expectations show as <code>Expect:</code> lines, and you can edit those too.</p>
+    <p>You can edit <code>.momo/plan.md</code> freely before approving: reword or reorder steps, add or delete them, or mark one <code>[-]</code> to skip it. In a test-driven plan the expectations show as <code>Expect:</code> lines, and you can edit those too.</p>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Effect</th></tr>
       <tr><td><code>/plan</code></td><td class="wrap">Switch to plan mode, showing the current plan's state if there is one</td></tr>
@@ -885,7 +885,7 @@ ollama serve</code></pre></div>
       <tr><td><code>/plan show</code></td><td class="wrap">The plan with the status of each step</td></tr>
       <tr><td><code>/plan run</code></td><td class="wrap">Approve a kept plan and execute it (re-reads the file)</td></tr>
       <tr><td><code>/plan resume</code></td><td class="wrap">Continue a paused plan from its current step</td></tr>
-      <tr><td><code>/plan cancel</code></td><td class="wrap">Discard the plan and delete <code>.momo-plan.md</code></td></tr>
+      <tr><td><code>/plan cancel</code></td><td class="wrap">Discard the plan and delete <code>.momo/plan.md</code></td></tr>
     </table></div>
   </section>
 
@@ -942,7 +942,7 @@ ollama serve</code></pre></div>
       <tr><td>A step</td><td class="wrap">This step's tag, and the tags of all earlier steps, are gone. No check (<code>assert…</code>, <code>expect…</code>) was deleted from a test. No test of a finished step changed.</td></tr>
       <tr><td>Acceptance</td><td class="wrap">No <code>tdd-</code> tag is left anywhere.</td></tr>
     </table></div>
-    <p>Then <code>test_command</code> must exit 0. Approving a test-driven plan also approves running that command after every step, without a <code>run_command</code> confirmation. The tags are found by searching the project's text files. <code>.momo-plan.md</code> and momo's own logs are skipped, since the test output in them repeats the skip reasons.</p>
+    <p>Then <code>test_command</code> must exit 0. Approving a test-driven plan also approves running that command after every step, without a <code>run_command</code> confirmation. The tags are found by searching the project's text files. <code>.momo/plan.md</code> and momo's own logs are skipped, since the test output in them repeats the skip reasons.</p>
     <ul>
       <li><strong>Test changes are audited.</strong> When the tests are written, the harness notes which test belongs to which step, and at each gate it compares the test files with how they were when the step started. A deleted check is refused, and so is a change to a finished step's test. Any other change, such as an expectation the model got wrong and corrected, is listed in the chat as <em>Test lines changed in step N</em>. If an expectation itself is wrong, the model is told to say so or ask you, never to weaken the test.</li>
       <li><strong>Three refusals in a row ask you.</strong> If the same step fails its gate three times, momo asks for guidance to pass on to the model, or <code>pause</code> to stop the plan there. Resume with <code>/plan resume</code>.</li>
@@ -1074,6 +1074,7 @@ ollama serve</code></pre></div>
       <tr><td><code>move_file</code> / <code>delete_file</code></td><td>coding, momo</td><td class="wrap">Rename or move (creates parent folders), or delete</td></tr>
       <tr><td><code>run_command</code></td><td>coding, momo, plan</td><td class="wrap">Any shell command, in the working directory but <strong>not confined to it</strong>. <code>/run-confirm on</code> asks before each one. 120 s timeout by default; the output is saved to a log and the model gets a view of it. See <a href="#run-output">Command output</a>.</td></tr>
       <tr><td><code>command_output</code></td><td>coding, momo, plan</td><td class="wrap">Search a saved command log again without rerunning it: <code>grep=</code>, <code>tail=</code> or a line range. Only in run mode <code>new</code>.</td></tr>
+      <tr><td><code>scratch_write</code></td><td>all modes</td><td class="wrap">Write (or <code>append=true</code>) a file in the <a href="#scratch">scratchpad</a>, <code>.momo/scratch/</code>: temporary scripts, notes and results that must not land in the project. Cannot write outside it.</td></tr>
     </table></div>
     <h3>Internet (all modes, only with <code>/net on</code>)</h3>
     <div class="table-scroll"><table>
@@ -1126,17 +1127,40 @@ ollama serve</code></pre></div>
 <div class="code-block"><div class="code-bar"><span class="code-lang">tool result</span></div><pre><code>Ran 300 tests in 0.004s
 
 FAILED (failures=2)
-[output saved: /Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log — 323 lines, 20 KB, exit code 1]
-[7 lines mention error/fail/warning — command_output(path="/Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log", grep="error|fail|warning|traceback") lists them]</code></pre></div>
+[output saved: /Users/me/project/.momo/runs/2026-09-26T14-05-42/r1.log — 323 lines, 20 KB, exit code 1]
+[7 lines mention error/fail/warning — command_output(path="/Users/me/project/.momo/runs/2026-09-26T14-05-42/r1.log", grep="error|fail|warning|traceback") lists them]</code></pre></div>
     <p><code>command_output</code> searches that log again (<code>grep=</code>, <code>tail=</code>, a line range) instead of running the suite twice, also after a timeout or interrupt.</p>
     <p><strong>Timeout:</strong> 120 seconds unless the model passes <code>timeout=</code>, up to 900. Small models rarely pass one, so the default keeps a script stuck in a loop from holding the turn; a command it stops is told how to ask for longer.</p>
-    <p>Logs live in <code>~/.momo-harness/runs/&lt;session&gt;/</code>, outside the workdir, so they never show up in <code>git status</code>; see <a href="#storage">storage</a> for cleanup. <code>command_output</code> only ever opens those files.</p>
+    <p>Logs live in the workspace's <a href="#scratch"><code>.momo/</code> folder</a>, in <code>.momo/runs/&lt;session&gt;/</code>: git-ignored, never indexed, and readable with <code>read_file</code> too. In a workdir momo can't write to they go to <code>~/.momo-harness/runs/</code>; see <a href="#storage">storage</a> for cleanup. <code>command_output</code> only ever opens those files.</p>
     <div class="table-scroll"><table>
       <tr><th>Setting</th><th>Description</th></tr>
       <tr><td><code>/run-mode new|classic</code></td><td class="wrap"><code>new</code> (default): log, views and <code>command_output</code>. <code>classic</code>: return the whole output, as before. Remembered between runs; also <code>--run-mode</code> and View → Context.</td></tr>
       <tr><td><code>/run-output-limit [n|off]</code></td><td class="wrap">Size of the default view in characters (minimum 500; default off: the whole output)</td></tr>
     </table></div>
     <p class="note"><strong>Measured</strong> on Qwen3.5-9B with five command tasks: both modes found every fact, but <code>new</code> sent 62 KB of command output to the model instead of 436 KB and finished 35% sooner. <code>evals/run_output_bench.py</code> measures the views without a model.</p>
+  </section>
+
+  <section id="scratch" data-voice="scratch">
+    <h2>Scratchpad &amp; <code>.momo/</code></h2>
+    <p>Each workspace gets a folder of momo's own, made the first time something is written there. A <code>.gitignore</code> of <code>*</code> inside it keeps the whole folder out of git without touching a tracked file.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">&lt;workdir&gt;/.momo/</span></div><pre><code>.momo/
+├── .gitignore            <span class="com"># "*": never committed</span>
+├── scratch/              <span class="com"># the model's scratchpad, kept between sessions</span>
+├── plan.md               <span class="com"># the plan, while one exists</span>
+└── runs/&lt;session&gt;/r1.log <span class="com"># saved run_command output</span></code></pre></div>
+    <p><strong>The scratchpad.</strong> Small models drop throwaway scripts and results wherever they are, often in the project root. Every mode offers <code>scratch_write</code>, and the Environment section of the system prompt tells the model to put temporary scripts, notes and intermediate results there, never in the project tree. It reads them back with <code>read_file</code>, runs them with <code>run_command</code> (<code>python3 .momo/scratch/probe.py</code>), and commands get the folder as <code>$MOMO_SCRATCH</code>.</p>
+    <ul>
+      <li><strong>Bounded.</strong> Paths are relative to the scratchpad (<code>probe.py</code>), to the workdir (<code>.momo/scratch/probe.py</code>) or absolute inside it, and symlinks are resolved first. <code>../</code>, outside paths, a link that points out, and a symlinked <code>.momo</code> are refused.</li>
+      <li><strong>Not the project.</strong> So it's offered in chat and plan investigation too, doesn't end a design-mode turn like <code>write_file</code>, and doesn't reset a TDD plan's green state.</li>
+      <li><strong>Out of the way.</strong> Never indexed, whatever the index filter says. <code>grep_files</code> and <code>find_files</code> skip it from the root; searching inside it works.</li>
+    </ul>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/scratch</code></td><td class="wrap">Path, size and newest files</td></tr>
+      <tr><td><code>/scratch clear</code></td><td class="wrap">Delete everything in it (asks first)</td></tr>
+      <tr><td><code>/tools scratch_write off</code></td><td class="wrap">Turn it off for a mode, with its prompt line (for A/B runs)</td></tr>
+    </table></div>
+    <p class="note">Only data that is harmless if a cloned repository ships its own copy, or the model overwrites it, lives in <code>.momo/</code>. Approvals, the index pickle, keys and command config stay in <a href="#storage"><code>~/.momo-harness/</code></a>.</p>
   </section>
 
   <section id="index" data-voice="index">
@@ -1632,6 +1656,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/host [url]</code></td><td class="wrap">Show the backend, or connect to another</td></tr>
       <tr><td><code>/token [key]</code>, <code>/clear-token</code></td><td class="wrap">Set, show (masked) or remove the Bearer token</td></tr>
       <tr><td><code>/workspace [path]</code></td><td class="wrap">Show or change the working directory (alias <code>/workdir</code>)</td></tr>
+      <tr><td><code>/scratch [clear]</code></td><td class="wrap">Show the <a href="#scratch">scratchpad</a>, or empty it (asks first)</td></tr>
       <tr><td><code>/think [off|on|&lt;level&gt;]</code></td><td class="wrap">Show or set the model's <a href="#thinking">thinking level</a> (remembered)</td></tr>
       <tr><td><code>/think-history off|turn|all</code></td><td class="wrap"><a href="#think-history">Send the model's own reasoning back</a> to it (remembered)</td></tr>
       <tr><td><code>/tools [list|&lt;name&gt;]</code></td><td class="wrap">Pick this mode's tools, list them, or show one. See <a href="#tool-choices">Turning tools on and off</a></td></tr>
@@ -1710,7 +1735,7 @@ curl -sN localhost:8765/api/events</code></pre></div>
 
   <section id="storage" data-voice="storage">
     <h2>Where momo stores data</h2>
-    <p>Everything momo keeps between runs lives in one folder in your home directory. None of it is sent anywhere (momo only talks to your model server, and to MCP servers you add), and deleting the folder resets momo completely.</p>
+    <p>Everything momo keeps between runs lives in one folder in your home directory, except what belongs to one workspace: its scratchpad, plan file and command logs are in that workspace's git-ignored <a href="#scratch"><code>.momo/</code></a>. None of it is sent anywhere (momo only talks to your model server, and to MCP servers you add), and deleting the folder resets momo completely.</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">~/.momo-harness/</span></div><pre><code>~/.momo-harness/
 ├── prefs.json            <span class="com"># remembered settings</span>
 ├── sessions/
@@ -1720,7 +1745,7 @@ curl -sN localhost:8765/api/events</code></pre></div>
 │   ├── 3f2a9c…e1.pickle  <span class="com"># saved code index, one per workdir (/index-persist, on by default)</span>
 │   └── 3f2a9c…e1.filter  <span class="com"># which files that index covers (/index-filter)</span>
 ├── runs/
-│   └── 2026-09-23T18-04-11/r1.log  <span class="com"># saved run_command output, per session</span>
+│   └── 2026-09-23T18-04-11/r1.log  <span class="com"># run_command output, only when the workdir's .momo/ can't be used</span>
 ├── search_sources/
 │   └── docsrs.json       <span class="com"># your web_search sources (/search-sources save)</span>
 ├── mcp.json              <span class="com"># your MCP servers (/mcp add)</span>
@@ -1741,7 +1766,7 @@ curl -sN localhost:8765/api/events</code></pre></div>
       <tr><td><code>sessions/*.log</code></td><td class="wrap">Every request, response, tool call and token count, one JSON object per line, for auditing what the model did. Secret request headers are masked.</td></tr>
       <tr><td><code>index/*.pickle</code></td><td class="wrap">Named by a hash of the workdir. Written by <code>/index save</code>, and on exit with <code>/index-persist</code> (on by default). Mode 0600, and only loaded if it's yours and not writable by others.</td></tr>
       <tr><td><code>index/*.filter</code></td><td class="wrap">Created from the project's <code>.gitignore</code> files the first time the index starts. Edit it with <code>/index-filter</code> or View → Code index → Filter…. Mode 0600.</td></tr>
-      <tr><td><code>runs/&lt;session&gt;/rN.log</code></td><td class="wrap">Last 20 per session (<a href="#run-output">Command output</a>). Deleted on <code>/clear</code>, <code>/new</code> and session load; other sessions' folders go after 3 days.</td></tr>
+      <tr><td><code>runs/&lt;session&gt;/rN.log</code></td><td class="wrap">Fallback: normally logs are in <code>&lt;workdir&gt;/.momo/runs/</code>. Last 20 per session (<a href="#run-output">Command output</a>). Deleted on <code>/clear</code>, <code>/new</code> and session load; other sessions' folders go after 3 days.</td></tr>
       <tr><td><code>mcp.json</code></td><td class="wrap">Your <a href="#mcp">MCP servers</a>, in the <code>mcpServers</code> format. A project's servers live in its own <code>.mcp.json</code> instead.</td></tr>
       <tr><td><code>mcp-approved.json</code></td><td class="wrap">Fingerprints of approved and denied project servers (workdir, name and launch settings). Mode 0600.</td></tr>
       <tr><td><code>mcp-logs/*.log</code></td><td class="wrap">stderr of each stdio server, capped at about 1 MB with one rotated copy.</td></tr>
@@ -1756,7 +1781,7 @@ curl -sN localhost:8765/api/events</code></pre></div>
     </ul>
     <h3>Elsewhere</h3>
     <ul>
-      <li><strong>In your project:</strong> <code>.momo-plan.md</code> while a plan exists (deleted when it completes or is cancelled), and <code>conversation-&lt;timestamp&gt;.md</code> when you run <code>/export</code>.</li>
+      <li><strong>In your project:</strong> <code>.momo/plan.md</code> while a plan exists (deleted when it completes or is cancelled), and <code>conversation-&lt;timestamp&gt;.md</code> when you run <code>/export</code>.</li>
       <li><strong>In each browser:</strong> the web UI keeps its theme, view options and notification switches in <code>localStorage</code>; the token cookie lasts until the browser closes.</li>
       <li><strong>Never stored:</strong> the model server token (<code>/token</code>) and the web UI access token.</li>
     </ul>
@@ -1985,7 +2010,7 @@ const SPEECH = {
     "< coding: full tool suite", "< momo mode is me!", "< /code, /plan, /momo...",
   ],
   plan: [
-    "< investigate, then plan", "< nothing edits till y!", "< edit .momo-plan.md!",
+    "< investigate, then plan", "< nothing edits till y!", "< edit .momo/plan.md!",
     "< [-] skips a step", "< /plan resume after a nap", "< ▶ marks the current step",
     "< complete_step!", "< ticking [x]~", "< plan done? file deleted",
   ],
@@ -1998,6 +2023,10 @@ const SPEECH = {
     "< grep is love", "< read_symbol by line no.", "< find_references!",
     "< sandboxed to the workdir", "< .. escapes? rejected", "< edit_file: one match only",
     "< run_command can ask first", "< code_outline a folder!",
+  ],
+  scratch: [
+    "< scratch, not src!", "< .momo/ is mine~", "< git can't see it",
+    "< ../ ? nope", "< /scratch clear",
   ],
   "run-output": [
     "< tail=30 for the summary", "< grep=\"fail\" finds it", "< logs, not floods~",

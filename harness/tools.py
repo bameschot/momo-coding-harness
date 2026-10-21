@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import code_index, code_nav, editing, net, search
+from . import code_index, code_nav, editing, momo_dir, net, search
 from . import run_store as run_store_mod
 from .paths import (BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, SKIP_DIRS, safe_entry_path,
                     safe_path, split_lines, walk_files)
@@ -580,13 +580,29 @@ NET_TOOLS = [
         ["spec", "test_query"]),
 ]
 
-ALL_TOOLS    = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS
+# Every mode, the read-only ones included: the scratchpad is not the project,
+# and the tool cannot write anywhere else (momo_dir.resolve_scratch).
+SCRATCH_TOOLS = [
+    _fn("scratch_write",
+        f"Write a file in your scratchpad ({momo_dir.SCRATCH_REL}/) — for temporary scripts, notes "
+        "and intermediate results that must not land in the project. path is relative to the "
+        "scratchpad and cannot leave it; folders are created. Overwrites the file, or adds to its "
+        "end with append=true. Read it back with read_file "
+        f"(path \"{momo_dir.SCRATCH_REL}/<name>\").",
+        {"path":    {"type": "string",  "description": "File inside the scratchpad, e.g. 'probe.py' or 'out/results.txt'"},
+         "content": {"type": "string",  "description": "Raw file content (no markdown fences around code)."},
+         "append":  {"type": "boolean", "description": "Add to the end of the file instead of overwriting it (default false)"}},
+        ["path", "content"]),
+]
+
+ALL_TOOLS    = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS + CODING_ONLY_TOOLS + SCRATCH_TOOLS
 
 _by_name = {t["function"]["name"]: t for t in SHARED_TOOLS + CODING_ONLY_TOOLS}
 # Design mode writes one spec and revises it: edit_file changes a section
 # without rewriting a long document (which a small context can truncate).
-DESIGN_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS + [_by_name["edit_file"]]
-CHAT_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [_by_name["ask_user"]]
+DESIGN_TOOLS = (READ_ONLY_TOOLS + CODE_NAV_TOOLS + SHARED_TOOLS + [_by_name["edit_file"]]
+                + SCRATCH_TOOLS)
+CHAT_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [_by_name["ask_user"]] + SCRATCH_TOOLS
 
 # Plan-mode tools.  Like ask_user these are intercepted by the harness (they
 # change plan state rather than touching the filesystem), so they have no
@@ -689,7 +705,7 @@ PLAN_INVESTIGATE_TOOLS = READ_ONLY_TOOLS + CODE_NAV_TOOLS + [
     _by_name["ask_user"],
     _by_name["run_command"],
     _plan_by_name["create_plan"],
-]
+] + SCRATCH_TOOLS
 # Execution gets exactly the coding tool set, plus the step-tracking tools.
 PLAN_EXECUTE_TOOLS = ALL_TOOLS + [_plan_by_name["complete_step"], _plan_by_name["revise_plan"]]
 PLAN_TDD_INVESTIGATE_TOOLS = _with_tdd(PLAN_INVESTIGATE_TOOLS)
@@ -1157,7 +1173,8 @@ def exec_command(command: str, timeout: int, workdir: Path, cancel, out, err):
     them would cost every later build a cold JVM."""
     try:
         proc = subprocess.Popen(command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
-                                stdout=out, stderr=err, start_new_session=True)
+                                stdout=out, stderr=err, start_new_session=True,
+                                env=command_env(workdir))
     except OSError as e:
         return None, f"ERROR: {e}"
     files = [f for f in (out, err) if hasattr(f, "fileno")]
@@ -1351,12 +1368,11 @@ def _start_background(command, timeout, defaulted, wait_for, workdir, cancel, lo
     pass.  Returns (proc, stopped, notice) like exec_command, plus a line saying how
     the wait ended; proc None: it could not start (stopped is the error)."""
     # Python block-buffers stdout that is not a terminal: "Serving on …" would
-    # sit in the buffer and wait_for never see it.
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    # sit in the buffer and wait_for never see it (command_env sets PYTHONUNBUFFERED).
     try:
         proc = subprocess.Popen(command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                                env=env)
+                                env=command_env(workdir))
     except OSError as e:
         return None, f"ERROR: {e}", ""
     rx = run_store_mod.compile_pattern(wait_for)[0] if wait_for else None
@@ -1469,13 +1485,45 @@ def _stop_command(path: str, *, workdir: Path,
         log, text, status, False, run_store.meta(log).get("command"))
 
 
+def _scratch_write(path: str, content: str, append: bool = False, *, workdir: Path) -> str:
+    folder = momo_dir.ensure(workdir, momo_dir.SCRATCH)
+    if isinstance(folder, str):
+        return folder
+    p = momo_dir.resolve_scratch(path, workdir)
+    if isinstance(p, str):
+        return p
+    shown = f"{momo_dir.SCRATCH_REL}/{p.relative_to(folder.resolve()).as_posix()}"
+    if p.is_dir():
+        return f"ERROR: {shown} is a folder — name a file in it"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a" if append else "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as e:
+        return f"ERROR: could not write {shown}: {e.strerror or e}"
+    lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+    return (f"{'Appended to' if append else 'Written:'} {shown} ({lines} line"
+            f"{'s' if lines != 1 else ''}, {len(content.encode('utf-8'))} bytes)")
+
+
+def command_env(workdir: Path) -> dict:
+    """The environment of a run_command: PYTHONUNBUFFERED (a background
+    command's "ready" line must not sit in a buffer) and MOMO_SCRATCH, the
+    scratchpad's absolute path (created, so a script can write there)."""
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    folder = momo_dir.ensure(workdir, momo_dir.SCRATCH)
+    if not isinstance(folder, str):
+        env["MOMO_SCRATCH"] = str(folder)
+    return env
+
+
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
 # Required- and known-argument maps built from the tool schemas — used to generate
 # clear error messages before Python's TypeError exposes internal function names.
 _SCHEMAS = {t["function"]["name"]: t["function"]["parameters"]
             for t in (READ_ONLY_TOOLS + CODE_NAV_TOOLS + INDEX_TOOLS + SHARED_TOOLS
-                      + CODING_ONLY_TOOLS + NET_TOOLS + [_RUN_COMMAND_FILE, _COMMAND_OUTPUT,
+                      + CODING_ONLY_TOOLS + SCRATCH_TOOLS + NET_TOOLS + [_RUN_COMMAND_FILE, _COMMAND_OUTPUT,
                                                          _STOP_COMMAND, _EDIT_FILE])}
 _REQUIRED_ARGS: dict[str, list[str]] = {n: p["required"] for n, p in _SCHEMAS.items()}
 _KNOWN_ARGS: dict[str, set[str]] = {n: set(p["properties"]) for n, p in _SCHEMAS.items()}
@@ -1500,6 +1548,7 @@ _EXECUTORS = {
     "run_command":        _run_command,
     "command_output":     _command_output,
     "stop_command":       _stop_command,
+    "scratch_write":      _scratch_write,
     "fetch_url":          net.fetch_url,
     "web_search":         search.web_search,
     "add_search_source":  search.add_search_source,
@@ -1541,6 +1590,7 @@ _INJECTED = {
     "read_file":   ("read_budget",),
     **{n: ("index", "cancel") for n in INDEX_TOOL_NAMES},
 }
+RUN_STORE_TOOLS = frozenset(n for n, inj in _INJECTED.items() if "run_store" in inj)
 # Tools that change files: their paths are re-indexed right away, so the next
 # index query does not depend on the stat-diff throttle to see the change.
 _WRITES_PATHS = {"write_file": ("path",), "edit_file": ("path",), "append_to_file": ("path",),
@@ -1570,7 +1620,7 @@ def _coerce_args(name: str, args: dict) -> dict:
 
 # The argument that carries text headed for the disk.
 _BODY_ARG = {"write_file": "content", "append_to_file": "content", "edit_file": "new_string",
-             "replace_symbol": "new_source"}
+             "replace_symbol": "new_source", "scratch_write": "content"}
 _PLACEHOLDER_RE = re.compile(r"^\s*\[written to [^\]]*\]\s*$")
 # Notes the harness splices into tool results (compaction trim, size cutoff).
 # Content carrying one was rebuilt from a shortened result: writing it would
@@ -1616,6 +1666,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
         routed = _route_to_index(name, args, workdir, index, cancel)
         if routed is not None:
             return routed
+    _ensure_momo_dir(name, args, workdir)
     result = _dispatch(name, args, workdir, net_access, net_max_bytes, net_max_chars, index,
                        cancel, more)
     if name == "run_command" and _NO_PYTHON_RE.search(result) and shutil.which("python3"):
@@ -1630,6 +1681,15 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
         elif name == "run_command":      # (edit_files invalidates its own writes)
             index.mark_dirty()
     return result
+
+
+def _ensure_momo_dir(name: str, args: dict, workdir: Path) -> None:
+    """A write tool aimed at .momo/ (write_file into the scratchpad in coding
+    mode) gets the folder and its .gitignore first, or git would see the file."""
+    paths = (edit_paths(args) if name == "edit_files"
+             else [args.get(k) for k in _WRITES_PATHS.get(name, ())])
+    if any(isinstance(p, str) and momo_dir.touches(p, workdir) for p in paths):
+        momo_dir.ensure(workdir)
 
 
 # ── index-first search (/index-route, on by default) ─────────────────────────
@@ -1889,6 +1949,7 @@ _TOOL_EXAMPLES: dict[str, dict] = {
     "run_command":    {"command": "python -m pytest"},
     "command_output": {"path": "r1", "grep": "FAILED|Error"},
     "stop_command":   {"path": "r2"},
+    "scratch_write":  {"path": "probe.py", "content": "import json\nprint(json.load(open('config.json')).keys())\n"},
     "ask_user":       {"question": "Should I overwrite the existing file?"},
     "create_plan":    {"title": "Fix off-by-one in paginate()",
                        "goal": "Last page is dropped because paginate() uses < instead of <=.",

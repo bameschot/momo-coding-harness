@@ -10,9 +10,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 # Folders never worth searching or indexing (the index filter seeds them as
-# editable `name/` lines, see ignore_rules.DEFAULT_EXCLUDES).
-SKIP_DIRS = (".git", ".venv", "venv", "__pycache__", "node_modules", ".tox", "dist", "build",
-             ".mypy_cache", ".pytest_cache")
+# editable `name/` lines, see ignore_rules.DEFAULT_EXCLUDES).  .momo is the
+# harness's own folder (momo_dir): scratchpad, plan file, run logs.
+SKIP_DIRS = (".git", ".momo", ".venv", "venv", "__pycache__", "node_modules", ".tox", "dist",
+             "build", ".mypy_cache", ".pytest_cache")
 MAX_SCAN_FILE_BYTES = 2_000_000  # larger files are skipped by grep_files, code nav and the index
 BINARY_SNIFF_BYTES = 4096        # bytes inspected for a NUL byte to detect binary files
 

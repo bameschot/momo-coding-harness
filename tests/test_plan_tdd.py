@@ -16,7 +16,7 @@ from harness import plan_runner, tdd
 from harness.commands import handle as handle_command
 from harness.events import ChatEvent, DiffEvent, ToolCallEvent, ToolResultEvent
 from harness.llm.base import ChatResponse, LLMClient, ToolCall
-from harness.plan import PLAN_FILENAME, Plan, Step
+from harness.plan import LEGACY_PLAN_FILENAME, PLAN_FILENAME, Plan, Step
 
 PY = shlex.quote(sys.executable)
 TEST_CMD = f"{PY} -m unittest discover -q -s tests -t ."
@@ -155,8 +155,9 @@ class PlanModel(unittest.TestCase):
 class Gate(_Base):
     def test_find_tags_skips_plan_file_and_momo_dir(self):
         (self.wd / "tests" / "test_calc.py").write_text(calc_tests(True, True))
-        (self.wd / PLAN_FILENAME).write_text("Tag: tdd-step-9\n")
         (self.wd / ".momo").mkdir()
+        (self.wd / PLAN_FILENAME).write_text("Tag: tdd-step-9\n")
+        (self.wd / LEGACY_PLAN_FILENAME).write_text("Tag: tdd-step-7\n")
         (self.wd / ".momo" / "r1.log").write_text("skipped 'tdd-step-8'\n")
         found = tdd.find_tags(self.wd)
         self.assertEqual(sorted(found), ["tdd-acceptance", "tdd-step-1"])

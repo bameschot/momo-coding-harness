@@ -1862,9 +1862,9 @@ $("#plan-progress").onclick = $("#plan-btn").onclick;
 $("#plan-close").onclick = () => DRAWERS["#plan-drawer"]();
 for (const b of document.querySelectorAll("#plan-drawer [data-cmd]")) {
   b.onclick = async () => {
-    // Like deleting a session, discarding a plan asks first: it deletes .momo-plan.md.
+    // Like deleting a session, discarding a plan asks first: it deletes .momo/plan.md.
     const bar = $("#plan-drawer .drawer-actions");
-    if (b.id === "plan-cancel" && !(await confirmInline(bar, "Discard this plan and .momo-plan.md?", "Discard"))) return;
+    if (b.id === "plan-cancel" && !(await confirmInline(bar, "Discard this plan and .momo/plan.md?", "Discard"))) return;
     send(b.dataset.cmd);
     DRAWERS["#plan-drawer"]();
   };

@@ -11,7 +11,8 @@ Supported syntax, as in git: ``#`` comments, blank lines, trailing spaces
 middle is anchored at the project root (otherwise it matches at any depth),
 ``*`` ``?`` ``[...]``, and ``**`` as ``**/x``, ``x/**`` or ``a/**/b``.  As in
 git, a file inside an excluded directory cannot be re-included unless the
-directory itself is.  ``.git/`` is always excluded.
+directory itself is.  ``.git/`` and momo's own ``.momo/`` (scratchpad, plan
+file, run logs) are always excluded, whatever the filter says.
 """
 
 from __future__ import annotations
@@ -23,9 +24,12 @@ from pathlib import Path
 
 from .paths import SKIP_DIRS
 
+# Never indexed, whatever the filter says: git's folder and momo's own (a
+# filter saved before .momo existed has no line for it).
+_ALWAYS = frozenset({".git", ".momo"})
 # Folders that are never worth indexing; seeded as editable `name/` lines
-# (.git/ is always excluded, so it needs no line).
-DEFAULT_EXCLUDES = tuple(f"{d}/" for d in SKIP_DIRS if d != ".git")
+# (the _ALWAYS ones need no line).
+DEFAULT_EXCLUDES = tuple(f"{d}/" for d in SKIP_DIRS if d not in _ALWAYS)
 _MAX_SEED_GITIGNORES = 500
 _MAX_SEED_DIRS = 20_000     # folders searched for nested .gitignore files (a workdir of $HOME)
 
@@ -156,17 +160,17 @@ class Rules:
 
     def dir_excluded(self, rel: str) -> bool:
         """For a top-down walk whose parents are already known to be included."""
-        return rel.rsplit("/", 1)[-1] == ".git" or self._match(rel, True)
+        return rel.rsplit("/", 1)[-1] in _ALWAYS or self._match(rel, True)
 
     def file_excluded(self, rel: str) -> bool:
         """Likewise, for a file whose parent directories are included.  A `.git`
         file (a worktree's or submodule's link) is excluded like the folder."""
-        return rel.rsplit("/", 1)[-1] == ".git" or self._match(rel, False)
+        return rel.rsplit("/", 1)[-1] in _ALWAYS or self._match(rel, False)
 
     def excluded(self, rel: str, is_dir: bool = False) -> bool:
         """Full check: any excluded parent directory excludes the path."""
         parts = rel.split("/")
-        if ".git" in parts:
+        if not _ALWAYS.isdisjoint(parts):
             return True
         for k in range(1, len(parts)):
             if self._match("/".join(parts[:k]), True):

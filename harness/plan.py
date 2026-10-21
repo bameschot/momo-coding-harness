@@ -4,10 +4,15 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import momo_dir
+
 # The plan is mirrored to this file in the working directory while it exists.
 # It is re-parsed when the user approves the plan (so hand edits are honoured)
 # and deleted once every step has been executed.
-PLAN_FILENAME = ".momo-plan.md"
+PLAN_FILENAME = momo_dir.PLAN_REL
+# Where it lived before .momo/: still read when the new file is missing, and
+# removed on the next write or delete.
+LEGACY_PLAN_FILENAME = ".momo-plan.md"
 
 # Checkbox marker per status, used both when rendering and parsing the file.
 _STATUS_MARK = {"pending": " ", "in_progress": "~", "done": "x", "skipped": "-"}
@@ -295,30 +300,49 @@ class Plan:
 # ── plan file ─────────────────────────────────────────────────────────────────
 
 def plan_path(workdir: Path) -> Path:
-    return workdir / PLAN_FILENAME
+    return momo_dir.plan_path(workdir)
+
+
+def _drop_legacy(workdir: Path):
+    try:
+        (workdir / LEGACY_PLAN_FILENAME).unlink()
+    except OSError:
+        pass  # never there (or unremovable) — nothing more to do
 
 
 def write_plan_file(plan: Plan, workdir: Path) -> str:
     """Write the plan markdown. Returns '' on success or an error message."""
+    folder = momo_dir.ensure(workdir)
+    if isinstance(folder, str):
+        return f"could not write {PLAN_FILENAME}: {folder.removeprefix('ERROR: ')}"
     try:
         plan_path(workdir).write_text(plan.to_markdown(), encoding="utf-8")
-        return ""
     except OSError as e:
         return f"could not write {PLAN_FILENAME}: {e}"
+    _drop_legacy(workdir)
+    return ""
 
 
 def read_plan_file(workdir: Path) -> Plan | None:
-    """Parse the plan file; None if it is missing or contains no steps."""
-    try:
-        text = plan_path(workdir).read_text(encoding="utf-8")
-    except OSError:
-        return None
-    plan = Plan.from_markdown(text)
-    return plan if plan.steps else None
+    """Parse the plan file (or the pre-.momo one); None if it is missing or
+    contains no steps."""
+    for p in (plan_path(workdir), workdir / LEGACY_PLAN_FILENAME):
+        if p.is_symlink():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        plan = Plan.from_markdown(text)
+        return plan if plan.steps else None
+    return None
 
 
 def delete_plan_file(workdir: Path):
+    p = plan_path(workdir)
     try:
-        plan_path(workdir).unlink()
+        if not p.parent.is_symlink():
+            p.unlink()
     except OSError:
         pass  # already gone (or unremovable) — nothing more to do
+    _drop_legacy(workdir)

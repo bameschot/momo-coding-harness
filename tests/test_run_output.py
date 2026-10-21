@@ -387,7 +387,9 @@ class HarnessWiring(unittest.TestCase):
     def test_logs_live_in_the_session_dir_and_go_with_it(self):
         out = self.h._dispatch("run_command", {"command": "echo hi"})
         path = Path(saved_path(out))
-        self.assertEqual(path.parent, self.home / ".momo-harness" / "runs" / self.h._ts)
+        self.assertEqual(path.parent, self.h.workdir / ".momo" / "runs" / self.h._ts)
+        # inside the workdir, so the model's own file tools read it too
+        self.assertIn("hi", self.h._dispatch("read_file", {"path": str(path)}))
         commands.handle("/clear", self.h)
         self.assertFalse(path.exists())
         out = self.h._dispatch("run_command", {"command": "echo again"})

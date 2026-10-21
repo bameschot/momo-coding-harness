@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import code_index, ignore_rules
+from . import code_index, ignore_rules, momo_dir
 from .mcp import config as mcp_config
 from . import net as net_mod
 from . import run_store as run_store_mod
@@ -552,6 +552,30 @@ def handle(line: str, harness: Harness) -> CommandResult:
         if not harness.guides:
             return CommandResult(handled=True, output="Project guides: off")
         return CommandResult(handled=True, output=f"Project guides: on\n{note}")
+
+    if cmd == "/scratch":
+        sub = arg.strip().lower()
+        if sub not in ("", "clear"):
+            return CommandResult(handled=True, output="Usage: /scratch | /scratch clear")
+        files, size, newest = momo_dir.scratch_usage(harness.workdir)
+        where = momo_dir.scratch_root(harness.workdir)
+        if sub == "clear":
+            if not files:
+                return CommandResult(handled=True, output=f"Scratchpad is empty: {where}")
+            return CommandResult(
+                handled=True,
+                confirm_prompt=(f"Delete everything in the scratchpad ({files} file"
+                                f"{'s' if files != 1 else ''}, {net_mod.format_size(size)})?"),
+                confirm_action=lambda: (f"Scratchpad cleared: {momo_dir.clear_scratch(harness.workdir)} "
+                                        f"entries removed from {where}"))
+        if not files:
+            return CommandResult(handled=True, output=f"Scratchpad: {where} (empty)")
+        lines = [f"Scratchpad: {where} — {files} file{'s' if files != 1 else ''}, "
+                 f"{net_mod.format_size(size)}", "Newest:"]
+        lines += [f"  {rel}  ({net_mod.format_size(n)})" for rel, n in newest]
+        if files > len(newest):
+            lines.append(f"  … and {files - len(newest)} more")
+        return CommandResult(handled=True, output="\n".join(lines))
 
     if cmd in ("/system-prompt", "/prompt"):
         sub = arg.strip().lower()
@@ -1335,9 +1359,9 @@ Available commands:
   /plan tdd           Plan mode with a test-driven plan: tests first, each step gated on them
   /plan normal        Plan mode with a normal plan (the default)
   /plan show          Show the current plan and its progress
-  /plan run           Approve and execute the plan in coding mode (re-reads .momo-plan.md edits)
+  /plan run           Approve and execute the plan in coding mode (re-reads .momo/plan.md edits)
   /plan resume        Continue a paused plan from its current step (in coding mode)
-  /plan cancel        Discard the plan and delete .momo-plan.md
+  /plan cancel        Discard the plan and delete .momo/plan.md
   /chat               Switch to chat mode (read files, ask questions)
   /momo               Switch to momo companion mode (talk to the cat)
   /clear              Clear conversation history and discard any active plan
@@ -1345,6 +1369,8 @@ Available commands:
   /retry              Re-send your last message (drops the reply it got)
   /workspace          Show current working directory (alias: /workdir)
   /workspace <path>   Set working directory for file operations
+  /scratch            Show the model's scratchpad (.momo/scratch/): size and newest files
+  /scratch clear      Delete everything in the scratchpad
   /tool-output on|off   Show or hide the tool calls pane
   /think-output on|off  Show or hide model thinking/reasoning output  (Shift+T)
   /markdown on|off      Enable or disable markdown rendering  (Shift+M)

@@ -40,7 +40,7 @@ def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
     arg = parts[1].strip().lower() if len(parts) > 1 else ""
     return (cmd in _MUTATING or cmd in _MODE_COMMANDS
             or (cmd == "/plan" and arg != "show")
-            or (cmd in ("/session", "/workspace", "/workdir", "/run-mode",
+            or (cmd in ("/session", "/workspace", "/workdir", "/run-mode", "/scratch",
                         "/search-sources", "/host", "/model") and bool(arg))
             # a per-tool change (/tools <name> on|off) alters the running turn's tools
             or (cmd == "/tools" and len(parts) > 1 and len(parts[1].split()) > 1)

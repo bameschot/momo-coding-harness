@@ -65,6 +65,7 @@ from .. import companion
 from .. import ignore_rules
 from ..file_search import fuzzy_search, workspace_files
 from .. import session as session_mod
+from ..momo_dir import MOMO_DIR
 from ..paths import SKIP_DIRS, safe_path
 from ..commands import export_markdown, help_commands
 from ..controller import CONFIRM_SUFFIX, Controller
@@ -195,7 +196,8 @@ def _list_workspace(root: Path, rel: str, hidden: bool) -> list[dict] | str:
     except OSError as e:
         return f"ERROR: {e}"
     for e in entries:
-        if (not hidden and e.name.startswith(".")) or e.name in SKIP_DIRS:
+        # momo's own folder (scratchpad, run logs) shows with the hidden files.
+        if (not hidden and e.name.startswith(".")) or (e.name in SKIP_DIRS and e.name != MOMO_DIR):
             continue
         is_dir = e.is_dir(follow_symlinks=False)
         try:

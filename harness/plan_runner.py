@@ -23,7 +23,8 @@ TDD_MAX_REFUSALS = 3   # gate refusals in a row before the user is asked
 # Tools that cannot change files: a green run of the test command stays valid
 # across them (tdd gate reuse).  Any other call, run_command included, ends it.
 KEEPS_GREEN = ({t["function"]["name"] for t in tools_mod.READ_ONLY_TOOLS + tools_mod.CODE_NAV_TOOLS}
-                | set(INDEX_TOOL_NAMES) | {"command_output", "stop_command", "ask_user", "complete_step"})
+                | set(INDEX_TOOL_NAMES) | {"command_output", "stop_command", "ask_user", "complete_step",
+                                           "scratch_write"})     # the scratchpad is not the project
 
 # Steps a planner writes that a TDD plan does itself: running or keeping the
 # suite green ("Run the full test suite", "Keep existing add tests green") and

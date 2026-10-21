@@ -1,11 +1,12 @@
 """Saved run_command output (/run-mode new).
 
 In the new run mode a command's whole output is written to a log file under
-~/.momo-harness/runs/<session>/, and the model gets back a bounded view of it:
+<workdir>/.momo/runs/<session>/, and the model gets back a bounded view of it:
 the tail, a grep, a line range, or (by default) the beginning and end.  The log
 stays queryable through command_output, so a second look never means running a
-test suite again.  The directory lives outside the workdir, so the logs never
-show up in git status or the code index.
+test suite again.  .momo/ is git-ignored and never indexed (momo_dir), and being
+inside the workdir the model's read_file/grep_file reach the logs too.  When
+.momo/ cannot be used (a read-only tree) the logs go to ~/.momo-harness/runs/.
 
 The view helpers work on plain text and never touch the disk, so they are shared
 by run_command and command_output and unit-testable without a subprocess.
@@ -23,6 +24,7 @@ import time
 import weakref
 from pathlib import Path
 
+from . import momo_dir
 from .paths import momo_home
 
 DEFAULT_LIMIT = 0             # chars one run_command / command_output view may return; 0 = off: the whole output
@@ -40,8 +42,16 @@ _LOG_RE = re.compile(r"r(\d+)(?:\.log)?")
 
 
 def runs_root() -> Path:
-    """Evaluated per call, so a test that points HOME elsewhere is honoured."""
+    """The fallback (and pre-.momo) home of run logs.  Evaluated per call, so a
+    test that points HOME elsewhere is honoured."""
     return momo_home() / "runs"
+
+
+def session_root(workdir: Path, session: str) -> Path:
+    """Where one session's logs go: <workdir>/.momo/runs/<session>, else (no
+    usable .momo folder) runs_root()/<session>."""
+    folder = momo_dir.ensure(workdir, momo_dir.RUNS)
+    return (runs_root() if isinstance(folder, str) else folder) / session
 
 
 class RunStore:
@@ -209,11 +219,12 @@ def short_command(command: str, width: int = 80) -> str:
     return one if len(one) <= width else one[:width - 1] + "…"
 
 
-def prune_stale(current: Path | None = None) -> None:
-    """Remove other sessions' run dirs that have not been written for a while
-    (a crash or kill skips the clean-up a normal session change does)."""
-    root = runs_root()
-    if not root.is_dir():
+def prune_stale(current: Path | None = None, root: Path | None = None) -> None:
+    """Remove other sessions' run dirs under root (default runs_root()) that
+    have not been written for a while (a crash or kill skips the clean-up a
+    normal session change does)."""
+    root = runs_root() if root is None else root
+    if root.is_symlink() or not root.is_dir():
         return
     cutoff = time.time() - STALE_SECS
     for d in root.iterdir():

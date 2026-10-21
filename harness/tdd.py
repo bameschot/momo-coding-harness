@@ -15,14 +15,14 @@ import tempfile
 from pathlib import Path
 
 from .paths import BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, split_lines, walk_files
-from .plan import PLAN_FILENAME, Plan
+from .plan import LEGACY_PLAN_FILENAME, Plan
 from . import tools
 
 TAG_RE = re.compile(r"\btdd-(?:step-\d+|acceptance)\b")
 
 # Not part of the project: momo's own state in the workdir.  Its run logs hold
 # test output, and test output prints the skip reasons.
-_SKIP_TOP = {PLAN_FILENAME, ".momo"}
+_SKIP_TOP = {LEGACY_PLAN_FILENAME, ".momo"}
 
 _OUTPUT_CHARS = 4000   # test output shown with a gate result (the end of it)
 _MAX_SITES = 8         # file:line locations listed per tag

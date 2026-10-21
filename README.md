@@ -478,7 +478,7 @@ Press `Shift+Tab` to cycle through modes: **design → chat → plan → coding 
 
 The assistant acts as a design partner. It explores your codebase to understand existing code, asks informed questions grounded in what it finds, and builds a spec. It writes the design document autonomously once it has gathered enough information — no explicit trigger required. It will **not** create or modify code files.
 
-Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `write_file`, `ask_user`
+Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `write_file`, `ask_user`, `scratch_write`
 
 ### Coding mode
 
@@ -502,7 +502,7 @@ When the code can't answer a question that changes the plan (two valid designs, 
 
 The assistant calls `create_plan` with a title, a goal (the root cause, key decisions, and your answers), and an ordered list of steps. Each step names the file and function it changes, what the change is, and how to verify it. The last step runs the project's tests.
 
-The harness writes the plan to **`.momo-plan.md`** in the working directory and shows it in chat:
+The harness writes the plan to **`.momo/plan.md`** in the working directory and shows it in chat:
 
 ```markdown
 # Plan: Fix paginate() dropping the last partial page
@@ -534,7 +534,7 @@ The harness then asks: *Execute this plan?*
 | `n` (or empty) | Keep the plan for later. The status bar shows `plan [awaiting approval]`. Start it with `/plan run` |
 | anything else | Treated as feedback. The assistant investigates further if needed and submits a revised plan |
 
-You can also **edit `.momo-plan.md` by hand** before answering (or before `/plan run`). You can reword, reorder, add, or delete steps, or mark a step `[-]` to skip it. The file is re-read when you approve, so your edits are what gets executed.
+You can also **edit `.momo/plan.md` by hand** before answering (or before `/plan run`). You can reword, reorder, add, or delete steps, or mark a step `[-]` to skip it. The file is re-read when you approve, so your edits are what gets executed.
 
 #### 4. Execute
 
@@ -544,13 +544,13 @@ The harness drives the plan one step at a time:
 - Each step arrives as a `Plan step i/N` message and runs the full coding loop. The prompt is the coding agent's prompt, the tools are the full coding tool set, and each step gets its own 100-iteration budget, with the same retries and nudges.
 - The model ends a step by calling `complete_step(summary)`, or by replying with text only. Tool calls after `complete_step` in the same turn are not run, so the model can't wander into the next step.
 - If the model discovers the rest of the plan is wrong, it calls `revise_plan` with the corrected remaining steps. Finished steps are kept. Any step left out of the revision is reported in chat, and the model is told, so nothing gets dropped silently.
-- Progress is visible in the status bar (`MODE: plan [exec 3/7]`) and in `.momo-plan.md`, where the checkboxes update as steps start (`[~]`) and finish (`[x]`, with a short note).
+- Progress is visible in the status bar (`MODE: plan [exec 3/7]`) and in `.momo/plan.md`, where the checkboxes update as steps start (`[~]`) and finish (`[x]`, with a short note).
 
-When the last step is done, the harness reports *Plan complete* and **deletes `.momo-plan.md`**.
+When the last step is done, the harness reports *Plan complete* and **deletes `.momo/plan.md`**.
 
 #### Pausing and resuming
 
-If a step is interrupted (Esc or `Shift+C`), hits a backend error, or runs out of iterations, execution **pauses** at that step. The plan and its progress stay in `.momo-plan.md` and in the saved session. To continue:
+If a step is interrupted (Esc or `Shift+C`), hits a backend error, or runs out of iterations, execution **pauses** at that step. The plan and its progress stay in `.momo/plan.md` and in the saved session. To continue:
 
 - `/plan resume` picks up at the paused step, or
 - type any message: it is passed to the model as extra context for the resumed step (e.g. *"the test runner is `make test`"*).
@@ -563,7 +563,7 @@ This also works after restarting the harness and reloading the session with `/se
 
 A TDD plan states what each step and the whole change must achieve, and the tests are written before any code:
 
-- `create_plan` also takes a `test_command` (the whole suite, exiting non-zero on failure), `tests` on every step (its expected outcomes, e.g. `add(2, 3) → 5`) and `acceptance` (the outcomes of the whole change). In `.momo-plan.md` these show as `## Test command` and `Expect:` lines, with a `Tag:` per step.
+- `create_plan` also takes a `test_command` (the whole suite, exiting non-zero on failure), `tests` on every step (its expected outcomes, e.g. `add(2, 3) → 5`) and `acceptance` (the outcomes of the whole change). In `.momo/plan.md` these show as `## Test command` and `Expect:` lines, with a `Tag:` per step.
 - The harness wraps the steps in two stages of its own. First, **write the tests**: complete tests for every step and for acceptance are written, each **skipped** with the framework's own marker on its own line above the test and the step's tag in the skip reason, e.g. `@unittest.skip("tdd-step-2")`, `@Disabled("tdd-step-2")`, `#[ignore = "tdd-step-2"]`, `it.skip("… (tdd-step-2)")`. Last, **acceptance**: the `tdd-acceptance` tests are switched on.
 - When a step starts, the **harness switches its tests on**: it deletes the marker lines carrying the step's tag, then runs `test_command` once and puts the result in the step's instructions. The model starts from the failures it has to fix. If the tests already pass before any code change, the model is told they don't check the step and must be made to fail first. A tagged line that is more than a plain marker (such as `it.skip("… (tdd-step-2)", () => {`) is left for the model to change.
 - Every stage ends at a **gate the harness checks itself** when the model calls `complete_step`:
@@ -593,9 +593,9 @@ Tests for later steps stay skipped, so they never break the build. They count fr
 | `/plan tdd` | Plan mode with a test-driven plan: tests first, every step gated on them |
 | `/plan normal` | Plan mode with a normal plan (the default) |
 | `/plan show` | Show the current plan with step statuses |
-| `/plan run` | Approve a plan kept for later and execute it (re-reads `.momo-plan.md`) |
+| `/plan run` | Approve a plan kept for later and execute it (re-reads `.momo/plan.md`) |
 | `/plan resume` | Continue a paused plan from its current step (switches to coding mode) |
-| `/plan cancel` | Discard the plan and delete `.momo-plan.md` |
+| `/plan cancel` | Discard the plan and delete `.momo/plan.md` |
 
 Investigation tools: read-only tools + `run_command`, `ask_user`, `create_plan`. Execution runs in coding mode: its tools (and your `/tools` choices for coding) + `complete_step`, `revise_plan`. A paused plan resumes only in coding mode; in plan mode the model sees it and a new `create_plan` replaces it.
 
@@ -603,7 +603,7 @@ Investigation tools: read-only tools + `run_command`, `ask_user`, `create_plan`.
 
 The assistant acts as a conversation partner for exploring code and documents. Point it at a file or module and it will read it, explain what it found, and ask follow-up questions to deepen the discussion. It never writes or modifies files — it is a read-only dialogue mode designed for understanding rather than implementation.
 
-Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `ask_user`
+Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep_file`, `grep_files`, `ask_user`, and `scratch_write` for its own notes (the [scratchpad](#scratchpad-and-the-momo-folder) is not the project)
 
 ### Momo mode
 
@@ -611,7 +611,7 @@ Momo is a small black cat who lives in the harness and keeps you company. This m
 
 The animated companion in the bar between the chat pane and status bar *is* Momo — in this mode you are talking to it directly. (The companion walks around and mews in every mode; toggle it with `/companion on|off` or `Shift+Q`. With `/companion-idle-recap on` (or the web UI's **View → Companion** menu), a companion that has been left alone for a while mews short recaps of what you just did instead of its canned lines. The bubble voice lives in `roles/momo-companion.md`, separate from this mode's persona.)
 
-Available tools: same as coding mode (all read-only + `write_file`, `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`, `ask_user`)
+Available tools: same as coding mode (all read-only + `write_file`, `edit_file`, `delete_file`, `move_file`, `append_to_file`, `run_command`, `ask_user`, `scratch_write`)
 
 Switch modes with `/design`, `/chat`, `/plan`, `/code`, `/momo`, or `Shift+Tab`.
 
@@ -668,6 +668,12 @@ Offered while the [code index](#code-index) is on, which it is unless you turn i
 | `ask_user` | Pause mid-task and ask the user a focused clarifying question. The worker thread blocks until the answer is submitted; the status bar shows `? waiting for input`. |
 
 Chat mode also has `ask_user` but not `write_file`.
+
+### Scratchpad (all modes)
+
+| Tool | Description |
+|---|---|
+| `scratch_write` | Write (or with `append=true`, add to) a file in the workspace's scratchpad, `.momo/scratch/`: temporary scripts, notes and intermediate results that must not land in the project. The path is relative to the scratchpad and cannot leave it. See [Scratchpad and the `.momo/` folder](#scratchpad-and-the-momo-folder). |
 
 ### Internet access (all modes, off by default)
 
@@ -745,7 +751,7 @@ stdout and stderr go into the log together, in the order they were written, so t
 Ran 300 tests in 0.004s
 
 FAILED (failures=2)
-[output saved: /Users/me/.momo-harness/runs/2026-09-26T14-05-42/r1.log — 323 lines, 20 KB, exit code 1]
+[output saved: /Users/me/project/.momo/runs/2026-09-26T14-05-42/r1.log — 323 lines, 20 KB, exit code 1]
 [7 lines mention error/fail/warning — command_output(path="r1", grep="error|fail|warning|traceback") lists them]
 ```
 
@@ -753,7 +759,7 @@ The model passes that path (or just `r1`) to **`command_output`** to look again 
 
 **Servers and watchers.** `background=true` starts a command, waits until it is ready, and leaves it running: until `wait_for="regex"` appears in its output (up to `timeout`, default 30 s), or for 3 s without `wait_for`. Python runs unbuffered, so its "Serving on …" line reaches the log. The result says it is still running and how to see more: `command_output(path="r3")` shows the output so far, and **`stop_command(path="r3")`** kills it and everything it started. A command that ends with `&` is run this way too, since the shell would return at once and leave the server running untracked. A command that exits during start-up is reported as a normal run. At most 5 run at once. A running command's log is never pruned, and all of them are killed on `/clear`, `/new`, a session load and when momo exits.
 
-`command_output` only ever opens its own session's logs: it takes the `rN.log` name from whatever path it is given, and refuses symlinks. The short id (`r1`) works too. Logs live in `~/.momo-harness/runs/<session>/`, outside the workdir, so they never show up in `git status` or the code index. momo keeps the last 20 per session (at most 256 MB), deletes them on `/clear`, `/new` and when a session loads, and removes other sessions' log folders after 3 days.
+`command_output` only ever opens its own session's logs: it takes the `rN.log` name from whatever path it is given, and refuses symlinks. The short id (`r1`) works too. Logs live in the workspace's [`.momo/` folder](#scratchpad-and-the-momo-folder), in `.momo/runs/<session>/`: git-ignored and never indexed, and inside the workdir, so `read_file` and `grep_file` can open them too. In a workdir momo cannot write to, they go to `~/.momo-harness/runs/<session>/` instead. Changing the workdir keeps the session's logs where they are, so `r1` still resolves. momo keeps the last 20 per session (at most 256 MB), deletes them on `/clear`, `/new` and when a session loads, and removes other sessions' log folders after 3 days.
 
 | Command | Effect |
 |---|---|
@@ -764,6 +770,33 @@ The model passes that path (or just `r1`) to **`command_output`** to look again 
 The same settings are in the web UI under View → Context, and on the command line as `--run-mode` and `--run-output-limit`. `/tool-result` does not cut these results, because they are sized already.
 
 **Measured** against Qwen3.5-9B on five command tasks, 3 runs per mode (details in `evals/README.md`): both modes found every fact. `new` sent **62 KB** of command output to the model instead of 436 KB, finished in **686 s** instead of 1,060 s, and the model piped commands through `| grep`/`| tail` itself 3 times instead of 16. The call count stayed about the same (66 vs 71): when the fact sits in the middle of a long log, the model needs a second look, but that look is ~5 KB instead of ~57 KB. The two tool descriptions cost about 640 more tokens in every request.
+
+## Scratchpad and the `.momo/` folder
+
+Each workspace gets a folder of momo's own, `.momo/`, made the first time something is written there:
+
+```
+<workdir>/.momo/
+├── .gitignore            # "*": the whole folder stays out of git, no tracked file changes
+├── scratch/              # the model's scratchpad (scratch_write), kept between sessions
+├── plan.md               # the plan, while one exists (Plan mode)
+└── runs/<session>/rN.log # saved run_command output (Command output)
+```
+
+**The scratchpad.** Small models put throwaway scripts and results wherever they happen to be, often in the project root. The scratchpad gives them a place for it. Every mode offers `scratch_write`, and the system prompt's Environment section names the folder (only while the tool is offered): *write temporary scripts, notes and intermediate results there, never into the project tree.* Reading back needs no new tool: `read_file`, `grep_file` and `list_directory` take `.momo/scratch/...` paths, and `run_command` can run `python3 .momo/scratch/probe.py`. Commands also get the folder's absolute path as `$MOMO_SCRATCH`.
+
+**`scratch_write` cannot write anywhere else.** It accepts a path relative to the scratchpad (`probe.py`, `out/results.txt`), relative to the workdir (`.momo/scratch/probe.py`) or absolute inside it, and resolves symlinks before checking. `../`, absolute paths outside, a link inside the scratchpad that points out, and a `.momo` or `scratch` folder that is itself a symlink are all refused. The tool is available even in chat and plan investigation, because the scratchpad is not the project. For the same reason it doesn't end a design-mode turn the way `write_file` does, and it doesn't reset a TDD plan's passing state.
+
+**Never in the way.** `.momo/` is always excluded from the code index, whatever the [index filter](#code-index) says (also for filters saved before it existed). `grep_files` and `find_files` skip it from the project root, but searching inside it (`directory=".momo/scratch"`) works. The web UI's file tree shows it with hidden files.
+
+| Command | Effect |
+|---|---|
+| `/scratch` | Show the scratchpad's path, size and newest files |
+| `/scratch clear` | Delete everything in it (asks first) |
+
+To compare with and without it, turn the tool off per mode with `/tools scratch_write off`; the prompt line goes with it.
+
+Only data that is harmless if a cloned repository ships its own copy, or the model overwrites it, lives in `.momo/`. Approvals, the index pickle, keys and command config stay in `~/.momo-harness/` ([Where momo stores data](#where-momo-stores-data)).
 
 ## Code index
 
@@ -1233,6 +1266,8 @@ Type any command in the input bar:
 | `/clear-token` | Remove the current auth token |
 | `/workspace` | Show the current working directory (alias: `/workdir`) |
 | `/workspace <path>` | Change the working directory. If the path does not exist, prompts for confirmation before creating it. |
+| `/scratch` | Show the model's scratchpad (`.momo/scratch/`): path, size, newest files |
+| `/scratch clear` | Delete everything in the scratchpad (asks first) |
 | `/think` | Show the thinking level and what the current model takes |
 | `/think off\|on\|low\|medium\|high\|xhigh` | Set the model's thinking/reasoning level (saved). See [Thinking level](#thinking-level) |
 | `/think-history off\|turn\|all` | Send the model's own reasoning back to it: none, since your last message (default), or every turn (saved). See [Sending reasoning back](#sending-reasoning-back) |
@@ -1286,7 +1321,7 @@ Type any command in the input bar:
 | `/max-output-tokens [n\|off]` | Most tokens one model reply may take, reasoning included (default 25000, saved; `--max-output-tokens N`, 0 = off). A model caught in a repetition loop is cut off there; the harness then retries without thinking. Without a cap, one eval reply ran to 125k tokens and held the turn for 80 minutes |
 | `/compact` | Compact context — removes old messages and summarises them with the LLM |
 | `/fast-compact` | Compact context without LLM summarisation (instant) |
-| `/clear` | Clear conversation history and discard any active plan (removes `.momo-plan.md`, like `/plan cancel`) |
+| `/clear` | Clear conversation history and discard any active plan (removes `.momo/plan.md`, like `/plan cancel`) |
 | `/new` | Save this session and start a new, empty one (same model, host and mode) |
 | `/retry` | Re-send your last message, replacing the reply it got |
 | `/cost` | Show token usage for this session, aggregated by mode and model (in/out/total tokens per combination) |
@@ -1440,7 +1475,7 @@ A log file (`.log`) is written alongside the JSON, recording every request, resp
 
 ## Where momo stores data
 
-Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent anywhere; deleting the folder resets momo completely.
+Everything momo keeps between runs lives in `~/.momo-harness/`, except what belongs to one workspace, which lives in that workspace's git-ignored [`.momo/` folder](#scratchpad-and-the-momo-folder) (scratchpad, plan file, command logs). Nothing is sent anywhere; deleting `~/.momo-harness/` resets momo completely.
 
 ```
 ~/.momo-harness/
@@ -1450,7 +1485,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 │   └── <timestamp>.log      # its request/tool log (NDJSON)
 ├── index/<hash>.pickle      # saved code index per workdir (/index save, /index-persist)
 ├── index/<hash>.filter      # which files that workdir's index covers (/index-filter)
-├── runs/<timestamp>/rN.log  # saved run_command output (/run-mode new), per session
+├── runs/<timestamp>/rN.log  # run_command output only when the workdir's .momo/ can't be used
 ├── search_sources/*.json    # your web_search sources (/search-sources save, or add your own)
 └── tls/                     # only with --web-tls auto (folder 0700, keys 0600)
     ├── momo-ca.pem          # the CA certificate you trust on your devices
@@ -1466,10 +1501,10 @@ Everything momo keeps between runs lives in `~/.momo-harness/`. Nothing is sent 
 | `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |
-| `runs/<session>/rN.log` | Full output of each `run_command` in run mode `new` | Last 20 per session; deleted on `/clear`, `/new` and session load; other sessions' folders removed after 3 days |
+| `runs/<session>/rN.log` | Fallback for `run_command` logs when the workdir's `.momo/` is read-only or a symlink (normally they are in `<workdir>/.momo/runs/`) | Last 20 per session; deleted on `/clear`, `/new` and session load; other sessions' folders removed after 3 days. Logs from before `.momo/` empty themselves this way |
 | `search_sources/*.json` | Your own `web_search` sources: ones you wrote, and ones saved with `/search-sources save` | Loaded after the shipped sources; a file with a shipped name overrides it. Never read from the workdir. Specs may not hold credential headers |
 | `tls/` | momo's local CA and HTTPS certificate | Deleting it creates a new CA on the next `--web-tls auto` start; every device must trust it again |
 
-Elsewhere: `.momo-plan.md` in the workdir while a plan exists, `conversation-<timestamp>.md` from `/export`, and the web UI's theme, view and notification settings in each browser's `localStorage`. The `/token` value and the web UI access token are never stored anywhere.
+In each workdir: `.momo/` (scratchpad, `plan.md` while a plan exists, `runs/` command logs; see [Scratchpad and the `.momo/` folder](#scratchpad-and-the-momo-folder)). Elsewhere: `conversation-<timestamp>.md` from `/export`, and the web UI's theme, view and notification settings in each browser's `localStorage`. The `/token` value and the web UI access token are never stored anywhere.
 
 Keep `~/.momo-harness/` private: sessions and logs contain your conversations, tool output from your code and your project paths.

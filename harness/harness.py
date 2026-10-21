@@ -20,7 +20,7 @@ from .plan_runner import KEEPS_GREEN, TDD_MAX_REFUSALS, PlanRunnerMixin
 from .mcp_mixin import MCPMixin
 from .tools import (ALL_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, NET_TOOLS,
                     PLAN_EXECUTE_TOOLS, PLAN_INVESTIGATE_TOOLS, PLAN_TDD_EXECUTE_TOOLS,
-                    PLAN_TDD_INVESTIGATE_TOOLS, dispatch, render_tool_reference,
+                    PLAN_TDD_INVESTIGATE_TOOLS, RUN_STORE_TOOLS, dispatch, render_tool_reference,
                     with_edit_features, with_index_tools, with_run_mode)
 from . import tdd as tdd_mod
 from .editing import EDIT_FEATURES
@@ -959,7 +959,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             return dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes,
                             self._fetch_chars(), index=self.index, cancel=self._cancel,
                             index_route=self.index_route, read_budget=self._read_budget(),
-                            run_mode=self.run_mode, run_store=self.run_store,
+                            run_mode=self.run_mode,
+                            # made on first use: it creates .momo/runs/ in the workdir
+                            run_store=self.run_store if name in RUN_STORE_TOOLS else None,
                             run_output_limit=self.run_output_limit,
                             search_sources=self.search_sources,
                             edit_features=self.edit_features, run_exit=run_exit)
@@ -971,12 +973,17 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
 
     @property
     def run_store(self) -> "run_store_mod.RunStore":
-        """This session's saved command output (/run-mode new), made on first use."""
-        root = run_store_mod.runs_root() / self._ts
-        if self._run_store is None or self._run_store.root != root:
-            self._run_store = run_store_mod.RunStore(root)
-            run_store_mod.prune_stale(current=root)
-        return self._run_store
+        """This session's saved command output (/run-mode new), made on first use
+        in <workdir>/.momo/runs/<session>.  A workdir change keeps the store until
+        the session changes: its background commands and rN logs stay reachable."""
+        store = self._run_store
+        if store is None or store.root.name != self._ts:
+            root = run_store_mod.session_root(self.workdir, self._ts)
+            self._run_store = store = run_store_mod.RunStore(root)
+            run_store_mod.prune_stale(current=root, root=root.parent)
+            if root.parent != run_store_mod.runs_root():
+                run_store_mod.prune_stale()       # logs from before .momo/ empty themselves
+        return store
 
     def drop_run_logs(self) -> None:
         """Delete the saved command output: the conversation that could refer to
