@@ -576,6 +576,11 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       <p>Plug in any <strong>Model Context Protocol</strong> server, a local command or a remote HTTP endpoint, in the same <code>mcpServers</code> format Claude Desktop uses. Its tools and resources join momo's own. Tools that change things ask first, and a project's <code>.mcp.json</code> never runs until you approve it.</p>
       <a class="more" href="#mcp">MCP servers →</a>
     </div>
+    <div class="card" style="--c: var(--system)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg>Tools a project brings along</h3>
+      <p>Commit tools in <code>.momo/tools/</code> and the whole team gets them. Each runs in its own process with the project's own virtualenv, gets its modes from its category, and never runs before you approve it. A shipped guide lets an agent write them for you.</p>
+      <a class="more" href="#workspace-tools">Workspace tools →</a>
+    </div>
   </div>
 
   <div class="features">
@@ -1250,6 +1255,9 @@ chmod 600 ~/.momo-harness/tools/word_count.py
       <tr><td><code>/tools &lt;name&gt; off</code></td><td class="wrap">Turn it off for this mode, like any tool</td></tr>
     </table></div>
 
+    <h3 id="ws-pointer">Tools a project brings along</h3>
+    <p>A repository can carry its own tools in <code>.momo/tools/</code>, committed and shared with everyone who opens it. They are self-contained, run in their own process, and never run before you approve them. See <a href="#workspace-tools">Workspace tools</a>.</p>
+
     <h3 id="tool-tips">Writing a tool a small model uses well</h3>
     <ul>
       <li><strong>Lead with what it is for.</strong> The first sentence of the description is how a small model chooses. A feature mentioned only at the end of a parameter description got used 7 times in 15; named up front, 3 in 3.</li>
@@ -1258,6 +1266,152 @@ chmod 600 ~/.momo-harness/tools/word_count.py
       <li><strong>Hint in the result, not the prompt.</strong> A pointer to the next useful call, inside the tool's own result, steered the 9B more reliably than any rule in the system prompt.</li>
       <li><strong>Honour Esc.</strong> A slow tool takes <code>inject=("cancel",)</code> and stops when <code>cancel.is_set()</code>.</li>
     </ul>
+  </section>
+
+  <section id="workspace-tools" data-voice="workspace-tools">
+    <h2>Workspace tools</h2>
+    <p>A project can bring its own tools. Put them in <code>.momo/tools/</code> and commit them, and everyone who opens the repository in momo gets them: a report generator, a check against the team's conventions, a wrapper around the project's own scripts. They follow the <a href="#tool-structure">same structure</a> as the built-in tools, with two differences. A workspace tool is <strong>self-contained</strong>: it never imports momo's code and runs in its own process. And because it arrives with a clone, <strong>it never runs until you approve it</strong>.</p>
+
+    <h3 id="ws-quickstart">Quick start</h3>
+    <ol>
+      <li><code>/tools init</code> creates <code>.momo/tools/</code> with a guide for writing tools (<code>README.md</code>) and an empty <code>requirements.txt</code>.</li>
+      <li>Write <code>.momo/tools/&lt;name&gt;.py</code> yourself, or let an agent write it: <code>/load-skill workspace-tools</code>, then ask momo in coding mode.</li>
+      <li><code>/tools check</code> validates the file without running it.</li>
+      <li>Read the file, then <code>/tools approve &lt;name&gt;</code>. The model can use the tool from the next message on.</li>
+      <li>Commit <code>.momo/tools/</code> and <code>.momo/tools.json</code>. Teammates approve the tools once on their own machines.</li>
+    </ol>
+
+    <h3 id="ws-file">The tool file</h3>
+<div class="code-block"><div class="code-bar"><span class="code-lang">.momo/tools/todo_count.py</span></div><pre><code>import os
+from pathlib import Path
+
+TOOL = {                                   <span class="com"># a plain literal: read with ast.literal_eval, never executed</span>
+    "name": "todo_count",
+    "description": "Count the TODO and FIXME comments per file under a folder of the project, "
+                   "most first.",
+    "parameters": {
+        "path": {"type": "string", "description": "Folder or file to scan (default: the whole project)"},
+        "limit": {"type": "integer", "description": "Files to list (default 20)"},
+    },
+    "required": [],
+    "category": "read",
+    "example": {"path": "src", "limit": 10},
+    "timeout": 60,
+}
+
+def run(path: str = ".", limit: int = 20, *, workdir: Path) -> str:
+    root = (workdir / path).resolve()
+    if root != workdir.resolve() and workdir.resolve() not in root.parents:
+        return f"ERROR: {path} is outside the project — pass a path inside it, e.g. 'src'"
+    ...                                    <span class="com"># full file: docs/examples/workspace-tools/todo_count.py</span></code></pre></div>
+    <p>The file name is the tool name. <code>TOOL</code> must be a literal at module level (strings, numbers, booleans, lists and dicts, no names or calls), because momo reads it without running the file. Files starting with <code>_</code> are helpers the tools can import; they are never loaded as tools.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Key</th><th>Type</th><th>Required</th><th>Meaning</th></tr>
+      <tr><td><code>name</code></td><td>str</td><td>yes</td><td class="wrap">a-z, 0-9 and <code>_</code>, starting with a letter, 2–64 characters, equal to the file name. No <code>mcp_</code> prefix, and not a name momo already has.</td></tr>
+      <tr><td><code>description</code></td><td>str</td><td>yes</td><td class="wrap">What the tool is for, in the first sentence: a small model picks tools by it</td></tr>
+      <tr><td><code>parameters</code></td><td>dict</td><td>yes</td><td class="wrap">JSON-schema properties, e.g. <code>{"path": {"type": "string", "description": "…"}}</code>; <code>{}</code> for none</td></tr>
+      <tr><td><code>required</code></td><td>list</td><td>no</td><td class="wrap">The parameters the model must pass</td></tr>
+      <tr><td><code>category</code></td><td>str</td><td>no</td><td class="wrap"><code>read</code>, <code>write</code>, <code>run</code> or <code>net</code>, which decides <a href="#ws-categories">where it is offered</a>. Missing or unknown counts as <code>write</code>.</td></tr>
+      <tr><td><code>example</code></td><td>dict</td><td>no</td><td class="wrap">One realistic call, shown in the model's tool reference</td></tr>
+      <tr><td><code>order</code></td><td>int</td><td>no</td><td class="wrap">Its place in the tool list (default 9500, after momo's and your own tools)</td></tr>
+      <tr><td><code>timeout</code></td><td>int</td><td>no</td><td class="wrap">Seconds before the call is killed, 1–900 (default 120)</td></tr>
+      <tr><td><code>confirm</code></td><td>bool</td><td>no</td><td class="wrap">Ask you before every call</td></tr>
+    </table></div>
+    <p><code>run</code> takes exactly the parameters as keyword arguments (give optional ones defaults), plus <code>workdir</code>: the project folder, which is also the current directory. It returns a <strong>string</strong>, which is all the model sees. The environment has <code>MOMO_WORKDIR</code>, <code>MOMO_TOOL</code> and <code>MOMO_SCRATCH</code> (the <a href="#scratch">scratchpad</a>, for temporary files). No stdin is connected. Anything the tool prints goes to a log, not to the model. An exception, a non-string result or a missing package comes back to the model as an <code>ERROR:</code> it can act on. A good tool also returns its own <code>ERROR: …</code> for expected failures, and says what to do instead.</p>
+
+    <h3 id="ws-approval">Approval</h3>
+    <figure class="flow" aria-label="Lifecycle of a workspace tool">
+      <div class="flow-row"><div class="box you">Commit<small>a file in <code>.momo/tools/</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">Listed, not run<small>"waiting for approval" at start and in <code>/tools list</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">Approve<small><code>/tools approve &lt;name&gt;</code> after reading it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">Called<small>in the modes its category allows</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">Own process<small><code>python -I -B</code> in the workdir; killed on Esc or timeout</small></div></div>
+      <ul class="flow-edges">
+        <li><span class="from">any change</span> <span class="via">to the code in .momo/tools/ or its Python</span> → <span class="to">waiting for approval again</span></li>
+      </ul>
+      <figcaption>A tool that arrives with a clone never runs on its own.</figcaption>
+    </figure>
+    <ul>
+      <li><strong>What you approve.</strong> A fingerprint of the workdir, the tool's name, every <code>.py</code> file in <code>.momo/tools/</code> (a tool may import <code>_helper.py</code> files) and the Python it runs with. <code>/tools approve</code> shows the file, its category, its roles and that Python first.</li>
+      <li><strong>Where it is kept.</strong> In <code>~/.momo-harness/workspace-tools-approved.json</code>, never in the repository, so a repo can't approve its own tools. The same repository cloned somewhere else asks again.</li>
+      <li><strong>When it asks again.</strong> After any edit to a file in <code>.momo/tools/</code> or a change of interpreter: every tool there is back to waiting, and <code>/tools approve all</code> re-approves them in one go. Each call checks the fingerprint again before it runs, and runs exactly the source that was approved.</li>
+      <li><strong>Denied</strong> tools stay quiet. <code>approve all</code> skips them; name one to allow it after all.</li>
+    </ul>
+    <div class="table-scroll"><table>
+      <tr><th>Status in <code>/tools list</code></th><th>Means</th><th>Do</th></tr>
+      <tr><td>waiting for approval</td><td class="wrap">New or changed code, or a new interpreter</td><td class="wrap">Read it, <code>/tools approve &lt;name&gt;</code></td></tr>
+      <tr><td>loaded</td><td class="wrap">Approved and offered in its roles</td><td class="wrap">—</td></tr>
+      <tr><td>denied</td><td class="wrap">You said no</td><td class="wrap"><code>/tools approve &lt;name&gt;</code> to change your mind</td></tr>
+      <tr><td>disabled</td><td class="wrap"><code>"enabled": false</code> in <code>.momo/tools.json</code></td><td class="wrap"><code>/tools enable &lt;name&gt;</code></td></tr>
+      <tr><td>error</td><td class="wrap">The file breaks a rule, or the interpreter is refused; the reason is shown</td><td class="wrap">Fix it; <code>/tools check</code> says what's wrong</td></tr>
+    </table></div>
+
+    <h3 id="ws-categories">Categories and roles</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Category</th><th>For a tool that…</th><th>Offered in</th></tr>
+      <tr><td><code>read</code></td><td class="wrap">only reads</td><td class="wrap">every mode, including chat and planning; a TDD plan's passing tests stay valid after a call</td></tr>
+      <tr><td><code>write</code></td><td class="wrap">creates, changes or deletes files</td><td class="wrap">coding, momo, a running plan; the code index re-checks the files afterwards</td></tr>
+      <tr><td><code>run</code></td><td class="wrap">runs programs, tests or builds</td><td class="wrap">the same, plus plan investigation</td></tr>
+      <tr><td><code>net</code></td><td class="wrap">talks to the network</td><td class="wrap">every mode, but only while <code>/net</code> is on</td></tr>
+    </table></div>
+    <p>These are the role sets the built-in tools use. A tool that doesn't declare a category, or declares one momo doesn't know, counts as <code>write</code>: offered only where editing is allowed, never as read-only.</p>
+
+    <h3 id="ws-settings">Committed settings: <code>.momo/tools.json</code></h3>
+    <p>Override where a tool is offered, per workspace, and commit the file so the team shares it and nobody sets it up again per session:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">.momo/tools.json</span></div><pre><code>{
+  "python": ".venv/bin/python",
+  "tools": {
+    "todo_count":  {"roles": ["chat", "coding"]},
+    "deploy_check": {"category": "net"},
+    "old_report":  {"enabled": false}
+  }
+}</code></pre></div>
+    <div class="table-scroll"><table>
+      <tr><th>Key</th><th>Written by</th><th>Effect</th></tr>
+      <tr><td><code>tools.&lt;name&gt;.roles</code></td><td><code>/tools roles &lt;name&gt; chat,coding</code></td><td class="wrap">The modes that offer it: <code>design</code>, <code>chat</code>, <code>plan</code>, <code>coding</code>, <code>momo</code>, <code>plan-exec</code> (a running plan). <code>auto</code> goes back to its category's roles.</td></tr>
+      <tr><td><code>tools.&lt;name&gt;.category</code></td><td><code>/tools category &lt;name&gt; read</code></td><td class="wrap">Overrides the declared category, and with it the roles and treatment</td></tr>
+      <tr><td><code>tools.&lt;name&gt;.enabled</code></td><td><code>/tools disable|enable &lt;name&gt;</code></td><td class="wrap">Off for everyone in this workspace. <code>/tools &lt;name&gt; off</code> is the session-only switch for you.</td></tr>
+      <tr><td><code>python</code></td><td>by hand</td><td class="wrap">The interpreter, relative to the workdir (see <a href="#ws-deps">Dependencies</a>)</td></tr>
+    </table></div>
+    <p>The file only affects the workspace's own tools. An entry for a built-in or personal tool is ignored with a note, so a repository can't reshape momo's own tool set.</p>
+
+    <h3 id="ws-deps">Dependencies</h3>
+    <ol>
+      <li>List the packages in <code>.momo/tools/requirements.txt</code> (pip format) and commit it.</li>
+      <li><code>/tools venv</code> creates <code>.momo/tools/.venv</code> with Python's own <code>venv</code> and installs them. It asks first, because installing a package runs its setup code, and pip's output streams into the chat. <code>/tools venv update</code> installs again after the list changed.</li>
+      <li>The tools now run with that Python, so approve them again.</li>
+    </ol>
+    <p>The interpreter is chosen in this order: <code>"python"</code> in <code>tools.json</code> (e.g. the project's own <code>.venv/bin/python</code>), then <code>.momo/tools/.venv</code>, then momo's own Python, which has no extra packages. A Python inside the workspace came with the repository, so momo only accepts a real virtualenv: a <code>pyvenv.cfg</code> next to it, and an executable that links to a Python outside the workspace. A committed script named <code>python</code> is refused, never run. The virtualenv is not committed, and every machine builds its own.</p>
+
+    <h3 id="ws-isolation">What runs where</h3>
+    <ul>
+      <li>Every call is a fresh <code>python -I -B</code> process, started in the project folder. <code>-I</code> leaves momo's code, the current directory, <code>PYTHONPATH</code> and your user site-packages off the import path, so a tool can't import momo. <code>-B</code> writes no <code>__pycache__</code>.</li>
+      <li>A crash or a hang can't take momo down. Esc and the timeout kill the tool and everything it started, and so does output beyond 64 MB.</li>
+      <li><strong>Not a sandbox.</strong> The process has your permissions. "Only the workspace's files" is the rule tools are written to, and the guide makes agents follow it, but momo doesn't enforce it. That is why approval is the gate.</li>
+    </ul>
+
+    <h3 id="ws-git">Git and the index</h3>
+    <p><code>.momo/.gitignore</code> lets <code>tools/</code> and <code>tools.json</code> through and keeps everything else out: the scratchpad, command logs, the plan file, <code>tools/.venv/</code> and <code>__pycache__/</code>. The <code>.gitignore</code> itself stays out of git, so momo never adds a tracked file you didn't ask for. The code index never contains <code>.momo/</code>, and project-wide searches skip it; the model can still read a tool file by its path.</p>
+
+    <h3 id="ws-agents">Letting an agent write tools</h3>
+    <p><code>skills/workspace-tools.md</code> is a guide written for a model: the file format, every <code>TOOL</code> key, the categories, the rules (no harness imports, stay in the workdir, no stdin, bounded output, <code>ERROR:</code> results, finish within the timeout, no secrets in a committed file), how to test a tool, and a checklist. It also tells the agent that it cannot approve its own tool and must ask you. Two ways to hand it over:</p>
+    <ul>
+      <li><strong>momo:</strong> <code>/load-skill workspace-tools</code>, then ask in coding mode, e.g. "write a workspace tool that counts lines per .py file".</li>
+      <li><strong>Other coding agents</strong> working in the repository: <code>/tools init</code> copies the guide to <code>.momo/tools/README.md</code>, next to the tools, where they find it. <code>/tools init --force</code> refreshes it.</li>
+    </ul>
+    <p class="note"><strong>Tried with the local 9B:</strong> with the skill loaded, it wrote a valid <code>line_count</code> tool, declared it <code>read</code>, tested it with the guide's one-liner, and ended by asking for <code>/tools approve line_count</code>. After the approval the tool worked. With the example tool approved, a chat-mode question about TODO comments was answered with <code>todo_count</code> first.</p>
+
+    <h3 id="ws-commands">Commands</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/tools list</code></td><td class="wrap">All tools; workspace tools that aren't offered are listed with their status and what to do</td></tr>
+      <tr><td><code>/tools approve &lt;name&gt;|all</code></td><td class="wrap">Show a waiting tool (file, category, roles, Python) and let it run. <code>all</code>: every waiting one.</td></tr>
+      <tr><td><code>/tools deny &lt;name&gt;</code></td><td class="wrap">Keep it from running (remembered)</td></tr>
+      <tr><td><code>/tools roles &lt;name&gt; &lt;role,…&gt;|auto</code></td><td class="wrap">Which modes offer it, saved in <code>.momo/tools.json</code></td></tr>
+      <tr><td><code>/tools category &lt;name&gt; read|write|run|net|auto</code></td><td class="wrap">Override its category, saved</td></tr>
+      <tr><td><code>/tools enable|disable &lt;name&gt;</code></td><td class="wrap">On or off for this workspace, saved</td></tr>
+      <tr><td><code>/tools check [name]</code></td><td class="wrap">Validate tool files and the interpreter without running anything</td></tr>
+      <tr><td><code>/tools init [--force]</code></td><td class="wrap">Create <code>.momo/tools/</code> with the guide and a <code>requirements.txt</code></td></tr>
+      <tr><td><code>/tools venv [update]</code></td><td class="wrap">Create <code>.momo/tools/.venv</code> and install <code>requirements.txt</code> (asks first)</td></tr>
+      <tr><td><code>/tools reload</code>, <code>/tools errors</code></td><td class="wrap">Read <code>.momo/tools/</code> again; why a file did not load</td></tr>
+    </table></div>
+    <p>The changing commands are refused while a reply is running. Changing the workspace with <code>/workspace</code> swaps in the new workspace's tools.</p>
   </section>
 
   <section id="editing" data-voice="editing">
@@ -1304,9 +1458,11 @@ FAILED (failures=2)
 
   <section id="scratch" data-voice="scratch">
     <h2>Scratchpad &amp; <code>.momo/</code></h2>
-    <p>Each workspace gets a folder of momo's own, made the first time something is written there. A <code>.gitignore</code> of <code>*</code> inside it keeps the whole folder out of git without touching a tracked file.</p>
+    <p>Each workspace gets a folder of momo's own, made the first time something is written there. A <code>.gitignore</code> inside it keeps everything but the <a href="#workspace-tools">workspace tools</a> out of git without touching a tracked file.</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">&lt;workdir&gt;/.momo/</span></div><pre><code>.momo/
-├── .gitignore            <span class="com"># "*": never committed</span>
+├── .gitignore            <span class="com"># all but tools/ and tools.json stay out of git</span>
+├── tools/                <span class="com"># workspace tools, committed (tools/.venv/ is not)</span>
+├── tools.json            <span class="com"># their roles, categories and Python, committed</span>
 ├── scratch/              <span class="com"># the model's scratchpad, kept between sessions</span>
 ├── plan.md               <span class="com"># the plan, while one exists</span>
 └── runs/&lt;session&gt;/r1.log <span class="com"># saved run_command output</span></code></pre></div>
@@ -1322,7 +1478,7 @@ FAILED (failures=2)
       <tr><td><code>/scratch clear</code></td><td class="wrap">Delete everything in it (asks first)</td></tr>
       <tr><td><code>/tools scratch_write off</code></td><td class="wrap">Turn it off for a mode, with its prompt line (for A/B runs)</td></tr>
     </table></div>
-    <p class="note">Only data that is harmless if a cloned repository ships its own copy, or the model overwrites it, lives in <code>.momo/</code>. Approvals, the index pickle, keys and command config stay in <a href="#storage"><code>~/.momo-harness/</code></a>.</p>
+    <p class="note">Only data that is harmless if a cloned repository ships its own copy, or the model overwrites it, lives in <code>.momo/</code>. Approvals, the index pickle, keys and command config stay in <a href="#storage"><code>~/.momo-harness/</code></a>. The one exception is <a href="#workspace-tools">workspace tools</a>: code, which runs only after you approved each one.</p>
   </section>
 
   <section id="index" data-voice="index">
@@ -1823,7 +1979,8 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/think-history off|turn|all</code></td><td class="wrap"><a href="#think-history">Send the model's own reasoning back</a> to it (remembered)</td></tr>
       <tr><td><code>/tools [list|&lt;name&gt;]</code></td><td class="wrap">Pick this mode's tools, list them, or show one. See <a href="#tool-choices">Turning tools on and off</a></td></tr>
       <tr><td><code>/tools [&lt;name&gt;…] on|off</code></td><td class="wrap">Turn named tools on or off for this mode (saved in the session), or all tool calls</td></tr>
-      <tr><td><code>/tools reload|errors</code></td><td class="wrap">Load your <a href="#custom-tools">custom tools</a> again, or show why one did not load</td></tr>
+      <tr><td><code>/tools reload|errors</code></td><td class="wrap">Load your <a href="#custom-tools">custom tools</a> and the workspace's again, or show why one did not load</td></tr>
+      <tr><td><code>/tools approve|deny|roles|category|enable|disable|check|init|venv …</code></td><td class="wrap">Manage the <a href="#workspace-tools">workspace tools</a> in <code>.momo/tools/</code></td></tr>
       <tr><td><code>/run-confirm on|off</code></td><td class="wrap">Ask y/N before each <code>run_command</code></td></tr>
     </table></div>
     <h3>Conversation &amp; context</h3>
@@ -1913,6 +2070,7 @@ curl -sN localhost:8765/api/events</code></pre></div>
 │   └── docsrs.json       <span class="com"># your web_search sources (/search-sources save)</span>
 ├── tools/
 │   └── word_count.py     <span class="com"># your custom tools (folder 0700, files 0600)</span>
+├── workspace-tools-approved.json  <span class="com"># workspace tools you approved or denied</span>
 ├── mcp.json              <span class="com"># your MCP servers (/mcp add)</span>
 ├── mcp-approved.json     <span class="com"># project MCP servers you approved or denied</span>
 ├── mcp-logs/
@@ -1936,6 +2094,7 @@ curl -sN localhost:8765/api/events</code></pre></div>
       <tr><td><code>mcp-approved.json</code></td><td class="wrap">Fingerprints of approved and denied project servers (workdir, name and launch settings). Mode 0600.</td></tr>
       <tr><td><code>mcp-logs/*.log</code></td><td class="wrap">stderr of each stdio server, capped at about 1 MB with one rotated copy.</td></tr>
       <tr><td><code>tools/*.py</code></td><td class="wrap">Your <a href="#custom-tools">custom tools</a>. Code that runs inside momo: loaded only if the folder and file are yours and not writable by others. Never read from the workdir.</td></tr>
+      <tr><td><code>workspace-tools-approved.json</code></td><td class="wrap">Fingerprints of the <a href="#workspace-tools">workspace tools</a> you approved or denied (workdir, name, code, Python). Kept here so a repository can't approve its own tools.</td></tr>
       <tr><td><code>search_sources/*.json</code></td><td class="wrap">Your own <a href="#search">web_search sources</a>. Loaded after the shipped sources; a file with a shipped name overrides it. Never read from the workdir.</td></tr>
       <tr><td><code>tls/</code></td><td class="wrap">Folder 0700, keys 0600. Deleting it makes a new CA on the next <code>--web-tls auto</code> start, and every device must then trust the new one.</td></tr>
     </table></div>
@@ -2194,6 +2353,10 @@ const SPEECH = {
     "< one file, one tool", "< /tools reload!", "< TOOL = Tool(...)",
     "< chmod 600 it~", "< never from the repo", "< order=470, purrr",
     "< first sentence matters", "< ERROR: and how to fix",
+  ],
+  "workspace-tools": [
+    "< .momo/tools, approved", "< own process, purrr", "< /tools venv!",
+    "< read it, then approve", "< /tools init~", "< no harness imports!",
   ],
   scratch: [
     "< scratch, not src!", "< .momo/ is mine~", "< git can't see it",

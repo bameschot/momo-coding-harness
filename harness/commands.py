@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import code_index, ignore_rules, momo_dir
+from .tools import workspace as workspace_mod
 from .mcp import config as mcp_config
 from . import net as net_mod
 from . import run_store as run_store_mod
@@ -180,20 +181,93 @@ def _tool_listing(harness) -> str:
         lines.append(f"  custom tool {file} not loaded: {why}")
     if report.errors:
         lines.append(f"  (fix it in {report.folder}, then /tools reload; /tools errors shows tracebacks)")
+    ws = harness.workspace_tools
+    waiting = [t for t in ws.tools if t.status != "loaded"]
+    if waiting or ws.notes:
+        lines.append("  workspace (.momo/tools/), not offered:")
+        lines += [f"    · {n}" for n in ws.notes]
+        for t in waiting:
+            why = {"pending": "waiting for approval — /tools approve " + t.name,
+                   "denied": "denied — /tools approve " + t.name + " to allow it",
+                   "disabled": "disabled in .momo/tools.json — /tools enable " + t.name}.get(
+                t.status, t.reason)
+            lines.append(f"    ✗ {t.name}  ({why})")
     return "\n".join(lines)
+
+
+_CATEGORY_ARGS = (*workspace_mod.CATEGORIES, "auto")
+
+
+def _workspace_tools_command(harness, parts: list[str]) -> CommandResult | None:
+    """/tools approve|deny|roles|category|enable|disable|check|init|venv —
+    the workspace's tools (.momo/tools/, tools/workspace.py).  None: not one."""
+    sub, rest = parts[0], parts[1:]
+    wd = harness.workdir
+    out = lambda text: CommandResult(handled=True, output=text)
+    if sub in ("approve", "deny") and rest:
+        if sub == "approve" and rest != ["all"]:
+            # Show what is being approved: it will run on this machine.
+            report = harness.workspace_tools
+            shown = [workspace_mod.describe(t, report) for t in workspace_mod.discover(wd)
+                     if t.name in rest]
+            note = workspace_mod.decide(wd, rest, True)
+            return out("\n".join(shown + [note, harness.reload_workspace_tools()]).strip())
+        note = workspace_mod.decide(wd, rest, sub == "approve")
+        return out("\n".join(n for n in (note, harness.reload_workspace_tools()) if n))
+    if sub == "roles" and len(rest) == 2:
+        name, value = rest
+        if value == "auto":
+            roles = None
+        else:
+            roles = sorted({r.strip() for r in value.split(",") if r.strip()})
+            bad = [r for r in roles if r not in tools_mod.ROLES]
+            if bad or not roles:
+                return out(f"ERROR: roles are {', '.join(tools_mod.ROLES)} (comma-separated), or auto")
+        err = workspace_mod.set_override(wd, name, "roles", roles)
+        return out(err or f"{name}: roles {'from its category' if roles is None else ', '.join(roles)} "
+                   f"(saved in .momo/tools.json)\n" + harness.reload_workspace_tools())
+    if sub == "category" and len(rest) == 2:
+        name, value = rest
+        if value not in _CATEGORY_ARGS:
+            return out(f"ERROR: category is one of {', '.join(_CATEGORY_ARGS)}")
+        err = workspace_mod.set_override(wd, name, "category", None if value == "auto" else value)
+        return out(err or f"{name}: category {'as declared' if value == 'auto' else value} "
+                   f"(saved in .momo/tools.json)\n" + harness.reload_workspace_tools())
+    if sub in ("enable", "disable") and len(rest) == 1:
+        err = workspace_mod.set_override(wd, rest[0], "enabled", None if sub == "enable" else False)
+        return out(err or f"{rest[0]}: {sub}d for this workspace (saved in .momo/tools.json)\n"
+                   + harness.reload_workspace_tools())
+    if sub == "check" and len(rest) <= 1:
+        return out(workspace_mod.check(wd, rest[0] if rest else None))
+    if sub == "init" and rest in ([], ["--force"]):
+        return out(workspace_mod.init(wd, force=bool(rest)))
+    if sub == "venv" and rest in ([], ["update"]):
+        update = bool(rest)
+        what = ("install requirements.txt into .momo/tools/.venv again" if update else
+                "create .momo/tools/.venv and install .momo/tools/requirements.txt into it")
+        return CommandResult(
+            handled=True,
+            confirm_prompt=(f"{what[0].upper() + what[1:]}? Installing packages runs their setup "
+                            f"code, and the workspace tools then run with this virtualenv (approve "
+                            f"them again)."),
+            confirm_action=lambda: harness.start_workspace_venv(update))
+    return None
 
 
 def _custom_tool_errors(harness) -> str:
     """/tools errors: why custom tool files did not load, with tracebacks."""
     report = harness.custom_tools
+    lines = []
     if not report.errors:
         where = report.folder if report.folder.is_dir() else f"{report.folder} (no such folder)"
-        return f"Custom tools: {len(report.loaded)} loaded, no errors — folder {where}"
-    lines = []
+        lines.append(f"Custom tools: {len(report.loaded)} loaded, no errors — folder {where}")
     for file, why in report.errors:
         lines.append(f"{file}: {why}")
         if file in report.details:
             lines.append(report.details[file].rstrip())
+    broken = [t for t in harness.workspace_tools.tools if t.status == "error"]
+    lines += [f"workspace {t.path.name}: {t.reason}" for t in broken]
+    lines += [f"workspace: {n}" for n in harness.workspace_tools.notes]
     return "\n".join(lines)
 
 
@@ -439,8 +513,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 guides_note = harness.reload_guides()
                 index_note = harness.restart_index()
                 mcp_note = harness.mcp_reload()
+                tools_note = harness.reload_workspace_tools()
                 return (f"Created and set working directory: {p}"
-                        + "".join(f"\n{n}" for n in (guides_note, index_note, mcp_note) if n))
+                        + "".join(f"\n{n}" for n in (guides_note, index_note, mcp_note, tools_note) if n))
             return CommandResult(
                 handled=True,
                 confirm_prompt=f"Directory does not exist: {p}\nCreate it?",
@@ -451,9 +526,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
         guides_note = harness.reload_guides()
         index_note = harness.restart_index()
         mcp_note = harness.mcp_reload()     # the project's .mcp.json changes with it
-        harness.emit_status()
+        tools_note = harness.reload_workspace_tools()     # and its .momo/tools/
         return CommandResult(handled=True, output=f"Working directory set to: {p}"
-                             + "".join(f"\n{n}" for n in (guides_note, index_note, mcp_note) if n))
+                             + "".join(f"\n{n}" for n in (guides_note, index_note, mcp_note,
+                                                         tools_note) if n))
 
     if cmd in _VIEW_TOGGLES:
         on = _on_off(arg)
@@ -613,6 +689,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=harness.reload_custom_tools())
         if parts == ["errors"]:
             return CommandResult(handled=True, output=_custom_tool_errors(harness))
+        if (ws := _workspace_tools_command(harness, parts)) is not None:
+            return ws
         if len(parts) == 1:
             if _on_off(arg) is not None:
                 return _toggle(harness, "tools_enabled", arg, "Tool calls")
@@ -1434,6 +1512,14 @@ Available commands:
   /tools list         List this mode's tools and whether each is on
   /tools reload       Load the custom tools in ~/.momo-harness/tools/ again
   /tools errors       Why a custom tool file did not load (with the traceback)
+  /tools approve <name>|all  Let a workspace tool (.momo/tools/) run, after reading it
+  /tools deny <name>  Keep a workspace tool from running
+  /tools roles <name> <role,…>|auto  Which modes offer a workspace tool (saved in .momo/tools.json)
+  /tools category <name> read|write|run|net|auto  A workspace tool's category (sets its roles)
+  /tools enable|disable <name>  Turn a workspace tool on or off for this workspace
+  /tools check [name] Check workspace tool files without running them
+  /tools init [--force]  Create .momo/tools/ with a guide for writing tools (README.md)
+  /tools venv [update]  Create .momo/tools/.venv and install its requirements.txt
   /tools <name>       Show what a tool does and its parameters
   /tools <name> on|off  Turn one tool on or off for this mode (saved in the session)
   /net                Show internet access state (off/on/local)

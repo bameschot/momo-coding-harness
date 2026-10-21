@@ -129,7 +129,8 @@ class Tool:
 
 
 _BUILTIN: dict[str, Tool] = {}
-_CUSTOM: dict[str, Tool] = {}
+_CUSTOM: dict[str, Tool] = {}        # ~/.momo-harness/tools/ (custom.py)
+_WORKSPACE: dict[str, Tool] = {}     # <workdir>/.momo/tools/, approved (workspace.py)
 # id(schema) -> example, for every schema and variant a tool registered: the
 # tool reference shows the example of the variant actually offered.
 _EXAMPLES: dict[int, dict] = {}
@@ -161,27 +162,48 @@ def load_builtins() -> None:
             _register(tool, _BUILTIN)
 
 
+def _replace(table: dict[str, Tool], tools: list[Tool]) -> None:
+    for t in table.values():
+        _EXAMPLES.pop(id(t.schema), None)
+    table.clear()
+    for t in tools:
+        _register(t, table)
+
+
 def set_custom(tools: list[Tool]) -> None:
     """Replace the custom tools (custom.load_custom_tools)."""
-    for t in _CUSTOM.values():
-        _EXAMPLES.pop(id(t.schema), None)
-    _CUSTOM.clear()
-    for t in tools:
-        _register(t, _CUSTOM)
+    _replace(_CUSTOM, tools)
+
+
+def set_workspace(tools: list[Tool]) -> None:
+    """Replace the workspace tools (workspace.load_workspace_tools)."""
+    _replace(_WORKSPACE, tools)
 
 
 def builtins() -> list[Tool]:
     return sorted(_BUILTIN.values(), key=lambda t: t.order)
 
 
+_KIND_RANK = {"builtin": 0, "custom": 1, "workspace": 2}
+
+
 def all_tools() -> list[Tool]:
-    """Every registered tool, built-in first, in list order."""
-    return sorted([*_BUILTIN.values(), *_CUSTOM.values()],
-                  key=lambda t: (t.source != "builtin", t.order))
+    """Every registered tool, built-in first, then custom, then workspace
+    tools, each in list order."""
+    return sorted([*_BUILTIN.values(), *_CUSTOM.values(), *_WORKSPACE.values()],
+                  key=lambda t: (_KIND_RANK[kind_of(t.name)], t.order))
 
 
 def get(name: str) -> Tool | None:
-    return _BUILTIN.get(name) or _CUSTOM.get(name)
+    return _BUILTIN.get(name) or _CUSTOM.get(name) or _WORKSPACE.get(name)
+
+
+def kind_of(name: str) -> str | None:
+    """"builtin" | "custom" | "workspace", or None for an unknown name."""
+    for kind, table in (("builtin", _BUILTIN), ("custom", _CUSTOM), ("workspace", _WORKSPACE)):
+        if name in table:
+            return kind
+    return None
 
 
 def is_builtin(name: str) -> bool:

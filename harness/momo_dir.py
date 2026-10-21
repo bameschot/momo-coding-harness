@@ -1,13 +1,17 @@
 """The workspace's own harness folder, <workdir>/.momo/.
 
-It holds the model's scratchpad (scratch/), the plan file (plan.md) and the
-run_command logs (runs/<session>/).  A `.gitignore` of `*` inside it keeps the
-whole folder out of git without touching a tracked file, and the code index,
-grep_files and find_files never look inside (paths.SKIP_DIRS, ignore_rules).
+It holds the model's scratchpad (scratch/), the plan file (plan.md), the
+run_command logs (runs/<session>/), and the workspace tools (tools/) with their
+settings (tools.json).  A `.gitignore` inside it keeps everything but the
+tools out of git without touching a tracked file; the tools are meant to be
+committed.  The code index, grep_files and find_files never look inside
+(paths.SKIP_DIRS, ignore_rules).
 
 Only data that is harmless when a cloned repository ships its own copy, or the
 model overwrites it, belongs here: approvals, pickles, keys and command config
-stay in paths.momo_home().
+stay in paths.momo_home().  The one exception is the workspace tools, which are
+code: they run only after the user approved each file, and that approval is
+kept in paths.momo_home() (tools/workspace.py).
 
 A leaf module (imports only paths), so plan, run_store and tools can use it.
 """
@@ -24,8 +28,20 @@ SCRATCH = "scratch"
 RUNS = "runs"
 PLAN = "plan.md"
 SCRATCH_REL = f"{MOMO_DIR}/{SCRATCH}"
+TOOLS = "tools"
+TOOLS_SETTINGS = "tools.json"
 PLAN_REL = f"{MOMO_DIR}/{PLAN}"
-_GITIGNORE = "# Created by momo: harness state and the model's scratchpad, never committed.\n*\n"
+_GITIGNORE = (
+    "# Created by momo: harness state and the model's scratchpad, never committed;\n"
+    "# workspace tools and their settings are meant to be committed.\n"
+    "*\n"
+    "!tools/\n"
+    "!tools/**\n"
+    "!tools.json\n"
+    "tools/.venv/\n"
+    "__pycache__/\n")
+# What ensure() wrote before workspace tools existed: upgraded when found as is.
+_OLD_GITIGNORE = "# Created by momo: harness state and the model's scratchpad, never committed.\n*\n"
 
 
 def momo_root(workdir: Path) -> Path:
@@ -38,6 +54,14 @@ def scratch_root(workdir: Path) -> Path:
 
 def runs_root(workdir: Path) -> Path:
     return workdir / MOMO_DIR / RUNS
+
+
+def tools_root(workdir: Path) -> Path:
+    return workdir / MOMO_DIR / TOOLS
+
+
+def tools_settings_path(workdir: Path) -> Path:
+    return workdir / MOMO_DIR / TOOLS_SETTINGS
 
 
 def plan_path(workdir: Path) -> Path:
@@ -58,8 +82,9 @@ def ensure(workdir: Path, sub: str = "") -> Path | str:
             if d.resolve().parent != (root if d == target else target.resolve()):
                 return f"ERROR: {d.relative_to(root)} is not inside the working directory"
         ignore = target / ".gitignore"
-        if not ignore.is_symlink() and not ignore.exists():
-            ignore.write_text(_GITIGNORE, encoding="utf-8")
+        if not ignore.is_symlink():
+            if not ignore.exists() or ignore.read_text(encoding="utf-8") == _OLD_GITIGNORE:
+                ignore.write_text(_GITIGNORE, encoding="utf-8")
     except OSError as e:
         return f"ERROR: could not create {MOMO_DIR}/{sub}: {e.strerror or e}"
     return target / sub if sub else target

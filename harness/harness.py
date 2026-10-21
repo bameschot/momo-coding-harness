@@ -22,6 +22,7 @@ from .tools import (DIFF_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, L
                     NET_TOOL_NAMES, RUN_STORE_TOOLS, ToolContext, ToolRunContext, dispatch,
                     registry, render_tool_reference)
 from .tools import custom as custom_mod
+from .tools import workspace as workspace_mod
 from . import tdd as tdd_mod
 from .editing import EDIT_FEATURES
 from . import run_store as run_store_mod
@@ -64,7 +65,8 @@ def _run_key(command: str) -> tuple | str:
 _LOCKED_TOOLS = LOCKED_TOOLS
 
 # The pickers' section order (sorted() is stable, so tools keep their schema order within one).
-_GROUP_ORDER = ("files", "code nav", "index", "edit & shell", "net", "ask & plan", "custom")
+_GROUP_ORDER = ("files", "code nav", "index", "edit & shell", "net", "ask & plan", "custom",
+                "workspace")
 
 
 def _tool_group(name: str) -> str:
@@ -328,8 +330,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._turn_user: dict | None = None  # the user message the running turn answers
         self._start_turn_stats()             # what the running turn cost (DoneEvent)
         self._init_mcp()                     # before the first prompt: it lists MCP tools
-        # Custom tools (~/.momo-harness/tools/): loaded before the first prompt too.
+        # Custom tools (~/.momo-harness/tools/) and the workspace's approved tools
+        # (.momo/tools/): loaded before the first prompt too.
         self.custom_tools = custom_mod.load_custom_tools()
+        self.workspace_tools = workspace_mod.load_workspace_tools(self.workdir)
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
         ]
@@ -766,12 +770,35 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         return out
 
     def reload_custom_tools(self) -> str:
-        """/tools reload: read ~/.momo-harness/tools/ again (tools/custom.py)."""
+        """/tools reload: read ~/.momo-harness/tools/ and .momo/tools/ again
+        (tools/custom.py, tools/workspace.py)."""
         self.custom_tools = custom_mod.load_custom_tools()
+        note = self.reload_workspace_tools()
+        return "\n".join(n for n in (self.custom_tools.summary(), note) if n) or (
+            f"Custom tools: none in {self.custom_tools.folder}; no workspace tools in .momo/tools/")
+
+    def start_workspace_venv(self, update: bool) -> str:
+        """/tools venv: build .momo/tools/.venv on a thread (pip can take a while),
+        streaming its output to the chat; the tools are reloaded when it is done."""
+        def work():
+            emit = lambda line: self.event_queue.put(ChatEvent("system", line))
+            try:
+                result = workspace_mod.build_venv(self.workdir, update, emit)
+            except Exception as e:           # a thread must report, not vanish
+                result = f"ERROR: /tools venv failed: {type(e).__name__}: {e}"
+            emit(result)
+            if (note := self.reload_workspace_tools()):
+                emit(note)
+        threading.Thread(target=work, name="workspace-venv", daemon=True).start()
+        return "Setting up .momo/tools/.venv — its output follows."
+
+    def reload_workspace_tools(self) -> str:
+        """The workspace's tools again: after an approval or a settings change,
+        and when the workdir changes.  Returns the notice ('' when quiet)."""
+        self.workspace_tools = workspace_mod.load_workspace_tools(self.workdir)
         self.rebuild_system_prompt()
         self.emit_status()
-        return self.custom_tools.summary() or (
-            f"Custom tools: none in {self.custom_tools.folder}")
+        return self.workspace_tools.summary()
 
     def set_tool_enabled(self, name: str, on: bool) -> str:
         """Turn one tool on or off for the current role; returns a notice.
@@ -2267,6 +2294,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             self._start_index()
         if self.mcp.workdir != self.workdir:
             self.mcp_reload()
+        if self.workspace_tools.workdir != self.workdir:
+            self.workspace_tools = workspace_mod.load_workspace_tools(self.workdir)
         # Always rebuild the system prompt from the current role files and skills on
         # disk — saved sessions carry a snapshot; role/skill edits must take effect.
         self.rebuild_system_prompt()

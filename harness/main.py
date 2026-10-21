@@ -310,8 +310,9 @@ def main():
     controller = Controller(harness)
     if (guides_note := harness.guides_summary()):
         harness.event_queue.put(ChatEvent("system", guides_note))
-    if (tools_note := harness.custom_tools.summary()):
-        harness.event_queue.put(ChatEvent("system", tools_note))
+    for tools_note in (harness.custom_tools.summary(), harness.workspace_tools.summary()):
+        if tools_note:
+            harness.event_queue.put(ChatEvent("system", tools_note))
 
     web = None
     web_notes: list[str] = []

@@ -783,8 +783,71 @@ TOOL = Tool(
 
 | Command | Effect |
 |---|---|
-| `/tools reload` | Load `~/.momo-harness/tools/` again (refused while a turn runs) |
-| `/tools errors` | Why a custom tool file did not load, with the traceback |
+| `/tools reload` | Load `~/.momo-harness/tools/` and `.momo/tools/` again (refused while a turn runs) |
+| `/tools errors` | Why a custom or workspace tool file did not load, with the traceback |
+
+### Workspace tools
+
+A project can bring its own tools in **`.momo/tools/`**, committed with the repository so everyone who opens it in momo gets them. A workspace tool follows the same structure as the other tools, but it is self-contained: it never imports momo's code, and momo runs it in its own process.
+
+```python
+# .momo/tools/todo_count.py  (the full file: docs/examples/workspace-tools/todo_count.py)
+from pathlib import Path
+
+TOOL = {                                   # a plain literal: momo reads it without running the file
+    "name": "todo_count",
+    "description": "Count the TODO and FIXME comments per file under a folder of the project, most first.",
+    "parameters": {"path": {"type": "string", "description": "Folder or file to scan"}},
+    "category": "read",                    # read | write | run | net
+    "example": {"path": "src"},
+}
+
+def run(path: str = ".", *, workdir: Path) -> str:
+    ...
+```
+
+**Nothing runs before you approve it.** A workspace tool is code that arrives with a clone, so it is gated the way project MCP servers are:
+- momo lists a new tool as *waiting for approval* at start and in `/tools list`, without running anything: the `TOOL` literal is read with `ast.literal_eval`.
+- `/tools approve <name>` (or `all`) shows the file, its category, roles and the Python it will run with, and approves it.
+- The approval is a fingerprint of the workdir, the tool's name, every `.py` file in `.momo/tools/` (a tool may import `_helper.py` files) and the interpreter. It is kept in `~/.momo-harness/workspace-tools-approved.json`, never in the repository, so a repo cannot approve itself.
+- Any change to that code or to the interpreter puts the tools back to waiting. A call is checked again before it runs.
+
+**Each call runs in its own process**: `python -I -B`, with the workdir as current directory. The tool cannot import harness modules, a crash or hang cannot take momo down, and Esc or the tool's `timeout` (default 120 s) kills it and everything it started. Its `print()` output never reaches the model; the returned string does. This is a contract, not a sandbox: the process runs with your permissions, which is why approval is the gate.
+
+**Roles come from the category**, the same sets the built-in tools use:
+
+| Category | Offered in | Notes |
+|---|---|---|
+| `read` | every mode | keeps a TDD plan's passing tests valid |
+| `write` | coding, momo, a running plan | marks the code index stale after a call |
+| `run` | coding, momo, a running plan, plan investigation | marks the code index stale after a call |
+| `net` | every mode, only while `/net` is on | |
+
+A missing or unknown category counts as `write`, never as `read`.
+
+**Your overrides are committed too.** `.momo/tools.json` holds per-tool roles, category and on/off for the workspace's tools, and the interpreter to use. The commands below write it, so a team shares the setup and nobody sets it up again per session. It never changes built-in or personal tools.
+
+```json
+{"python": ".venv/bin/python",
+ "tools": {"todo_count": {"roles": ["chat", "coding"]}, "old_report": {"enabled": false}}}
+```
+
+**Dependencies** go in `.momo/tools/requirements.txt`. `/tools venv` creates `.momo/tools/.venv` (stdlib `venv`, not committed) and installs them, after asking, since installing runs the packages' setup code. The tools then run with that Python. A `"python"` entry in `tools.json` points at another one instead, e.g. the project's own `.venv`. A Python inside the workspace must be a real virtualenv: one with a `pyvenv.cfg` whose executable resolves to a Python outside the repository. A committed script named `python` is refused, never run.
+
+**Git and the index.** `.momo/.gitignore` lets `tools/` and `tools.json` through and keeps everything else out: the scratchpad, logs, plan file, `tools/.venv/` and `__pycache__/`. The code index never contains `.momo/`, and project-wide searches skip it.
+
+**Writing one, or letting an agent write one.** [`skills/workspace-tools.md`](skills/workspace-tools.md) is a guide written for an agent: the file format, every `TOOL` key, the categories, the rules (no harness imports, stay in the workdir, bounded output, `ERROR:` results, …), how to test a tool, and that it must ask you to approve it rather than try to. `/load-skill workspace-tools` gives it to momo's own model. `/tools init` copies it to `.momo/tools/README.md` for other coding agents working in the repository.
+
+| Command | Effect |
+|---|---|
+| `/tools approve <name>\|all` | Show a waiting workspace tool and let it run |
+| `/tools deny <name>` | Keep it from running (remembered) |
+| `/tools roles <name> <role,…>\|auto` | Which modes offer it: `design`, `chat`, `plan`, `coding`, `momo`, `plan-exec`, or back to its category's (saved in `.momo/tools.json`) |
+| `/tools category <name> read\|write\|run\|net\|auto` | Override its category (saved) |
+| `/tools enable\|disable <name>` | On or off for this workspace (saved), unlike the session-only `/tools <name> off` |
+| `/tools check [name]` | Validate tool files and the interpreter without running anything |
+| `/tools init [--force]` | Create `.momo/tools/` with the guide (`README.md`) and a `requirements.txt` |
+| `/tools venv [update]` | Create `.momo/tools/.venv` and install `requirements.txt` (asks first) |
 
 ## Command output
 
@@ -827,7 +890,9 @@ Each workspace gets a folder of momo's own, `.momo/`, made the first time someth
 
 ```
 <workdir>/.momo/
-├── .gitignore            # "*": the whole folder stays out of git, no tracked file changes
+├── .gitignore            # keeps all but tools/ and tools.json out of git, no tracked file changes
+├── tools/                # workspace tools, committed (Workspace tools); tools/.venv/ is not
+├── tools.json            # their roles, categories and interpreter, committed
 ├── scratch/              # the model's scratchpad (scratch_write), kept between sessions
 ├── plan.md               # the plan, while one exists (Plan mode)
 └── runs/<session>/rN.log # saved run_command output (Command output)
@@ -846,7 +911,7 @@ Each workspace gets a folder of momo's own, `.momo/`, made the first time someth
 
 To compare with and without it, turn the tool off per mode with `/tools scratch_write off`; the prompt line goes with it.
 
-Only data that is harmless if a cloned repository ships its own copy, or the model overwrites it, lives in `.momo/`. Approvals, the index pickle, keys and command config stay in `~/.momo-harness/` ([Where momo stores data](#where-momo-stores-data)).
+Only data that is harmless if a cloned repository ships its own copy, or the model overwrites it, lives in `.momo/`. Approvals, the index pickle, keys and command config stay in `~/.momo-harness/` ([Where momo stores data](#where-momo-stores-data)). The one exception is [workspace tools](#workspace-tools): code, which runs only after you approved each one, with the approval kept in `~/.momo-harness/`.
 
 ## Code index
 
@@ -1179,6 +1244,7 @@ In the web UI the book button in the header does the same with checkboxes, showi
 | `testing` | TDD and testing patterns |
 | `text-based-game-design` | World design, puzzles, parser conventions |
 | `typescript` | TypeScript type system, strict mode, common patterns |
+| `workspace-tools` | How to write a workspace tool momo accepts (`.momo/tools/`): format, categories, rules, testing — see [Workspace tools](#workspace-tools) |
 
 To add a new skill, create a `.md` file in `skills/`. The filename (without extension) is the skill name used in commands.
 
@@ -1329,7 +1395,10 @@ Type any command in the input bar:
 | `/tools <name> [<name>…] on\|off` | Turn tools on or off for the current mode (saved in the session) |
 | `/tools on\|off` | Enable or disable tool calls entirely (off = model receives no tool schemas) |
 | `/tools reload` | Load your custom tools in `~/.momo-harness/tools/` again — see [Adding a tool](#adding-a-tool) |
-| `/tools errors` | Why a custom tool file did not load, with the traceback |
+| `/tools errors` | Why a custom or workspace tool file did not load, with the traceback |
+| `/tools approve\|deny <name>` | Let a [workspace tool](#workspace-tools) run, or keep it from running |
+| `/tools roles\|category\|enable\|disable <name> …` | A workspace tool's roles, category, or on/off for this workspace (saved in `.momo/tools.json`) |
+| `/tools check [name]`, `/tools init`, `/tools venv` | Check workspace tools without running them; create `.momo/tools/` with the guide; set up its virtualenv |
 | `/system-prompt` | Show the composed system prompt (TUI: `$PAGER`; web: side panel) — alias `/prompt`, see [Seeing the system prompt](#seeing-the-system-prompt) |
 | `/system-prompt list` | List the system prompt's parts and their estimated size |
 | `/net` | Show internet access state (off / on / local) |
@@ -1540,6 +1609,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`, except what belo
 ├── runs/<timestamp>/rN.log  # run_command output only when the workdir's .momo/ can't be used
 ├── search_sources/*.json    # your web_search sources (/search-sources save, or add your own)
 ├── tools/*.py               # your custom tools (Adding a tool); folder 0700, files 0600
+├── workspace-tools-approved.json  # which workspace tools (.momo/tools/) you approved or denied
 └── tls/                     # only with --web-tls auto (folder 0700, keys 0600)
     ├── momo-ca.pem          # the CA certificate you trust on your devices
     ├── momo-ca.key          # the CA's private key — never share
@@ -1556,6 +1626,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`, except what belo
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |
 | `runs/<session>/rN.log` | Fallback for `run_command` logs when the workdir's `.momo/` is read-only or a symlink (normally they are in `<workdir>/.momo/runs/`) | Last 20 per session; deleted on `/clear`, `/new` and session load; other sessions' folders removed after 3 days. Logs from before `.momo/` empty themselves this way |
 | `tools/*.py` | Your custom tools, see [Adding a tool](#adding-a-tool) | Code that runs inside momo: loaded only if the folder and file are yours and not writable by others. Never read from the workdir |
+| `workspace-tools-approved.json` | Fingerprints of the [workspace tools](#workspace-tools) you approved or denied (workdir, name, code, interpreter) | Kept here so a repository cannot approve its own tools; any change to the code asks again |
 | `search_sources/*.json` | Your own `web_search` sources: ones you wrote, and ones saved with `/search-sources save` | Loaded after the shipped sources; a file with a shipped name overrides it. Never read from the workdir. Specs may not hold credential headers |
 | `tls/` | momo's local CA and HTTPS certificate | Deleting it creates a new CA on the next `--web-tls auto` start; every device must trust it again |
 
