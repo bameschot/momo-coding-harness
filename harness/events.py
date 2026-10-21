@@ -65,6 +65,7 @@ class StatusEvent:
     think_known: bool = False     # the server said what the model takes
     think_history: str = "turn"   # /think-history: off | turn | all
     tools_off: list = field(default_factory=list)  # tools turned off for the current mode
+    workspace_pending: list = field(default_factory=list)  # .momo/tools/ tools awaiting approval
     skills: list = field(default_factory=list)     # active skills, in load order
     index_enabled: bool = False   # /index: the code index and its index_* tools
     index_state: str = "off"      # off | building | refreshing | idle | stopped

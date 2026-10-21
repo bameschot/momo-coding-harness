@@ -186,12 +186,7 @@ def _tool_listing(harness) -> str:
     if waiting or ws.notes:
         lines.append("  workspace (.momo/tools/), not offered:")
         lines += [f"    · {n}" for n in ws.notes]
-        for t in waiting:
-            why = {"pending": "waiting for approval — /tools approve " + t.name,
-                   "denied": "denied — /tools approve " + t.name + " to allow it",
-                   "disabled": "disabled in .momo/tools.json — /tools enable " + t.name}.get(
-                t.status, t.reason)
-            lines.append(f"    ✗ {t.name}  ({why})")
+        lines += [f"    ✗ {t.name}  ({workspace_mod.status_hint(t)})" for t in waiting]
     return "\n".join(lines)
 
 
@@ -237,6 +232,9 @@ def _workspace_tools_command(harness, parts: list[str]) -> CommandResult | None:
         err = workspace_mod.set_override(wd, rest[0], "enabled", None if sub == "enable" else False)
         return out(err or f"{rest[0]}: {sub}d for this workspace (saved in .momo/tools.json)\n"
                    + harness.reload_workspace_tools())
+    if sub == "workspace" and not rest:
+        harness.reload_workspace_tools()          # files written since the last look
+        return out(workspace_mod.listing(harness.workspace_tools))
     if sub == "check" and len(rest) <= 1:
         return out(workspace_mod.check(wd, rest[0] if rest else None))
     if sub == "init" and rest in ([], ["--force"]):
@@ -1517,6 +1515,7 @@ Available commands:
   /tools roles <name> <role,…>|auto  Which modes offer a workspace tool (saved in .momo/tools.json)
   /tools category <name> read|write|run|net|auto  A workspace tool's category (sets its roles)
   /tools enable|disable <name>  Turn a workspace tool on or off for this workspace
+  /tools workspace    List the workspace tools (.momo/tools/) and whether each is approved
   /tools check [name] Check workspace tool files without running them
   /tools init [--force]  Create .momo/tools/ with a guide for writing tools (README.md)
   /tools venv [update]  Create .momo/tools/.venv and install its requirements.txt

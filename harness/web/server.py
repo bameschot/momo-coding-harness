@@ -16,7 +16,8 @@ Routes
   GET  /api/models    models available on the backend
   GET  /api/context   context usage broken down per category (system, tools, …)
   GET  /api/index     code index memory broken down per category and language
-  GET  /api/tools     the current mode's tools and whether each is on (/tools)
+  GET  /api/tools     the current mode's tools and whether each is on (/tools), and
+                      the workspace's tools with their approval state
   GET  /api/skills    every skill: title, summary, token estimate, active (/load-skill)
   GET  /api/system-prompt the composed system prompt in its parts (/system-prompt)
   GET  /api/mcp       MCP servers: state, tools, config files (/mcp)
@@ -444,7 +445,7 @@ class WebServer:
                     self._json({"skills": h.skill_choices()})
                 elif path == "/api/tools":
                     self._json({"mode": h.mode, "tools_enabled": h.tools_enabled,
-                                "tools": h.tool_choices()})
+                                "tools": h.tool_choices(), "workspace": h.workspace_choices()})
                 elif path == "/api/index-filter":
                     text, fpath = h.index_filter()
                     self._json({"path": fpath, "text": text,

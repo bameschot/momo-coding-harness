@@ -453,6 +453,72 @@ class InTheHarness(_Workspace):
         commands.handle(f"/workspace {self.wd}", h)
         self.assertIn("probe", [t["function"]["name"] for t in h._current_tools()])
 
+    def test_workspace_listing_and_pending_status(self):
+        self.put("other.py", tool_file("other"))
+        self.put("broken.py", "TOOL = {")
+        h = self.harness()
+        self.assertEqual(h.status_event().workspace_pending, ["other", "probe"])
+        out = commands.handle("/tools workspace", h).output
+        self.assertIn("0 approved, 2 waiting for approval", out)
+        self.assertIn("? probe  waiting for approval — /tools approve probe", out)
+        self.assertIn("✗ broken  ", out)
+        commands.handle("/tools approve probe", h)
+        commands.handle("/tools deny other", h)
+        self.assertEqual(h.status_event().workspace_pending, [])
+        out = commands.handle("/tools workspace", h).output
+        self.assertIn("1 approved, 0 waiting", out)
+        self.assertIn("✓ probe  approved · read · ", out)
+        self.assertIn("✗ other  denied — /tools approve other to allow it", out)
+        choices = {c["name"]: c for c in h.workspace_choices()}
+        self.assertEqual(choices["probe"]["status"], "loaded")
+        self.assertEqual(choices["probe"]["path"], ".momo/tools/probe.py")
+        self.assertEqual(choices["other"]["hint"], "denied — /tools approve other to allow it")
+        self.assertEqual(choices["broken"]["status"], "error")
+        for p in self.tools.glob("*.py"):
+            p.unlink()
+        self.assertIn("No workspace tools", commands.handle("/tools workspace", h).output)
+
+    def test_a_new_or_changed_tool_is_noticed_without_a_reload(self):
+        h = self.harness()
+        commands.handle("/tools approve probe", h)
+        loads = []
+        real = workspace.load_workspace_tools
+        with mock.patch.object(workspace, "load_workspace_tools",
+                               lambda wd: loads.append(wd) or real(wd)):
+            self.assertFalse(h.check_workspace_tools())        # nothing changed
+            self.put("fresh.py", tool_file("fresh"))           # the model wrote one
+            self.assertTrue(h.check_workspace_tools())
+            # the approval covers every file in the folder, so probe waits again too
+            self.assertEqual(h.status_event().workspace_pending, ["fresh", "probe"])
+            self.assertFalse(h.check_workspace_tools())
+            self.assertEqual(len(loads), 1)
+            commands.handle("/tools approve all", h)           # reloads itself
+            self.assertEqual(h.status_event().workspace_pending, [])
+            self.assertFalse(h.check_workspace_tools())
+            self.assertEqual(len(loads), 2)
+            # a turn's end checks too: editing an approved tool makes it pending again
+            self.put("probe.py", tool_file("probe", body='return "changed"'))
+            _Scripted.replies = [ChatResponse(content="Done.", done_reason="stop")]
+            h.send("hi")
+        self.assertEqual(h.status_event().workspace_pending, ["fresh", "probe"])
+        self.assertEqual(len(loads), 3)
+
+    def test_code_hash_skips_the_venv_without_walking_it(self):
+        self.put("_helper.py", "X = 1")
+        before = workspace.code_hash(self.wd)
+        (self.tools / ".venv" / "lib").mkdir(parents=True)
+        (self.tools / ".venv" / "lib" / "site.py").write_text("y = 2")
+        (self.tools / "__pycache__").mkdir()
+        (self.tools / "__pycache__" / "probe.py").write_text("z")
+        self.assertEqual(workspace.code_hash(self.wd), before)
+        walked = []
+        real_walk = os.walk
+        with mock.patch.object(workspace.os, "walk",
+                               lambda root: (walked.append(f) or (f, d, n) for f, d, n in real_walk(root))):
+            workspace.code_hash(self.wd)
+        self.assertFalse([f for f in walked if ".venv" in f], walked)
+
+
 
 if __name__ == "__main__":
     unittest.main()

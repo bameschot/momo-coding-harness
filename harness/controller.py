@@ -261,6 +261,13 @@ class Controller:
         except Exception:
             pass
         try:
+            # Workspace tools written or edited outside a turn (the user's editor).
+            with self._lock:
+                if not (self._busy or self._pending_confirm is not None):
+                    self.harness.check_workspace_tools()
+        except Exception:
+            pass
+        try:
             self._title_tick()
         except Exception:
             pass  # a failed title must not stop the recap check below

@@ -229,6 +229,9 @@ button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border)
 .skills-list { max-height: 160px; overflow-y: auto; }
 .tools-menu label.mono { font-size: var(--fs-sm); padding: 2px 0; }
 .tool-note { margin-left: auto; font-family: var(--sans); }
+.ws-tool { padding: 3px 0; font-size: var(--fs-sm); }
+.ws-tool-head { display: flex; gap: 6px; align-items: center; }
+.ws-tool-actions { display: flex; gap: 10px; margin: 1px 0 0 14px; }
 #tool-tip {
   position: fixed; z-index: 30; width: max-content; max-width: min(360px, calc(100vw - 16px));
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r);
@@ -243,6 +246,7 @@ button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border)
   border-radius: var(--r-sm); background: var(--warn); color: var(--surface);
   font-size: 10px; line-height: 14px; text-align: center; font-weight: 600;
 }
+#tools-btn .count.pending { left: 0; right: auto; background: var(--focus); }
 
 /* ── transcript ─────────────────────────────────────────────────────────── */
 #transcript {

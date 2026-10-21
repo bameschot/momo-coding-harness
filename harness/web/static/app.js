@@ -718,8 +718,15 @@ function applyStatus(s) {
   const off = s.tools_off || [];
   $("#tools-off").hidden = !off.length;
   $("#tools-off").textContent = String(off.length);
-  $("#tools-btn").title = off.length ? `Tools for this mode — ${off.length} off: ${off.join(", ")}`
-                                     : "Tools for this mode (/tools)";
+  const waiting = s.workspace_pending || [];
+  $("#tools-pending").hidden = !waiting.length;
+  $("#tools-pending").textContent = String(waiting.length);
+  const toolsLabel = (off.length ? `Tools for this mode — ${off.length} off: ${off.join(", ")}`
+                                 : "Tools for this mode (/tools)")
+    + (waiting.length ? ` — ${waiting.length} workspace tool${waiting.length === 1 ? "" : "s"} `
+                        + `waiting for approval: ${waiting.join(", ")}` : "");
+  $("#tools-btn").title = toolsLabel;
+  $("#tools-btn").setAttribute("aria-label", toolsLabel);
   $("#tools-badge").hidden = s.tools_enabled;
   // Chip colours: .active = a setting you turned on, .warn = something off or
   // less safe than the default.
@@ -2055,10 +2062,51 @@ function renderToolsMenu(menu, b) {
     if (t.note) lab.append(el("span", "muted small tool-note", t.note));
     rows.push(lab);
   }
+  // Tools waiting for approval go on top, where the badge points; otherwise last.
+  const ws = workspaceRows(b);
+  if ((b.workspace || []).some((w) => w.status === "pending")) rows.splice(2, 0, ...ws);
+  else rows.push(...ws);
   menu.replaceChildren(...rows);
   // A refresh (after a toggle) replaces the rows under the pointer: keep the
   // tooltip on the same tool.
   if (toolTipName) showToolTip(menu.querySelector(`label[data-name="${toolTipName}"]`), 0);
+}
+// The workspace's own tools (.momo/tools/) that have no checkbox above: waiting
+// for approval, denied, disabled, broken, or not offered in this mode.  Approving
+// runs the file's code on this machine, so each row offers its code first.
+function workspaceRows(b) {
+  const offered = new Set(b.tools.map((t) => t.name));
+  const rest = (b.workspace || []).filter((w) => !offered.has(w.name));
+  if (!rest.length) return [];
+  const linkBtn = (label, onclick) => {
+    const btn = el("button", "link-btn", label);
+    btn.type = "button";
+    btn.onclick = onclick;
+    return btn;
+  };
+  const rows = [el("div", "menu-sub", "workspace — .momo/tools/")];
+  for (const w of rest) {
+    const d = el("span", "dot");
+    if (w.status === "loaded") d.classList.add("on");
+    else if (w.status === "pending") d.classList.add("on", "offline");
+    else if (w.status !== "error") d.classList.add("muted-dot");
+    const why = w.status === "loaded" ? `not offered in ${b.mode} mode (roles: ${w.roles.join(", ") || "none"})`
+      : w.status === "pending" ? "waiting for approval" : w.status === "denied" ? "denied"
+      : w.status === "disabled" ? "disabled in .momo/tools.json" : w.hint;
+    const head = el("div", "ws-tool-head");
+    head.append(d, el("span", "mono", w.name), el("span", "muted small tool-note", why));
+    const acts = el("div", "ws-tool-actions");
+    acts.append(linkBtn("View code", () => { closeMenu(); showFile(w.path); }));
+    if (w.status === "pending" || w.status === "denied") {
+      acts.append(linkBtn("Approve", () => send(`/tools approve ${w.name}`)));
+    }
+    if (w.status === "pending") acts.append(linkBtn("Deny", () => send(`/tools deny ${w.name}`)));
+    const row = el("div", "ws-tool");
+    if (w.desc) row.title = w.desc;
+    row.append(head, acts);
+    rows.push(row);
+  }
+  return rows;
 }
 $("#tools-btn").onclick = (e) => toggleMenu(e, "#tools-menu", "Tools", refreshToolsMenu);
 

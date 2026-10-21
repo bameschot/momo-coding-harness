@@ -800,6 +800,32 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self.emit_status()
         return self.workspace_tools.summary()
 
+    def check_workspace_tools(self) -> bool:
+        """Reload the workspace's tools if their files, tools.json or the
+        approvals changed since the last load (the model wrote a tool, the user
+        edited one): the status then shows tools waiting for approval."""
+        if (not self.workdir.is_dir()
+                or workspace_mod.signature(self.workdir) == self.workspace_tools.signature):
+            return False
+        if (note := self.reload_workspace_tools()):
+            self.event_queue.put(ChatEvent("system", note))
+        return True
+
+    def workspace_choices(self) -> list[dict]:
+        """Every tool in .momo/tools/ with its approval state, for the web
+        tools popover: [{name, status, hint, category, roles, path, desc}]."""
+        out = []
+        for t in self.workspace_tools.tools:
+            try:
+                rel = t.path.resolve().relative_to(self.workdir.resolve()).as_posix()
+            except ValueError:
+                rel = str(t.path)
+            out.append({"name": t.name, "status": t.status,
+                        "hint": "" if t.status == "loaded" else workspace_mod.status_hint(t),
+                        "category": t.category, "roles": sorted(t.roles), "path": rel,
+                        "desc": t.meta.get("description", "")})
+        return out
+
     def set_tool_enabled(self, name: str, on: bool) -> str:
         """Turn one tool on or off for the current role; returns a notice.
         Turning on a net or index tool while its toggle is off turns the toggle
@@ -1464,6 +1490,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
 
     def _done_event(self) -> DoneEvent:
         """The DoneEvent ending a model turn, with what the turn cost."""
+        self.check_workspace_tools()         # it may have written one
         st = self._turn_stats
         return DoneEvent(secs=round(time.monotonic() - st["t0"], 1), prompt_tokens=st["prompt"],
                          eval_tokens=st["eval"], tool_calls=st["calls"])
@@ -2094,6 +2121,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             think_known=self.client.thinking_caps().known,
             think_history=self.think_history,
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
+            workspace_pending=[t.name for t in self.workspace_tools.by_status("pending")],
             skills=list(self.active_skills),
             **self._index_status_fields(),
             **self._mcp_status_fields(),

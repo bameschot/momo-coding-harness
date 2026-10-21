@@ -181,16 +181,30 @@ def code_hash(workdir: Path) -> str:
     """Every .py file under .momo/tools/ (a tool imports its `_helper` files),
     the virtualenv and caches excepted."""
     root = momo_dir.tools_root(workdir)
+    files = []
+    for folder, dirs, names in os.walk(root):     # prunes .venv: no walk of site-packages
+        dirs[:] = [d for d in dirs if d != "__pycache__" and not (d == ".venv" and folder == str(root))]
+        files += [Path(folder, n) for n in names if n.endswith(".py")]
     h = hashlib.sha256()
-    for p in sorted(root.rglob("*.py")):
+    for p in sorted(files):
         rel = p.relative_to(root)
-        if rel.parts[0] == ".venv" or "__pycache__" in rel.parts:
-            continue
         h.update(str(rel).encode() + b"\0")
         try:
             h.update(p.read_bytes())
         except OSError:
             h.update(b"<unreadable>")
+    return h.hexdigest()
+
+
+def signature(workdir: Path) -> str:
+    """What a reload depends on in the workspace — tool code and
+    .momo/tools.json — so an unchanged one can skip it.  Approvals are not in
+    it: /tools approve|deny reload themselves."""
+    h = hashlib.sha256(code_hash(workdir).encode())
+    try:
+        h.update(momo_dir.tools_settings_path(workdir).read_bytes())
+    except OSError:
+        pass
     return h.hexdigest()
 
 
@@ -329,6 +343,7 @@ class LoadReport:
     notes: list[str] = field(default_factory=list)       # settings problems
     python: str = ""
     python_origin: str = ""
+    signature: str = ""
 
     def by_status(self, status: str) -> list[WorkspaceTool]:
         return [t for t in self.tools if t.status == status]
@@ -448,7 +463,7 @@ def load_workspace_tools(workdir: Path) -> LoadReport:
     """Discover the workspace's tools and register the approved, enabled ones
     (replacing those of the workspace loaded before)."""
     settings, notes = load_settings(workdir)
-    report = LoadReport(workdir, notes=notes)
+    report = LoadReport(workdir, notes=notes, signature=signature(workdir))
     python, report.python_origin, _ = interpreter(workdir.resolve(), settings)
     report.python = str(python)
     report.tools = discover(workdir, settings)
@@ -502,6 +517,34 @@ def describe(t: WorkspaceTool, report: LoadReport | None = None) -> str:
     return "\n".join(lines)
 
 
+def status_hint(t: WorkspaceTool) -> str:
+    """Why a tool is not offered, and the command that changes that."""
+    return {"pending": f"waiting for approval — /tools approve {t.name}",
+            "denied": f"denied — /tools approve {t.name} to allow it",
+            "disabled": f"disabled in {momo_dir.MOMO_DIR}/{momo_dir.TOOLS_SETTINGS} — "
+                        f"/tools enable {t.name}"}.get(t.status, t.reason)
+
+
+_NONE_YET = (f"No workspace tools in {momo_dir.MOMO_DIR}/{momo_dir.TOOLS}/ — /tools init "
+             f"creates the folder with a guide for writing them.")
+
+
+def listing(report: LoadReport) -> str:
+    """/tools workspace: every tool in .momo/tools/ and whether it is approved."""
+    if not report.tools:
+        return "\n".join([*report.notes, _NONE_YET])
+    approved, pending = len(report.by_status("loaded")), len(report.by_status("pending"))
+    lines = [f"Workspace tools in {momo_dir.MOMO_DIR}/{momo_dir.TOOLS}/ — {approved} approved, "
+             f"{pending} waiting for approval",
+             f"  python: {report.python} ({report.python_origin})", *report.notes]
+    for t in report.tools:
+        if t.status == "loaded":
+            lines.append(f"  ✓ {t.name}  approved · {t.category} · {', '.join(sorted(t.roles)) or 'no roles'}")
+        else:
+            lines.append(f"  {'?' if t.status == 'pending' else '✗'} {t.name}  {status_hint(t)}")
+    return "\n".join(lines)
+
+
 def check(workdir: Path, name: str | None = None) -> str:
     """/tools check: validate tool files and the interpreter, running nothing."""
     settings, notes = load_settings(workdir)
@@ -513,8 +556,7 @@ def check(workdir: Path, name: str | None = None) -> str:
         if not tools:
             return f"No tool file {name}.py in {momo_dir.MOMO_DIR}/{momo_dir.TOOLS}/"
     if not tools:
-        return (f"No workspace tools in {momo_dir.MOMO_DIR}/{momo_dir.TOOLS}/ — /tools init "
-                f"creates the folder with a guide for writing them.")
+        return _NONE_YET
     lines = [*notes, f"Python: {python} ({origin})" + (f" — {problem}" if problem else ""), ""]
     lines += [describe(t) for t in tools]
     lines.append("\n(Checked without running anything. A tool runs once it is approved: "
