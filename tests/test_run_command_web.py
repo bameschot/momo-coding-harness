@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 
 from harness import tools
-from harness.tools import _web_client_in, dispatch
+from harness.tools import dispatch
+from harness.tools.shell import web_client_in as _web_client_in
 
 
 class Matcher(unittest.TestCase):

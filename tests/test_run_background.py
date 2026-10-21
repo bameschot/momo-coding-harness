@@ -10,7 +10,8 @@ from unittest import mock
 
 from harness import run_store
 from harness import tools
-from harness.tools import dispatch, with_run_mode
+from harness.tools import dispatch
+from harness.tools.builtin import run_command as run_command_tool
 
 SERVER = "echo starting; sleep 0.3; echo ready on port 1; sleep 60"
 
@@ -59,7 +60,7 @@ class Background(unittest.TestCase):
         self.assertIn("[ready: its output matched `ready`]", out)
 
     def test_without_wait_for_it_gets_a_few_seconds(self):
-        with mock.patch.object(tools, "_BACKGROUND_SETTLE", 0.5):
+        with mock.patch.object(run_command_tool, "_BACKGROUND_SETTLE", 0.5):
             out = self.cmd("echo up; sleep 60", background=True)
         self.assertIn("up\n", out)
         self.assertEqual(self.store.running(), ["r1"])
@@ -128,11 +129,11 @@ class Background(unittest.TestCase):
         self.assertTrue(self.call("stop_command", path="r9").startswith("ERROR: no saved"))
 
     def test_schema_follows_the_run_mode(self):
-        base = [tools._RUN_COMMAND_CLASSIC]
-        self.assertEqual([t["function"]["name"] for t in with_run_mode(base, "new")],
-                         ["run_command", "command_output", "stop_command"])
-        self.assertEqual([t["function"]["name"] for t in with_run_mode(base, "classic")],
-                         ["run_command"])
+        names = lambda mode: [t["function"]["name"] for t in tools.offered("coding", run_mode=mode)
+                              if t["function"]["name"] in ("run_command", "command_output",
+                                                           "stop_command")]
+        self.assertEqual(names("new"), ["run_command", "command_output", "stop_command"])
+        self.assertEqual(names("classic"), ["run_command"])
 
 
 if __name__ == "__main__":

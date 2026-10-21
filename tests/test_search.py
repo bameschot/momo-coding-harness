@@ -438,7 +438,7 @@ class Schema(Base):
         names = [t["function"]["name"] for t in tools.NET_TOOLS]
         self.assertIn("web_search", names)
         self.assertIn("add_search_source", names)
-        self.assertIn("web_search", tools._EXECUTORS)
+        self.assertIsNotNone(tools.registry.get("web_search").run)
 
     def test_source_list_in_schema(self):
         base = next(t for t in tools.NET_TOOLS if t["function"]["name"] == "web_search")
@@ -625,9 +625,9 @@ class HarnessIntegration(unittest.TestCase):
 
     def test_web_search_not_cut_by_tool_result(self):
         # web_search sizes itself; the generic cut would slice through the fence.
-        import inspect
-        from harness import harness as hmod
-        self.assertIn('name not in ("fetch_url", "web_search")', inspect.getsource(hmod.Harness))
+        from harness.tools import ToolContext, registry
+        for name in ("fetch_url", "web_search"):
+            self.assertTrue(registry.get(name).windows_itself(ToolContext(run_mode="classic")))
 
 
 if __name__ == "__main__":

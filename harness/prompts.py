@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import code_nav
 from .momo_dir import SCRATCH_REL
-from .tools import ALL_TOOLS, CHAT_TOOLS, DESIGN_TOOLS, PLAN_INVESTIGATE_TOOLS
+from .tools import ROLES
 
 _ROLES_DIR = Path(__file__).parent.parent / "roles"
 
@@ -400,14 +400,8 @@ _ROLE_LOADERS = {
     "plan":    lambda wd: _planner_prompt(wd),
 }
 
-_MODE_TOOLS = {
-    "design":  DESIGN_TOOLS,
-    "coding":  ALL_TOOLS,
-    "chat":    CHAT_TOOLS,
-    "momo":    ALL_TOOLS,
-    "plan":    PLAN_INVESTIGATE_TOOLS,
-}
-
 # The modes in the order the frontends list and cycle them (Shift+Tab, the web picker).
+# Each is also a tool role (a tool's Tool.modes says which roles offer it).
 MODES = ("design", "chat", "plan", "coding", "momo")
-assert set(MODES) == set(_MODE_TOOLS), "MODES and _MODE_TOOLS must name the same modes"
+assert set(MODES) <= set(ROLES) and set(MODES) == set(_ROLE_LOADERS), \
+    "every mode needs a role prompt and must be a tool role"

@@ -40,7 +40,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from harness import code_index as ci  # noqa: E402
-from harness import tools  # noqa: E402
+from harness.tools.builtin.grep_files import grep_files  # noqa: E402
 
 LANG_DIR = Path(__file__).resolve().parent / "lang"
 _RESULT_LINE = re.compile(r"^(\S+):L(\d+)-(\d+)\s+(\S+)\s+(\S+)\s+\|")
@@ -213,7 +213,7 @@ def _score(exp, idx, root: Path, sc: Scorer, res: Result) -> None:
         fn += len(truth.keys() - got.keys())
         fp += len(got.keys() - truth.keys())
         idx_chars += len(ci.index_callers(name, workdir=root, index=idx))
-        grep_chars += len(tools._grep_files(rf"\b{re.escape(bare)}\b", ".", workdir=root))
+        grep_chars += len(grep_files(rf"\b{re.escape(bare)}\b", ".", workdir=root))
     m["callers_recall"] = tp / max(tp + fn, 1)
     m["callers_precision"] = tp / max(tp + fp, 1)
     m["role_acc"] = role_ok / max(role_n, 1)

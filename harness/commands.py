@@ -175,6 +175,25 @@ def _tool_listing(harness) -> str:
         mark = "✓" if c["enabled"] else "✗"
         note = f"  ({'locked: ' if c['locked'] else ''}{c['note']})" if c["note"] else ""
         lines.append(f"    {mark} {c['name']}{note}")
+    report = harness.custom_tools
+    for file, why in report.errors:
+        lines.append(f"  custom tool {file} not loaded: {why}")
+    if report.errors:
+        lines.append(f"  (fix it in {report.folder}, then /tools reload; /tools errors shows tracebacks)")
+    return "\n".join(lines)
+
+
+def _custom_tool_errors(harness) -> str:
+    """/tools errors: why custom tool files did not load, with tracebacks."""
+    report = harness.custom_tools
+    if not report.errors:
+        where = report.folder if report.folder.is_dir() else f"{report.folder} (no such folder)"
+        return f"Custom tools: {len(report.loaded)} loaded, no errors — folder {where}"
+    lines = []
+    for file, why in report.errors:
+        lines.append(f"{file}: {why}")
+        if file in report.details:
+            lines.append(report.details[file].rstrip())
     return "\n".join(lines)
 
 
@@ -590,6 +609,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=_tool_listing(harness), tool_picker=True)
         if parts == ["list"]:
             return CommandResult(handled=True, output=_tool_listing(harness))
+        if parts == ["reload"]:
+            return CommandResult(handled=True, output=harness.reload_custom_tools())
+        if parts == ["errors"]:
+            return CommandResult(handled=True, output=_custom_tool_errors(harness))
         if len(parts) == 1:
             if _on_off(arg) is not None:
                 return _toggle(harness, "tools_enabled", arg, "Tool calls")
@@ -599,7 +622,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
         on = _on_off(parts[-1])
         if on is None:
             return CommandResult(handled=True, output=(
-                "Usage: /tools on|off | /tools list | /tools <name> [<name>...] on|off"))
+                "Usage: /tools on|off | /tools list | /tools reload | /tools errors | "
+                "/tools <name> [<name>...] on|off"))
         return CommandResult(handled=True, output="\n".join(
             harness.set_tool_enabled(name, on) for name in parts[:-1]))
 
@@ -1408,6 +1432,8 @@ Available commands:
   /tools              Pick this mode's tools (on/off per tool)
   /tools on|off       Enable or disable tool calls entirely
   /tools list         List this mode's tools and whether each is on
+  /tools reload       Load the custom tools in ~/.momo-harness/tools/ again
+  /tools errors       Why a custom tool file did not load (with the traceback)
   /tools <name>       Show what a tool does and its parameters
   /tools <name> on|off  Turn one tool on or off for this mode (saved in the session)
   /net                Show internet access state (off/on/local)

@@ -5,6 +5,9 @@ import unittest
 from pathlib import Path
 
 from harness import tools
+from harness.tools.builtin.grep_file import grep_file
+from harness.tools.builtin.grep_files import grep_files
+from harness.tools.common import MAX_GREP_LINE_CHARS
 
 
 class GrepHitClipping(unittest.TestCase):
@@ -18,16 +21,16 @@ class GrepHitClipping(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_long_line_is_clipped_around_the_match(self):
-        out = tools._grep_files("class .*Controller", ".", workdir=self.root)
+        out = grep_files("class .*Controller", ".", workdir=self.root)
         long_hit = next(l for l in out.splitlines() if l.startswith("bundle.js"))
-        self.assertLess(len(long_hit), tools._MAX_GREP_LINE_CHARS + 100)
+        self.assertLess(len(long_hit), MAX_GREP_LINE_CHARS + 100)
         self.assertIn("FooController", long_hit)
         self.assertIn("[line is 200,021 chars]", long_hit)
         self.assertIn("short.kt:1: class BarController", out)
 
     def test_search_file_clips_too(self):
-        out = tools._grep_file("FooController", "bundle.js", workdir=self.root)
-        self.assertLess(len(out), tools._MAX_GREP_LINE_CHARS + 100)
+        out = grep_file("FooController", "bundle.js", workdir=self.root)
+        self.assertLess(len(out), MAX_GREP_LINE_CHARS + 100)
         self.assertIn("FooController", out)
 
 

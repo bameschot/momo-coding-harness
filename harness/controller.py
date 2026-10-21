@@ -42,8 +42,10 @@ def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
             or (cmd == "/plan" and arg != "show")
             or (cmd in ("/session", "/workspace", "/workdir", "/run-mode", "/scratch",
                         "/search-sources", "/host", "/model") and bool(arg))
-            # a per-tool change (/tools <name> on|off) alters the running turn's tools
-            or (cmd == "/tools" and len(parts) > 1 and len(parts[1].split()) > 1)
+            # a per-tool change (/tools <name> on|off) and a reload of the custom
+            # tools alter the running turn's tools
+            or (cmd == "/tools" and len(parts) > 1
+                and (len(parts[1].split()) > 1 or arg == "reload"))
             # every /mcp change alters the tool set; the read-only ones are fine
             or (cmd == "/mcp" and arg.split(" ")[0] not in ("", "list", "tools", "resources",
                                                            "read", "log")))

@@ -10,13 +10,12 @@ from __future__ import annotations
 import hashlib
 import os
 import pickle
-import stat as stat_mod
 import sys
 from functools import lru_cache
 from pathlib import Path
 
 from .. import code_nav, ignore_rules
-from ..paths import momo_home
+from ..paths import momo_home, untrusted_reason
 from ..session import atomic_write
 
 FORMAT_VERSION = 7   # 6: HTML inline-script JavaScript; 7: skipped files, source fingerprint
@@ -52,14 +51,7 @@ def filter_path(root: Path) -> Path:
     return pickle_path(root).with_suffix(".filter")
 
 
-def _untrusted_reason(path: Path, st) -> str:
-    if not stat_mod.S_ISREG(st.st_mode):
-        return f"{path} is not a regular file"
-    if hasattr(os, "getuid") and st.st_uid != os.getuid():
-        return f"{path} is not owned by you"
-    if st.st_mode & 0o022:
-        return f"{path} is writable by other users (chmod 600 it, or delete it)"
-    return ""
+_untrusted_reason = untrusted_reason      # (paths.py: custom tool files use it too)
 
 
 def load_filter(root: Path) -> tuple[str, str]:

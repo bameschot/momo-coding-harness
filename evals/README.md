@@ -5,7 +5,8 @@ opposed to whether they work. `tests/` covers the second question; this covers
 the first.
 
 Tool descriptions are load-bearing in this harness — the system prompt's tool
-reference is generated from the schemas in `harness/tools.py`, so a wording
+reference is generated from the tool schemas (one file per tool in
+`harness/tools/builtin/`; `harness/tools.py` before 2026-10-21), so a wording
 change alters behaviour. This makes that measurable.
 
 ```bash
@@ -132,9 +133,23 @@ outright that a line query needs the one file, not the directory containing it.
 ## A trap when grading
 
 Anchor error detection on the `ERROR` prefix, never a bare substring. These tasks
-read `harness/tools.py`, whose source contains `dispatch`'s own error strings
-("does not accept argument(s)"), so an unanchored match scores a successful file
-read as a malformed call. That bug inflated the first coding-mode report by 3.
+read `harness/tools/dispatcher.py` (`harness/tools.py` before the split below),
+whose source contains `dispatch`'s own error strings ("does not accept
+argument(s)"), so an unanchored match scores a successful file read as a
+malformed call. That bug inflated the first coding-mode report by 3.
+
+## The tool split (2026-10-21)
+
+`harness/tools.py` became the `harness/tools/` package, one file per tool. What
+the model sees did not change (`tests/test_tool_registry_golden.py` pins every
+schema, the tool reference and the system prompt across 192 configurations),
+but this repo, which several tasks are about, did. Three tasks' ground truth
+moved with it and their numbers before that date are not comparable:
+`blast-radius` (now about `harness/tools/dispatcher.py`; must name
+`tools/__init__.py`, which re-exports `dispatch`), `central-modules` (every tool
+file imports `tools/registry.py`, now the most imported module) and `file-card`
+(`net.py` is imported by `tools/builtin/fetch_url.py` instead of `tools.py`).
+Numbers in the tables above that mention `tools.py` are from before.
 
 ## Reusing runs (`--cache`)
 
@@ -146,7 +161,7 @@ python evals/run_evals.py --suite lang --no-think --mode chat --runs 5 --cache e
 Each run is stored under a fingerprint of everything that can change its outcome:
 the task (prompt, expected facts, ideal tools), the files of the project it runs
 in, model / mode / think / index, the rendered system prompt and tool schemas,
-and the harness code behind the tool output (`tools.py`, `code_nav.py`,
+and the harness code behind the tool output (the `tools/` package, `code_nav.py`,
 `harness.py`, `net.py`, plus the `code_index/` package with `--index`). A matching run is
 reused; any change to those inputs makes the next invocation run it fresh.
 Asking for more runs than are stored tops up (`--runs 5` after 3 cached runs

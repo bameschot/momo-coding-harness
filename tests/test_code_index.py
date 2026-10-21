@@ -20,6 +20,8 @@ from unittest import mock
 
 from harness import code_index as ci
 from harness import code_nav, prompts, tools
+from harness.tools import common
+from harness.tools.builtin.grep_file import grep_file
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -724,7 +726,7 @@ class ReviewFixes0926(Base):
         self.assertEqual("".join(split_lines("a\r\nb\n\nc", keepends=True)), "a\r\nb\n\nc")
         self.assertIn("L8 (call) return foo()", self.callers("foo"))
         self.assertIn("L8 [in bar]: return foo()", self.text("foo()"))
-        self.assertIn("   8: ", tools._grep_file("foo", "ff.py", workdir=self.root))
+        self.assertIn("   8: ", grep_file("foo", "ff.py", workdir=self.root))
 
     def test_regex_prefilter_keeps_real_matches(self):
         self.assertEqual(ci.text._regex_literals(r"(?!foo)bar"), ["bar"])
@@ -1152,7 +1154,7 @@ class IndexRouting(Base):
         out = self.run_tool("grep_files", {"pattern": "retry_delay"}, route=False)
         self.assertIn("conf/app.yaml:3:", out)                      # the real grep
         self.assertTrue(out.startswith("(the code index is on:"), out)
-        self.assertNotIn(tools._INDEX_GREP_TIP.strip(), out)        # led, not trailed
+        self.assertNotIn(common.INDEX_GREP_TIP.strip(), out)        # led, not trailed
         self.assertEqual(self.run_tool("find_files", {"pattern": "a.py"}, route=False), "a.py")
         self.assertEqual(tools.dispatch("grep_files", {"pattern": "zzz_none"}, self.root,
                                         index=self.idx, index_route=False), "(no matches)")
@@ -1173,16 +1175,16 @@ class IndexRouting(Base):
         self.assertIn("does not accept", out)
 
     def test_literal_detection(self):
-        self.assertEqual(tools._literal("os.path"), "os.path")
-        self.assertEqual(tools._literal(r"foo\.bar"), "foo.bar")
+        self.assertEqual(common.literal("os.path"), "os.path")
+        self.assertEqual(common.literal(r"foo\.bar"), "foo.bar")
         for rx in (r"\bword", "a|b", "def .*x", "(x)", "x+"):
-            self.assertIsNone(tools._literal(rx), rx)
+            self.assertIsNone(common.literal(rx), rx)
 
 
 class ToolSet(unittest.TestCase):
 
     def test_index_tools_replace_overlapping_code_nav_tools(self):
-        names = [t["function"]["name"] for t in tools.with_index_tools(tools.ALL_TOOLS)]
+        names = [t["function"]["name"] for t in tools.offered("coding", index_on=True)]
         for gone in tools.INDEX_REPLACES:
             self.assertNotIn(gone, names)
         for new in tools.INDEX_TOOL_NAMES:

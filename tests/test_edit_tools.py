@@ -12,6 +12,7 @@ from unittest import mock
 
 from harness import code_index as ci
 from harness import code_nav, editing, prompts, tools
+from harness.tools.builtin import run_command as run_command_tool
 from harness.tools import dispatch
 
 INV = '''class Inventory:
@@ -447,11 +448,11 @@ class FeaturesOff(Base):
 
     def test_tool_list(self):
         names = lambda ts: [t["function"]["name"] for t in ts]
-        off = tools.with_edit_features(tools.ALL_TOOLS, frozenset())
+        off = tools.offered("coding", edit_features=frozenset())
         self.assertNotIn("replace_symbol", names(off))
         edit = next(t for t in off if t["function"]["name"] == "edit_file")
         self.assertNotIn("within", edit["function"]["parameters"]["properties"])
-        on = tools.with_edit_features(tools.ALL_TOOLS, editing.EDIT_FEATURES)
+        on = tools.offered("coding", edit_features=editing.EDIT_FEATURES)
         edit = next(t for t in on if t["function"]["name"] == "edit_file")
         self.assertNotIn("within", edit["function"]["parameters"]["properties"])
         self.assertIn("lists where each occurrence is", edit["function"]["description"])
@@ -471,9 +472,9 @@ class PythonHint(unittest.TestCase):
 
     def test_command_not_found_gets_a_note(self):
         with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(tools, "_run_command", return_value="/bin/sh: python: command not found"), \
-                mock.patch.dict(tools._EXECUTORS, {"run_command": tools._run_command}), \
-                mock.patch.object(tools.shutil, "which", lambda c: "/usr/bin/python3"):
+                mock.patch.object(tools.registry.get("run_command"), "run",
+                                  lambda **kw: "/bin/sh: python: command not found"), \
+                mock.patch.object(run_command_tool.shutil, "which", lambda c: "/usr/bin/python3"):
             out = dispatch("run_command", {"command": "python x.py"}, Path(tmp))
         self.assertTrue(out.endswith("(note: there is no `python` command here — use python3)"), out)
 

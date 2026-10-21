@@ -16,12 +16,12 @@ from .llm import make_client
 from .logger import Logger
 from .compaction import CompactionMixin, calls_tokens, content_text, format_for_summary, text_tokens
 from .plan import Plan
-from .plan_runner import KEEPS_GREEN, TDD_MAX_REFUSALS, PlanRunnerMixin
+from .plan_runner import TDD_MAX_REFUSALS, PlanRunnerMixin, keeps_green
 from .mcp_mixin import MCPMixin
-from .tools import (ALL_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, NET_TOOLS,
-                    PLAN_EXECUTE_TOOLS, PLAN_INVESTIGATE_TOOLS, PLAN_TDD_EXECUTE_TOOLS,
-                    PLAN_TDD_INVESTIGATE_TOOLS, RUN_STORE_TOOLS, dispatch, render_tool_reference,
-                    with_edit_features, with_index_tools, with_run_mode)
+from .tools import (DIFF_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, LOCKED_TOOLS,
+                    NET_TOOL_NAMES, RUN_STORE_TOOLS, ToolContext, ToolRunContext, dispatch,
+                    registry, render_tool_reference)
+from .tools import custom as custom_mod
 from . import tdd as tdd_mod
 from .editing import EDIT_FEATURES
 from . import run_store as run_store_mod
@@ -31,23 +31,19 @@ from . import tools as tools_mod
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
                      StatusEvent, ThinkEvent, ToolCallEvent, ToolResultEvent)
-from .prompts import (_index_banner, _MODE_TOOLS,
+from .prompts import (_index_banner, MODES,
                       _PLAN_EXECUTION_RULES, _PLAN_TDD_EXECUTION_RULES, _PLAN_TDD_RULES,
                       _ROLE_LOADERS, _coding_prompt, _environment,
                       _load_role, _nav_rules, _net_rules, planner_for_tdd)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls)
 
-# Tools that mutate a file on disk — the harness snapshots the target before and
-# after these run to build a DiffEvent for the TUI.  Keyed by the arg holding the
-# affected path ("move_file" uses src/dst and is handled separately).
-_MUTATING_TOOLS = {
-    "edit_file", "append_to_file", "replace_symbol",
-    "write_file", "delete_file", "move_file",
-}
-# Tools whose result a frontend may receive as DiffEvents instead of a
-# ToolResultEvent (edit_files: one diff per file).  Served to the web UI.
-DIFF_TOOLS = frozenset(_MUTATING_TOOLS | {"edit_files"})
+# DIFF_TOOLS (Tool.diff): tools whose result a frontend may receive as
+# DiffEvents instead of a ToolResultEvent; served to the web UI.  The harness
+# snapshots the target before and after each to build the DiffEvent: the "path"
+# argument ("move_file" uses src/dst and is handled separately), except
+# edit_files, which changes several files and gets one diff each.
+_MUTATING_TOOLS = DIFF_TOOLS - {"edit_files"}
 
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
@@ -62,20 +58,13 @@ def _run_key(command: str) -> tuple | str:
         return base
 
 
-# Per-role tool choices (/tools <name> on|off): what the pickers group tools by,
-# and the tools that can't be turned off because plan mode stops working without them.
-_LOCKED_TOOLS = {"create_plan", "complete_step", "revise_plan"}
-_TOOL_GROUPS = (
-    ("files",       {t["function"]["name"] for t in tools_mod.READ_ONLY_TOOLS}),
-    ("code nav",    {t["function"]["name"] for t in tools_mod.CODE_NAV_TOOLS}),
-    ("net",         {t["function"]["name"] for t in NET_TOOLS}),
-    ("index",       INDEX_TOOL_NAMES),
-    ("ask & plan",  {"ask_user"} | _LOCKED_TOOLS),
-)
-
+# Per-role tool choices (/tools <name> on|off): the pickers group tools by
+# Tool.group, and the locked tools (Tool.locked) can't be turned off because
+# plan mode stops working without them.
+_LOCKED_TOOLS = LOCKED_TOOLS
 
 # The pickers' section order (sorted() is stable, so tools keep their schema order within one).
-_GROUP_ORDER = ("files", "code nav", "index", "edit & shell", "net", "ask & plan")
+_GROUP_ORDER = ("files", "code nav", "index", "edit & shell", "net", "ask & plan", "custom")
 
 
 def _tool_group(name: str) -> str:
@@ -83,7 +72,8 @@ def _tool_group(name: str) -> str:
         return "mcp · " + name[5:].split("__", 1)[0]
     if name.startswith("mcp_"):
         return "mcp"
-    return next((g for g, names in _TOOL_GROUPS if name in names), "edit & shell")
+    tool = registry.get(name)
+    return tool.group if tool is not None else "edit & shell"
 
 
 def _group_rank(group: str) -> tuple[int, str]:
@@ -338,6 +328,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._turn_user: dict | None = None  # the user message the running turn answers
         self._start_turn_stats()             # what the running turn cost (DoneEvent)
         self._init_mcp()                     # before the first prompt: it lists MCP tools
+        # Custom tools (~/.momo-harness/tools/): loaded before the first prompt too.
+        self.custom_tools = custom_mod.load_custom_tools()
         self.messages: list[dict] = [
             {"role": "system", "content": self._build_system_prompt()}
         ]
@@ -375,6 +367,15 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         """Called from a frontend thread when the user answers a mid-task question."""
         self.awaiting_input = False
         self._user_input_queue.put(text)
+
+    def _tool_run_ctx(self, name: str) -> ToolRunContext | None:
+        """The harness services for a tool that asks for them (inject "ctx"):
+        asking the user, and a note in the chat."""
+        tool = registry.get(name)
+        if tool is None or "ctx" not in tool.inject:
+            return None
+        return ToolRunContext(self.workdir, self._cancel, ask_user=self._ask_user,
+                              note=lambda text: self.event_queue.put(ChatEvent("system", str(text))))
 
     def _confirm(self, question: str) -> bool:
         """A y/N question through the ask_user plumbing; only y / yes allows."""
@@ -696,27 +697,28 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
 
     # ── tool sets ─────────────────────────────────────────────────────────────
 
-    def _current_tools(self) -> list[dict]:
-        """Tool set for the current mode (and, in plan mode, the current phase).
+    def _tool_ctx(self) -> ToolContext:
+        """What decides the tool set: the role (an executing plan is its own),
+        the run mode, edit features, code index, internet and a TDD plan."""
+        executing = self._plan_executing()
+        if executing:
+            role, tdd = "plan-exec", self.plan.tdd
+        else:
+            role = self.mode if self.mode in MODES else "coding"
+            tdd = self.mode == "plan" and self.plan_kind == "tdd"
+        return ToolContext(role=role, run_mode=self.run_mode, edit_features=self.edit_features,
+                           index_on=self.index is not None, net_on=self.net_access != "off",
+                           tdd=tdd, search_sources=self.search_sources)
 
-        fetch_url is appended only while internet access is on, so a model that
+    def _current_tools(self) -> list[dict]:
+        """Tool set for the current mode (and, in plan mode, the current phase):
+        the registry's tools for this context (tools/registry.py), then the MCP
+        tools, less the ones the user turned off for this role.
+
+        fetch_url is offered only while internet access is on, so a model that
         cannot use it never sees it in the schema or in the generated reference.
         """
-        if self._plan_executing():
-            tools = PLAN_TDD_EXECUTE_TOOLS if self.plan.tdd else PLAN_EXECUTE_TOOLS
-        elif self.mode == "plan" and self.plan_kind == "tdd":
-            tools = PLAN_TDD_INVESTIGATE_TOOLS
-        else:
-            tools = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
-        tools = with_edit_features(with_run_mode(tools, self.run_mode), self.edit_features)
-        if self.net_access != "off":
-            # web_search's schema lists the loaded sources, so it is built per call.
-            tools = tools + [search_mod.web_search_tool(t, self.search_sources)
-                             if t["function"]["name"] == "web_search" else t
-                             for t in NET_TOOLS]
-        if self.index is not None:
-            tools = with_index_tools(tools)
-        tools = tools + self._mcp_tools()
+        tools = registry.offered(self._tool_ctx()) + self._mcp_tools()
         off = self.disabled_tools.get(self.mode, set()) - _LOCKED_TOOLS
         if off:
             tools = [t for t in tools if t["function"]["name"] not in off]
@@ -726,14 +728,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
 
     def _role_universe(self) -> list[dict]:
         """Every tool the current role can be offered, whatever the toggles."""
-        if self.mode == "plan":
-            base = PLAN_TDD_INVESTIGATE_TOOLS if self.plan_kind == "tdd" else PLAN_INVESTIGATE_TOOLS
-        elif self._plan_executing():
-            base = PLAN_TDD_EXECUTE_TOOLS if self.plan.tdd else PLAN_EXECUTE_TOOLS
-        else:
-            base = _MODE_TOOLS.get(self.mode, ALL_TOOLS)
-        return (with_edit_features(with_run_mode(base, self.run_mode), self.edit_features)
-                + NET_TOOLS + INDEX_TOOLS + self._mcp_tools())
+        return registry.universe(self._tool_ctx()) + self._mcp_tools()
 
     def tool_choices(self) -> list[dict]:
         """The current role's tools for the frontends' pickers:
@@ -770,6 +765,14 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                         "desc": t["function"].get("description", ""), "params": params})
         return out
 
+    def reload_custom_tools(self) -> str:
+        """/tools reload: read ~/.momo-harness/tools/ again (tools/custom.py)."""
+        self.custom_tools = custom_mod.load_custom_tools()
+        self.rebuild_system_prompt()
+        self.emit_status()
+        return self.custom_tools.summary() or (
+            f"Custom tools: none in {self.custom_tools.folder}")
+
     def set_tool_enabled(self, name: str, on: bool) -> str:
         """Turn one tool on or off for the current role; returns a notice.
         Turning on a net or index tool while its toggle is off turns the toggle
@@ -785,7 +788,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         # is looked up only afterwards.
         if on and group == "net" and self.net_access == "off":
             self.set_net_access("on")
-            others = {t["function"]["name"] for t in NET_TOOLS} - {name}
+            others = NET_TOOL_NAMES - {name}
             notes.append("Internet access: on")
         elif on and group == "index" and not self.index_enabled:
             notes.append(self.set_index(True))
@@ -815,7 +818,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
     def set_net_access(self, access: str) -> None:
         """/net off|on|local.  Turning it on turns every net tool on in every role."""
         if self.net_access == "off" and access != "off":
-            self._clear_choices({t["function"]["name"] for t in NET_TOOLS})
+            self._clear_choices(set(NET_TOOL_NAMES))
         self.net_access = access
         # fetch_url enters/leaves the tool set, so the generated tool reference
         # in the system prompt has to be re-rendered.
@@ -958,6 +961,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         try:
             return dispatch(name, args, self.workdir, self.net_access, self.net_max_bytes,
                             self._fetch_chars(), index=self.index, cancel=self._cancel,
+                            ctx=self._tool_run_ctx(name),
                             index_route=self.index_route, read_budget=self._read_budget(),
                             run_mode=self.run_mode,
                             # made on first use: it creates .momo/runs/ in the workdir
@@ -1821,18 +1825,27 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                         result = self._add_search_source(args)
                     elif self._is_mcp_tool(name):
                         result = self._mcp_call(name, args)
+                    elif (tool := registry.get(name)) is not None and tool.confirm:
+                        # A custom tool that asked for approval of each call.
+                        shown_args = json.dumps(args, ensure_ascii=False)[:500]
+                        if self._confirm(f"Run the tool {name}? Reply 'y' to allow, anything "
+                                         f"else to decline.\n  {shown_args}"):
+                            result = self._dispatch(name, args)
+                        else:
+                            result = ("ERROR: the user declined this call, so it was not run. "
+                                      "Do not retry — ask the user what they would like to do "
+                                      "instead.")
                     else:
                         result = self._dispatch(name, args)
-                    # fetch_url windows its own output (net_max_chars) and says how to
-                    # page on; a generic cut here would slice through the untrusted-
-                    # content fence and point the model at read_file.
-                    # New-mode run_command / command_output / stop_command and MCP
-                    # results (fenced when untrusted) window themselves too.
+                    # A tool that windows its own output (Tool.windows_itself:
+                    # fetch_url pages by net_max_chars behind an untrusted-content
+                    # fence; new-mode run_command and friends return a view of a
+                    # log) must not be cut here; nor MCP results (fenced too).
+                    tool = registry.get(name)
                     if (self.max_tool_result > 0 and len(result) > self.max_tool_result
-                            and name not in ("fetch_url", "web_search")
                             and not self._is_mcp_tool(name)
-                            and not (name in ("run_command", "command_output", "stop_command")
-                                     and self.run_mode == "new")):
+                            and not (tool is not None and tool.windows_itself is not None
+                                     and tool.windows_itself(self._tool_ctx()))):
                         total = len(result)
                         cutoff = result.rfind("\n", 0, self.max_tool_result)
                         if cutoff < self.max_tool_result // 2:
@@ -1994,7 +2007,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._last_failed_call = key if failed else None
         if name == "run_command":
             return self._rerun_note(str(args.get("command") or ""), result)
-        if name not in KEEPS_GREEN:
+        if not keeps_green(name):
             self._last_run = None
         return result
 
@@ -2183,7 +2196,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         # Sessions saved in a mode that no longer exists (e.g. the removed
         # "writing" mode) fall back to design mode.
         mode = data.get("mode", "design")
-        self.mode = mode if mode in _MODE_TOOLS else "design"
+        self.mode = mode if mode in MODES else "design"
         self.workdir = Path(data.get("workdir", str(self.workdir)))
         self.context_pct = data.get("context_pct", None)
         # Sessions from before context_fixed saved every limit, derived or not:

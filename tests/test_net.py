@@ -29,6 +29,7 @@ from pathlib import Path
 from unittest import mock
 
 from harness import net
+from harness.tools import dispatcher as tools_dispatch
 
 WD = Path(__file__).parent
 
@@ -506,8 +507,8 @@ class Dispatch(unittest.TestCase):
         self.assertIn("not supported", out)
 
     def test_schema_registered_for_arg_validation(self):
-        self.assertIn("fetch_url", self.tools._KNOWN_ARGS)
-        self.assertEqual(self.tools._REQUIRED_ARGS["fetch_url"], ["url"])
+        self.assertIn("url", tools_dispatch.known_args("fetch_url"))
+        self.assertEqual(tools_dispatch.required_args("fetch_url"), ["url"])
 
 
 LONG_HTML = ("<html><title>Guide</title><body><div role='navigation'>crumbs</div><main>"

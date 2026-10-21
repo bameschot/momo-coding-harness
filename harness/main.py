@@ -14,7 +14,7 @@ from .controller import Controller
 from .events import ChatEvent
 from .harness import DEFAULT_MAX_OUTPUT_TOKENS, MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness
 from .llm.base import THINK_LEVELS
-from .prompts import _MODE_TOOLS
+from .prompts import MODES
 from .tui import run_tui
 from .web import tls as tls_mod
 from .web.server import is_loopback, start_web_server
@@ -289,7 +289,7 @@ def main():
                 harness.reload_guides()
     else:
         mode = args.mode or prefs.get("mode")
-        harness.set_mode(mode if mode in _MODE_TOOLS else "design")
+        harness.set_mode(mode if mode in MODES else "design")
     if args.context is not None:      # after the restore, which would overwrite it
         harness.context_pct = None
         harness.context_fixed = True
@@ -310,6 +310,8 @@ def main():
     controller = Controller(harness)
     if (guides_note := harness.guides_summary()):
         harness.event_queue.put(ChatEvent("system", guides_note))
+    if (tools_note := harness.custom_tools.summary()):
+        harness.event_queue.put(ChatEvent("system", tools_note))
 
     web = None
     web_notes: list[str] = []

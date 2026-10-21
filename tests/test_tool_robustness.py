@@ -12,6 +12,7 @@ from unittest import mock
 
 from harness import code_index as ci
 from harness import tools
+from harness.tools import common, shell
 from harness.tools import dispatch
 
 
@@ -138,11 +139,11 @@ class RunCommand(Base):
 
 
     def test_default_timeout_is_short_and_says_how_to_ask_for_longer(self):
-        self.assertEqual(tools._clamp_timeout(None), tools._DEFAULT_COMMAND_TIMEOUT)
-        self.assertEqual(tools._clamp_timeout(0), tools._DEFAULT_COMMAND_TIMEOUT)
-        self.assertEqual(tools._clamp_timeout(5000), tools.MAX_COMMAND_TIMEOUT)
-        self.assertEqual(tools._clamp_timeout("300"), 300)
-        with mock.patch.object(tools, "_DEFAULT_COMMAND_TIMEOUT", 1):
+        self.assertEqual(shell.clamp_timeout(None), shell.DEFAULT_COMMAND_TIMEOUT)
+        self.assertEqual(shell.clamp_timeout(0), shell.DEFAULT_COMMAND_TIMEOUT)
+        self.assertEqual(shell.clamp_timeout(5000), tools.MAX_COMMAND_TIMEOUT)
+        self.assertEqual(shell.clamp_timeout("300"), 300)
+        with mock.patch.object(shell, "DEFAULT_COMMAND_TIMEOUT", 1):
             out = self.run_tool("run_command", command="sleep 30")
             self.assertIn("timed out after 1s", out)
             self.assertIn("run it again with timeout= up to 900", out)
@@ -180,7 +181,7 @@ class RunCommand(Base):
                 pass
 
     def test_runaway_output_is_stopped(self):
-        with mock.patch.object(tools, "_MAX_OUTPUT_BYTES", 100_000):
+        with mock.patch.object(shell, "MAX_OUTPUT_BYTES", 100_000):
             out = self.run_tool("run_command", command="yes", timeout=20)
         self.assertTrue(out.startswith("ERROR: command stopped"), out)
         self.assertLess(len(out), 10_000)
@@ -251,6 +252,9 @@ class HarnessDispatch(Base):
             def _fetch_chars(self):
                 return 0
 
+            def _tool_run_ctx(self, name):
+                return None
+
         with mock.patch.object(hmod, "dispatch", side_effect=RuntimeError("boom")):
             out = hmod.Harness._dispatch(H(), "read_file", {"path": "x"})
         self.assertEqual(out, "ERROR: read_file failed: RuntimeError: boom")
@@ -296,7 +300,7 @@ class ReadAndGrep(Base):
     def test_single_file_greps_are_capped(self):
         (self.root / "a.txt").write_text("x\n" * 500)
         out = self.run_tool("grep_file", pattern="x", path="a.txt")
-        self.assertEqual(len(out.splitlines()), tools._MAX_GREP_RESULTS + 1)
+        self.assertEqual(len(out.splitlines()), common.MAX_GREP_RESULTS + 1)
         self.assertIn("of 500 matches", out)
         out = self.run_tool("grep_extract", pattern="x", path="a.txt")
         self.assertIn("of 500 matches", out)
@@ -355,8 +359,8 @@ class Guards(Base):
 
     def test_descriptions_quote_the_limits(self):
         descs = {t["function"]["name"]: t["function"]["description"] for t in tools.ALL_TOOLS}
-        self.assertIn(f"capped at {tools._MAX_FIND_RESULTS} files", descs["find_files"])
-        self.assertIn(f"capped at {tools._MAX_GREP_RESULTS} matches", descs["grep_files"])
+        self.assertIn(f"capped at {common.MAX_FIND_RESULTS} files", descs["find_files"])
+        self.assertIn(f"capped at {common.MAX_GREP_RESULTS} matches", descs["grep_files"])
         self.assertIn("nothing is moved", descs["move_file"])
 
 

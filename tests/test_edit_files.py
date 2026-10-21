@@ -110,11 +110,11 @@ class EditFiles(Base):
         self.assertIn("WARNING: report.py no longer parses", out)
 
     def test_off_with_the_batch_feature(self):
-        names = [t["function"]["name"] for t in tools.with_edit_features(
-            tools.ALL_TOOLS, editing.EDIT_FEATURES - {"batch"})]
+        names = [t["function"]["name"] for t in tools.offered(
+            "coding", edit_features=editing.EDIT_FEATURES - {"batch"})]
         self.assertNotIn("edit_files", names)
-        names = [t["function"]["name"] for t in tools.with_edit_features(
-            tools.ALL_TOOLS, editing.EDIT_FEATURES)]
+        names = [t["function"]["name"] for t in tools.offered(
+            "coding", edit_features=editing.EDIT_FEATURES)]
         self.assertIn("edit_files", names)
 
 

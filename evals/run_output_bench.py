@@ -168,7 +168,7 @@ def prompt_cost() -> dict[str, int]:
     schemas under each run mode — paid on every request."""
     out = {}
     for mode in tools.RUN_MODES:
-        tl = tools.with_run_mode(tools.ALL_TOOLS, mode)
+        tl = tools.offered("coding", run_mode=mode, edit_features=tools.EDIT_FEATURES)
         out[mode] = (len(tools.render_tool_reference(tl)) + len(json.dumps(tl))) // 4
     return out
 

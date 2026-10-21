@@ -6,6 +6,7 @@ file_search and the web server can all import it at load time.
 from __future__ import annotations
 
 import os
+import stat as stat_mod
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -22,6 +23,18 @@ def momo_home() -> Path:
     """~/.momo-harness, where sessions, prefs, logs, the index and run logs live.
     Read per call, so a HOME changed after import (tests) is honoured."""
     return Path.home() / ".momo-harness"
+
+
+def untrusted_reason(path: Path, st) -> str:
+    """Why a file momo would load code or pickles from must not be trusted
+    ('' when it may): not a regular file, not yours, or writable by others."""
+    if not stat_mod.S_ISREG(st.st_mode):
+        return f"{path} is not a regular file"
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return f"{path} is not owned by you"
+    if st.st_mode & 0o022:
+        return f"{path} is writable by other users (chmod 600 it, or delete it)"
+    return ""
 
 
 def split_lines(text: str, keepends: bool = False) -> list[str]:

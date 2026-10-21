@@ -113,7 +113,8 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
     bare-JSON scan anchored to tool-name occurrences in the text.
 
     The bare-JSON pattern is built dynamically from `tools`, so adding a tool
-    to tools.py automatically extends coverage without touching this function.
+    (a file in harness/tools/builtin/, or a custom one) automatically extends
+    coverage without touching this function.
 
     Returns a list of {"name": str, "arguments": dict}.
     """

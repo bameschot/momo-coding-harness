@@ -1041,7 +1041,7 @@ ollama serve</code></pre></div>
 
   <section id="tools" data-group="How it works" data-voice="tools">
     <h2>Tools</h2>
-    <p>What the model can call, by group. The system prompt's tool reference is generated from these schemas, so the model only ever sees the tools its current mode offers. File tools are confined to the working directory, and <code>..</code> escapes are rejected; <code>run_command</code> is a shell, so it isn't, and <code>/run-confirm on</code> has you approve each command. With the <a href="#index">code index</a> on, its <code>index_*</code> tools join these.</p>
+    <p>What the model can call, by group. Each tool is one file in <code>harness/tools/builtin/</code>, and you can add your own (<a href="#tool-structure">How tools are built</a>). The system prompt's tool reference is generated from these schemas, so the model only ever sees the tools its current mode offers. File tools are confined to the working directory, and <code>..</code> escapes are rejected; <code>run_command</code> is a shell, so it isn't, and <code>/run-confirm on</code> has you approve each command. With the <a href="#index">code index</a> on, its <code>index_*</code> tools join these.</p>
     <h3>Read-only (all modes)</h3>
     <div class="table-scroll"><table>
       <tr><th>Tool</th><th>Description</th></tr>
@@ -1095,6 +1095,168 @@ ollama serve</code></pre></div>
       <li><strong>Saved in the session,</strong> not in <code>prefs.json</code>; <code>/new</code> starts with every tool on.</li>
       <li><strong><code>/net</code> and <code>/index</code> switch their tool groups</strong> on or off in every mode, and your per-tool choices are kept for when they're back on. Ticking one of those tools while its group is off turns the group on, with just that tool on in this mode.</li>
       <li>Plan mode's own tools (<code>create_plan</code>, <code>complete_step</code>, <code>revise_plan</code>) can't be switched off.</li>
+    </ul>
+  </section>
+
+  <section id="tool-structure" data-voice="tool-structure">
+    <h2>How tools are built</h2>
+    <p>Every tool the model can call is one Python file. The file declares everything momo needs to know about the tool: the schema the model sees, the function that runs, when the tool is offered and how the harness treats a call. Nothing else lists tools by hand. The per-mode tool sets, the tool reference in the system prompt, the <code>/tools</code> pickers and the tables the harness checks (which tools show a diff, which keep a TDD plan's passing tests valid, which can't be turned off) are all read from these files. Adding a tool means adding a file, for a built-in tool and for <a href="#custom-tools">your own</a> alike.</p>
+
+    <h3 id="tool-layout">Where the code lives</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Path</th><th>What it holds</th></tr>
+      <tr><td><code>harness/tools/builtin/</code></td><td class="wrap">One file per built-in tool, 37 of them (<code>read_file.py</code>, <code>edit_file.py</code>, <code>run_command.py</code>, …). Each ends with <code>TOOL = Tool(...)</code>. Files starting with <code>_</code> are shared helpers, not tools.</td></tr>
+      <tr><td><code>harness/tools/registry.py</code></td><td class="wrap">The <code>Tool</code> class and its fields, loading the tool files, and which tools a mode is offered in which variant</td></tr>
+      <tr><td><code>harness/tools/dispatcher.py</code></td><td class="wrap">Running a call: argument checks, type fixes, guards, the harness state a tool asks for</td></tr>
+      <tr><td><code>harness/tools/reference.py</code></td><td class="wrap">The tool reference in the system prompt, generated from the schemas</td></tr>
+      <tr><td><code>harness/tools/common.py</code>, <code>shell.py</code></td><td class="wrap">Helpers several tools share: reading a file safely, search limits, running a command, saved command logs</td></tr>
+      <tr><td><code>harness/tools/custom.py</code></td><td class="wrap">Loading your tools from <code>~/.momo-harness/tools/</code></td></tr>
+    </table></div>
+    <p>A tool whose real work lives in a bigger module keeps it there, and its file only points at it: the edit tools run <code>harness/editing.py</code>, the code navigation tools <code>code_nav.py</code>, the index tools <code>code_index/</code>, and <code>fetch_url</code> and <code>web_search</code> <code>net.py</code> and <code>search.py</code>. A few tools are answered by the harness loop itself, because they change its state rather than touching files: <code>ask_user</code> and the plan tools. Their files carry the schema and are marked <code>harness=True</code>.</p>
+
+    <h3 id="tool-anatomy">Anatomy of a tool file</h3>
+    <p>A built-in tool, shortened: <code>delete_file.py</code>. A tool file has three parts: the function, the schema, and the <code>Tool</code> that ties them together with how the harness treats the tool.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">harness/tools/builtin/delete_file.py</span></div><pre><code>"""delete_file: remove one file (never a folder)."""
+from pathlib import Path
+
+from ...paths import safe_entry_path
+from ..registry import Tool, tool_schema
+
+
+<span class="com"># 1. The function: the model's arguments, plus workdir; returns the text the model gets back.</span>
+def delete_file(path: str, *, workdir: Path) -> str:
+    p = safe_entry_path(path, workdir)          <span class="com"># an ERROR string when the path leaves the workdir</span>
+    if isinstance(p, str):
+        return p
+    ...
+    return "OK"
+
+
+TOOL = Tool(
+    <span class="com"># 2. The schema: exactly what the model sees.</span>
+    tool_schema("delete_file",
+        "Permanently delete a single file (this cannot be undone). ...",
+        {"path": {"type": "string", "description": "File to delete"}},
+        ["path"]),
+    <span class="com"># 3. How momo offers it and treats a call.</span>
+    run=delete_file,
+    order=470,                  <span class="com"># its place in every tool list</span>
+    group="edit &amp; shell",       <span class="com"># its section in the /tools pickers</span>
+    writes=("path",),           <span class="com"># re-index this path after the call</span>
+    diff=True,                  <span class="com"># the frontends show what changed</span>
+    example={"path": "old-file.py"})   <span class="com"># the example call in the tool reference</span></code></pre></div>
+    <p>The schema text is load-bearing: it is the only thing the model knows about the tool, and a small model picks tools by the first sentence of the description. <code>modes</code> is left at its default here, so <code>delete_file</code> is offered in coding mode, momo mode and a running plan, and nowhere else.</p>
+
+    <h3 id="tool-flow">From file to tool call</h3>
+    <figure class="flow" aria-label="How a tool reaches the model and how a call runs">
+      <div class="flow-col">
+        <div class="box harness"><div class="flow-who">harness · at start</div>Load the tool files<small>every file in <code>builtin/</code>, then yours from <code>~/.momo-harness/tools/</code> (also on <code>/tools reload</code>)</small></div>
+        <div class="side"><b>a broken custom file</b> → reported and skipped; momo still starts</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness · every turn</div>Pick this mode's tools<small>the tool's <code>modes</code>; <code>needs_net</code>, <code>needs_index</code>, run mode and edit features; the schema variant for this context; sorted by <code>order</code>; then MCP tools; minus the ones you turned off with <code>/tools</code></small></div>
+        <div class="side"><b>same settings</b> → the same list, word for word</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Send the schemas and the tool reference<small>the reference in the system prompt is generated from the same schemas, with each tool's example</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">model</div>Call a tool<small>native tool call, or written as text and recovered</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness cond"><div class="flow-who">harness</div>Answer it in the loop, or ask you first<small><code>harness=True</code> tools; <code>confirm=True</code>, <code>run_command</code> with <code>/run-confirm on</code>, <code>fetch_url</code> writes</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness · dispatcher</div>Check, then run<small>the index answers plain searches (<code>index_route</code>) · guards refuse placeholder text · missing or unknown arguments are refused with what to fix · <code>"40"</code> and <code>"true"</code> become numbers and booleans · the <code>inject</code> state is added · <code>run</code></small></div>
+        <div class="side"><b>bad arguments</b> → an <code>ERROR:</code> the model can act on, nothing runs</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>After the call<small><code>after</code> adds hints (e.g. the index tool to use next); the written paths are re-indexed; the result goes back to the model, or a diff to the frontends</small></div>
+      </div>
+      <div class="flow-legend"><span class="model">model</span><span class="harness">harness</span><span class="harness cond">only in some cases</span></div>
+      <figcaption>What a tool file's fields decide, from start-up to a finished call.</figcaption>
+    </figure>
+
+    <h3 id="tool-fields">The <code>Tool</code> fields</h3>
+    <p>All fields but the schema are optional. The defaults suit a custom tool.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Field</th><th>Default</th><th>What it does</th></tr>
+      <tr><th colspan="3">What the model sees</th></tr>
+      <tr><td><code>schema</code></td><td>—</td><td class="wrap"><code>tool_schema(name, description, properties, required)</code>: the function-calling schema</td></tr>
+      <tr><td><code>example</code></td><td>built from the required parameters</td><td class="wrap">The example call in the tool reference</td></tr>
+      <tr><td><code>variants</code>, <code>examples</code>, <code>select</code></td><td>none</td><td class="wrap">Other schemas, picked per context by <code>select(ctx)</code>, each with its own example</td></tr>
+      <tr><td><code>adapt</code></td><td>none</td><td class="wrap">A last change to the schema per context, e.g. <code>web_search</code> listing the loaded sources</td></tr>
+      <tr><th colspan="3">When it is offered</th></tr>
+      <tr><td><code>modes</code></td><td>coding, momo, a running plan</td><td class="wrap">Roles: <code>design</code>, <code>chat</code>, <code>plan</code>, <code>coding</code>, <code>momo</code>, <code>plan-exec</code> (a plan being executed). <code>ALL_ROLES</code> and <code>WRITE_ROLES</code> are ready-made sets</td></tr>
+      <tr><td><code>order</code></td><td>9000</td><td class="wrap">Place in every list. Built-ins: files 100s, code index 200s, code navigation 300s, edits 400s, shell 500s, plan and scratchpad 600–700s, internet 800s</td></tr>
+      <tr><td><code>needs_net</code>, <code>needs_index</code></td><td>False</td><td class="wrap">Only while <code>/net</code> or <code>/index</code> is on</td></tr>
+      <tr><td><code>hidden_by_index</code></td><td>False</td><td class="wrap">Not while the index is on (an index tool replaces it)</td></tr>
+      <tr><td><code>needs_run_mode</code>, <code>needs_edit_feature</code></td><td>none</td><td class="wrap">Only in that <code>/run-mode</code>, or with that edit feature</td></tr>
+      <tr><td><code>requires</code></td><td>none</td><td class="wrap">A check that its dependencies are installed, e.g. tree-sitter</td></tr>
+      <tr><th colspan="3">How it runs</th></tr>
+      <tr><td><code>run</code></td><td>—</td><td class="wrap">The function: the schema's arguments as keywords, <code>workdir</code>, and the <code>inject</code> state</td></tr>
+      <tr><td><code>inject</code></td><td>none</td><td class="wrap">Harness state the function receives: <code>cancel</code> (set by Esc), <code>index</code>, <code>net_access</code>, <code>read_budget</code>, <code>run_store</code>, <code>edit_features</code>, <code>ctx</code>, … Never a model argument, so the model can't set them</td></tr>
+      <tr><td><code>confirm</code></td><td>False</td><td class="wrap">You approve each call</td></tr>
+      <tr><td><code>guard</code>, <code>body_arg</code></td><td>none</td><td class="wrap">Refuse a call up front; the argument holding file text, refused when it is a history placeholder or a cut-off note</td></tr>
+      <tr><td><code>after</code></td><td>none</td><td class="wrap">Change the result: add a hint, mark the index stale</td></tr>
+      <tr><th colspan="3">How the harness treats it</th></tr>
+      <tr><td><code>writes</code>, <code>written</code></td><td>none</td><td class="wrap">Path arguments it writes: re-indexed after the call, and <code>.momo/</code> is set up before a write there</td></tr>
+      <tr><td><code>keeps_green</code></td><td>False</td><td class="wrap">It changes no file, so a TDD plan's passing tests stay valid after a call</td></tr>
+      <tr><td><code>windows_itself</code></td><td>none</td><td class="wrap">It bounds its own output, so <code>/tool-result</code> doesn't cut it</td></tr>
+      <tr><td><code>group</code></td><td><code>custom</code></td><td class="wrap">Its section in the <code>/tools</code> pickers</td></tr>
+      <tr><th colspan="3">Built-in tools only</th></tr>
+      <tr><td><code>harness</code>, <code>locked</code>, <code>diff</code>, <code>index_route</code></td><td>False / none</td><td class="wrap">Answered by the harness loop; can't be turned off; shown as a diff; answered from the code index. These rely on harness internals</td></tr>
+    </table></div>
+
+    <h3 id="tool-variants">One tool, several schemas</h3>
+    <p>Some tools look different depending on the session. <code>run_command</code> has two schemas: in <code>/run-mode new</code> it takes <code>tail</code>, <code>grep</code> and <code>background</code> and saves the output to a log, and in <code>classic</code> mode it only takes <code>command</code> and <code>timeout</code>. <code>create_plan</code> asks for a test command and expected outcomes in a test-driven plan. With the code index on, <code>grep_files</code> and <code>find_files</code> gain a first sentence pointing at the index tools. The file declares each schema once and <code>select</code> or <code>adapt</code> picks per context:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">harness/tools/builtin/run_command.py</span></div><pre><code>TOOL = Tool(
+    tool_schema("run_command", "Run a shell command in the working directory. Pass tail=N ...", ...),
+    variants={"classic": _CLASSIC},
+    examples={"classic": {"command": "python -m pytest"}},
+    select=lambda ctx: "classic" if ctx.run_mode == "classic" else "",   <span class="com"># "" = the main schema</span>
+    ...)</code></pre></div>
+
+    <h3 id="tool-builtin-add">Adding a built-in tool</h3>
+    <ol>
+      <li>Add <code>harness/tools/builtin/&lt;name&gt;.py</code>, named after the tool, ending with <code>TOOL = Tool(...)</code>.</li>
+      <li>Pick an <code>order</code> in the group's range; the gaps of 10 leave room.</li>
+      <li>Run the tests. <code>tests/test_tool_registry.py</code> checks that every file defines one tool named after it, that the orders are unique, that every schema argument and injected value reaches the function, and that each example fits its schema.</li>
+      <li>A new tool changes what the model sees, so <code>tests/test_tool_registry_golden.py</code> fails on purpose. It pins every schema, the tool reference and the system prompt across 192 combinations of mode and settings. Regenerate it with <code>MOMO_REGEN_GOLDEN=1</code> once the change is meant.</li>
+    </ol>
+
+    <h3 id="custom-tools">Your own tools</h3>
+    <p>Put a tool file in <code>~/.momo-harness/tools/</code>. momo loads it at start and on <code>/tools reload</code>, and it shows up in the mode's tool list, the tool reference and the <code>/tools</code> pickers under "custom", where you can turn it off per mode like any other tool. The same <code>Tool</code> class applies, imported from <code>harness.tools</code>. A complete example, <code>docs/examples/tools/word_count.py</code>:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">~/.momo-harness/tools/word_count.py</span></div><pre><code>from pathlib import Path
+from harness.tools import ALL_ROLES, Tool, read_text, tool_schema
+
+def word_count(path: str, *, workdir: Path) -> str:
+    got = read_text(path, workdir, refuse_binary=True)   <span class="com"># stays inside the workdir</span>
+    if isinstance(got, str):
+        return got                                       <span class="com"># an "ERROR: ..." the model can act on</span>
+    _, text = got
+    return f"{path}: {len(text.splitlines()):,} lines, {len(text.split()):,} words"
+
+TOOL = Tool(
+    tool_schema("word_count",
+                "Count the lines, words and characters of a text file in the project.",
+                {"path": {"type": "string", "description": "File to count, e.g. 'README.md'"}},
+                ["path"]),
+    run=word_count, modes=ALL_ROLES, keeps_green=True, example={"path": "README.md"})</code></pre></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">shell</span></div><pre><code>mkdir -p ~/.momo-harness/tools &amp;&amp; chmod 700 ~/.momo-harness/tools
+cp docs/examples/tools/word_count.py ~/.momo-harness/tools/
+chmod 600 ~/.momo-harness/tools/word_count.py
+<span class="com"># then in momo:  /tools reload</span></code></pre></div>
+    <p>A tool that needs the user asks for <code>inject=("ctx",)</code> and gets a small context instead of the harness itself: <code>ctx.workdir</code>, <code>ctx.cancel</code>, <code>ctx.ask_user(question)</code>, which blocks until you answer, and <code>ctx.note(text)</code>, a line in the chat. With <code>confirm=True</code> momo asks you before every call and tells the model when you declined.</p>
+    <p class="note"><strong>A custom tool is code that runs inside momo.</strong> It is only loaded from <code>~/.momo-harness/tools/</code>, never from the workdir, where a cloned repository could bring one along, and only when the folder (<code>chmod 700</code>) and the file (<code>chmod 600</code>) are yours and not writable by others, the same rule as the saved code index. A file that fails to load is reported at start and in <code>/tools list</code>, and momo starts without it. Custom tools can't reuse a built-in name, take the <code>mcp_</code> prefix, or set the built-in-only fields.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/tools reload</code></td><td class="wrap">Load <code>~/.momo-harness/tools/</code> again (refused while a turn runs)</td></tr>
+      <tr><td><code>/tools errors</code></td><td class="wrap">Why a tool file did not load, with the traceback</td></tr>
+      <tr><td><code>/tools &lt;name&gt; off</code></td><td class="wrap">Turn it off for this mode, like any tool</td></tr>
+    </table></div>
+
+    <h3 id="tool-tips">Writing a tool a small model uses well</h3>
+    <ul>
+      <li><strong>Lead with what it is for.</strong> The first sentence of the description is how a small model chooses. A feature mentioned only at the end of a parameter description got used 7 times in 15; named up front, 3 in 3.</li>
+      <li><strong>Return errors it can act on.</strong> Start with <code>ERROR:</code> and say what to do instead: the path that would work, the argument that is missing.</li>
+      <li><strong>Keep results bounded.</strong> Cap long output, say what was left out, and point at how to get the rest.</li>
+      <li><strong>Hint in the result, not the prompt.</strong> A pointer to the next useful call, inside the tool's own result, steered the 9B more reliably than any rule in the system prompt.</li>
+      <li><strong>Honour Esc.</strong> A slow tool takes <code>inject=("cancel",)</code> and stops when <code>cancel.is_set()</code>.</li>
     </ul>
   </section>
 
@@ -1661,6 +1823,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/think-history off|turn|all</code></td><td class="wrap"><a href="#think-history">Send the model's own reasoning back</a> to it (remembered)</td></tr>
       <tr><td><code>/tools [list|&lt;name&gt;]</code></td><td class="wrap">Pick this mode's tools, list them, or show one. See <a href="#tool-choices">Turning tools on and off</a></td></tr>
       <tr><td><code>/tools [&lt;name&gt;…] on|off</code></td><td class="wrap">Turn named tools on or off for this mode (saved in the session), or all tool calls</td></tr>
+      <tr><td><code>/tools reload|errors</code></td><td class="wrap">Load your <a href="#custom-tools">custom tools</a> again, or show why one did not load</td></tr>
       <tr><td><code>/run-confirm on|off</code></td><td class="wrap">Ask y/N before each <code>run_command</code></td></tr>
     </table></div>
     <h3>Conversation &amp; context</h3>
@@ -1748,6 +1911,8 @@ curl -sN localhost:8765/api/events</code></pre></div>
 │   └── 2026-09-23T18-04-11/r1.log  <span class="com"># run_command output, only when the workdir's .momo/ can't be used</span>
 ├── search_sources/
 │   └── docsrs.json       <span class="com"># your web_search sources (/search-sources save)</span>
+├── tools/
+│   └── word_count.py     <span class="com"># your custom tools (folder 0700, files 0600)</span>
 ├── mcp.json              <span class="com"># your MCP servers (/mcp add)</span>
 ├── mcp-approved.json     <span class="com"># project MCP servers you approved or denied</span>
 ├── mcp-logs/
@@ -1770,6 +1935,7 @@ curl -sN localhost:8765/api/events</code></pre></div>
       <tr><td><code>mcp.json</code></td><td class="wrap">Your <a href="#mcp">MCP servers</a>, in the <code>mcpServers</code> format. A project's servers live in its own <code>.mcp.json</code> instead.</td></tr>
       <tr><td><code>mcp-approved.json</code></td><td class="wrap">Fingerprints of approved and denied project servers (workdir, name and launch settings). Mode 0600.</td></tr>
       <tr><td><code>mcp-logs/*.log</code></td><td class="wrap">stderr of each stdio server, capped at about 1 MB with one rotated copy.</td></tr>
+      <tr><td><code>tools/*.py</code></td><td class="wrap">Your <a href="#custom-tools">custom tools</a>. Code that runs inside momo: loaded only if the folder and file are yours and not writable by others. Never read from the workdir.</td></tr>
       <tr><td><code>search_sources/*.json</code></td><td class="wrap">Your own <a href="#search">web_search sources</a>. Loaded after the shipped sources; a file with a shipped name overrides it. Never read from the workdir.</td></tr>
       <tr><td><code>tls/</code></td><td class="wrap">Folder 0700, keys 0600. Deleting it makes a new CA on the next <code>--web-tls auto</code> start, and every device must then trust the new one.</td></tr>
     </table></div>
@@ -2023,6 +2189,11 @@ const SPEECH = {
     "< grep is love", "< read_symbol by line no.", "< find_references!",
     "< sandboxed to the workdir", "< .. escapes? rejected", "< edit_file: one match only",
     "< run_command can ask first", "< code_outline a folder!",
+  ],
+  "tool-structure": [
+    "< one file, one tool", "< /tools reload!", "< TOOL = Tool(...)",
+    "< chmod 600 it~", "< never from the repo", "< order=470, purrr",
+    "< first sentence matters", "< ERROR: and how to fix",
   ],
   scratch: [
     "< scratch, not src!", "< .momo/ is mine~", "< git can't see it",

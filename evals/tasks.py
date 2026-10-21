@@ -80,11 +80,13 @@ TASKS: list[Task] = [
     ),
     Task(
         id="blast-radius",
-        prompt="I want to rename the function `dispatch` in harness/tools.py. "
+        prompt="I want to rename the function `dispatch` in harness/tools/dispatcher.py. "
                "Which files and lines must I update?",
         ideal=frozenset({"find_references", "index_callers"}),
-        must=("commands.py", "harness.py", "tools.py"),
-        note="Watch for a whole-file read of tools.py (~12k tokens) before the "
+        # harness/tools/__init__.py re-exports it (since the 2026-10-21 tool split;
+        # before, the task named harness/tools.py and must had "tools.py").
+        must=("commands.py", "harness.py", "tools/__init__.py"),
+        note="Watch for a whole-file read of the defining file before the "
              "find_references call that actually answers it.",
         max_calls=2,
     ),
@@ -212,7 +214,10 @@ INDEX_TASKS: list[Task] = [
         id="central-modules",
         prompt="Which three modules under harness/ are imported by the most other files?",
         ideal=frozenset({"index_map", "file_dependencies"}),
-        must=("harness.py", "tools.py", "base.py"),
+        # Since the 2026-10-21 tool split every tool file imports tools/registry.py
+        # (was: harness.py, tools.py, base.py).  code_nav.py leads paths.py and
+        # session.py by one importer only.
+        must=("registry.py", "harness.py", "code_nav.py"),
         note="index_map ranks by importers; without it this is a file-by-file survey.",
         max_calls=2,
     ),
@@ -220,7 +225,7 @@ INDEX_TASKS: list[Task] = [
         id="file-card",
         prompt="Which files import harness/net.py, and which of its functions do they use?",
         ideal=frozenset({"index_file", "file_dependencies"}),
-        must=("commands.py", "main.py", "tools.py", "format_size"),
+        must=("commands.py", "main.py", "fetch_url.py", "format_size"),   # was tools.py
         max_calls=2,
     ),
     Task(

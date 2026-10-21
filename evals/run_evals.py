@@ -186,7 +186,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         # act on (wrong-but-understood arguments). The second costs a round trip;
         # the first means the model cannot drive the tool at all.
         # Anchor on the ERROR prefix, never a bare substring: these eval tasks
-        # read harness/tools.py, whose source contains dispatch's own error
+        # read harness/tools/dispatcher.py, whose source contains dispatch's own error
         # strings, so an unanchored match counts a successful read as a rejection.
         "rejected_calls": sum(1 for r in results
                               if r.startswith("ERROR")
@@ -328,7 +328,8 @@ def _reruns(calls) -> int:
 # Harness code whose behaviour reaches the model's tool results; the prompt and
 # tool schemas are fingerprinted separately, as rendered.
 _CODE_FILES = ("harness/tools.py", "harness/code_nav.py", "harness/harness.py",
-               "harness/net.py", "harness/run_store.py", "harness/editing.py")
+               "harness/net.py", "harness/run_store.py", "harness/editing.py") + tuple(
+    sorted(p.relative_to(REPO).as_posix() for p in (REPO / "harness" / "tools").rglob("*.py")))
 # The index package (and the single module it was before, for an older worktree).
 _INDEX_CODE_FILES = ("harness/code_index.py",) + tuple(
     sorted(p.relative_to(REPO).as_posix() for p in (REPO / "harness" / "code_index").glob("*.py")))

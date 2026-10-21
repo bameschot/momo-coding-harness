@@ -216,7 +216,9 @@ class Dispatch(unittest.TestCase):
         def two(a, *, workdir):
             return a
 
-        with mock.patch.dict(tools._EXECUTORS, {"boom": boom, "two": two}):
+        fake = {n: tools.Tool(tools.tool_schema(n, "test tool", {}, []), run=fn)
+                for n, fn in (("boom", boom), ("two", two))}
+        with mock.patch.dict(tools.registry._BUILTIN, fake):
             with self.assertRaises(TypeError):
                 tools.dispatch("boom", {}, Path("."))
             self.assertIn("ERROR: bad arguments for two", tools.dispatch("two", {}, Path(".")))

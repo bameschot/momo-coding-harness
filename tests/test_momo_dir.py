@@ -17,7 +17,7 @@ from harness.ignore_rules import Rules
 from harness.plan import LEGACY_PLAN_FILENAME, Plan, Step, read_plan_file, write_plan_file
 from harness.plan import delete_plan_file
 from harness.plan_runner import KEEPS_GREEN
-from harness.prompts import _MODE_TOOLS
+from harness.prompts import MODES
 from harness.tools import PLAN_EXECUTE_TOOLS, PLAN_TDD_EXECUTE_TOOLS, dispatch
 
 from test_run_output import _Scripted
@@ -208,7 +208,7 @@ class HarnessWiring(unittest.TestCase):
         return {t["function"]["name"] for t in self.h._current_tools()}
 
     def test_offered_in_every_mode_and_named_in_the_prompt(self):
-        for mode in _MODE_TOOLS:
+        for mode in MODES:
             with self.subTest(mode=mode):
                 self.h.set_mode(mode)
                 self.assertIn("scratch_write", self.names())

@@ -105,9 +105,8 @@ class Sections(Base):
     def test_prompt_names_only_offered_tools(self):
         """No role text or generated section may teach a tool the mode does not
         offer — the hand-copied role tables went stale exactly this way."""
-        from harness.tools import ALL_TOOLS, INDEX_TOOLS, NET_TOOLS, PLAN_TOOLS, with_run_mode
-        every = {t["function"]["name"] for t in
-                 with_run_mode(ALL_TOOLS, "new") + INDEX_TOOLS + NET_TOOLS + PLAN_TOOLS}
+        from harness.tools import registry
+        every = {t.name for t in registry.all_tools()}
         for net in ("off", "on"):
             self.h.set_net_access(net)
             for index in (None, _StubIndex(self.home)):

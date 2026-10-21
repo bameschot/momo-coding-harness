@@ -4,7 +4,8 @@ Backs the code_outline / find_symbol / read_symbol / find_references /
 file_dependencies tools.  Everything here is read-only.  Grammars come from the
 per-language ``tree-sitter-<lang>`` wheels, which bundle the compiled grammar, so
 nothing is downloaded at runtime.  If tree-sitter is not installed, AVAILABLE is
-False and tools.py leaves these tools out of every mode's tool set.
+False and these tools are offered in no mode (their tool files declare
+``requires=lambda: code_nav.AVAILABLE``, see harness/tools/builtin/).
 
 code_index builds on this module's internals (node-type tables, classifiers,
 _Index) by design: the two are one tree-sitter subsystem.  Every other module

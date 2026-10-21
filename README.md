@@ -617,6 +617,8 @@ Switch modes with `/design`, `/chat`, `/plan`, `/code`, `/momo`, or `Shift+Tab`.
 
 ## Available Tools
 
+Each tool is one file in [`harness/tools/builtin/`](harness/tools/builtin/): its schema (what the model sees), the function that runs it, and how the harness treats it. The per-mode tool lists, the tool reference in the system prompt and the `/tools` pickers are all built from those files. You can add your own tools the same way, see [Adding a tool](#adding-a-tool).
+
 ### Read-only (all modes)
 
 | Tool | Description |
@@ -735,6 +737,54 @@ In the web UI, the wrench button in the status bar opens the same list. Hover a 
 - **Some tools are locked.** `create_plan`, `complete_step` and `revise_plan` can't be turned off, because plan mode needs them. While the index is on, `find_references` and `file_dependencies` show as replaced by the index.
 - Plan mode's choices apply both while investigating and while executing a plan.
 - Changing tools is refused while a turn is running; interrupt or wait first.
+
+## Adding a tool
+
+A tool is one Python file that ends with `TOOL = Tool(...)`. The built-in ones live in `harness/tools/builtin/`, and dropping a new file there registers it: no list or table elsewhere needs editing. **Your own tools** go in `~/.momo-harness/tools/`, where momo loads them at start and on `/tools reload`. A complete example is [`docs/examples/tools/word_count.py`](docs/examples/tools/word_count.py):
+
+```python
+from pathlib import Path
+from harness.tools import ALL_ROLES, Tool, read_text, tool_schema
+
+def word_count(path: str, *, workdir: Path) -> str:
+    got = read_text(path, workdir, refuse_binary=True)   # stays inside the workdir
+    if isinstance(got, str):
+        return got                                       # an "ERROR: ..." the model can act on
+    _, text = got
+    return f"{path}: {len(text.splitlines()):,} lines, {len(text.split()):,} words"
+
+TOOL = Tool(
+    tool_schema("word_count",
+                "Count the lines, words and characters of a text file in the project.",
+                {"path": {"type": "string", "description": "File to count, e.g. 'README.md'"}},
+                ["path"]),
+    run=word_count, modes=ALL_ROLES, keeps_green=True, example={"path": "README.md"})
+```
+
+`run` is called with the model's arguments plus `workdir`, and returns the text the model gets back. Arguments are checked against the schema first: a missing or unknown one is refused with an error the model can act on, and `"40"` / `"true"` are turned into numbers and booleans where the schema says so. Start the description with what the tool is for, since a small model picks tools by their first sentence. The `Tool` fields (documented in `harness/tools/registry.py`):
+
+| Field | Default | What it does |
+|---|---|---|
+| `run` | — | The function. Takes the schema's arguments, `workdir`, and whatever `inject` names |
+| `modes` | coding, momo, a running plan | Roles that offer it: `design`, `chat`, `plan`, `coding`, `momo`, `plan-exec` (`ALL_ROLES`, `WRITE_ROLES`) |
+| `order` | 9000 | Its place in every tool list. Built-in tools use 100–820 in steps of 10 |
+| `group` | `custom` | Its section in the `/tools` pickers |
+| `inject` | none | Harness state passed as keyword arguments: `cancel` (Esc), `index`, `net_access`, `read_budget`, `ctx`, … |
+| `example` | built from the required parameters | The example call in the tool reference |
+| `keeps_green` | False | It changes no file, so a TDD plan's passing tests stay valid after a call |
+| `confirm` | False | Ask the user before each call |
+| `needs_net` / `needs_index` | False | Only offered while `/net` / `/index` is on |
+| `writes`, `body_arg` | none | Path arguments it writes (re-indexed after the call) and the argument holding file text (refused when it holds a history placeholder or a cut-off note) |
+| `variants`, `select`, `adapt` | none | Other schemas for some contexts (run mode, TDD plan, …), and a last change to the schema per context |
+
+`inject=("ctx",)` gives the tool a small context instead of the harness itself: `ctx.workdir`, `ctx.cancel`, `ctx.ask_user(question)` (blocks until the user answers) and `ctx.note(text)` (a line in the chat).
+
+**Custom tools are code that runs inside momo**, so momo only loads them from `~/.momo-harness/tools/`, never from the workdir, where a cloned repository could bring one along. The folder must be yours and not writable by others (`chmod 700`), and so must each file (`chmod 600`). A file that fails to load is reported at start and in `/tools list`, and momo starts without it; `/tools errors` shows the traceback. Custom tools cannot reuse a built-in name, use the `mcp_` prefix, or set the fields only the harness can honour (`harness`, `locked`, `diff`, `index_route`). Files starting with `_` are helpers for the others and are not loaded as tools.
+
+| Command | Effect |
+|---|---|
+| `/tools reload` | Load `~/.momo-harness/tools/` again (refused while a turn runs) |
+| `/tools errors` | Why a custom tool file did not load, with the traceback |
 
 ## Command output
 
@@ -1054,7 +1104,7 @@ python -m unittest discover tests
 
 `tests/` checks that the tools work. `evals/` checks whether the model actually
 *uses* them — which matters because the in-prompt tool reference is generated from
-the schemas in `harness/tools.py`, so reworded descriptions change behaviour.
+the tool schemas (one file per tool in `harness/tools/builtin/`), so reworded descriptions change behaviour.
 
 ```bash
 python evals/run_evals.py --runs 3                      # needs a model server
@@ -1278,6 +1328,8 @@ Type any command in the input bar:
 | `/tools <name>` | Show what a tool does, its parameters, and whether it is on in this mode |
 | `/tools <name> [<name>…] on\|off` | Turn tools on or off for the current mode (saved in the session) |
 | `/tools on\|off` | Enable or disable tool calls entirely (off = model receives no tool schemas) |
+| `/tools reload` | Load your custom tools in `~/.momo-harness/tools/` again — see [Adding a tool](#adding-a-tool) |
+| `/tools errors` | Why a custom tool file did not load, with the traceback |
 | `/system-prompt` | Show the composed system prompt (TUI: `$PAGER`; web: side panel) — alias `/prompt`, see [Seeing the system prompt](#seeing-the-system-prompt) |
 | `/system-prompt list` | List the system prompt's parts and their estimated size |
 | `/net` | Show internet access state (off / on / local) |
@@ -1487,6 +1539,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`, except what belo
 ├── index/<hash>.filter      # which files that workdir's index covers (/index-filter)
 ├── runs/<timestamp>/rN.log  # run_command output only when the workdir's .momo/ can't be used
 ├── search_sources/*.json    # your web_search sources (/search-sources save, or add your own)
+├── tools/*.py               # your custom tools (Adding a tool); folder 0700, files 0600
 └── tls/                     # only with --web-tls auto (folder 0700, keys 0600)
     ├── momo-ca.pem          # the CA certificate you trust on your devices
     ├── momo-ca.key          # the CA's private key — never share
@@ -1502,6 +1555,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`, except what belo
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |
 | `runs/<session>/rN.log` | Fallback for `run_command` logs when the workdir's `.momo/` is read-only or a symlink (normally they are in `<workdir>/.momo/runs/`) | Last 20 per session; deleted on `/clear`, `/new` and session load; other sessions' folders removed after 3 days. Logs from before `.momo/` empty themselves this way |
+| `tools/*.py` | Your custom tools, see [Adding a tool](#adding-a-tool) | Code that runs inside momo: loaded only if the folder and file are yours and not writable by others. Never read from the workdir |
 | `search_sources/*.json` | Your own `web_search` sources: ones you wrote, and ones saved with `/search-sources save` | Loaded after the shipped sources; a file with a shipped name overrides it. Never read from the workdir. Specs may not hold credential headers |
 | `tls/` | momo's local CA and HTTPS certificate | Deleting it creates a new CA on the next `--web-tls auto` start; every device must trust it again |
 

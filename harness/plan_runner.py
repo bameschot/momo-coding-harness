@@ -8,10 +8,10 @@ import re
 
 from . import tdd as tdd_mod
 from . import tools as tools_mod
+from .tools import registry
 from .events import ChatEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
 from .plan import (ACCEPTANCE_TAG, PLAN_FILENAME, Plan, Step, delete_plan_file, read_plan_file,
                    str_list, write_plan_file)
-from .tools import INDEX_TOOL_NAMES
 
 
 # A TDD step that ends with a text reply gets its gate failure back this often
@@ -20,11 +20,15 @@ _TDD_TEXT_RETRIES = 2
 
 TDD_MAX_REFUSALS = 3   # gate refusals in a row before the user is asked
 
-# Tools that cannot change files: a green run of the test command stays valid
-# across them (tdd gate reuse).  Any other call, run_command included, ends it.
-KEEPS_GREEN = ({t["function"]["name"] for t in tools_mod.READ_ONLY_TOOLS + tools_mod.CODE_NAV_TOOLS}
-                | set(INDEX_TOOL_NAMES) | {"command_output", "stop_command", "ask_user", "complete_step",
-                                           "scratch_write"})     # the scratchpad is not the project
+# Tools that cannot change files (Tool.keeps_green): a green run of the test
+# command stays valid across them (tdd gate reuse).  Any other call,
+# run_command included, ends it.  KEEPS_GREEN: the built-in ones.
+KEEPS_GREEN = tools_mod.KEEPS_GREEN
+
+
+def keeps_green(name: str) -> bool:
+    tool = registry.get(name)
+    return tool is not None and tool.keeps_green
 
 # Steps a planner writes that a TDD plan does itself: running or keeping the
 # suite green ("Run the full test suite", "Keep existing add tests green") and
@@ -294,7 +298,7 @@ class PlanRunnerMixin:
             code, self._last_run_exit = self._last_run_exit, None
             self._tdd_green = code == 0 and tdd_mod.same_command(
                 str(args.get("command") or ""), self.plan.test_command)
-        elif name not in KEEPS_GREEN and not self._mcp_keeps_green(name):
+        elif not keeps_green(name) and not self._mcp_keeps_green(name):
             self._tdd_green = False
 
     def _check_step_command(self, idx: int):
