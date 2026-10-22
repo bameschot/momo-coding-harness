@@ -886,6 +886,74 @@ class Windowing(unittest.TestCase):
         self.assertEqual(net._window("abc", 99, None, 10, notes), "")
         self.assertIn("past the end", notes[0])
 
+    def test_outline_gives_each_heading_its_offset(self):
+        out = net._window(self.BODY, 0, None, 1000, [])
+        outline = out.split("[sections on this page:]\n")[1].split("\n")
+        for line in outline:
+            title, at = line.rsplit("  @", 1)
+            self.assertTrue(self.BODY[int(at):].startswith(title), line)
+
+    def test_outline_collapses_deep_levels_and_opens_the_current_section(self):
+        body = "".join(f"## Class {i}\n" + "".join(f"### method {i}.{j}\nbody\n" for j in range(10))
+                       for i in range(10))
+        at = body.index("## Class 4")
+        lines = net._outline(body, at)
+        self.assertLessEqual(len(lines), net._OUTLINE_MAX)
+        self.assertTrue(any(ln.startswith("## Class 9  @") for ln in lines))
+        self.assertIn("(+10 subsections)", next(ln for ln in lines if ln.startswith("## Class 1 ")))
+        self.assertTrue(any(ln.startswith("### method 4.9") for ln in lines))
+        self.assertFalse(any(ln.startswith("### method 1.") for ln in lines))
+
+    def test_outline_opens_the_next_section_when_the_current_one_is_a_title(self):
+        # rustdoc: a one-line title section at the top, then the page's real one.
+        body = "# Vec in std::vec\n# Struct Vec\n" + "".join(
+            f"## Part {i}\n" + "".join(f"### item {i}.{j}\nbody\n" for j in range(10))
+            for i in range(10))
+        lines = net._outline(body, 0)
+        self.assertEqual(len(lines), net._OUTLINE_MAX)
+        self.assertTrue(any(ln.startswith("### item 0.0  @") for ln in lines))
+
+    def test_outline_opens_subsections_nearest_the_reader_first(self):
+        body = "# Guide\n" + "".join(f"## Part {i}\n" + "".join(
+            f"### item {i}.{j}\nbody\n" for j in range(10)) for i in range(10)) + "## Last\nend\n"
+        lines = net._outline(body, body.index("## Last"))
+        self.assertTrue(any(ln.startswith("### item 9.9  @") for ln in lines))
+        self.assertFalse(any(ln.startswith("### item 0.0  @") for ln in lines))
+
+    def test_outline_too_long_at_the_top_shows_the_lines_near_the_reader(self):
+        body = "".join(f"## Function {i}\nbody\n" for i in range(100))
+        lines = net._outline(body, body.index("## Function 70"))
+        self.assertTrue(lines[0].startswith("… (") and "earlier" in lines[0])
+        self.assertTrue(lines[-1].startswith("… (") and "more" in lines[-1])
+        self.assertTrue(any(ln.startswith("## Function 70  @") for ln in lines))
+
+    def test_outline_skips_comments_in_code(self):
+        body = "## Real\n```\n# a shell comment\n```\n" + "x " * 600
+        self.assertEqual([ln.split("  @")[0] for ln in net._outline(body)], ["## Real"])
+
+    def test_find_shows_one_section(self):
+        notes = []
+        out = net._window(self.BODY, 0, "part 3", 5000, notes)
+        nxt = self.BODY.index("## Part 4")
+        self.assertEqual(out.split("\n\n[sections")[0], self.BODY[self.BODY.index("## Part 3"):nxt])
+        self.assertIn(f"continues at offset={nxt}", notes[0])
+
+    def test_find_names_the_other_matches(self):
+        body = "".join(f"## f{i}\nintro\n### Parameters\nx{i}\n" for i in range(3)) + "y " * 400
+        notes = []
+        out = net._window(body, 0, "parameters", 200, notes)
+        self.assertTrue(out.startswith("### Parameters\nx0"))
+        others = [m.start() for m in re.finditer("### Parameters", body)][1:]
+        self.assertIn(f"offsets {others[0]} (heading), {others[1]} (heading)", notes[0])
+
+    def test_find_falls_back_to_the_best_passage(self):
+        body = ("## Setup\nInstall it.\n\n## Errors\nRequests that fail are retried with "
+                "exponential backoff.\n\n" + "filler words here. " * 100)
+        notes = []
+        out = net._window(body, 0, "retries backoff", 300, notes)
+        self.assertTrue(out.startswith("Requests that fail"), out[:60])
+        self.assertIn("best matches its words", notes[0])
+
     def test_fence_survives_windowing(self):
         body = ("x" * 5000) + net._END + ("y" * 5000)
         out = net._render("u", "u", 200, "OK", _headers("Content-Type: text/plain\n"),
@@ -1005,6 +1073,32 @@ class PagingLive(unittest.TestCase):
         out = self.fetch("/long", offset=nxt)
         self.assertEqual(HITS["/long"], 1)
         self.assertIn(f"showing chars {nxt:,}–", out)
+
+    def test_follow_ups_parse_the_page_once(self):
+        with mock.patch.object(html_text, "convert", wraps=html_text.convert) as conv:
+            first = self.fetch("/long")
+            nxt = int(re.search(r"offset=(\d+)", first).group(1))
+            self.fetch("/long", find="installation")
+            self.fetch("/long", offset=nxt)
+            self.fetch("/long", links="*")
+        self.assertEqual(conv.call_count, 1)
+        self.assertEqual(HITS["/long"], 1)
+
+    def test_web_search_download_parsed_once_for_fetch_url(self):
+        with mock.patch.object(html_text, "convert", wraps=html_text.convert) as conv:
+            got = net.fetch_page(f"{self.base}/long", allow_private=True,
+                                 max_bytes=net.DEFAULT_MAX_BYTES)
+            net._decoded(got)                       # what web_search read=true does
+            out = self.fetch("/long", find="installation")
+        self.assertEqual(conv.call_count, 1)
+        self.assertIn("page cache", out)
+
+    def test_extracted_text_counts_toward_the_byte_ceiling(self):
+        self.fetch("/long")
+        self.fetch("/long", offset=10)
+        with net._cache_lock:
+            entry = next(iter(net._cache.values()))[1]
+            self.assertGreater(net._entry_bytes(entry), len(entry["raw"]))
 
     def test_plain_fetch_always_refetches(self):
         self.fetch("/long")

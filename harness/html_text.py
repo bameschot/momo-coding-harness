@@ -27,6 +27,7 @@ Then, on the tree:
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -45,6 +46,7 @@ class Page:
     text: str             # with the page title as a '# ' line when the body lacks it
     title: str
     links: list[Link] = field(default_factory=list)
+    note: str = ""        # how the text was got, when it is not the rendered page
 
 
 # ── tree ──────────────────────────────────────────────────────────────────────
@@ -114,6 +116,8 @@ class _TreeBuilder(HTMLParser):
         self.stack = [self.root]
         self.head: Node | None = None
         self._head_closed = False
+        self.scripts = 0
+        self.data_scripts: list[Node] = []     # see _embedded_text
 
     def _close(self, tags, scope=_SCOPE) -> bool:
         """Pop through the nearest open element in `tags`, unless an element
@@ -157,6 +161,10 @@ class _TreeBuilder(HTMLParser):
         parent.kids.append(node)
         if tag == "head" and self.head is None:
             self.head = node
+        if tag == "script":
+            self.scripts += 1
+            if a.get("id") == "__NEXT_DATA__" or a.get("type", "").lower() == "application/ld+json":
+                self.data_scripts.append(node)
         if tag not in VOID_TAGS and len(self.stack) < _MAX_DEPTH:
             self.stack.append(node)
 
@@ -181,15 +189,19 @@ class _TreeBuilder(HTMLParser):
             parent.kids.append(data)
 
 
-def parse(html: str) -> Node:
-    """The document tree.  Never raises: malformed markup yields a partial tree."""
+def _parse(html: str) -> _TreeBuilder:
     b = _TreeBuilder()
     try:
         b.feed(html)
         b.close()
     except Exception:
         pass
-    return b.root
+    return b
+
+
+def parse(html: str) -> Node:
+    """The document tree.  Never raises: malformed markup yields a partial tree."""
+    return _parse(html).root
 
 
 def _walk(node: Node, skip=frozenset()):
@@ -346,6 +358,8 @@ def _drop_rule(n: Node, in_code: bool) -> int:
     if n.tag in _SOFT_DROP:
         return _BROAD
     a = n.attrs
+    if (a.get("role") or "").lower() == "tabpanel":
+        return 0                              # an inactive tab is hidden, not chrome
     if (a.get("role") or "").lower() in _DROP_ROLES:
         return _BROAD
     if "hidden" in a or (a.get("aria-hidden") or "").lower() == "true":
@@ -396,6 +410,52 @@ def _prune(body: Node, soft: bool) -> None:
             keep.append(k)
             stack.append((k, in_code or k.tag in _CODE_TAGS))
         n.kids = keep
+
+
+# ── tabs ──────────────────────────────────────────────────────────────────────
+
+def _role(n: Node) -> str:
+    return n.attr("role").lower()
+
+
+def _tab_labels(body: Node) -> dict[int, str]:
+    """id(panel) -> the label of its tab, for role=tabpanel elements.  Taken
+    before pruning, which drops the tab buttons.  By aria-labelledby, else by
+    position against the tablist the panels share a container with (Docusaurus
+    tabs carry no ids)."""
+    tabs: dict[str, Node] = {}
+    tablists, panels = [], []
+    for n in _walk(body, _HARD_DROP):
+        role = _role(n)
+        if role == "tab" and n.attr("id"):
+            tabs[n.attr("id")] = n
+        elif role == "tablist":
+            tablists.append(n)
+        elif role == "tabpanel":
+            panels.append(n)
+    labels: dict[int, str] = {}
+    for tl in tablists:
+        if tl.parent is None:
+            continue
+        own = [n for n in _walk(tl) if _role(n) == "tab"]
+        found, stack = [], [k for k in reversed(tl.parent.kids) if not isinstance(k, str)]
+        while stack:
+            n = stack.pop()
+            if n is tl or n.tag in _HARD_DROP:
+                continue
+            if _role(n) == "tabpanel":
+                found.append(n)         # a tab set nested in a panel is its own
+                continue
+            stack.extend(k for k in reversed(n.kids) if not isinstance(k, str))
+        if len(found) == len(own):
+            for tab, panel in zip(own, found):
+                if (label := _squash(_text(tab))):
+                    labels[id(panel)] = label
+    for panel in panels:
+        ref = panel.attr("aria-labelledby").split()
+        if ref and ref[0] in tabs and (label := _squash(_text(tabs[ref[0]]))):
+            labels[id(panel)] = label
+    return labels
 
 
 # ── content root ──────────────────────────────────────────────────────────────
@@ -530,8 +590,9 @@ def _code_lang(n: Node) -> str:
 
 
 class _Renderer:
-    def __init__(self):
+    def __init__(self, tabs: dict[int, str] | None = None):
         self._blockish: dict[int, bool] = {}
+        self.tabs = tabs or {}
 
     def is_block(self, n) -> bool:
         """Block-level by tag, or an inline element wrapping blocks (a card
@@ -555,7 +616,10 @@ class _Renderer:
                 buf.append(k)
                 continue
             self._flush(buf, out)
-            out.extend(self.block(k))
+            rendered = self.block(k)
+            if rendered and (label := self.tabs.get(id(k))):
+                out.append(f"**{label[:80]}**")
+            out.extend(rendered)
         self._flush(buf, out)
         return out
 
@@ -797,11 +861,63 @@ def _with_title(blocks: list[str], title: str) -> list[str]:
 
 
 def _render(body: Node, soft: bool) -> tuple[str, Node]:
+    tabs = _tab_labels(body)
     _prune(body, soft)
     root = _choose_root(body) if soft else body
     # block(), not blocks(): the root may itself be a table or a list.
-    blocks = _tidy(_Renderer().block(root))
+    blocks = _tidy(_Renderer(tabs).block(root))
     return "\n\n".join(blocks), root
+
+
+# ── client-rendered pages ─────────────────────────────────────────────────────
+
+# A page whose text is shorter than this is thin: chrome only, an app shell.
+_THIN_TEXT = 200
+# A data string counts as prose from this length, with a few spaces in it.
+_PROSE_MIN = 40
+_TITLE_KEYS = frozenset({"headline", "title"})
+_HTML_FRAGMENT = re.compile(r"<(?:p|div|h[1-6]|ul|ol|li|br|pre|table|blockquote|section)\b", re.I)
+_EMBEDDED_MAX = 200_000
+
+
+def _embedded_text(scripts: list[Node]) -> str:
+    """Readable text from the data a client-rendered page ships with its
+    HTML: Next.js's page props (<script id="__NEXT_DATA__">) and schema.org
+    JSON-LD.  Prose strings and titles, in document order; HTML strings
+    rendered.  Keys, ids and URLs are left out."""
+    out: list[str] = []
+    seen: set[str] = set()
+    size = 0
+    for node in scripts:
+        try:
+            data = json.loads("".join(k for k in node.kids if isinstance(k, str)))
+        except ValueError:
+            continue
+        if node.attr("id") == "__NEXT_DATA__" and isinstance(data, dict):
+            props = data.get("props")
+            if isinstance(props, dict) and "pageProps" in props:
+                data = props["pageProps"]
+        stack: list[tuple[str, object]] = [("", data)]
+        while stack and size < _EMBEDDED_MAX:
+            key, v = stack.pop()
+            if isinstance(v, dict):
+                stack.extend((str(k), x) for k, x in reversed(list(v.items())))
+            elif isinstance(v, list):
+                stack.extend((key, x) for x in reversed(v))
+            elif isinstance(v, str):
+                text = v.strip()
+                if not text or text.startswith(("http://", "https://", "/")):
+                    continue
+                prose = len(text) >= _PROSE_MIN and text.count(" ") >= 3
+                if not prose and not (key.lower() in _TITLE_KEYS and " " in text):
+                    continue
+                if _HTML_FRAGMENT.search(text):
+                    text = _render(parse(text), soft=False)[0]
+                if text and text not in seen:
+                    seen.add(text)
+                    out.append(text)
+                    size += len(text)
+    return "\n\n".join(out)
 
 
 def _find(root: Node, tag: str) -> Node | None:
@@ -817,7 +933,8 @@ def _title(root: Node) -> str:
 
 def convert(html: str, base_url: str = "") -> Page:
     """The page as plain text, its title, and an index of its links."""
-    root = parse(html)
+    built = _parse(html)
+    root = built.root
     title = _title(root)
     base = base_url
     if (b := _find(root, "base")) is not None and b.attr("href"):
@@ -828,12 +945,24 @@ def convert(html: str, base_url: str = "") -> Page:
 
     text, content = _render(body, soft=True)
     in_content = {id(n) for n in _walk(content) if n.tag == "a"}
-    if len(text) < 200 and len(html) > 5000:
+    if len(text) < _THIN_TEXT and len(html) > 5000:
         # A soft drop that took the page with it: try again with tag drops only.
         root2 = parse(html)
         text2, _ = _render(_find(root2, "body") or root2, soft=False)
         if len(text2) > len(text):
             text, in_content = text2, {id(n) for n, _, _ in anchors}
+    note = ""
+    if len(text) < _THIN_TEXT and built.scripts:
+        # An app shell: the content is built by scripts fetch_url does not run.
+        data = _embedded_text(built.data_scripts)
+        if len(data) > len(text):
+            text = data
+            note = ("the page is built by JavaScript, which fetch_url does not run; the text "
+                    "is the data embedded in its HTML, not the rendered page")
+        else:
+            note = ("the page's HTML holds almost no text and has scripts — it may be built "
+                    "by JavaScript, which fetch_url does not run; try the site's API, the "
+                    "docs' source, or web_search")
 
     if title:
         blocks = text.split("\n\n") if text else []
@@ -846,7 +975,7 @@ def convert(html: str, base_url: str = "") -> Page:
         inside = id(n) in in_content
         if url not in links or (inside and not links[url].in_content):
             links[url] = Link(label[:200], url, inside)
-    return Page(text=text, title=title, links=list(links.values()))
+    return Page(text=text, title=title, links=list(links.values()), note=note)
 
 
 # ── markdown bodies ───────────────────────────────────────────────────────────

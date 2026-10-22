@@ -302,3 +302,66 @@ class Markdown(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Tabs(unittest.TestCase):
+    def test_hidden_panels_kept_with_their_labels(self):
+        out = text('<div role="tablist"><button role="tab" id="t1">pip</button>'
+                   '<button role="tab" id="t2">conda</button></div>'
+                   '<div role="tabpanel" aria-labelledby="t1"><pre>pip install x</pre></div>'
+                   '<div role="tabpanel" aria-labelledby="t2" hidden><pre>conda install x</pre></div>')
+        self.assertIn("**pip**\n\n```\npip install x\n```", out)
+        self.assertIn("**conda**\n\n```\nconda install x\n```", out)
+
+    def test_labels_by_position_without_ids(self):
+        # Docusaurus: no ids, no aria-labelledby; panels in a sibling wrapper.
+        out = text('<div class="tabs-container"><ul role="tablist">'
+                   '<li role="tab">npm</li><li role="tab">yarn</li></ul>'
+                   '<div><div role="tabpanel"><p>npm add x</p></div>'
+                   '<div role="tabpanel" hidden><p>yarn add x</p></div></div></div>')
+        self.assertIn("**npm**\n\nnpm add x", out)
+        self.assertIn("**yarn**\n\nyarn add x", out)
+
+    def test_other_hidden_content_still_dropped(self):
+        out = text(f'<main>{FILLER}<div hidden>SECRET MENU</div></main>')
+        self.assertNotIn("SECRET MENU", out)
+
+
+class ClientRendered(unittest.TestCase):
+    PROSE = "This guide explains how the scheduler assigns work to each worker in turn."
+
+    def shell(self, data: str, kind: str = 'id="__NEXT_DATA__" type="application/json"') -> str:
+        return (f'<html><head><title>App</title></head><body><div id="__next"></div>'
+                f'<script {kind}>{data}</script><script src="/app.js"></script></body></html>')
+
+    def test_next_data_page_props_read(self):
+        import json
+        data = json.dumps({"props": {"pageProps": {
+            "title": "Scheduling basics", "slug": "scheduling",
+            "body": f"<h2>How it works</h2><p>{self.PROSE}</p>",
+            "url": "https://example.com/a long path"}}, "buildId": "abc"})
+        page = convert(self.shell(data), BASE)
+        self.assertIn("Scheduling basics", page.text)
+        self.assertIn("## How it works", page.text)
+        self.assertIn(self.PROSE, page.text)
+        self.assertNotIn("abc", page.text)
+        self.assertNotIn("example.com", page.text)
+        self.assertIn("embedded in its HTML", page.note)
+
+    def test_json_ld_article_read(self):
+        import json
+        data = json.dumps({"@type": "Article", "headline": "Release notes for 2.0",
+                           "articleBody": self.PROSE})
+        page = convert(self.shell(data, 'type="application/ld+json"'), BASE)
+        self.assertIn("Release notes for 2.0", page.text)
+        self.assertIn(self.PROSE, page.text)
+
+    def test_empty_shell_explained(self):
+        page = convert(self.shell("{}"), BASE)
+        self.assertIn("may be built by JavaScript", page.note)
+
+    def test_rendered_page_ignores_its_data(self):
+        page = convert(f"<body><main>{FILLER}</main><script id='__NEXT_DATA__'>"
+                       f'{{"props": {{"pageProps": {{"x": "{self.PROSE}"}}}}}}</script></body>', BASE)
+        self.assertNotIn("scheduler", page.text)
+        self.assertEqual(page.note, "")

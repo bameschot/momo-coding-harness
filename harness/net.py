@@ -38,9 +38,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
-from . import html_text
+from . import html_text, passages
 
 _MAX_REDIRECTS = 5
 # Two separate budgets.  The download cap only bounds memory and time: an HTML
@@ -568,6 +569,8 @@ _FOOTER = (
 _JSON_PRETTY_MAX = 8_000
 # How many headings the section outline under a cut-off page lists.
 _OUTLINE_MAX = 40
+# How many other matching lines a find= note gives the offsets of.
+_FIND_OTHERS_MAX = 8
 
 
 def _header(headers, name: str, default: str = "") -> str:
@@ -713,6 +716,8 @@ def _decode_body(raw: bytes, headers, final_url: str, json_path: str | None = No
             notes.append("the site served a bot-check page instead of content; fetch_url "
                          "cannot get past it — try a different source (web_search, the "
                          "project's docs or its API)")
+        elif notes is not None and page.note:
+            notes.append(page.note)
         return "html→text", page.text
     if ctype in ("text/markdown", "text/x-markdown"):
         text, links = html_text.delink_markdown(text, final_url)
@@ -721,12 +726,83 @@ def _decode_body(raw: bytes, headers, final_url: str, json_path: str | None = No
     return "text", text
 
 
-def _outline(body: str) -> list[str]:
-    """The page's markdown headings, for a model to aim find= at."""
-    heads = [ln for ln in body.split("\n") if re.match(r"#{1,6} \S", ln)]
-    if len(heads) > _OUTLINE_MAX:
-        heads = heads[:_OUTLINE_MAX] + [f"… ({len(heads) - _OUTLINE_MAX} more)"]
-    return [h[:120] for h in heads]
+class _Section(NamedTuple):
+    level: int
+    title: str          # the heading line, '#'s included
+    start: int
+    end: int            # where the next heading of the same or a higher level starts
+
+
+_HEADING_LINE = re.compile(r"#{1,6} \S")
+
+
+def _sections(body: str) -> list[_Section]:
+    """The page's markdown headings, each as the section it opens.  Lines
+    inside ``` fences are code (a '# comment'), not headings."""
+    heads, pos, fenced = [], 0, False
+    for line in body.split("\n"):
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and _HEADING_LINE.match(line):
+            heads.append((len(line) - len(line.lstrip("#")), line[:120], pos))
+        pos += len(line) + 1
+    out: list = [None] * len(heads)
+    open_: list[int] = []
+    for i, (level, _, start) in enumerate(heads):
+        while open_ and heads[open_[-1]][0] >= level:
+            j = open_.pop()
+            out[j] = _Section(*heads[j], start)
+        open_.append(i)
+    for j in open_:
+        out[j] = _Section(*heads[j], len(body))
+    return out
+
+
+def _outline(body: str, at: int = 0, secs: list[_Section] | None = None) -> list[str]:
+    """The section list under a cut-off page, each heading with the offset
+    that jumps to it.  A long page lists the shallowest levels that fit in
+    _OUTLINE_MAX lines, opens up the section being shown and counts what each
+    collapsed heading hides; when even the top level does not fit, the lines
+    nearest the part being shown."""
+    secs = _sections(body) if secs is None else secs
+    if not secs:
+        return []
+    levels = sorted({s.level for s in secs})
+    depth = levels[0]
+    for lv in levels[1:]:
+        if sum(s.level <= lv for s in secs) > _OUTLINE_MAX:
+            break
+        depth = lv
+    shown = [s for s in secs if s.level <= depth]
+    if len(shown) < _OUTLINE_MAX:
+        # Open up the innermost section holding `at`, or, when nothing there has
+        # subsections (a one-line title at the top of the page), the next one
+        # that does.  The subsections from `at` on come first, then the ones
+        # just before it.
+        here = [s for s in reversed(shown) if s.start <= at < s.end]
+        for s in here + [s for s in shown if s.start > at]:
+            inner = [t for t in secs if t.level > depth and s.start < t.start < s.end]
+            if inner:
+                inner.sort(key=lambda t: (t.start < at, abs(t.start - at)))
+                shown = sorted(shown + inner[:_OUTLINE_MAX - len(shown)], key=lambda s: s.start)
+                break
+    listed = set(shown)
+    hidden = dict.fromkeys(shown, 0)
+    for s in secs:
+        if s not in listed:
+            owner = next((o for o in reversed(shown)
+                          if o.start < s.start and s.end <= o.end and o.level < s.level), None)
+            if owner is not None:
+                hidden[owner] += 1
+    lines = [f"{s.title}  @{s.start}" + (f"  (+{hidden[s]} subsections)" if hidden[s] else "")
+             for s in shown]
+    if len(lines) <= _OUTLINE_MAX:
+        return lines
+    i = max((k for k, s in enumerate(shown) if s.start <= at), default=0)
+    lo = max(0, min(i - _OUTLINE_MAX // 2, len(lines) - _OUTLINE_MAX))
+    hi = lo + _OUTLINE_MAX
+    return (([f"… ({lo} earlier)"] if lo else []) + lines[lo:hi]
+            + ([f"… ({len(lines) - hi} more)"] if hi < len(lines) else []))
 
 
 def _clean_needle(needle: str) -> str:
@@ -750,22 +826,52 @@ def _heading_word_match(body: str, needle: str) -> tuple[int, str] | None:
     return None
 
 
-def _find(body: str, needle: str) -> int:
-    """Start of the line to show for `needle`: a matching heading beats a
-    matching line elsewhere, since find= is mostly aimed at a section.  -1 if
-    absent."""
+def _matches(body: str, needle: str) -> list[int]:
+    """Start of every line containing `needle`, each line once, in page order."""
     low, n = body.lower(), _clean_needle(needle).lower()
-    if not n:
-        return -1
-    pos, first = 0, -1
-    while (hit := low.find(n, pos)) != -1:
+    out: list[int] = []
+    pos = 0
+    while n and (hit := low.find(n, pos)) != -1:
         start = body.rfind("\n", 0, hit) + 1
-        if body.startswith("#", start):
-            return start
-        if first == -1:
-            first = start
+        if not out or out[-1] != start:
+            out.append(start)
         pos = hit + 1
-    return first
+    return out
+
+
+def _best_passage(body: str, needle: str) -> int | None:
+    """Start of the block that best matches the words of `needle` (BM25, as
+    web_search ranks passages), or None if no block shares a word."""
+    ranked = passages.rank_passages([("", body)], _clean_needle(needle))
+    return passages.blocks_at(body)[ranked[0][2]][0] if ranked else None
+
+
+def _locate(body: str, find: str, heads: dict[int, _Section], notes: list[str]) -> int:
+    """Where find= lands, -1 for nowhere.  Notes name the fallback taken and
+    any other matches, by offset only: page text never goes above the fence."""
+    shown = safe_line(find, 80)
+    if (hits := _matches(body, find)):
+        # A matching heading beats a matching line elsewhere: find= is mostly
+        # aimed at a section.
+        at = next((h for h in hits if h in heads), hits[0])
+        others = sorted((h for h in hits if h != at), key=lambda h: h not in heads)
+        if others:
+            listed = ", ".join(f"{h}" + (" (heading)" if h in heads else "")
+                               for h in others[:_FIND_OTHERS_MAX])
+            more = f" and {len(others) - _FIND_OTHERS_MAX} more" if len(others) > _FIND_OTHERS_MAX else ""
+            notes.append(f"find: '{shown}' occurs on {len(hits)} lines; the others start at "
+                         f"offsets {listed}{more} — pass one as offset= (without find=) to "
+                         f"read it")
+        return at
+    if (alt := _heading_word_match(body, _clean_needle(find))):
+        notes.append(f"find: '{shown}' does not occur verbatim — jumped to the first heading "
+                     f"containing '{safe_line(alt[1], 40)}'")
+        return alt[0]
+    if (best := _best_passage(body, find)) is not None:
+        notes.append(f"find: '{shown}' does not occur verbatim and no heading shares a word "
+                     f"with it — jumped to the passage that best matches its words")
+        return best
+    return -1
 
 
 def _window(body: str, offset: int, find: str | None, max_chars: int,
@@ -774,40 +880,45 @@ def _window(body: str, offset: int, find: str | None, max_chars: int,
     total = len(body)
     start = max(0, offset)
     missed = False
+    secs = _sections(body)
+    heads = {s.start: s for s in secs}
+    section = None
     if find:
-        hit = _find(body, find)
-        if hit == -1 and (alt := _heading_word_match(body, _clean_needle(find))):
-            hit = alt[0]
-            notes.append(f"find: '{safe_line(find, 80)}' does not occur verbatim — jumped "
-                         f"to the first heading containing '{safe_line(alt[1], 40)}'")
+        hit = _locate(body, find, heads, notes)
         if hit == -1:
             missed = True
             notes.append(f"find: '{safe_line(find, 80)}' does not occur in the page — "
                          f"showing from char {min(start, total)}; the section list at the "
                          f"end names the headings that do")
         else:
-            start = hit
+            start, section = hit, heads.get(hit)
     if start >= total and total:
         notes.append(f"offset {start} is past the end of the page ({total:,} chars)")
         return ""
     if not max_chars or (start == 0 and total <= max_chars):
         return body
     end = min(total, start + max_chars)
-    if end < total:
+    if section is not None and section.end < end:
+        end = section.end           # find= aimed at a section: that section, not more
+    elif end < total:
         # End on a line boundary when one is reasonably close.
         cut = body.rfind("\n", start, end)
         if cut > start + max_chars // 2:
             end = cut
     chunk = body[start:end]
-    if end < total:
+    if section is not None and end == section.end and end < total:
+        notes.append(f"showing the section at chars {start:,}–{end:,} of {total:,}; the page "
+                     f"continues at offset={end}")
+    elif end < total:
         notes.append(f"showing chars {start:,}–{end:,} of {total:,}: call fetch_url again "
                      f"with the same url and offset={end} for the next part, or "
-                     f"find=\"<heading or phrase>\" to jump to a section")
+                     f"find=\"<heading or phrase>\" to jump to a section (the section list "
+                     f"at the end gives each one's offset)")
     elif start:
         notes.append(f"showing chars {start:,}–{end:,} of {total:,} (the end of the page)")
     if end < total or missed:
-        if (heads := _outline(body)):
-            chunk += "\n\n[sections on this page:]\n" + "\n".join(heads)
+        if (lines := _outline(body, start, secs)):
+            chunk += "\n\n[sections on this page:]\n" + "\n".join(lines)
     return chunk
 
 
@@ -854,7 +965,8 @@ def _render(url: str, final_url: str, status: int, reason: str, headers,
 # 64 slots, because one web_search read=true fills up to five and a follow-up on
 # a page read many calls earlier should still find it.  Pages average ~0.2 MB,
 # so the count is normally the limit; the byte ceiling bounds memory when many
-# pages near the download cap pile up (64 × 2 MB would be 128 MB).
+# pages near the download cap pile up (64 × 2 MB would be 128 MB).  It counts
+# each page's extracted text as well as its download (see _decoded).
 _CACHE_MAX = 64
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
 _cache: dict[tuple, tuple[float, dict]] = {}
@@ -871,17 +983,42 @@ def _cache_get(key: tuple) -> dict | None:
         return hit[1]
 
 
-def _cache_put(key: tuple, entry: dict, via: str) -> None:
-    """Store a response; `via` names the tool that downloaded it, for /net-cache."""
+def _entry_bytes(entry: dict) -> int:
+    """What a cached page holds in memory.  Caller holds _cache_lock."""
+    return len(entry["raw"]) + sum(len(d[1]) for d in entry.get("decoded", {}).values())
+
+
+def _cache_put(key: tuple, entry: dict, via: str) -> dict:
+    """Store a response; `via` names the tool that downloaded it, for /net-cache.
+    Returns the stored entry, so the caller decodes into that (see _decoded)."""
+    stored = {**entry, "via": via, "hits": 0}
     with _cache_lock:
         _cache.pop(key, None)
-        _cache[key] = (time.monotonic(), {**entry, "via": via, "hits": 0})
-        total = sum(len(e["raw"]) for _, e in _cache.values())
+        _cache[key] = (time.monotonic(), stored)
+        total = sum(_entry_bytes(e) for _, e in _cache.values())
         # A single page over the byte ceiling stays (alone): its follow-ups work.
         while len(_cache) > _CACHE_MAX or (total > _CACHE_MAX_BYTES and len(_cache) > 1):
             oldest = next(iter(_cache))
-            total -= len(_cache[oldest][1]["raw"])
+            total -= _entry_bytes(_cache[oldest][1])
             del _cache[oldest]
+    return stored
+
+
+def _decoded(got: dict, json_path: str | None = None) -> tuple[str, str, list, list[str]]:
+    """(kind, text, links, notes) of a response, decoded once per json_path.
+
+    Kept on the response dict, so for a page in the cache only the first call
+    parses the HTML; later offset=/find=/links= calls slice the stored text.
+    The returned lists are shared: copy before changing them."""
+    memo = got.get("decoded", {})
+    if (hit := memo.get(json_path)) is not None:
+        return hit
+    notes: list[str] = []
+    links: list = []
+    kind, text = _decode_body(got["raw"], got["headers"], got["final_url"], json_path,
+                              notes, links)
+    with _cache_lock:       # _entry_bytes reads the memo under the lock
+        return got.setdefault("decoded", {}).setdefault(json_path, (kind, text, links, notes))
 
 
 def clear_cache() -> int:
@@ -1053,7 +1190,7 @@ def fetch_page(url: str, *, allow_private: bool, max_bytes: int,
     got = _get(url, allow_private=allow_private, max_bytes=max_bytes,
                timeout=timeout, cancel=cancel)
     if not isinstance(got, str) and 200 <= got["status"] < 300:
-        _cache_put(key, got, "web_search")
+        return _cache_put(key, got, "web_search")
     return got
 
 
@@ -1174,9 +1311,8 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
     key = (url.strip(), allow_private, max_bytes)
 
     def respond(got: dict, notes: list[str]) -> str:
-        found: list = []
-        kind, text = _decode_body(got["raw"], got["headers"], got["final_url"], json_path,
-                                  notes, found)
+        kind, text, found, decode_notes = _decoded(got, json_path)
+        notes = notes + decode_notes
         at, look = offset, find
         if links is not None and kind.startswith("json"):
             notes.append("links ignored: the response is JSON")
@@ -1208,5 +1344,5 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
         return got
     notes = pre_notes + got["notes"]
     if cacheable and 200 <= got["status"] < 300:
-        _cache_put(key, {**got, "notes": list(notes)}, "fetch_url")
+        got = _cache_put(key, {**got, "notes": list(notes)}, "fetch_url")
     return respond(got, notes)

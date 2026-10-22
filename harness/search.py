@@ -23,7 +23,6 @@ from __future__ import annotations
 import copy
 import html
 import json
-import math
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +31,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import net
+from .passages import blocks as _blocks, rank_passages
 from .paths import momo_home
 
 SHIPPED_DIR = Path(__file__).parent.parent / "search_sources"
@@ -447,75 +447,6 @@ def query_source(src: Source, query: str, n: int, ctx: Ctx, strict: bool = False
 
 # ── pages and passages ────────────────────────────────────────────────────────
 
-_STOP = set("a an and are as at be by can do does for from how i in is it my of on or "
-            "the this that to use using what when where which why with you your".split())
-
-
-def _tokens(text: str) -> list[str]:
-    return [t for t in re.findall(r"[a-z0-9_]+(?:[.\-][a-z0-9_]+)*", text.lower())
-            if len(t) > 1 and t not in _STOP]
-
-
-def _blocks(text: str) -> list[tuple[str, str]]:
-    """(heading, block) pairs: paragraphs and whole fenced code blocks, each
-    under the nearest heading above it."""
-    out, buf, heading, in_fence = [], [], "", False
-
-    def flush():
-        block = "\n".join(buf).strip()
-        if block:
-            out.append((heading, block))
-        buf.clear()
-    for line in text.split("\n"):
-        if line.startswith("```"):
-            buf.append(line)
-            if in_fence:
-                flush()
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            buf.append(line)
-            continue
-        if re.match(r"#{1,6} \S", line):
-            flush()
-            heading = line.lstrip("#").strip()
-            continue
-        if not line.strip():
-            flush()
-            continue
-        buf.append(line)
-    flush()
-    return out
-
-
-def rank_passages(pages: list[tuple[str, str]], query: str) -> list[tuple[float, int, int, str, str]]:
-    """BM25 over every block of every page: (score, page index, block index,
-    heading, block), best first.  Only blocks sharing a term with the query."""
-    q = set(_tokens(query))
-    docs = []
-    for pi, (_, text) in enumerate(pages):
-        for bi, (heading, block) in enumerate(_blocks(text)):
-            docs.append((pi, bi, heading, block, _tokens(heading + " " + block)))
-    if not q or not docs:
-        return []
-    avg = sum(len(d[4]) for d in docs) / len(docs) or 1
-    df = {t: sum(1 for d in docs if t in d[4]) for t in q}
-    k1, b = 1.2, 0.75
-    scored = []
-    for pi, bi, heading, block, toks in docs:
-        score = 0.0
-        for t in q:
-            tf = toks.count(t)
-            if not tf:
-                continue
-            idf = math.log(1 + (len(docs) - df[t] + 0.5) / (df[t] + 0.5))
-            score += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * len(toks) / avg))
-        if score > 0:
-            scored.append((score, pi, bi, heading, block))
-    scored.sort(key=lambda s: -s[0])
-    return scored
-
-
 def _trim(block: str, limit: int = _PASSAGE_CHARS) -> str:
     if len(block) <= limit:
         return block
@@ -527,7 +458,7 @@ def _trim(block: str, limit: int = _PASSAGE_CHARS) -> str:
 
 def _page_text(got: dict) -> tuple[str, str]:
     """(title, text) of a fetched page."""
-    kind, text = net._decode_body(got["raw"], got["headers"], got["final_url"])
+    kind, text, _, _ = net._decoded(got)
     if kind == "binary":
         return "", ""
     title = ""

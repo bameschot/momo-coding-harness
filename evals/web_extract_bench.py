@@ -112,6 +112,38 @@ CASES = [
     Case("fowler", "https://martinfowler.com/articles/microservices.html",
          ["Componentization via Services", "Smart endpoints and dumb pipes"], [], []),
     Case("verge", "https://www.theverge.com/", ["The Verge"], [], []),
+    # Tabs (only the first is visible), hidden by the page until clicked.
+    Case("docusaurus", "https://docusaurus.io/docs/installation",
+         ["npx create-docusaurus@latest my-website classic", "yarn create docusaurus",
+          "bunx create-docusaurus", "Node.js version 20.0 or above"],
+         ["Edit this page"], ["/docs/configuration"]),
+    Case("mkdocs-material", "https://squidfunk.github.io/mkdocs-material/getting-started/",
+         ["pip install mkdocs-material", "docker pull squidfunk/mkdocs-material"], [], []),
+    # Very large single-page references: parse cost and the section outline.
+    Case("python-os", "https://docs.python.org/3/library/os.html",
+         ["os.walk(top, topdown=True", "os.environ", "Process Management", "os.scandir"],
+         ["Theme", "Navigation"], ["os.path.html"]),
+    Case("rust-vec", "https://doc.rust-lang.org/std/vec/struct.Vec.html",
+         ["A contiguous growable array type", "pub fn with_capacity", "Capacity and reallocation"],
+         [], []),
+    Case("javadoc", "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/String.html",
+         ["class represents character strings. All string literals", "compareToIgnoreCase"],
+         [], []),
+    Case("cppreference", "https://en.cppreference.com/w/cpp/container/vector",
+         ["is a sequence container that encapsulates dynamic size arrays", "push_back"], [], []),
+    Case("nodejs-fs", "https://nodejs.org/api/fs.html",
+         ["fs.readFile(path[, options], callback)", "fsPromises.open", "Promises API"], [], []),
+    Case("discourse", "https://discuss.python.org/t/pep-703-making-the-global-interpreter-lock-optional-in-cpython/22606",
+         ["PEP 703", "nogil", "Free Lists"], [], []),
+    Case("apnews", "https://apnews.com/technology", blocked=True),
+    Case("govuk", "https://www.gov.uk/vat-registration",
+         ["VAT threshold", "£90,000"], ["Cookies on GOV.UK"], []),
+    Case("go-blog", "https://go.dev/blog/loopvar-preview",
+         ["GOEXPERIMENT=loopvar", "per-iteration"], [], []),
+    Case("nextjs", "https://nextjs.org/docs/app/getting-started/installation",
+         ["npx create-next-app@latest"], [], []),
+    Case("notion", "https://www.notion.com/help/start-here",
+         ["building blocks", "Databases"], [], []),
 ]
 
 
@@ -169,6 +201,7 @@ class _Headings(HTMLParser):
 
 
 def _norm(s: str) -> str:
+    s = re.sub(r"[\u200b-\u200d\ufeff]", "", s)          # zero-width anchors (Docusaurus)
     s = re.sub(r"<https?://[^>]*>|\]\([^)]*\)|[`*\[\]¶§#]", " ", s)
     return re.sub(r"\s+", " ", s).strip().lower()
 

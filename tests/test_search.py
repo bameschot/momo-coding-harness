@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from harness import net, search, search_sources, tools
+from harness import net, passages, search, search_sources, tools
 
 WD = Path(__file__).parent
 
@@ -302,6 +302,11 @@ class Passages(Base):
         self.assertEqual({h for h, _ in blocks}, {"Specifications"})
         self.assertIn("Name\tAge\tCity\nAnn\t3\tX", [b for _, b in blocks])
         self.assertNotIn("<https://", text)
+
+    def test_block_offsets_point_into_the_text(self):
+        text = "# H\n\npara one\nstill one\n\n```\na\n\nb\n```\n\n## I\nafter"
+        for start, _, block in passages.blocks_at(text):
+            self.assertTrue(text[start:].startswith(block), block)
 
     def test_code_fence_is_one_block(self):
         blocks = search._blocks("# H\n\npara\n\n```\na\n\nb\n```\n\nafter")
