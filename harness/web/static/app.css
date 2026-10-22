@@ -586,6 +586,19 @@ details.think.live summary { font-style: italic; }
 .chip-menu { width: min(300px, calc(100vw - 24px)); }
 .menu-note, .chip-menu .note { font-size: var(--fs-sm); color: var(--muted); margin: 4px 0; }
 .menu-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+.cache-head { display: flex; justify-content: space-between; gap: 8px; }
+.cache-head .muted { font-weight: 400; text-transform: none; letter-spacing: 0; }
+.cache-list { list-style: none; margin: 2px 0 6px; padding: 0; max-height: 220px; overflow-y: auto; }
+.cache-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.cache-row:last-child { border-bottom: 0; }
+.cache-text { flex: 1; min-width: 0; }
+.cache-url { font: var(--fs-sm) var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cache-meta { font-size: var(--fs-xs); }
+.cache-k-html     { background: var(--assistant); }
+.cache-k-json     { background: var(--tool); }
+.cache-k-markdown { background: var(--user); }
+.cache-k-text     { background: var(--system); }
+.cache-k-other    { background: var(--muted); }
 .menu-foot kbd { margin-left: 4px; }
 #settings-drawer { width: min(460px, 100%); }
 .settings { padding: 4px 16px 16px; font-size: var(--fs); }

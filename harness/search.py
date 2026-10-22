@@ -323,14 +323,16 @@ class Ctx:
             return "the response is not JSON"
 
 
-def _clean(value, limit: int = _SNIPPET_CHARS) -> str:
+def _clean(value, limit: int = _SNIPPET_CHARS, markup: bool = True) -> str:
     """API text as one plain line: tags dropped (search excerpts carry
-    <span class=searchmatch>), entities decoded, whitespace collapsed."""
+    <span class=searchmatch>), entities decoded, whitespace collapsed.
+    `markup=False` is for page text, which is plain already: a '<caption>'
+    there is the text of a code sample, not a tag."""
     if value is None or isinstance(value, dict):
         return ""
     if isinstance(value, list):
         value = ", ".join(str(v) for v in value[:8] if not isinstance(v, (dict, list)))
-    text = html.unescape(re.sub(r"<[^>]+>", "", str(value)))
+    text = html.unescape(re.sub(r"<[^>]+>", "", str(value))) if markup else str(value)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:limit] + "…" if len(text) > limit else text
 
@@ -596,9 +598,9 @@ def _snippet_for(result: Result, query: str) -> str:
         return ""
     ranked = rank_passages([(result.url, result.content)], query) if query else []
     if ranked:
-        return _clean(ranked[0][4])
+        return _clean(ranked[0][4], markup=False)
     blocks = [b for h, b in _blocks(result.content) if not b.startswith("```")]
-    return _clean(blocks[0]) if blocks else ""
+    return _clean(blocks[0], markup=False) if blocks else ""
 
 
 def _render_results(results: list[Result]) -> str:

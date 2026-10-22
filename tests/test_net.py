@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from harness import net
+from harness import html_text, net
 from harness.tools import dispatcher as tools_dispatch
 
 WD = Path(__file__).parent
@@ -299,8 +299,12 @@ class HtmlToText(unittest.TestCase):
         self.assertNotIn("&amp;", out)
 
     def test_links_resolved_against_base(self):
+        # URLs stay out of the text; the link index carries them, absolute.
         out = net.html_to_text(self.HTML, "https://example.com/docs/page")
-        self.assertIn("<https://example.com/api>", out)
+        self.assertIn("See the API docs.", out)
+        self.assertNotIn("example.com", out)
+        links = html_text.convert(self.HTML, "https://example.com/docs/page").links
+        self.assertEqual([(lk.text, lk.url) for lk in links], [("API", "https://example.com/api")])
 
     def test_table_cells_separated(self):
         self.assertNotIn("onetwo", net.html_to_text(self.HTML))
@@ -517,6 +521,15 @@ LONG_HTML = ("<html><title>Guide</title><body><div role='navigation'>crumbs</div
              + "</main></body></html>").encode()
 API_JSON = json.dumps({"info": {"version": "2.31.0", "name": "thing"},
                        "releases": {f"1.{i}.0": [{"size": i}] for i in range(400)}}).encode()
+LINKS_HTML = ("<html><title>Docs</title><body><nav><a href='/next'>Next chapter</a>"
+              "<a href='/install'>Install (sidebar)</a></nav><main>"
+              + "<p>" + "body text " * 80 + "</p>"
+              + "<p>See <a href='/install'>the install guide</a> and "
+              + "<a href='https://other.test/spec'>the spec</a>.</p>"
+              + "".join(f"<p><a href='/item{i}'>item {i}</a></p>" for i in range(50))
+              + "</main></body></html>").encode()
+MARKDOWN = b"# Guide\n\nRead [the install guide](/install) first.\n"
+CHALLENGE = b"<html><head><title>Just a moment...</title></head><body>checking</body></html>"
 HITS: dict[str, int] = {}
 
 
@@ -540,6 +553,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._body(b"y" * 500_000, "text/plain")
         elif self.path == "/json":
             self._body(b'{"ok": true}', "application/json")
+        elif self.path == "/links":
+            self._body(LINKS_HTML, "text/html")
+        elif self.path == "/md":
+            self._body(MARKDOWN, "text/markdown")
+        elif self.path == "/challenge":
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(CHALLENGE)
         elif self.path == "/boom":
             self.send_response(404)
             self.send_header("Content-Type", "text/plain")
@@ -793,12 +815,15 @@ class Extraction(unittest.TestCase):
 
     def test_self_links_and_duplicates_not_repeated(self):
         base = "https://example.com/page"
-        out = net.html_to_text('<a href="/page#x">here</a> <a href="/other">o</a> '
-                               '<a href="/other">o again</a> '
-                               '<a href="https://example.com/raw">https://example.com/raw</a>', base)
-        self.assertNotIn("<https://example.com/page", out)
-        self.assertEqual(out.count("<https://example.com/other>"), 1)
-        self.assertNotIn("<https://example.com/raw>", out)
+        html = ('<a href="/page#x">here</a> <a href="/other">o</a> '
+                '<a href="/other">o again</a> '
+                '<a href="https://example.com/raw">https://example.com/raw</a>')
+        page = html_text.convert(html, base)
+        urls = [lk.url for lk in page.links]
+        self.assertNotIn("https://example.com/page#x", urls)
+        self.assertEqual(urls.count("https://example.com/other"), 1)
+        # A link whose text is its URL is content: it stays in the text, once.
+        self.assertEqual(page.text.count("https://example.com/raw"), 1)
 
     def test_language_switcher_and_empty_bullets_dropped(self):
         out = net.html_to_text('<ul><li><a href="https://af.example/x" hreflang="af">Afrikaans</a></li>'
@@ -1011,6 +1036,125 @@ class PagingLive(unittest.TestCase):
 
     def test_bad_offset_rejected(self):
         self.assertIn("not a number", self.fetch("/long", offset="soon"))
+
+    # links=: page text carries no URLs; the lookup returns them.
+
+    def body(self, out: str) -> str:
+        return out.split(net._BEGIN)[1].split(net._END)[0] if net._BEGIN in out else ""
+
+    def test_page_text_has_no_urls_and_says_so(self):
+        out = self.fetch("/links", net_max_chars=0)
+        self.assertNotIn("http", self.body(out))
+        self.assertIn("the install guide", out)
+        self.assertRegex(out, r"note: \d+ links removed from the text — call fetch_url again "
+                              r'with links="<word>"')
+
+    def test_links_lookup_served_from_cache(self):
+        self.fetch("/links")
+        out = self.fetch("/links", links="install")
+        self.assertEqual(HITS["/links"], 1)
+        self.assertIn("page cache", out)
+        self.assertIn("body: links", out)
+        body = self.body(out)
+        self.assertIn(f"the install guide → {self.base}/install", body)
+        self.assertNotIn("sidebar", body)     # one entry per URL, the content's wording
+
+    def test_links_lookup_without_a_prior_fetch(self):
+        out = self.fetch("/links", links="spec")
+        self.assertEqual(HITS["/links"], 1)
+        self.assertIn("the spec → https://other.test/spec", out)
+
+    def test_links_content_before_navigation(self):
+        out = self.body(self.fetch("/links", links="*"))
+        lines = [ln for ln in out.strip().split("\n") if "→" in ln]
+        self.assertTrue(lines[0].startswith("the install guide"), lines[0])
+        self.assertNotIn("Next chapter", out)       # 40 shown, content first
+
+    def test_links_lookup_caps_and_says_so(self):
+        out = self.fetch("/links", links="item")
+        self.assertEqual(self.body(out).count("→"), net._LINKS_MAX)
+        self.assertIn(f"showing {net._LINKS_MAX} of 50 matching links", out)
+
+    def test_navigation_links_marked(self):
+        out = self.fetch("/links", links="next")
+        self.assertIn(f"Next chapter → {self.base}/next  (navigation)", out)
+
+    def test_links_lookup_miss(self):
+        out = self.fetch("/links", links="zebra")
+        self.assertIn("no link text or URL contains 'zebra'", out)
+        self.assertIn('links="*" lists them', out)
+
+    def test_links_lookup_stays_fenced(self):
+        out = self.fetch("/links", links="install")
+        self.assertLess(out.index(net._BEGIN), out.index("the install guide →"))
+
+    def test_links_ignored_for_json(self):
+        out = self.fetch("/json", links="x")
+        self.assertIn("links ignored: the response is JSON", out)
+        self.assertIn('"ok": true', out)
+
+    def test_markdown_response_delinked_and_indexed(self):
+        out = self.fetch("/md")
+        self.assertIn("Read the install guide first.", out)
+        self.assertNotIn("](/install)", out)
+        out = self.fetch("/md", links="install")
+        self.assertIn(f"the install guide → {self.base}/install", out)
+
+    # The cache as /net-cache and the NET popover show it.
+
+    def test_snapshot_most_recent_first_with_hits(self):
+        self.fetch("/long")
+        self.fetch("/api")
+        self.assertEqual([p["url"].rsplit("/", 1)[1] for p in net.cache_snapshot()],
+                         ["api", "long"])
+        self.fetch("/long", find="installation")           # a hit moves it to the front
+        first = net.cache_snapshot()[0]
+        self.assertTrue(first["url"].endswith("/long"))
+        self.assertEqual((first["hits"], first["via"], first["kind"], first["local"]),
+                         (1, "fetch_url", "html", True))
+        self.assertEqual(first["bytes"], len(LONG_HTML))
+
+    def test_snapshot_marks_web_search_downloads(self):
+        net.fetch_page(f"{self.base}/links", allow_private=True,
+                       max_bytes=net.DEFAULT_MAX_BYTES)
+        self.assertEqual(net.cache_snapshot()[0]["via"], "web_search")
+
+    def test_pages_do_not_expire_with_time(self):
+        self.fetch("/long")
+        later = time.monotonic() + 7 * 24 * 3600
+        with mock.patch.object(net.time, "monotonic", return_value=later):
+            self.assertEqual(net.cache_stats()["entries"], 1)
+            out = self.fetch("/long", find="installation")
+        self.assertEqual(HITS["/long"], 1)
+        self.assertIn("page cache", out)
+
+    def test_slot_limit_pushes_out_least_recently_used(self):
+        with mock.patch.object(net, "_CACHE_MAX", 2):
+            self.fetch("/long")
+            self.fetch("/api")
+            self.fetch("/long", find="installation")    # /long is now the most recent
+            self.fetch("/json")                          # a third page: /api goes
+        self.assertEqual([p["url"].rsplit("/", 1)[1] for p in net.cache_snapshot()],
+                         ["json", "long"])
+
+    def test_drop_and_clear(self):
+        self.fetch("/long")
+        self.fetch("/api")
+        self.assertIsNone(net.cache_drop(3))
+        self.assertTrue(net.cache_drop(1).endswith("/api"))
+        self.assertEqual(net.cache_stats()["entries"], 1)
+        self.assertEqual(net.clear_cache(), 1)
+        self.assertEqual(net.cache_stats(), {"entries": 0, "bytes": 0, "max": net._CACHE_MAX,
+                                             "max_bytes": net._CACHE_MAX_BYTES})
+
+    def test_defaults(self):
+        self.assertEqual((net._CACHE_MAX, net._CACHE_MAX_BYTES), (64, 64 * 1024 * 1024))
+        self.assertFalse(hasattr(net, "_CACHE_TTL"))
+
+    def test_bot_check_page_explained(self):
+        out = self.fetch("/challenge")
+        self.assertIn("HTTP 403", out)
+        self.assertIn("bot-check page instead of content", out)
 
 
 

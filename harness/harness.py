@@ -1920,6 +1920,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                     shown = self._emit_diff(name, args, result, diff_old, diff_existed)
                 if not shown:
                     self.event_queue.put(ToolResultEvent(name, result))
+                if name in NET_TOOL_NAMES:
+                    self.emit_status()        # the page cache changed: refresh the NET popover
                 self.logger.log_tool_result(self.mode, self.client.model, name, len(result))
 
                 # Store the tool name on the message so export/replay can label
@@ -2109,6 +2111,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             net_confirm=self.net_confirm,
             net_max_bytes=self.net_max_bytes,
             net_max_chars=self.net_max_chars,
+            net_cache=net_mod.cache_snapshot(),
+            net_cache_max=(cache := net_mod.cache_stats())["max"],
+            net_cache_max_bytes=cache["max_bytes"],
             host=self.client.host,
             provider=self.provider,
             plan_progress=self._plan_progress(),

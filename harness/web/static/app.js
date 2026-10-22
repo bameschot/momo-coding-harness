@@ -739,7 +739,9 @@ function applyStatus(s) {
   net.classList.toggle("active", netOn && s.net_confirm);
   net.classList.toggle("warn", netOn && !s.net_confirm);
   net.textContent = netOn ? `NET: ${s.net_access}${s.net_confirm ? "" : " (writes: auto)"}` : "NET: off";
-  net.title = netOn ? `Internet access: ${s.net_access === "local" ? "public and local" : "public"}` : "Internet access: off";
+  const cached = (s.net_cache || []).length;
+  net.title = (netOn ? `Internet access: ${s.net_access === "local" ? "public and local" : "public"}` : "Internet access: off")
+    + (cached ? ` · ${cached} page${cached === 1 ? "" : "s"} cached` : "");
   $("#run-confirm").checked = !!s.run_confirm;
   $("#net-on").checked = netOn;
   $("#net-local").checked = s.net_access === "local";

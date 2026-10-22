@@ -683,7 +683,7 @@ Offered only while internet access is on (`/net on`), so the model never sees a 
 
 | Tool | Description |
 |---|---|
-| `fetch_url` | Fetch an http/https URL and return the response as text. HTML is converted to readable text (scripts, styles and navigation dropped, link targets kept), JSON is pretty-printed. GET and HEAD run straight away; POST, PUT, PATCH and DELETE ask for confirmation first. |
+| `fetch_url` | Fetch an http/https URL and return the response as text. HTML is converted to plain text with `#` headings and fenced code (scripts, styles, navigation and wiki/site chrome dropped, the main content preferred); link URLs are left out of the text and looked up with `links="<word>"`, served from the page cache. JSON is pretty-printed. GET and HEAD run straight away; POST, PUT, PATCH and DELETE ask for confirmation first. |
 | `web_search` | Search keyless sources (Stack Overflow, Wikipedia, GitHub and MDN by default; npm, crates.io, Maven Central, PyPI and OSV by name) and check candidate URLs the model proposes. `read=true` also fetches the top pages and returns only the passages that match the query. See [Web search](#web-search). |
 | `add_search_source` | Add a search source that fits the project (docs.rs, a company Nexus, a Read the Docs project). It is dry-run first and usable for the session at once; keeping it asks you. |
 
@@ -1017,6 +1017,18 @@ Raising this well past a megabyte is worth pairing with [`/tool-result`](#tool-r
 TLS certificates are verified, and there is deliberately no way to turn that off. Proxy environment variables are ignored: a proxy resolves the hostname itself, which would make every address check above meaningless.
 
 The timeout is enforced across the whole redirect chain, not per hop, so a chain of slow redirects cannot hold the worker thread for a multiple of the budget you asked for.
+
+### Page cache
+
+The last 64 pages `fetch_url` and `web_search` downloaded are kept in memory, up to 64 MB in total. Pages do not expire with time: once either limit is reached, the least recently used page is pushed out to make room (pages average about 0.2 MB, so the page count is normally the limit; one page bigger than the ceiling is still kept, on its own). That way a follow-up `find=`, `offset=`, `json_path=` or `links=` call reads the page already fetched instead of downloading it again. A plain `fetch_url` always goes to the network, and responses to requests with headers or with an error status are never kept. To see what is held:
+
+```
+/net-cache          # each page: kind, size, age, cache hits, which tool fetched it
+/net-cache drop 2   # remove one page
+/net-cache clear    # empty it
+```
+
+In the web UI the same list is in the **NET** chip's popover, under a bar of the 64 slots coloured by kind (html, JSON, markdown, text), where a page fades the closer it is to being pushed out, and a per-kind legend; each page has a remove button, and **Clear cache** empties it. It refreshes after every fetch. The cache lives only in the running process and is not affected by `/net off`.
 
 ### Write requests
 

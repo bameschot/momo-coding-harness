@@ -4,7 +4,7 @@
 // their own popovers in app.js.  Rendered from the last status event, and again
 // on every status event while open.
 
-import { $, el } from "./dom.js";
+import { $, el, formatSize, icon } from "./dom.js";
 
 // What app.js supplies.
 const hooks = {
@@ -86,7 +86,87 @@ function renderNet(menu) {
     check("Ask before POST / PUT / PATCH / DELETE", !!s.net_confirm,
           (on) => hooks.send(`/net-confirm ${on ? "on" : "off"}`), access === "off"),
     el("div", "note", notes[access] || ""),
+    ...renderPageCache(s),
     foot(settingsLink("network", "Download limits…")));
+}
+
+function ago(epochSeconds) {
+  const s = Math.max(0, Math.round(Date.now() / 1000 - epochSeconds));
+  return s < 60 ? `${s}s ago` : `${Math.floor(s / 60)}m ago`;
+}
+
+// The pages fetch_url keeps for find=/offset=/links= follow-ups (/net-cache).
+// Shown whatever the access level: a cache filled before /net off is still there.
+function renderPageCache(s) {
+  const pages = s.net_cache || [];
+  const max = s.net_cache_max || 64;
+  const bytes = pages.reduce((n, p) => n + p.bytes, 0);
+  const title = el("div", "menu-sub cache-head", "Page cache");
+  if (pages.length) {
+    title.append(el("span", "muted",
+      `${pages.length} of ${max} pages · ${formatSize(bytes)} of ${formatSize(s.net_cache_max_bytes || 0)}`));
+  }
+  if (!pages.length) {
+    return [title, el("div", "note", `No pages cached. fetch_url and web_search keep the last ${max} pages `
+      + `(up to ${formatSize(s.net_cache_max_bytes || 0)}), so find=, offset= and links= don't download again.`)];
+  }
+  const list = el("ol", "cache-list");
+  pages.forEach((p, i) => {
+    const row = el("li", "cache-row");
+    const text = el("div", "cache-text");
+    const url = el("div", "cache-url", p.url.replace(/^https?:\/\//, ""));
+    url.title = p.final_url && p.final_url !== p.url ? `${p.url}\n→ ${p.final_url}` : p.url;
+    const meta = [p.kind, formatSize(p.bytes), ago(p.fetched), `${p.hits} hit${p.hits === 1 ? "" : "s"}`];
+    if (p.via === "web_search") meta.push("via search");
+    if (p.local) meta.push("local");
+    text.append(url, el("div", "cache-meta muted", meta.join(" · ")));
+    const drop = el("button", "icon-btn sm");
+    drop.type = "button";
+    drop.title = "Remove from the cache";
+    drop.setAttribute("aria-label", `Remove ${p.url} from the cache`);
+    drop.append(icon("x", "icon sm"));
+    drop.onclick = () => hooks.send(`/net-cache drop ${i + 1}`);
+    row.append(text, drop);
+    list.append(row);
+  });
+  const clear = el("button", "btn small", "Clear cache");
+  clear.type = "button";
+  clear.onclick = () => hooks.send("/net-cache clear");
+  return [title, ...cacheBar(pages, max), list, clear];
+}
+
+const CACHE_KINDS = ["html", "json", "markdown", "text"];
+const kindClass = (kind) => `cache-k-${CACHE_KINDS.includes(kind) ? kind : "other"}`;
+
+// One segment per cached page out of the cache's slots, coloured by kind (the
+// CTX/INDEX popovers' bar).  Pages never expire with time; the least recently
+// used is pushed out first when the cache is full, so a page fades the closer
+// it is to that end.  Then a legend.
+function cacheBar(pages, max) {
+  const bar = el("div", "ctx-stack");
+  pages.forEach((p, i) => {
+    const seg = el("span", `ctx-seg ${kindClass(p.kind)}`);
+    seg.style.width = `${100 / max}%`;
+    seg.style.opacity = (1 - 0.65 * (i / Math.max(1, max - 1))).toFixed(2);
+    seg.title = `${p.url} · ${p.kind} · ${formatSize(p.bytes)} · ${ago(p.fetched)}`;
+    bar.append(seg);
+  });
+  const groups = new Map();
+  for (const p of pages) {
+    const g = groups.get(p.kind) || { n: 0, bytes: 0 };
+    g.n += 1;
+    g.bytes += p.bytes;
+    groups.set(p.kind, g);
+  }
+  const rows = el("div", "ctx-rows");
+  for (const [kind, g] of groups) {
+    const row = el("div", "ctx-row");
+    row.append(el("span", `ctx-swatch ${kindClass(kind)}`), el("span", "ctx-name", kind),
+               el("span", "ctx-tok mono", `${g.n} page${g.n === 1 ? "" : "s"}`),
+               el("span", "ctx-pc mono", formatSize(g.bytes)));
+    rows.append(row);
+  }
+  return [bar, rows];
 }
 
 function renderToolsOff(menu) {

@@ -37,9 +37,10 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
+
+from . import html_text
 
 _MAX_REDIRECTS = 5
 # Two separate budgets.  The download cap only bounds memory and time: an HTML
@@ -545,268 +546,10 @@ def _maybe_gunzip(raw: bytes, encoding: str, max_bytes: int = DEFAULT_MAX_BYTES
 
 # ── HTML → text ───────────────────────────────────────────────────────────────
 
-# Content that is never prose. select/button/textarea are here because their
-# text is UI chrome that crowds out the page body for a small model.  <form> is
-# NOT: ASP.NET WebForms wraps the entire page in one, so dropping it dropped
-# everything.
-_DROP_TAGS = {"script", "style", "head", "nav", "footer", "aside", "noscript",
-              "svg", "template", "iframe", "select", "button", "textarea", "dialog"}
-# </head> is optional in HTML5 and minified pages leave it out, so a dropped
-# <head> also ends at the first tag that can only appear in the body.
-_BODY_START_TAGS = {"body", "main", "div", "p", "article", "section", "header",
-                    "ul", "ol", "table", "pre", "h1", "h2", "h3", "h4", "h5", "h6"}
-# The same chrome marked up with ARIA roles instead of semantic tags — Sphinx
-# breadcrumbs, for one, are <div role="navigation">, not <nav>.
-_DROP_ROLES = {"navigation", "banner", "contentinfo", "search", "complementary"}
-_BLOCK_TAGS = {"p", "div", "br", "li", "tr", "td", "th", "section", "article",
-               "header", "ul", "ol", "table", "blockquote", "pre", "main",
-               "h1", "h2", "h3", "h4", "h5", "h6", "dl", "dt", "dd", "figure"}
-_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
-              "meta", "param", "source", "track", "wbr"}
-# The main-content region is only trusted when it holds at least this much text;
-# a tiny <main> is more likely a mis-marked widget than the page body.
-_MAIN_MIN_CHARS = 500
-# Private-use placeholder for a <pre> block, so the whitespace collapse in
-# html_to_text leaves code samples intact.
-_PRE_MARK = ""
-
-
-class _TextExtractor(HTMLParser):
-    """HTML to light markdown, keeping link targets inline as 'text <url>'.
-
-    Headings become '#', list items '- ' / '1.', <pre> a fenced block and
-    <code> backticks, so a small model can tell code from prose and find
-    sections by heading.  Elements are dropped by tag name, by ARIA role,
-    and when hidden; `attr_drops=False` turns the attribute-based drops off,
-    for pages whose markup is too broken for them to close properly.
-    """
-
-    def __init__(self, base_url: str = "", attr_drops: bool = True):
-        super().__init__(convert_charrefs=True)
-        self.base = base_url
-        self._page = base_url.split("#", 1)[0]
-        self._attr_drops = attr_drops
-        self.parts: list[str] = []
-        self.pre_blocks: list[str] = []
-        self.title = ""
-        # Dropping is keyed by the tag that opened it, so an attribute-based
-        # drop (<div role=navigation>) ends at its own </div>, not the first one.
-        self._drop_tag: str | None = None
-        self._drop_depth = 0
-        self._in_title = False
-        self._href = ""
-        self._link_start = 0
-        self._seen_links: set[str] = set()
-        self._lists: list[list] = []      # [tag, counter] per open ul/ol
-        self._pre: list[str] | None = None
-        self._pre_depth = 0
-        self._code = 0
-        # (start, end) indices into parts of the main-content region.
-        self._main_tag: str | None = None
-        self._main_depth = 0
-        self._main_start: int | None = None
-        self.main_range: tuple[int, int] | None = None
-        self._article_depth = 0
-        self.article_ranges: list[tuple[int, int]] = []
-        self._article_start = 0
-
-    def _should_drop(self, tag, attrs) -> bool:
-        if tag in _DROP_TAGS:
-            return True
-        if not self._attr_drops:
-            return False
-        a = dict(attrs)
-        if (a.get("role") or "").lower() in _DROP_ROLES:
-            return True
-        if "hidden" in a or (a.get("aria-hidden") or "").lower() == "true":
-            return True
-        if tag == "a":
-            # Sphinx/MkDocs permalink anchors (a bare '¶' after every heading),
-            # and language switchers — Wikipedia puts ~200 of them in <main>.
-            return "headerlink" in (a.get("class") or "").split() or "hreflang" in a
-        return False
-
-    def handle_starttag(self, tag, attrs):
-        # Checked before the drop set: <title> sits inside <head>, which is
-        # dropped, but the page title is the single most useful line of context.
-        if tag == "title" and self._drop_tag in (None, "head"):
-            self._in_title = True
-            return
-        if self._drop_tag == "head" and tag in _BODY_START_TAGS:
-            self._drop_tag, self._drop_depth = None, 0
-        if self._drop_tag is not None:
-            if tag == self._drop_tag:
-                self._drop_depth += 1
-            return
-        if self._should_drop(tag, attrs):
-            if tag not in _VOID_TAGS:
-                self._drop_tag, self._drop_depth = tag, 1
-            return
-
-        if self._main_start is None and self.main_range is None:
-            role = (dict(attrs).get("role") or "").lower()
-            if tag == "main" or role == "main":
-                self._main_tag, self._main_depth = tag, 0
-                self._main_start = len(self.parts)
-        if self._main_tag == tag and self._main_start is not None:
-            self._main_depth += 1
-        if tag == "article":
-            if self._article_depth == 0:
-                self._article_start = len(self.parts)
-            self._article_depth += 1
-
-        if self._pre is not None:
-            if tag == "pre":
-                self._pre_depth += 1
-            elif tag == "br":
-                self._pre.append("\n")
-            return
-        if tag == "pre":
-            self._pre, self._pre_depth = [], 1
-            return
-        if tag == "a":
-            href = dict(attrs).get("href") or ""
-            if href and not href.startswith(("#", "javascript:", "data:", "mailto:")):
-                self._href = urljoin(self.base, href)
-                self._link_start = len(self.parts)
-        elif tag == "code":
-            self._code += 1
-            if self._code == 1:
-                self.parts.append("`")
-        elif tag in ("ul", "ol"):
-            self._lists.append([tag, 0])
-            self.parts.append("\n")
-        elif tag == "li":
-            indent = "  " * max(0, len(self._lists) - 1)
-            if self._lists and self._lists[-1][0] == "ol":
-                self._lists[-1][1] += 1
-                self.parts.append(f"\n{indent}{self._lists[-1][1]}. ")
-            else:
-                self.parts.append(f"\n{indent}- ")
-        elif len(tag) == 2 and tag[0] == "h" and tag[1] in "123456":
-            self.parts.append("\n\n" + "#" * int(tag[1]) + " ")
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_startendtag(self, tag, attrs):
-        if self._drop_tag is not None:
-            return
-        if tag in ("br", "hr"):
-            (self._pre if self._pre is not None else self.parts).append("\n")
-
-    def handle_endtag(self, tag):
-        if tag == "title" and self._in_title:
-            self._in_title = False
-            return
-        if self._drop_tag is not None:
-            if tag == self._drop_tag:
-                self._drop_depth -= 1
-                if self._drop_depth <= 0:
-                    self._drop_tag = None
-            return
-
-        if self._pre is not None:
-            if tag == "pre":
-                self._pre_depth -= 1
-                if self._pre_depth <= 0:
-                    self.pre_blocks.append("".join(self._pre).strip("\n"))
-                    self.parts.append(f"\n{_PRE_MARK}{len(self.pre_blocks) - 1}{_PRE_MARK}\n")
-                    self._pre = None
-            self._close_regions(tag)
-            return
-
-        if tag == "a" and self._href:
-            text = "".join(self.parts[self._link_start:]).strip().strip("`")
-            target = self._href.split("#", 1)[0]
-            # A link back to this page, one already shown, or one whose text *is*
-            # the URL adds tokens and no information.
-            if (target != self._page and self._href not in self._seen_links
-                    and text != self._href and text):
-                self.parts.append(f" <{self._href}>")
-                self._seen_links.add(self._href)
-            self._href = ""
-        elif tag == "code" and self._code:
-            self._code -= 1
-            if self._code == 0:
-                self.parts.append("`")
-        elif tag in ("ul", "ol"):
-            if self._lists:
-                self._lists.pop()
-            self.parts.append("\n")
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n")
-        self._close_regions(tag)
-
-    def _close_regions(self, tag):
-        if tag == self._main_tag and self._main_start is not None:
-            self._main_depth -= 1
-            if self._main_depth <= 0:
-                self.main_range = (self._main_start, len(self.parts))
-                self._main_start, self._main_tag = None, None
-        if tag == "article" and self._article_depth:
-            self._article_depth -= 1
-            if self._article_depth == 0:
-                self.article_ranges.append((self._article_start, len(self.parts)))
-
-    def handle_data(self, data):
-        if self._in_title:
-            self.title += data
-            return
-        if self._drop_tag is not None:
-            return
-        if self._pre is not None:
-            self._pre.append(data)
-            return
-        # Whitespace-only data still separates words: "<a>x</a> <a>y</a>".
-        self.parts.append(data if data.strip() else " ")
-
-    def body_parts(self) -> list[str]:
-        """The main-content region when the page marks one clearly, else all."""
-        rng = self.main_range
-        if rng is None and self._main_start is not None:
-            rng = (self._main_start, len(self.parts))     # <main> never closed
-        if rng is None and len(self.article_ranges) == 1:
-            rng = self.article_ranges[0]
-        if rng is not None:
-            region = self.parts[rng[0]:rng[1]]
-            if len("".join(region).strip()) >= _MAIN_MIN_CHARS:
-                return region
-        return self.parts
-
-
-def _extract(html: str, base_url: str, attr_drops: bool) -> tuple[str, str]:
-    p = _TextExtractor(base_url, attr_drops)
-    try:
-        p.feed(html)
-        p.close()
-    except Exception:
-        pass  # malformed markup must degrade, never raise
-    text = "".join(p.body_parts())
-    text = re.sub(r"[ \t\r\f\v\xa0​  ]+", " ", text)
-    text = "\n".join(line.strip() for line in text.split("\n"))
-    # List items whose content was all dropped leave a bare bullet behind.
-    text = re.sub(r"(?m)^(?:-|\d+\.)$\n?", "", text)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    blocks = p.pre_blocks
-    text = re.sub(f"{_PRE_MARK}(\\d+){_PRE_MARK}",
-                  lambda m: f"```\n{blocks[int(m.group(1))]}\n```"
-                  if int(m.group(1)) < len(blocks) else "", text)
-    return text, p.title.strip()
-
-
 def html_to_text(html: str, base_url: str = "") -> str:
-    """Readable light markdown from an HTML page: chrome dropped, main content
-    preferred, headings/lists/code kept, link targets inline."""
-    text, title = _extract(html, base_url, attr_drops=True)
-    if len(text) < 200 and len(html) > 5000:
-        # An attribute-based drop that never closed (unbalanced markup) can
-        # swallow the rest of the page; retry with tag-name drops only.
-        text2, _ = _extract(html, base_url, attr_drops=False)
-        if len(text2) > len(text):
-            text = text2
-    if title:
-        text = f"# {title}\n\n{text}"
-    return text
+    """Readable plain text from an HTML page: chrome dropped, main content
+    preferred, headings/lists/code kept, link URLs left out (see html_text)."""
+    return html_text.convert(html, base_url).text
 
 
 # ── response formatting ───────────────────────────────────────────────────────
@@ -902,9 +645,28 @@ def _looks_textual(ctype: str, raw: bytes) -> bool:
     return True
 
 
+# Titles of the interstitials bot-protection services serve instead of the page.
+_BOT_CHECK_TITLES = re.compile(
+    r"^(?:just a moment\.*|attention required!?(?: \| cloudflare)?|access denied|"
+    r"please verify you are a human|are you a robot\??|ddos-guard|"
+    r"verifying you are human\.*|checking your browser\.*)$", re.I)
+_BOT_CHECK_MAX_CHARS = 1_000
+
+
+def _bot_check(headers, title: str, text: str) -> bool:
+    """True if the response is a bot-check page rather than the content."""
+    if _header(headers, "cf-mitigated").lower() == "challenge":
+        return True
+    return bool(_BOT_CHECK_TITLES.match(title.strip())) and len(text) < _BOT_CHECK_MAX_CHARS
+
+
 def _decode_body(raw: bytes, headers, final_url: str, json_path: str | None = None,
-                 notes: list[str] | None = None) -> tuple[str, str]:
-    """(kind, text). `headers` is an http.client.HTTPMessage where available."""
+                 notes: list[str] | None = None,
+                 links_out: list | None = None) -> tuple[str, str]:
+    """(kind, text). `headers` is an http.client.HTTPMessage where available.
+
+    Link URLs are taken out of HTML and markdown bodies; with `links_out` they
+    are appended there (html_text.Link), for fetch_url(links=...)."""
     try:
         ctype = headers.get_content_type()
         charset = headers.get_content_charset() or "utf-8"
@@ -944,7 +706,18 @@ def _decode_body(raw: bytes, headers, final_url: str, json_path: str | None = No
     if json_path and notes is not None:
         notes.append(f"json_path ignored: the response is {ctype}, not JSON")
     if ctype in ("text/html", "application/xhtml+xml"):
-        return "html→text", html_to_text(text, final_url)
+        page = html_text.convert(text, final_url)
+        if links_out is not None:
+            links_out.extend(page.links)
+        if notes is not None and _bot_check(headers, page.title, page.text):
+            notes.append("the site served a bot-check page instead of content; fetch_url "
+                         "cannot get past it — try a different source (web_search, the "
+                         "project's docs or its API)")
+        return "html→text", page.text
+    if ctype in ("text/markdown", "text/x-markdown"):
+        text, links = html_text.delink_markdown(text, final_url)
+        if links_out is not None:
+            links_out.extend(links)
     return "text", text
 
 
@@ -1071,13 +844,19 @@ def _render(url: str, final_url: str, status: int, reason: str, headers,
 
 # ── page cache ────────────────────────────────────────────────────────────────
 
-# Recent GET responses, so a follow-up offset=/find=/json_path= call reads the
-# page it already downloaded instead of fetching it again.  Only those follow-up
-# calls consult it — a plain fetch always goes to the network, so the model
-# never sees a stale page it did not ask to page through.  Never cached:
+# Recent GET responses, so a follow-up offset=/find=/json_path=/links= call reads
+# the page it already downloaded instead of fetching it again.  Only those
+# follow-up calls consult it — a plain fetch always goes to the network, so the
+# model never sees a stale page it did not ask to page through.  Never cached:
 # anything sent with request headers (it may carry auth) and non-2xx responses.
-_CACHE_TTL = 600
-_CACHE_MAX = 8
+# Pages never expire with time: they leave when a 65th page or the byte
+# ceiling pushes the least recently used one out, or by /net-cache drop|clear.
+# 64 slots, because one web_search read=true fills up to five and a follow-up on
+# a page read many calls earlier should still find it.  Pages average ~0.2 MB,
+# so the count is normally the limit; the byte ceiling bounds memory when many
+# pages near the download cap pile up (64 × 2 MB would be 128 MB).
+_CACHE_MAX = 64
+_CACHE_MAX_BYTES = 64 * 1024 * 1024
 _cache: dict[tuple, tuple[float, dict]] = {}
 _cache_lock = threading.Lock()
 
@@ -1087,24 +866,81 @@ def _cache_get(key: tuple) -> dict | None:
         hit = _cache.get(key)
         if hit is None:
             return None
-        if time.monotonic() - hit[0] > _CACHE_TTL:
-            del _cache[key]
-            return None
         _cache[key] = _cache.pop(key)       # most recently used goes last
+        hit[1]["hits"] = hit[1].get("hits", 0) + 1
         return hit[1]
 
 
-def _cache_put(key: tuple, entry: dict) -> None:
+def _cache_put(key: tuple, entry: dict, via: str) -> None:
+    """Store a response; `via` names the tool that downloaded it, for /net-cache."""
     with _cache_lock:
         _cache.pop(key, None)
-        _cache[key] = (time.monotonic(), entry)
-        while len(_cache) > _CACHE_MAX:
-            del _cache[next(iter(_cache))]
+        _cache[key] = (time.monotonic(), {**entry, "via": via, "hits": 0})
+        total = sum(len(e["raw"]) for _, e in _cache.values())
+        # A single page over the byte ceiling stays (alone): its follow-ups work.
+        while len(_cache) > _CACHE_MAX or (total > _CACHE_MAX_BYTES and len(_cache) > 1):
+            oldest = next(iter(_cache))
+            total -= len(_cache[oldest][1]["raw"])
+            del _cache[oldest]
 
 
-def clear_cache() -> None:
+def clear_cache() -> int:
+    """Empty the cache; returns how many pages it held."""
     with _cache_lock:
+        n = len(_cache)
         _cache.clear()
+        return n
+
+
+def _content_kind(headers) -> str:
+    try:
+        ctype = headers.get_content_type()
+    except AttributeError:
+        ctype = (_header(headers, "Content-Type") or _header(headers, "content-type")
+                 ).split(";")[0].strip().lower()
+    if ctype in ("text/html", "application/xhtml+xml"):
+        return "html"
+    if ctype.endswith(("json", "+json")):
+        return "json"
+    if ctype in ("text/markdown", "text/x-markdown"):
+        return "markdown"
+    return "text" if ctype.startswith("text/") else (ctype or "unknown")
+
+
+def _live_entries() -> list[tuple[tuple, float, dict]]:
+    """(key, stored-at, entry), most recently used first — the last one is the
+    next to be pushed out.  Caller holds _cache_lock."""
+    return [(k, at, e) for k, (at, e) in reversed(_cache.items())]
+
+
+def cache_snapshot() -> list[dict]:
+    """What the page cache holds, for /net-cache and the web UI's NET popover:
+    most recently used first, which is also the order cache_drop() numbers."""
+    with _cache_lock:
+        live = _live_entries()
+    now, wall = time.monotonic(), time.time()
+    return [{"url": key[0], "final_url": e["final_url"], "status": e["status"],
+             "kind": _content_kind(e["headers"]), "bytes": len(e["raw"]),
+             "fetched": wall - (now - at), "hits": e.get("hits", 0), "via": e.get("via", "fetch_url"), "local": key[1]}
+            for key, at, e in live]
+
+
+def cache_stats() -> dict:
+    with _cache_lock:
+        live = _live_entries()
+    return {"entries": len(live), "bytes": sum(len(e["raw"]) for _, _, e in live),
+            "max": _CACHE_MAX, "max_bytes": _CACHE_MAX_BYTES}
+
+
+def cache_drop(n: int) -> str | None:
+    """Remove the n-th page (1-based, cache_snapshot order); its URL, or None."""
+    with _cache_lock:
+        live = _live_entries()
+        if not 1 <= n <= len(live):
+            return None
+        key = live[n - 1][0]
+        del _cache[key]
+        return key[0]
 
 
 # ── the tool ──────────────────────────────────────────────────────────────────
@@ -1217,7 +1053,7 @@ def fetch_page(url: str, *, allow_private: bool, max_bytes: int,
     got = _get(url, allow_private=allow_private, max_bytes=max_bytes,
                timeout=timeout, cancel=cancel)
     if not isinstance(got, str) and 200 <= got["status"] < 300:
-        _cache_put(key, got)
+        _cache_put(key, got, "web_search")
     return got
 
 
@@ -1230,10 +1066,44 @@ def fence(body: str) -> str:
     return f"{_BEGIN}\n{body}\n{_END}\n\n{_FOOTER}"
 
 
+# How many links one links= lookup lists.
+_LINKS_MAX = 40
+
+
+def _link_listing(found: list, query: str, notes: list[str]) -> str:
+    """'text → url' lines for the links matching `query` ('*' for all):
+    links in the page's content first, then navigation, each in page order."""
+    if not found:
+        notes.append("the page has no links")
+        return ""
+    q = query.strip().lower()
+    if q in ("*", "all"):
+        hits = list(found)
+    else:
+        hits = [lk for lk in found if q in lk.text.lower() or q in lk.url.lower()]
+        if not hits:
+            words = [w for w in re.findall(r"\w+", q) if len(w) >= 3]
+            hits = [lk for lk in found if words
+                    and all(w in f"{lk.text} {lk.url}".lower() for w in words)]
+    if not hits:
+        notes.append(f"no link text or URL contains '{safe_line(query, 60)}' — the page has "
+                     f"{len(found)} links; links=\"*\" lists them")
+        return ""
+    hits.sort(key=lambda lk: not lk.in_content)
+    shown = hits[:_LINKS_MAX]
+    if len(hits) > len(shown):
+        notes.append(f"showing {len(shown)} of {len(hits)} matching links — use a more "
+                     "specific word")
+    else:
+        notes.append(f"{len(hits)} of the page's {len(found)} links match")
+    return "\n".join(f"{lk.text} → {lk.url}" + ("" if lk.in_content else "  (navigation)")
+                     for lk in shown)
+
+
 def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
               body: str | None = None, max_bytes=None,
               timeout: int = _DEFAULT_TIMEOUT, offset=0, find: str | None = None,
-              json_path: str | None = None, *,
+              json_path: str | None = None, links: str | None = None, *,
               workdir: Path, net_access: str = "off",
               net_max_bytes: int = DEFAULT_MAX_BYTES,
               net_max_chars: int = DEFAULT_MAX_CHARS, cancel=None) -> str:
@@ -1246,7 +1116,8 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
     `max_bytes` may be a number or a unit string ("500kb", "2mb"); it can only
     lower the download ceiling, never raise it.  `offset`/`find` choose which
     `net_max_chars` window of the extracted text comes back; `json_path`
-    selects part of a JSON response.
+    selects part of a JSON response.  Page text carries no link URLs; `links`
+    looks them up, from the page cache when the page was just fetched.
     """
     del workdir  # every executor takes it; this one has no filesystem side
     if net_access == "off":
@@ -1296,19 +1167,33 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
         return f"ERROR: offset '{safe_line(offset, 40)}' is not a number of characters."
     find = str(find) if find not in (None, "") else None
     json_path = str(json_path) if json_path not in (None, "") else None
+    links = str(links) if links not in (None, "") else None
     max_chars = min(int(net_max_chars or DEFAULT_MAX_CHARS), HARD_MAX_CHARS)
 
     cacheable = method == "GET" and not headers
     key = (url.strip(), allow_private, max_bytes)
-    paging = offset or find or json_path
+
+    def respond(got: dict, notes: list[str]) -> str:
+        found: list = []
+        kind, text = _decode_body(got["raw"], got["headers"], got["final_url"], json_path,
+                                  notes, found)
+        at, look = offset, find
+        if links is not None and kind.startswith("json"):
+            notes.append("links ignored: the response is JSON")
+        elif links is not None:
+            kind, text, at, look = "links", _link_listing(found, links, notes), 0, None
+        elif found:
+            notes.append(f"{len(found)} links removed from the text — call fetch_url again "
+                         "with links=\"<word>\" to look up their URLs")
+        return _render(url, got["final_url"], got["status"], got["reason"], got["headers"],
+                       kind, text, notes, got["hops"], method, max_chars, at, look)
+
+    paging = offset or find or json_path or links
     if cacheable and paging and (hit := _cache_get(key)):
         notes = list(hit["notes"])
         age = int(time.monotonic() - hit["at"])
         notes.append(f"served from the page cache (downloaded {age}s ago)")
-        kind, text = _decode_body(hit["raw"], hit["headers"], hit["final_url"],
-                                  json_path, notes)
-        return _render(url, hit["final_url"], hit["status"], hit["reason"], hit["headers"],
-                       kind, text, notes, hit["hops"], method, max_chars, offset, find)
+        return respond(hit, notes)
 
     data = body.encode("utf-8") if body and method not in _READ_METHODS else None
     pre_notes = []
@@ -1323,9 +1208,5 @@ def fetch_url(url: str, method: str = "GET", headers: dict | None = None,
         return got
     notes = pre_notes + got["notes"]
     if cacheable and 200 <= got["status"] < 300:
-        _cache_put(key, {**got, "notes": list(notes)})
-    raw, rheaders, final_url = got["raw"], got["headers"], got["final_url"]
-    status, reason, hops = got["status"], got["reason"], got["hops"]
-    kind, text = _decode_body(raw, rheaders, final_url, json_path, notes)
-    return _render(url, final_url, status, reason, rheaders, kind, text,
-                   notes, hops, method, max_chars, offset, find)
+        _cache_put(key, {**got, "notes": list(notes)}, "fetch_url")
+    return respond(got, notes)

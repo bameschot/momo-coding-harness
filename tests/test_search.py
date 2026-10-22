@@ -292,6 +292,17 @@ class Passages(Base):
         self.assertEqual(ranked[0][3], "Timeouts")
         self.assertIn("wait_for", ranked[0][4])
 
+    def test_passages_only_see_real_headings(self):
+        # Text that starts with '#' (a spec anchor, a shell comment in prose)
+        # must not open a section; a table stays one block under its heading.
+        text = net.html_to_text("<h2>Specifications</h2><p># the-table-element</p>"
+                                "<table><tr><th>Name</th><th>Age</th><th>City</th></tr>"
+                                "<tr><td>Ann</td><td>3</td><td>X</td></tr></table>")
+        blocks = search._blocks(text)
+        self.assertEqual({h for h, _ in blocks}, {"Specifications"})
+        self.assertIn("Name\tAge\tCity\nAnn\t3\tX", [b for _, b in blocks])
+        self.assertNotIn("<https://", text)
+
     def test_code_fence_is_one_block(self):
         blocks = search._blocks("# H\n\npara\n\n```\na\n\nb\n```\n\nafter")
         self.assertEqual([b for _, b in blocks], ["para", "```\na\n\nb\n```", "after"])

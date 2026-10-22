@@ -1084,7 +1084,7 @@ ollama serve</code></pre></div>
     <h3>Internet (all modes, only with <code>/net on</code>)</h3>
     <div class="table-scroll"><table>
       <tr><th>Tool</th><th>Description</th></tr>
-      <tr><td><code>fetch_url</code></td><td class="wrap">Read a URL as text: HTML becomes light markdown, JSON is pretty-printed. Page on with <code>offset=</code>, jump with <code>find=</code>, pick JSON with <code>json_path=</code>. Writes (POST, PUT, PATCH, DELETE) ask first. See <a href="#net">Internet access</a>.</td></tr>
+      <tr><td><code>fetch_url</code></td><td class="wrap">Read a URL as text: HTML becomes plain text with headings and code blocks, JSON is pretty-printed. Page on with <code>offset=</code>, jump with <code>find=</code>, pick JSON with <code>json_path=</code>, look up link URLs with <code>links=</code>. Follow-ups reuse the page cache; <code>/net-cache</code> and the NET popover show it. Writes (POST, PUT, PATCH, DELETE) ask first. See <a href="#net">Internet access</a>.</td></tr>
       <tr><td><code>web_search</code></td><td class="wrap">Search keyless sources and check URLs the model proposes. <code>read=true</code> also returns the passages that answer the query. See <a href="#search">Web search</a>.</td></tr>
       <tr><td><code>add_search_source</code></td><td class="wrap">Add a source that fits the project. It's dry-run first, then usable for the session; keeping it is your call.</td></tr>
     </table></div>

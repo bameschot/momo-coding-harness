@@ -53,6 +53,9 @@ class StatusEvent:
     net_confirm: bool = True    # ask y/N before a write request
     net_max_bytes: int = 2097152  # ceiling on one fetch_url download
     net_max_chars: int = 24000    # text returned per fetch_url call
+    net_cache: list = field(default_factory=list)  # /net-cache: net.cache_snapshot() rows
+    net_cache_max: int = 64       # pages the cache holds at most
+    net_cache_max_bytes: int = 64 * 1024 * 1024  # and bytes, whichever comes first
     host: str = ""
     provider: str = ""
     plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""

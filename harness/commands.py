@@ -120,6 +120,60 @@ def _on_off(arg: str) -> bool | None:
     return True if a in _ON else False if a in _OFF else None
 
 
+def _ago(seconds: float) -> str:
+    s = max(0, int(seconds))
+    return f"{s}s ago" if s < 60 else f"{s // 60}m ago"
+
+
+def _net_cache_listing() -> str:
+    pages, stats = net_mod.cache_snapshot(), net_mod.cache_stats()
+    cap = net_mod.format_size(stats["max_bytes"])
+    if not pages:
+        return (f"Page cache: empty. fetch_url and web_search keep the last {stats['max']} pages "
+                f"(up to {cap}), so find=, offset=, json_path= and links= reuse the download "
+                f"instead of fetching again.")
+    head = (f"Page cache: {len(pages)} of {stats['max']} pages, "
+            f"{net_mod.format_size(stats['bytes'])} of {cap}"
+            f" — when full, the page at the bottom goes first")
+    now = datetime.now().timestamp()
+    width = min(60, max(len(net_mod.safe_line(p["url"].split("://", 1)[-1], 60)) for p in pages))
+    rows = []
+    for i, p in enumerate(pages, 1):
+        url = net_mod.safe_line(p["url"].split("://", 1)[-1], 60)
+        hits = f"{p['hits']} hit{'s' * (p['hits'] != 1)}"
+        tags = "  ".join([p["via"]] + ["local"] * bool(p["local"]))
+        rows.append(f"{i:>2}. {url:<{width}}  {p['kind']:<8} "
+                    f"{net_mod.format_size(p['bytes']):>8}  {_ago(now - p['fetched']):>7}  "
+                    f"{hits:<7} {tags}")
+    return "\n".join([head, *rows,
+                      "/net-cache drop <n> removes one · /net-cache clear empties it"])
+
+
+def _net_cache_command(harness, arg: str) -> CommandResult:
+    """/net-cache [clear | drop <n>]: what fetch_url's page cache holds."""
+    parts = arg.split()
+    if not parts:
+        return CommandResult(handled=True, output=_net_cache_listing())
+    if parts == ["clear"]:
+        n = net_mod.clear_cache()
+        harness.emit_status()
+        return CommandResult(handled=True,
+                             output=f"Page cache: cleared {n} page{'s' * (n != 1)}.")
+    if len(parts) == 2 and parts[0] in ("drop", "rm", "remove"):
+        try:
+            url = net_mod.cache_drop(int(parts[1]))
+        except ValueError:
+            url = None
+        if url is None:
+            n = net_mod.cache_stats()["entries"]
+            return _bad_choice(parts[1], f"a page number from 1 to {n} (see /net-cache)"
+                               if n else "a page number, but the cache is empty")
+        harness.emit_status()
+        return CommandResult(handled=True,
+                             output=f"Page cache: dropped {net_mod.safe_line(url, 300)}.")
+    return _bad_choice(arg, "nothing, 'clear' or 'drop <n>'")
+
+
 def _bad_choice(arg: str, choices: str = "'on' or 'off'") -> CommandResult:
     return CommandResult(handled=True, output=f"ERROR: expected {choices}"
                                               + (f", got: {arg}" if arg else ""))
@@ -795,7 +849,10 @@ def handle(line: str, harness: Harness) -> CommandResult:
             label = {"off": "off", "on": "on (public internet only)",
                      "local": "on, including localhost and the LAN"}[harness.net_access]
             writes = "ask y/N" if harness.net_confirm else "run without asking"
-            return f"Internet access: {label}\nWrite requests (POST/PUT/PATCH/DELETE): {writes}"
+            out = f"Internet access: {label}\nWrite requests (POST/PUT/PATCH/DELETE): {writes}"
+            if (n := net_mod.cache_stats()["entries"]):
+                out += f"\nPage cache: {n} page{'s' * (n != 1)} (/net-cache)"
+            return out
         if not arg:
             return CommandResult(handled=True, output=_net_state())
         a = arg.lower()
@@ -877,6 +934,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                     f"the context ({harness.context_limit:,} tokens).")
         return CommandResult(handled=True, output=(
             f"fetch_url text per call: {n:,} characters" + warn))
+
+    if cmd == "/net-cache":
+        return _net_cache_command(harness, arg)
 
     if cmd == "/search-sources":
         reg = harness.search_sources
@@ -1530,6 +1590,9 @@ Available commands:
   /net-max-bytes <n>  Set it, in bytes or with a unit: 200000, 500kb, 2mb (saved)
   /net-max-chars      Show how much page text one fetch_url call returns
   /net-max-chars <n>  Set it in characters (default 24000; saved); the rest is paged
+  /net-cache          List the pages fetch_url keeps for find=/offset=/links= follow-ups
+  /net-cache clear    Empty the page cache
+  /net-cache drop <n>  Remove one page from the cache (number from /net-cache)
   /mcp                MCP servers: status (TUI: opens the server picker)
   /mcp list           List MCP servers, their state and tool counts
   /mcp on|off         Connect MCP servers and offer their tools (saved)
