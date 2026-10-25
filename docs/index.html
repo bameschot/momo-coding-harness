@@ -118,6 +118,8 @@ code { font: .88em var(--mono); background: var(--code-bg); border-radius: 4px; 
 .chip.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
 .chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
 .chip.sys { color: var(--system); border-color: color-mix(in srgb, var(--system) 50%, transparent); }
+a.chip { text-decoration: none; }
+a.chip:hover { border-color: currentColor; }
 .collapse { }
 
 /* ── layout ── */
@@ -512,6 +514,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
         <span class="chip ok">no required packages</span>
         <span class="chip ok">no build step</span>
         <span class="chip">Python 3.14</span>
+        <a class="chip sys" href="#cavecat" title="Cavecat mode: short replies, compacted command output, trimmed reasoning — runs ~20% faster on a 9B model">/cavecat on: ~20% faster</a>
       </div>
     </div>
 
@@ -1624,7 +1627,7 @@ FAILED (failures=2)
     </ul>
 
     <h3 id="think-history">Sending reasoning back</h3>
-    <p><code>/think-history off|turn|all</code> decides whether the model sees its own earlier reasoning. <code>turn</code> (the default) sends it back for the current tool loop, since your last message. <code>all</code> also sends earlier turns, and <code>off</code> sends none. It is remembered, and in the web UI it is under the <code>THINK</code> menu.</p>
+    <p><code>/think-history off|turn|all</code> decides whether the model sees its own earlier reasoning (with <a href="#cavecat"><code>/cavecat on</code></a>, only its decision). <code>turn</code> (the default) sends it back for the current tool loop, since your last message. <code>all</code> also sends earlier turns, and <code>off</code> sends none. It is remembered, and in the web UI it is under the <code>THINK</code> menu.</p>
     <ul>
       <li><strong>Why:</strong> models are trained to see their reasoning from the earlier steps of a tool loop. With <code>off</code>, the model sees its earlier tool calls without the reasoning behind them, and tends to plan again from scratch after every result.</li>
       <li><strong>Cost:</strong> sent reasoning counts toward the context (<em>Reasoning sent back</em> in the CTX breakdown). With <code>all</code>, compaction stops sending earlier turns' reasoning before it removes any messages.</li>
@@ -1656,11 +1659,12 @@ FAILED (failures=2)
 
   <section id="cavecat" data-voice="cavecat">
     <h2>Cavecat mode</h2>
-    <p>A nod to <a href="https://github.com/akramsystems/caveman">caveman</a>, the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat. On a local model, output tokens are wall-clock time, so <code>/cavecat on</code> trims the text a turn produces and the command output it reads. Thinking is never touched, and replies stay plain sentences.</p>
+    <p>A nod to <a href="https://github.com/akramsystems/caveman">caveman</a>, the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat. On a local model, output tokens are wall-clock time, so <code>/cavecat on</code> trims the text a turn produces and what it re-reads: command output and its own earlier reasoning. How the model thinks is never constrained, and replies stay plain sentences.</p>
     <ul>
       <li><strong>A short reply:</strong> the result first, then what changed and anything you must decide. No preamble, step-by-step recap or closing offer.</li>
       <li><strong>No narration between tool calls:</strong> the model calls the next tool without announcing it, and says what it found in the reply. The nudge that asks for text after 10 calls without any waits for 20, and stops asking for a progress line.</li>
       <li><strong>Telegraphic plans and tool text:</strong> <code>create_plan</code> steps (re-sent on every step of <a href="#plan">plan execution</a>), <code>complete_step</code> summaries, <code>ask_user</code> questions, commit messages and design specs, written as "verb + file + change".</li>
+      <li><strong>Only the decision of earlier reasoning is sent back</strong>, done by momo. With <a href="#think-history"><code>/think-history turn</code></a> the model re-reads its earlier reasoning on every later request; cavecat sends just the plan steps it listed and its closing paragraph, plus a note saying how much was left out. That is about a sixth of recorded reasoning. Your transcript keeps all of it, and because the trim never changes once made, llama.cpp's prompt cache stays warm. On Ornith-9B it made runs 9–22% faster than sending all of it; <code>/think-history off</code>, sending none, was faster still on that model.</li>
       <li><strong>Compacted command output</strong>, done by momo, not the model. In the default <code>run_command</code> view, runs of passing test lines, repeated lines and lines that differ only in their numbers collapse into a note naming their lines in the saved log, so <code>command_output</code> still reaches every one. Lines with an error, fail or warning word always stay. <code>tail=</code>/<code>grep=</code> views are never compacted.</li>
     </ul>
     <p>Code, file contents, paths, symbols, exact error text, numbers and test names are never compressed. It adds a short <strong>Cavecat</strong> part to the <a href="#system-prompt">system prompt</a>, right after the role, in every mode but momo: the companion keeps its voice.</p>

@@ -1525,7 +1525,7 @@ Compaction summaries and the companion's recaps always ask for no reasoning, wha
 /think-history off      # the model never sees its earlier reasoning
 ```
 
-Saved in `prefs.json`; `--think-history` sets it at startup. In the web UI it is in the `THINK` menu.
+Saved in `prefs.json`; `--think-history` sets it at startup. In the web UI it is in the `THINK` menu. With [`/cavecat on`](#cavecat-mode) only the decision of earlier reasoning is sent back (its plan steps and closing paragraph); the transcript keeps it all.
 
 During a tool loop the model reasons, calls a tool, gets the result, and reasons again. Chat templates are written for the model to see its reasoning from the earlier steps of that loop. The templates of the local models show what each expects:
 
@@ -1557,11 +1557,12 @@ Accuracy was unchanged, within the noise of 3 runs per task. The gain is efficie
 
 ## Cavecat mode
 
-Cavecat is a nod to [caveman](https://github.com/akramsystems/caveman), the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat, and it starts from the other end: what gets compressed is mostly what the model writes for itself and for the harness, plus what the harness feeds it. Replies get shorter but **stay plain sentences**, and thinking is never touched. `/cavecat on` turns on all of it:
+Cavecat is a nod to [caveman](https://github.com/akramsystems/caveman), the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat, and it starts from the other end: what gets compressed is mostly what the model writes for itself and for the harness, plus what the harness feeds it. Replies get shorter but **stay plain sentences**, and how the model thinks is never constrained (only what is sent back of it is shortened). `/cavecat on` turns on all of it:
 
 - **Plans.** `create_plan` steps are put into the system prompt on every turn of [plan execution](#plan-mode), so a shorter plan saves tokens on every step. `complete_step` summaries and `revise_plan` steps too.
 - **Tool text.** `ask_user` questions, commit messages, and the specs written in design mode.
 - **Between tool calls.** No narration alongside a call (caveman's "no chatter between tool calls"); what the model found goes in its reply. The nudge that asks a model for text after 10 tool-only calls waits for 20 instead, and no longer asks for a progress line.
+- **Reasoning sent back** (done by the harness). With [`/think-history`](#sending-reasoning-back) `turn` or `all`, the model re-reads its earlier reasoning on every later request. Cavecat sends only its decision: the plan steps it listed and its closing paragraph, with code the tool call repeats replaced by a pointer to the call, and a note saying how much was left out (`harness/think_trim.py`). On recorded sessions that leaves about a sixth of the reasoning. The transcript keeps all of it. The trim is a pure function of the history, so a step's trimmed reasoning is identical on every later request and llama.cpp's prompt cache misses only once per step. A lossless trim (only what the context already holds, and "Let me…" narration) was tried first and took 1–9% off: most reasoning is deliberation full of names and numbers. On Ornith-9B, sending reasoning back made the model reason more (it copies what it sees); the trim made runs 9–22% faster than sending it all, and sending none (`/think-history off`) was faster still. A Qwen3.5 eval favoured sending it back, so measure your own model ([`evals/README.md`](evals/README.md#measuring-cavecat---cavecat)).
 - **Command output** ("read less", done by the harness, not the model). In `/run-mode new`, the default view of a `run_command` result collapses runs of redundant lines into a note naming their lines in the saved log: passing test lines (a whole-word `PASS`/`PASSED`/`ok`/`OK` or a check mark, none with an error/fail/warning word), the same line repeated, and lines that differ only in their numbers (counters, timestamps, progress; the first and last stay). Only when it saves at least 10 lines, and only when the result then fits the output limit whole. `tail=`/`grep=` views and `command_output` are never compacted, and `command_output` reaches every collapsed line.
 - **The reply**: the result first, then what changed and anything you must decide; no preamble, step-by-step recap or closing offer. Still plain sentences, not caveman.
 

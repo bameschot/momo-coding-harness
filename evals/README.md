@@ -893,6 +893,41 @@ Output split over all 16 runs, exact: `off` is thinking 35%, between calls 8%, t
 - So `text` and `full` became one level, `on`. The testbench above is the measurement to
   repeat on another model.
 
+### Round 4: trimming the reasoning sent back (same model, `--suite cavecat --runs 2`, 2026-10-25)
+
+With `/think-history turn` the model re-reads its earlier reasoning on every later request.
+`harness/think_trim.py` sends back only the decision instead: the plan steps and the closing
+paragraph, with a note saying how much was left out.
+
+- **Offline,** `evals/think_trim_bench.py` ran over 279 recorded thoughts. The trim would not
+  send 83% of the reasoning (84% on Ornith), and it is stable on every thought.
+- **A lossless trim was tried first:** only what the context already holds, plus "Let me…"
+  narration. It took 1–9% off, because 68% of the reasoning is sentences carrying a path,
+  name, number or quote.
+
+Live, all at `--cavecat on`. Means per run:
+
+| Reasoning sent back | Tasks | Secs | Thinking | Calls | Prompt read | Cached | Sent / full chars | Passed |
+|---|---|---|---|---|---|---|---|---|
+| none (`--think-history off`, round 3) | shell | **25.6** | 134 | 2.8 | 34,880 | 68% | 0 | 10/10 facts |
+| | edits | **46.6** | 297 | 6.8 | 73,914 | 84% | 0 | 6/6 |
+| full (`turn`, `--think-trim off`) | shell | 39.1 | 442 | 3.5 | 42,335 | 73% | 1,394 / 1,394 | 10/10 facts |
+| | edits | 58.5 | 558 | 7.5 | 87,682 | 87% | 2,000 / 2,000 | 6/6 |
+| trimmed (`turn`, `--think-trim on`) | shell | 30.6 | 291 | 2.5 | 33,743 | 68% | 506 / 928 | 10/10 facts |
+| | edits | 53.2 | 498 | 7.3 | 80,538 | 86% | 1,108 / 1,780 | 6/6 |
+
+- **Sending reasoning back made this model reason more.** Against sending none, thinking
+  roughly tripled on shell tasks and doubled on edits, and runs were 25–50% slower. It copies
+  the long reasoning it sees. This contradicts the Qwen3.5 code-navigation eval, where `turn`
+  made a quarter fewer calls than `off`, so the effect depends on the model or the task.
+- **The trim recovers part of it:** 22% faster on shell and 9% on edits than sending it all,
+  with less thinking and no pass or fact lost. Live it cut 45% of the sent reasoning, not 83%:
+  many thoughts within a turn are short or a single paragraph, and those are sent as they are.
+- **The prompt cache held:** the cached share and prefill time were unchanged with the trim,
+  because a trimmed step is byte-identical on later requests.
+- **On this model, sending nothing was still fastest,** with nothing lost. The ordering is
+  none < trimmed < full in both task groups, though each cell is 2 runs per task.
+
 ## Round 3: verify guidance and narration (Ornith-1.5-9B Q8, `--cavecat off`, 2026-10-25)
 
 A census of the 1,378 tool calls in rounds 1–2 found rounds the coder role itself caused: 60

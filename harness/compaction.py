@@ -26,11 +26,14 @@ def calls_tokens(m: dict) -> int:
         return 0
     return text_tokens(json.dumps([tc.get("function", tc) for tc in calls], default=str))
 
-def msg_tokens(m: dict, sent: set[int] = frozenset()) -> int:
+def msg_tokens(m: dict, sent: set[int] | dict[int, str] = frozenset()) -> int:
     """Estimated tokens one message costs in a request.  A stored thinking
-    message costs nothing unless its id is in `sent` (Harness._sent_thinking)."""
+    message costs nothing unless its id is in `sent`: Harness._sent_thinking,
+    or Harness._sent_reasoning, whose text (maybe trimmed) is what is counted."""
     if m.get("role") == "thinking":
-        return text_tokens(content_text(m)) if id(m) in sent else 0
+        if id(m) not in sent:
+            return 0
+        return text_tokens(sent[id(m)] if isinstance(sent, dict) else content_text(m))
     return text_tokens(content_text(m)) + calls_tokens(m)
 
 # Compaction folds the dropped history into this block at the top of the oldest
@@ -96,7 +99,7 @@ class CompactionMixin:
             guides_notice = ""
         msgs = self.messages
         before = self._token_estimate or self._estimate(schemas=True)
-        sent = self._sent_thinking()
+        sent = self._sent_reasoning()
         costs = [msg_tokens(m, sent) for m in msgs]
         fixed = costs[0] if msgs else 0
         if fixed >= self.context_limit:

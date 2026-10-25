@@ -95,7 +95,7 @@ _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
 
 def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True,
              run_mode="new", tool_ref="compact", think_history="off", edit_features=None,
-             cavecat="off", max_secs=0):
+             cavecat="off", think_trim="auto", max_secs=0):
     """One task, one fresh conversation.  Returns what the model did.  A run
     still going after max_secs (0 = no limit) is cancelled and graded as is."""
     workdir = REPO / task.workdir
@@ -117,6 +117,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     h.think = think
     h.think_history = think_history
     h.cavecat = cavecat
+    h.think_trim = {"auto": None, "on": True, "off": False}[think_trim]
     if edit_features is not None:
         h.edit_features = frozenset(edit_features)   # ignored by a harness without them
     # Nobody is there to answer: without this a run that calls ask_user blocks forever.
@@ -193,6 +194,10 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     t.join(timeout=timeout + 30)
     sub.close()
     h.shutdown_index()
+    # What /think-history would send back now, against the reasoning it comes
+    # from (with --think-history turn: the whole turn's): what think_trim saved.
+    sent = h._sent_reasoning()
+    full = {id(m): len(m.get("content") or "") for m in h.messages if id(m) in sent}
     edit = _edit_outcome(task, workdir, h.messages) if task.check else {}
     if scratch is not None:
         scratch.cleanup()
@@ -203,6 +208,8 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     low = "\n".join(replies).lower()
     return {
         "task": task.id, "mode": mode, "think": think, "index": index, "cavecat": cavecat,
+        "think_trim": think_trim, "reasoning_sent": sum(len(v) for v in sent.values()),
+        "reasoning_full": sum(full.values()),
         "secs": round(time.time() - t0, 1),
         "eval_tokens": cost.get("eval_tokens"), "prompt_tokens": cost.get("prompt_tokens"),
         # Every round re-reads the context, so a run that loops costs more than
@@ -405,7 +412,7 @@ _env_cache: dict = {}
 
 def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
                 run_mode="new", tool_ref="compact", think_history="off",
-                edit_features=None, cavecat="off") -> str:
+                edit_features=None, cavecat="off", think_trim="auto") -> str:
     """Everything that can change a run's outcome, hashed."""
     key = (task.workdir, mode, index, route, run_mode, tool_ref,
            None if edit_features is None else tuple(sorted(edit_features)), cavecat)
@@ -441,7 +448,8 @@ def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
                        **({} if run_mode == "new" else {"run_mode": run_mode}),
                        # Runs cached before reasoning could be sent back are "off".
                        **({} if think_history == "off" else {"think_history": think_history}),
-                       **({} if cavecat == "off" else {"cavecat": cavecat})},
+                       **({} if cavecat == "off" else {"cavecat": cavecat}),
+                       **({} if think_trim == "auto" else {"think_trim": think_trim})},
                       sort_keys=True)
     return hashlib.sha256((spec + _env_cache[key]).encode()).hexdigest()[:24]
 
@@ -537,6 +545,11 @@ def summarise(rows):
                    f"{shares['preamble']:.0%} · tool args {shares['args']:.0%} · reply "
                    f"{shares['reply']:.0%} · framing {1 - sum(shares.values()):.0%}  "
                    f"({'exact' if exact == {True} else 'estimated' if exact == {False} else 'partly exact'})")
+    sentback = [r for r in rows if r.get("reasoning_full")]
+    if sentback:                    # --think-history turn|all
+        out.append(f"  reasoning sent   {statistics.mean(r['reasoning_sent'] for r in sentback):,.0f} "
+                   f"of {statistics.mean(r['reasoning_full'] for r in sentback):,.0f} chars/run "
+                   f"at the end of the turn (think_trim {'/'.join(sorted({r.get('think_trim', 'auto') for r in sentback}))})")
     cached = [r for r in read if r.get("prompt_cached") is not None and r["prompt_total"]]
     if cached and any(r["prompt_cached"] for r in cached):     # llama.cpp only
         share = sum(r["prompt_cached"] for r in cached) / sum(r["prompt_total"] for r in cached)
@@ -627,6 +640,9 @@ def main():
     ap.add_argument("--cavecat", choices=CAVECAT_LEVELS, default="off",
                     help="/cavecat for every run: compress plans and tool text (text), and "
                          "thinking too (full); compare tokens and pass rate across levels")
+    ap.add_argument("--think-trim", choices=("auto", "on", "off"), default="auto",
+                    help="send back only the decision of earlier reasoning (harness/think_trim.py); "
+                         "auto = with --cavecat on. Only matters with --think-history turn|all")
     ap.add_argument("--timeout", type=int, default=600,
                     help="seconds without any event before a run is given up (default: %(default)s)")
     ap.add_argument("--max-run-secs", type=int, default=600,
@@ -697,7 +713,8 @@ def main():
                                  model=args.model, provider=args.provider, host=args.host,
                                  route=args.route, run_mode=args.run_mode,
                                  tool_ref=args.tool_ref, think_history=args.think_history,
-                                 edit_features=edit_features, cavecat=args.cavecat)
+                                 edit_features=edit_features, cavecat=args.cavecat,
+                                 think_trim=args.think_trim)
                 stored = [] if args.refresh else cache.get(fp, [])
             for i in range(args.runs):
                 if i < len(stored):
@@ -710,7 +727,7 @@ def main():
                                  route=args.route, run_mode=args.run_mode,
                                  tool_ref=args.tool_ref, think_history=args.think_history,
                                  edit_features=edit_features, cavecat=args.cavecat,
-                                 max_secs=args.max_run_secs)
+                                 think_trim=args.think_trim, max_secs=args.max_run_secs)
                     source = ""
                     if cache_path and not r.get("err"):
                         with cache_path.open("a") as f:

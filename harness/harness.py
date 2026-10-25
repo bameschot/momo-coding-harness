@@ -30,6 +30,7 @@ from . import net as net_mod
 from . import search as search_mod
 from . import tools as tools_mod
 from .syntax_watch import SyntaxWatch
+from . import think_trim
 from .tools.dispatcher import written_paths
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
@@ -241,6 +242,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self.think_level: str = "on"
         self.think_history: str = "turn"    # /think-history, see THINK_HISTORY
         self.cavecat: str = "off"           # /cavecat, see prompts.CAVECAT_LEVELS
+        self.think_trim: bool | None = None  # evals only: force the think_trim; None follows cavecat
+        self._trim_cache: dict[tuple, str] = {}
         self.max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS   # /max-output-tokens, 0 = off
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
@@ -1242,7 +1245,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         Thinking is kept in the transcript; what /think-history sends back counts
         as "reasoning", the rest as "thinking" (reported, never sent)."""
         cats = {key: 0 for key, _, _ in _CTX_CATEGORIES}
-        sent = self._sent_thinking()
+        sent = self._sent_reasoning()
         # Kept apart as well as counted under "tools", so _estimate can leave it out.
         cats["schemas"] = self._schema_tokens()
         cats["tools"] += cats["schemas"]
@@ -1269,7 +1272,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             elif role == "tool":
                 cats["tool_results"] += text_tokens(text)
             elif role == "thinking":
-                cats["reasoning" if id(m) in sent else "thinking"] += text_tokens(text)
+                part = text_tokens(sent[id(m)]) if id(m) in sent else 0
+                cats["reasoning"] += part
+                cats["thinking"] += text_tokens(text) - part
         cats["generating"] = self._stream_tokens
         return cats
 
@@ -1437,17 +1442,45 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                 if m.get("role") == "thinking" and not m.get("unsent")
                 and nxt.get("role") == "assistant"}
 
+    def _trims_thinking(self) -> bool:
+        """Send back only the decision of earlier reasoning (think_trim): with
+        /cavecat on, unless an eval forces it (think_trim True/False)."""
+        return self.cavecat != "off" if self.think_trim is None else self.think_trim
+
+    def _sent_reasoning(self) -> dict[int, str]:
+        """id of each stored thinking message the next request sends back ->
+        the text it sends: the whole reasoning, or with /cavecat on its trim.
+        Trims are cached: the inputs of an earlier step never change."""
+        sent = self._sent_thinking()
+        if not sent:
+            return {}
+        trims = self._trims_thinking()
+        out = {}
+        for m, nxt in zip(self.messages, self.messages[1:]):
+            if id(m) not in sent:
+                continue
+            text = m.get("content") or ""
+            if trims:
+                key = (id(m), len(text), id(nxt))
+                if key not in self._trim_cache:
+                    if len(self._trim_cache) > 256:
+                        self._trim_cache.clear()
+                    self._trim_cache[key] = think_trim.trim(text, nxt)
+                text = self._trim_cache[key]
+            out[id(m)] = text
+        return out
+
     def _api_messages(self) -> list[dict]:
         """The history as the next request sends it: role="thinking" is harness-
         internal, so it is dropped, and what /think-history sends back rides on
         the following assistant message as `reasoning` (on a copy — the stored
         history is unchanged).  The adapters map `reasoning` onto their wire
         field (llama.cpp reasoning_content, Ollama thinking)."""
-        sent = self._sent_thinking()
+        sent = self._sent_reasoning()
         out, reasoning = [], None
         for m in self.messages:
             if m.get("role") == "thinking":
-                reasoning = m.get("content") if id(m) in sent else None
+                reasoning = sent.get(id(m))
                 continue
             if reasoning and m.get("role") == "assistant":
                 m = {**m, "reasoning": reasoning}
