@@ -403,6 +403,8 @@ def _edit(id, prompt, check, allowed, max_calls, note=""):
                 isolate=True, check=check, allowed=allowed)
 
 
+# max_calls for an edit is the fewest calls of a passing run with /cavecat off
+# on Ornith-9B (2026-10-25): "over budget" means less efficient than its best.
 EDIT_TASKS: list[Task] = [
     _edit("ambiguous-edit",
           "In shop/inventory.py, make Inventory.items_with_tag return an empty list instead of "
@@ -412,19 +414,19 @@ EDIT_TASKS: list[Task] = [
     _edit("nested-branch",
           "Add a 'uk' zone to shipping_cost in shop/shipping.py: a base fee of 7.0 plus 1.5 per "
           "kg, and a parcel to the uk heavier than 20 kg costs an extra 10.0.",
-          "nested_branch", ("shop/shipping.py",), 4,
+          "nested_branch", ("shop/shipping.py",), 7,
           note="an elif with nested lines, three levels deep: the line count changes"),
     _edit("two-edits",
           "Change apply_discount in shop/checkout.py so that it raises ValueError when the total "
           "is negative, and so that the result is never below 0.",
-          "two_edits", ("shop/checkout.py",), 5,
+          "two_edits", ("shop/checkout.py",), 8,
           note="one change at the top, one at the bottom of the same function"),
     _edit("rewrite-function",
           "Rewrite parse_duration in shop/util.py: it must return the duration in SECONDS and "
           "accept days, hours, minutes and seconds in that order, e.g. '2d', '1h30m', '45s', "
           "'1d2h3m4s' (case and spaces ignored). Empty or malformed input, or a number without "
           "a unit, must raise ValueError.",
-          "rewrite_function", ("shop/util.py",), 5,
+          "rewrite_function", ("shop/util.py",), 10,
           note="a 30-line function rewritten whole"),
     _edit("rename-across",
           "Rename the function calc_tax in shop/pricing.py to compute_tax and update every use "
@@ -438,6 +440,18 @@ EDIT_TASKS: list[Task] = [
           "it return the amount with two decimals, a space and the currency, e.g. '12.50 EUR'. "
           "Update every caller in the project to pass \"EUR\".",
           "signature_change", ("shop/pricing.py", "shop/cart.py", "shop/checkout.py",
-                               "shop/reports.py"), 10,
+                               "shop/reports.py"), 14,
           note="callers in 3 files, one of them calling it twice on a line"),
 ]
+
+
+# /cavecat's short testbench (--suite cavecat, ~12 min per level at --runs 2):
+# the shell tasks, where the reply is a third of the output and command output
+# is long (compaction, the short reply), and the three light edits, where calls
+# are many and quick (narration between calls) and a hidden check guards the
+# passes.  The heavy edits cost 5-10x the time and mostly measure thinking,
+# which cavecat leaves alone.
+#     python evals/run_evals.py --suite cavecat --runs 2 --cavecat off
+#     python evals/run_evals.py --suite cavecat --runs 2 --cavecat on
+_CAVECAT_EDITS = ("ambiguous-edit", "nested-branch", "two-edits")
+CAVECAT_TASKS: list[Task] = SHELL_TASKS + [t for t in EDIT_TASKS if t.id in _CAVECAT_EDITS]

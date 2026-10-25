@@ -581,6 +581,11 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       <p>Commit tools in <code>.momo/tools/</code> and the whole team gets them. Each runs in its own process with the project's own virtualenv, gets its modes from its category, and never runs before you approve it. A shipped guide lets an agent write them for you.</p>
       <a class="more" href="#workspace-tools">Workspace tools →</a>
     </div>
+    <div class="card" style="--c: var(--focus)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg>Cavecat mode</h3>
+      <p>Output tokens are wall-clock time on a local model. <code>/cavecat on</code> keeps replies short, cuts narration between tool calls and folds 300 passing test lines into one note. On a 9B model, runs were 20% faster and nothing was lost. Thinking is left alone.</p>
+      <a class="more" href="#cavecat">Cavecat mode →</a>
+    </div>
   </div>
 
   <div class="features">
@@ -1004,7 +1009,7 @@ ollama serve</code></pre></div>
           <li>the session drawer (load, start or delete sessions) and a workspace file browser;</li>
           <li>mode and model pickers;</li>
           <li>the CTX meter: click it for the per-category breakdown and a link to the <a href="#system-prompt">system prompt</a>;</li>
-          <li><code>THINK</code> / <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges for those settings;</li>
+          <li><code>THINK</code> / <code>CAVECAT</code> / <code>RUN</code> / <code>NET</code> / <code>INDEX</code> badges for those settings;</li>
           <li>a plug button for <a href="#mcp">MCP servers</a> (with a count of connected servers) a wrench button for <a href="#tool-choices">this mode's tools</a>, and a book button for <a href="#skills">skills</a> (with a count of active ones).</li>
         </ul></li>
       <li><strong>Transcript:</strong> streamed markdown replies, collapsible thinking, one-line tool calls that expand to show arguments and results, coloured diffs and question cards with Yes/No buttons.</li>
@@ -1649,6 +1654,38 @@ FAILED (failures=2)
     <p>On llama.cpp momo reads the levels from the model's chat template; on Ollama, from the model's capabilities.</p>
   </section>
 
+  <section id="cavecat" data-voice="cavecat">
+    <h2>Cavecat mode</h2>
+    <p>A nod to <a href="https://github.com/akramsystems/caveman">caveman</a>, the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat. On a local model, output tokens are wall-clock time, so <code>/cavecat on</code> trims the text a turn produces and the command output it reads. Thinking is never touched, and replies stay plain sentences.</p>
+    <ul>
+      <li><strong>A short reply:</strong> the result first, then what changed and anything you must decide. No preamble, step-by-step recap or closing offer.</li>
+      <li><strong>No narration between tool calls:</strong> the model calls the next tool without announcing it, and says what it found in the reply. The nudge that asks for text after 10 calls without any waits for 20, and stops asking for a progress line.</li>
+      <li><strong>Telegraphic plans and tool text:</strong> <code>create_plan</code> steps (re-sent on every step of <a href="#plan">plan execution</a>), <code>complete_step</code> summaries, <code>ask_user</code> questions, commit messages and design specs, written as "verb + file + change".</li>
+      <li><strong>Compacted command output</strong>, done by momo, not the model. In the default <code>run_command</code> view, runs of passing test lines, repeated lines and lines that differ only in their numbers collapse into a note naming their lines in the saved log, so <code>command_output</code> still reaches every one. Lines with an error, fail or warning word always stay. <code>tail=</code>/<code>grep=</code> views are never compacted.</li>
+    </ul>
+    <p>Code, file contents, paths, symbols, exact error text, numbers and test names are never compressed. It adds a short <strong>Cavecat</strong> part to the <a href="#system-prompt">system prompt</a>, right after the role, in every mode but momo: the companion keeps its voice.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">commands</span></div><pre><code>/cavecat          <span class="com"># off or on</span>
+/cavecat on       <span class="com"># everything above</span>
+/cavecat off      <span class="com"># as usual (the default)</span></code></pre></div>
+    <p>It is remembered between runs, and <code>--cavecat on</code> sets it at startup. In the web UI it is the <code>CAVECAT</code> badge, and View → Context. <code>text</code>, <code>full</code> and <code>lite</code>, earlier levels, now mean <code>on</code>.</p>
+    <p class="note"><strong>Measured</strong> on Ornith-1.5-9B with the cavecat testbench: runs were 20% faster with 25% fewer output tokens, and every fact and pass was kept. On shell tasks, compacted output saved calls as well as bytes: the warning hidden in a long build log was found in 2 calls instead of 3–4.</p>
+    <details><summary>Eval details</summary>
+    <p><code>--suite cavecat --runs 2</code>: the five shell tasks and three light edits, 16 runs per side, 2026-10-25. Means per run.</p>
+    <div class="table-scroll"><table>
+      <tr><th></th><th>Shell <code>off</code></th><th>Shell <code>on</code></th><th>Edits <code>off</code></th><th>Edits <code>on</code></th></tr>
+      <tr><td>Output tokens</td><td>601</td><td>406</td><td>1,233</td><td>990</td></tr>
+      <tr><td>Reply tokens</td><td>196</td><td>129</td><td>198</td><td>123</td></tr>
+      <tr><td>Between calls</td><td>44</td><td>23</td><td>103</td><td>85</td></tr>
+      <tr><td>Calls</td><td>3.5</td><td>2.8</td><td>7.2</td><td>6.8</td></tr>
+      <tr><td>Seconds</td><td>34.1</td><td>25.6</td><td>54.9</td><td>46.6</td></tr>
+      <tr><td>Command output</td><td>5.7 KB</td><td>2.5 KB</td><td>0.8 KB</td><td>0.8 KB</td></tr>
+      <tr><td>Passed</td><td>10/10 facts</td><td>10/10 facts</td><td>6/6</td><td>6/6</td></tr>
+    </table></div>
+    <p>The token counts come from the server's own tokenizer. On heavy edits, thinking is 56–82% of the output and cavecat leaves it alone, so expect less there. Two runs per task is a small sample, but every measure moved the same way in both task groups. Compacted on its own, with no model, the eval's 300-test run shrinks from 20 KB to 1.5 KB, and its 1,500-line build log from 57 KB to under 400 bytes, with the failures and the warning kept.</p>
+    <p><strong>Why thinking is left alone:</strong> an early version compressed thinking ("conclusions only"). On hard edits, the 9B then checked its work with tool calls instead of reasoning, making up to three times the edits and shell runs. A milder rule ("cut the narration, keep the reasoning") saved nothing the eval could measure, so it was removed.</p>
+    </details>
+  </section>
+
   <section id="system-prompt" data-voice="system-prompt">
     <h2>The system prompt</h2>
     <p>The system message is built from parts, in the order the model reads them. Each part is generated for the current mode and exactly the tools that are on, so the prompt never names a tool the model can't call. Role files describe behaviour; everything about tools lives in the generated parts.</p>
@@ -1657,6 +1694,7 @@ FAILED (failures=2)
       <div class="pd-head in">Inputs</div><div></div><div class="pd-head">System message, top to bottom</div>
         <div class="pd-row"><div class="pd-in"><code>/index</code> on</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Code index banner</span><span class="pd-tag">if index</span></div></div>
         <div class="pd-row"><div class="pd-in">mode · <code>roles/&lt;mode&gt;.md</code> · plan</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file"><span>Role</span></div></div>
+        <div class="pd-row"><div class="pd-in"><code>/cavecat on</code> (not momo)</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Cavecat</span><span class="pd-tag">if on</span></div></div>
         <div class="pd-row"><div class="pd-in">workdir · date · OS · git · <code>/net</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Environment</span></div></div>
         <div class="pd-row"><div class="pd-in"><code>/guides on</code> · <code>AGENTS.md</code>, …</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Project guides</span><span class="pd-tag">if guides</span></div></div>
         <div class="pd-row"><div class="pd-in"><code>/load-skill</code> · <code>skills/&lt;name&gt;.md</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Skill: &lt;name&gt;</span><span class="pd-tag">each skill</span></div></div>
@@ -1668,12 +1706,13 @@ FAILED (failures=2)
       <div class="pd-legend"><span>generated by the harness</span><span class="file">from a file</span><span class="cond">only when its input is on</span></div>
       <figcaption>Parts are joined by <code>---</code> rules and rebuilt in place whenever an input changes.</figcaption>
     </figure>
-    <p>The index banner comes first and the navigation rules last on purpose: small models weigh the start and end of a prompt most.</p>
+    <p>The index banner comes first and the navigation rules last on purpose: small models weigh the start and end of a prompt most. Cavecat sits right after the role for the same reason.</p>
     <details><summary>What each part says</summary>
     <div class="table-scroll"><table>
       <tr><th>Part</th><th>When</th><th>What it says</th></tr>
       <tr><td>Code index banner</td><td class="wrap">Index on</td><td class="wrap">One line: find code with the <code>index_*</code> tools, not grep or find</td></tr>
       <tr><td>Role</td><td class="wrap">Always</td><td class="wrap"><code>roles/&lt;mode&gt;.md</code>; in plan mode also the draft plan, or the execution rules and the live plan</td></tr>
+      <tr><td>Cavecat</td><td class="wrap">With <a href="#cavecat"><code>/cavecat on</code></a>, every mode but momo</td><td class="wrap">Keep the reply short, no narration between tool calls, telegraphic plan and tool text; never compress code, paths, error text or numbers</td></tr>
       <tr><td>Environment</td><td class="wrap">Always</td><td class="wrap">Working directory, today's date, OS/shell and git branch (with <code>run_command</code>), "run it as <code>python3</code>" when there's no <code>python</code> command, internet on or off</td></tr>
       <tr><td>Project guides</td><td class="wrap">With <code>/guides on</code></td><td class="wrap">The workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, …</td></tr>
       <tr><td>Skill: &lt;name&gt;</td><td class="wrap">One per loaded skill</td><td class="wrap"><code>skills/&lt;name&gt;.md</code></td></tr>
@@ -1945,6 +1984,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
       <tr><td><code>--think</code></td><td>last used / <code>on</code></td><td class="wrap">Thinking level: <code>off</code>, <code>on</code>, or an effort level (<code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, …) for models that take one. See <a href="#think-level">Thinking level</a>. <code>--no-think</code> is <code>--think off</code>.</td></tr>
       <tr><td><code>--think-history</code></td><td>last used / <code>turn</code></td><td class="wrap">Send the model's own reasoning back: <code>off</code>, <code>turn</code> (since your last message) or <code>all</code>. See <a href="#think-history">Sending reasoning back</a>.</td></tr>
+      <tr><td><code>--cavecat</code></td><td>last used / <code>off</code></td><td class="wrap"><code>on</code>: short replies, no narration between tool calls, telegraphic plans, compacted command output. See <a href="#cavecat">Cavecat mode</a>.</td></tr>
       <tr><td><code>--max-output-tokens</code></td><td>last used / <code>25000</code></td><td class="wrap">Most tokens one model reply may take, reasoning included; <code>0</code> = no cap. See <a href="#reply-cap">Reply cap</a>.</td></tr>
       <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
       <tr><td><code>--web</code> / <code>--no-web</code></td><td>on</td><td class="wrap">Serve the browser UI alongside the TUI</td></tr>
@@ -1977,6 +2017,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/scratch [clear]</code></td><td class="wrap">Show the <a href="#scratch">scratchpad</a>, or empty it (asks first)</td></tr>
       <tr><td><code>/think [off|on|&lt;level&gt;]</code></td><td class="wrap">Show or set the model's <a href="#thinking">thinking level</a> (remembered)</td></tr>
       <tr><td><code>/think-history off|turn|all</code></td><td class="wrap"><a href="#think-history">Send the model's own reasoning back</a> to it (remembered)</td></tr>
+      <tr><td><code>/cavecat [off|on]</code></td><td class="wrap"><a href="#cavecat">Cavecat mode</a>: compress replies, plans, tool text and command output to save tokens (remembered)</td></tr>
       <tr><td><code>/tools [list|&lt;name&gt;]</code></td><td class="wrap">Pick this mode's tools, list them, or show one. See <a href="#tool-choices">Turning tools on and off</a></td></tr>
       <tr><td><code>/tools [&lt;name&gt;…] on|off</code></td><td class="wrap">Turn named tools on or off for this mode (saved in the session), or all tool calls</td></tr>
       <tr><td><code>/tools reload|errors</code></td><td class="wrap">Load your <a href="#custom-tools">custom tools</a> and the workspace's again, or show why one did not load</td></tr>
@@ -2120,8 +2161,10 @@ python evals/run_evals.py --runs 3                <span class="com"># does the m
     <p><code>tests/</code> uses the standard-library <code>unittest</code>. It includes one fixture per tree-sitter grammar, so a grammar upgrade that renames a node fails a test instead of silently emptying a tool's output. <code>evals/</code> asks questions with known answers and scores whether the model reached the right tool, how many calls it took and how much output it pulled into context. <code>--suite shell --run-mode new|classic</code> compares the two ways <code>run_command</code> returns output. Sampling isn't pinned, so read the min–max spread, not a single run.</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>python evals/edit_bench.py                        <span class="com"># edit_file's matcher, no model</span>
 python evals/run_evals.py --suite edit            <span class="com"># change requests, checked by running them</span>
-python evals/replay.py --exp R2 --n 10            <span class="com"># one tool result, two wordings, same conversation</span></code></pre></div>
+python evals/replay.py --exp R2 --n 10            <span class="com"># one tool result, two wordings, same conversation</span>
+python evals/run_evals.py --suite cavecat --runs 2 --cavecat on   <span class="com"># and off: the cavecat A/B, ~12 min each</span></code></pre></div>
     <p><code>edit_bench.py</code> puts real edits through the slips a model makes when it copies <code>old_string</code> and counts how many land exactly right; a unit test keeps wrong-place writes at zero. <code>--suite edit</code> asks the model for six changes on a small project, checks each with hidden tests, and counts edit errors, re-reads and turns (<code>--edit-features</code> switches the edit extras off for an A/B). <code>replay.py</code> replays a real session up to one tool result and lets the model continue with that result worded two ways, which isolates the effect of a single message.</p>
+    <p><code>--suite cavecat</code> is a short testbench for <a href="#cavecat">cavecat mode</a>: the shell tasks, where replies and command output are long, and three light edits with a hidden check. Every run's output is split into thinking, text between calls, tool arguments and reply, counted by the server's tokenizer when it has one. <code>run_output_bench.py</code> shows what compaction keeps, with no model.</p>
   </section>
 
   </article>
@@ -2384,6 +2427,10 @@ const SPEECH = {
   thinking: [
     "< /think high, purrr", "< high→xhigh, nearest wins", "< 25k tokens per reply max",
     "< no 80-minute loops pls", "< turn: remember your plan",
+  ],
+  cavecat: [
+    "< few token. much fast", "< short reply, purrr", "< 300 ok lines? one note",
+    "< thinking? untouched", "< /cavecat on, -20% time",
   ],
   "system-prompt": [
     "< banner first, rules last", "< /prompt shows it all", "< never a tool you can't call",

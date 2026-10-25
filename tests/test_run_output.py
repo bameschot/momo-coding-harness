@@ -7,6 +7,7 @@ Run with HOME pointed at a scratch dir — the harness writes prefs and sessions
 """
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -279,6 +280,117 @@ class RunCommandNew(Base):
 
 # The classic suites, run again in new mode with the footer stripped: the same
 # commands must behave the same way.
+class Compact(unittest.TestCase):
+    """/cavecat's read-less: redundant runs of lines collapse into a note that
+    names their lines in the log."""
+    def test_passing_lines_collapse_and_failures_stay(self):
+        lines = ([f"test_{i} (t.T.test_{i}) ... ok" for i in range(1, 21)]
+                 + ["test_bad (t.T.test_bad) ... FAIL", "FAILED (failures=1)"])
+        out = run_store.compact("\n".join(lines), "r4")
+        self.assertIn('[lines 1–20: 20 passing lines not shown — '
+                      'command_output(path="r4", start_line=1, end_line=20)]', out)
+        self.assertIn("test_bad (t.T.test_bad) ... FAIL", out)
+        self.assertTrue(out.endswith("FAILED (failures=1)"))
+
+    def test_check_marks_and_pass_words_from_other_runners(self):
+        lines = ([f"  \u2713 renders item {i} ({i} ms)" for i in range(8)]
+                 + [f"ok  \texample.com/pkg{i}\t0.0{i}s" for i in range(8)])
+        out = run_store.compact("\n".join(lines), "r1")
+        self.assertEqual(out.count("passing lines not shown"), 1)
+        self.assertNotIn("renders", out)
+
+    def test_a_pass_line_with_a_trouble_word_is_kept(self):
+        lines = [f"case {c} PASSED" for c in "abcdefgh"] + ["case z PASSED with 2 warnings"] \
+            + [f"case {c} PASSED" for c in "ijklmnop"]
+        out = run_store.compact("\n".join(lines), "r1")
+        self.assertIn("case z PASSED with 2 warnings", out)
+        self.assertEqual(out.count("passing lines not shown"), 2)
+
+    def test_the_same_line_repeated(self):
+        out = run_store.compact("start\n" + "retrying connection\n" * 15 + "end", "r1")
+        self.assertEqual(out, "start\nretrying connection\n"
+                              "[lines 3–16: the same line 14 more times]\nend")
+
+    def test_lines_that_differ_only_in_numbers_keep_first_and_last(self):
+        out = run_store.compact("\n".join(f"step {i}/40 loss {i * 3}" for i in range(1, 41)), "r2")
+        self.assertEqual(out.split("\n"), [
+            "step 1/40 loss 3",
+            '[lines 2–39: 38 similar lines — command_output(path="r2", start_line=2, end_line=39)]',
+            "step 40/40 loss 120"])
+
+    def test_small_savings_leave_it_as_it_is(self):
+        text = "a\n" + "same\n" * 5 + "b"
+        self.assertIs(run_store.compact(text, "r1"), text)
+
+
+PASSES = 'for i in $(seq 1 30); do echo "test_$i ... ok"; done'
+
+
+class CompactRunCommand(Base):
+    def run_(self, command, **args):
+        return dispatch("run_command", {"command": command, **args}, self.wd, run_mode="new",
+                        run_store=self.store, run_output_limit=0, run_compact=True)
+
+    def test_default_view_is_compacted_and_the_log_is_whole(self):
+        out = self.run_(PASSES + "; echo done")
+        self.assertIn("30 passing lines not shown", out)
+        self.assertIn("31 lines", out)                  # the footer counts the whole log
+        self.assertIn("test_17 ... ok", self.output(saved_path(out), limit=0))
+
+    def test_tail_and_grep_views_are_not_compacted(self):
+        self.assertNotIn("not shown", self.run_(PASSES, tail=20))
+        self.assertNotIn("not shown", self.run_(PASSES, grep="ok"))
+
+    def test_off_by_default(self):
+        self.assertNotIn("not shown", self.cmd(PASSES, limit=0))
+
+    def test_a_cut_view_is_not_compacted(self):
+        # still past the limit compacted, the default view numbers lines, which must
+        # be the log's own
+        cmd = PASSES + '; for i in $(seq 1 400); do echo "x$i"; echo y; done'
+        out = dispatch("run_command", {"command": cmd}, self.wd, run_mode="new",
+                       run_store=self.store, run_output_limit=2000, run_compact=True)
+        self.assertNotIn("passing lines not shown", out)
+        self.assertIn("not shown", out)                 # the plain cut window
+
+
+class CompactShellSuite(unittest.TestCase):
+    """The eval's shell project (evals/shell/project), run for real: compacted,
+    each output keeps the facts the shell tasks ask for at a fifth of the size."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.wd = Path(self.tmp.name) / "project"
+        shutil.copytree(Path(__file__).parent.parent / "evals" / "shell" / "project", self.wd,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        self.store = run_store.RunStore(Path(self.tmp.name) / "runs")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def both(self, command):
+        out = [dispatch("run_command", {"command": command}, self.wd, run_mode="new",
+                        run_store=self.store, run_output_limit=0, run_compact=c)
+               for c in (False, True)]
+        return [body(o) for o in out]
+
+    def test_test_run_keeps_failures_and_summary(self):
+        whole, short = self.both("./run_tests.sh")
+        for fact in ("FAIL: test_restock_047", "FAIL: test_price_203", "47 != 48",
+                     "45000 != 50000", "Ran 300 tests"):
+            self.assertIn(fact, short)
+        self.assertLess(len(short), len(whole) / 5)
+
+    def test_build_keeps_the_warning_from_the_middle(self):
+        whole, short = self.both("./build.sh")
+        self.assertIn("deprecated key 'max_conn'", short)
+        self.assertIn("0 errors", short)
+        self.assertLess(len(short), len(whole) / 5)
+
+    def test_short_lint_output_is_untouched(self):
+        whole, short = self.both("./lint.sh")
+        self.assertEqual(short, whole)
+
+
 class ClassicSuiteInNewMode(base.RunCommand):
     def setUp(self):
         super().setUp()

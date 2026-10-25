@@ -29,13 +29,15 @@ from . import run_store as run_store_mod
 from . import net as net_mod
 from . import search as search_mod
 from . import tools as tools_mod
+from .syntax_watch import SyntaxWatch
+from .tools.dispatcher import written_paths
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
                      StatusEvent, ThinkEvent, ToolCallEvent, ToolResultEvent)
 from .prompts import (_index_banner, MODES,
                       _PLAN_EXECUTION_RULES, _PLAN_TDD_EXECUTION_RULES, _PLAN_TDD_RULES,
                       _ROLE_LOADERS, _coding_prompt, _environment,
-                      _load_role, _nav_rules, _net_rules, planner_for_tdd)
+                      _cavecat_rules, _load_role, _nav_rules, _net_rules, planner_for_tdd)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls)
 
@@ -45,6 +47,10 @@ from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
 # argument ("move_file" uses src/dst and is handled separately), except
 # edit_files, which changes several files and gets one diff each.
 _MUTATING_TOOLS = DIFF_TOOLS - {"edit_files"}
+
+# What a turn's output tokens went to (DoneEvent): reasoning, text alongside
+# tool calls, the calls themselves, and text without calls (the reply).
+_OUTPUT_PARTS = ("think", "preamble", "args", "reply")
 
 _SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
@@ -234,6 +240,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         # actually sent depends on the model (effective_think / thinking_caps).
         self.think_level: str = "on"
         self.think_history: str = "turn"    # /think-history, see THINK_HISTORY
+        self.cavecat: str = "off"           # /cavecat, see prompts.CAVECAT_LEVELS
         self.max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS   # /max-output-tokens, 0 = off
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
@@ -303,6 +310,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         # since, and the last call that failed: _annotate_result notes a repeat.
         self._last_run: tuple | None = None
         self._last_failed_call: tuple[str, str] | None = None
+        self._syntax_watch = SyntaxWatch()   # files this turn's writes left unparseable
         self._tool_ref = ""
         # How the prompt's tool reference is rendered: "full" (every description
         # and parameter table) or "compact" (one line per tool; the native
@@ -1021,7 +1029,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                             run_store=self.run_store if name in RUN_STORE_TOOLS else None,
                             run_output_limit=self.run_output_limit,
                             search_sources=self.search_sources,
-                            edit_features=self.edit_features, run_exit=run_exit)
+                            edit_features=self.edit_features, run_exit=run_exit,
+                            run_compact=self.cavecat != "off")
         except Exception as e:
             return f"ERROR: {name} failed: {type(e).__name__}: {e}"
         finally:
@@ -1095,6 +1104,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                          "call create_plan again with the complete plan.\n\n"
                          + self.plan.render_for_prompt())
         add("role", label, role, sep="\n\n")
+        role_name = "plan-exec" if self._plan_executing() else self.mode
+        # Next to the role, so a small model weighs it; nav keeps the last slot.
+        if (cave := _cavecat_rules(self.cavecat, role_name)):
+            add("cavecat", "Cavecat", cave)
         add("env", "Environment", _environment(self.workdir, names, self.net_access))
         # The user's own instructions sit next to the role they refine, not
         # behind the (large) tool reference.
@@ -1118,7 +1131,6 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             add("mcp", "MCP servers", mcp)
         self._tool_ref = render_tool_reference(tools, self.tool_ref)
         add("tools", f"Tool reference ({len(tools)} tools, {self.tool_ref})", self._tool_ref)
-        role_name = "plan-exec" if self._plan_executing() else self.mode
         net = _net_rules(role_name, names, set(self.search_sources.sources))
         if net:
             add("net", "Using the internet", net)
@@ -1486,14 +1498,33 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
     # ── send ──────────────────────────────────────────────────────────────────
 
     def _start_turn_stats(self) -> None:
-        self._turn_stats = {"t0": time.monotonic(), "prompt": 0, "eval": 0, "calls": 0}
+        self._turn_stats = {"t0": time.monotonic(), "prompt": 0, "prompt_total": 0,
+                            "prompt_cached": 0, "prompt_ms": 0.0, "eval": 0, "calls": 0,
+                            "text": {k: [] for k in _OUTPUT_PARTS}}
 
     def _done_event(self) -> DoneEvent:
         """The DoneEvent ending a model turn, with what the turn cost."""
         self.check_workspace_tools()         # it may have written one
         st = self._turn_stats
         return DoneEvent(secs=round(time.monotonic() - st["t0"], 1), prompt_tokens=st["prompt"],
-                         eval_tokens=st["eval"], tool_calls=st["calls"])
+                         prompt_total=st["prompt_total"], prompt_cached=st["prompt_cached"],
+                         prompt_secs=round(st["prompt_ms"] / 1000, 1), eval_tokens=st["eval"],
+                         tool_calls=st["calls"], **self._output_split(st["text"]))
+
+    def _output_split(self, text: dict[str, list[str]]) -> dict:
+        """DoneEvent's think/preamble/args/reply_tokens: the server's tokenizer
+        when it has one, else the usual estimate."""
+        joined = ["".join(text[k]) for k in _OUTPUT_PARTS]
+        counts = None
+        if any(joined):
+            try:
+                counts = self.client.count_tokens(joined)
+            except Exception:
+                counts = None
+        exact = counts is not None and len(counts) == len(joined)
+        if not exact:
+            counts = [text_tokens(t) for t in joined]
+        return {f"{k}_tokens": n for k, n in zip(_OUTPUT_PARTS, counts)} | {"split_exact": exact}
 
     def send(self, text: str):
         """Called from the harness worker thread."""
@@ -1543,12 +1574,16 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         "cancelled", "error", "limit" (iteration cap), or "plan_approved" (the
         user approved a create_plan).  The caller emits DoneEvent and autosaves."""
         _MAX_ITERATIONS = max_iterations
-        _NUDGE_AFTER = 10  # consecutive tool-only turns before injecting a respond prompt
+        # Consecutive tool-only turns before injecting a respond prompt.  /cavecat
+        # asks for no text between calls, so there it only catches a runaway.
+        _NUDGE_AFTER = 10 if self.cavecat == "off" else 20
+        quiet = self.cavecat != "off"
         investigating = self._plan_investigating()
         executing = self._plan_executing()
         plan_approved = False
         self._step_summary = None  # set by complete_step; ends the loop after this batch
         self._last_run = self._last_failed_call = None  # the user may have changed files
+        self._syntax_watch.reset()
 
         iteration = 0
         tool_only_turns = 0
@@ -1625,6 +1660,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             eval_tokens = response.eval_tokens
             done_reason = response.done_reason  # "stop" | "length" | None
             self._turn_stats["prompt"] = prompt_tokens or self._turn_stats["prompt"]
+            self._turn_stats["prompt_total"] += prompt_tokens or 0
+            self._turn_stats["prompt_cached"] += response.cached_tokens or 0
+            self._turn_stats["prompt_ms"] += response.prompt_ms or 0.0
             self._turn_stats["eval"] += eval_tokens or 0
 
             if prompt_tokens is not None:
@@ -1669,6 +1707,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                 prompt_tokens, eval_tokens,
                 bool(_calls),
             )
+            parts = self._turn_stats["text"]
+            parts["think"].append(raw_thinking or "")
+            parts["preamble" if _calls else "reply"].append(content or "")
+            parts["args"] += [json.dumps({"name": n, "arguments": a}, default=str) for n, a in _calls]
 
             # Model produced something — reset the empty-retry window so a later
             # empty response gets one fresh retry rather than failing immediately.
@@ -1906,6 +1948,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                             cutoff = self.max_tool_result
                         result = result[:cutoff] + f"\n... (truncated after {cutoff} chars of {total} — use read_file with start_line/end_line for specific sections)"
                 result = self._annotate_result(name, args, result)
+                result += self._watch_syntax(name, args, diff_old, diff_existed, multi_snaps)
 
                 # For mutating tools, show a diff of what changed on disk instead
                 # of the terse "OK" result. Falls back to ToolResultEvent on errors
@@ -1969,11 +2012,13 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                     "You have been calling tools for several turns without a text response. "
                     "If your investigation is complete, call create_plan now. "
                     "If a decision needs the user, call ask_user. "
-                    "Otherwise keep investigating, with one line of text alongside your next tool call."
+                    + ("Otherwise keep investigating." if quiet else
+                       "Otherwise keep investigating, with one line of text alongside your next tool call.")
                     if investigating else
                     "You have been calling tools for several turns without a text response. "
-                    "Write one line on your progress with your next tool call. Once the current "
-                    "plan step is complete and verified, call complete_step with a short summary."
+                    + ("" if quiet else "Write one line on your progress with your next tool call. ")
+                    + "Once the current plan step is complete and verified, call complete_step "
+                    "with a short summary."
                     if executing else
                     "You have been calling tools for several turns without a text response. "
                     "Stop and summarise what you have found or done so far, "
@@ -2067,6 +2112,28 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             self._last_run = None
         return result
 
+    def _watch_syntax(self, name: str, args: dict, diff_old: str | None, diff_existed: bool,
+                      multi_snaps: dict | None) -> str:
+        """SyntaxWatch's notes for this call: a write starts watching its files
+        (from the snapshots taken before it ran), and every call reports a file
+        this turn left unparseable."""
+        if "feedback" not in self.edit_features or not isinstance(args, dict):
+            return ""
+        tool = registry.get(name)
+        written = written_paths(tool, args) if tool is not None else []
+        for pth in written:
+            if multi_snaps is not None:
+                old, existed = multi_snaps.get(pth, ("", False))
+            elif pth == args.get("path"):    # the path the snapshot was taken of
+                old, existed = diff_old or "", diff_existed
+            else:
+                continue
+            self._syntax_watch.note_write(pth, self.workdir, old if existed else None)
+        try:
+            return self._syntax_watch.after_call(written, self.workdir)
+        except Exception:
+            return ""                    # a hint must never break a tool result
+
     def _rerun_note(self, command: str, result: str) -> str:
         """A new-mode run_command result, headed by a pointer to the earlier log
         when the same command ran last and nothing has written since.  The run
@@ -2125,6 +2192,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             think_choices=self.think_choices(),
             think_known=self.client.thinking_caps().known,
             think_history=self.think_history,
+            cavecat=self.cavecat,
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
             workspace_pending=[t.name for t in self.workspace_tools.by_status("pending")],
             skills=list(self.active_skills),

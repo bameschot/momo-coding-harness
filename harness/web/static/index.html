@@ -78,6 +78,7 @@
       <span id="ctx-pct" class="mono">0%</span>
     </button>
     <button id="think-badge" class="chip button" type="button" title="Thinking level (/think)" aria-haspopup="dialog" aria-expanded="false">THINK: on</button>
+    <button id="cavecat-badge" class="chip button" type="button" title="Cavecat (/cavecat): compress plans, tool text and command output, and keep replies short" aria-haspopup="dialog" aria-expanded="false">CAVECAT: off</button>
     <button id="tools-badge" class="chip button warn" type="button" title="Tool calls are off" aria-haspopup="dialog" aria-expanded="false" hidden>TOOLS: off</button>
     <button id="run-badge" class="chip button" type="button" title="Running commands" aria-haspopup="dialog" aria-expanded="false">RUN: auto</button>
     <button id="net-badge" class="chip button" type="button" title="Internet access" aria-haspopup="dialog" aria-expanded="false">NET: off</button>
@@ -119,6 +120,12 @@
     <label title="The model never sees its earlier reasoning"><input type="radio" name="think-history" value="off"> off</label>
     <label title="The model sees its reasoning since your last message — its current tool loop"><input type="radio" name="think-history" value="turn"> this turn</label>
     <label title="The model sees its reasoning from every turn still in history — uses more context"><input type="radio" name="think-history" value="all"> all turns</label>
+  </div>
+  <div id="cavecat-menu" class="menu think-menu" role="dialog" aria-label="Cavecat" hidden>
+    <div class="menu-title">Cavecat <kbd>/cavecat</kbd></div>
+    <label title="The model writes as usual"><input type="radio" name="cavecat" value="off"> off</label>
+    <label title="Telegraphic plans and tool text, no narration between calls, compact command output, short replies"><input type="radio" name="cavecat" value="on"> on</label>
+    <div class="muted menu-note">Saves tokens: plans, tool text and command output are compressed, and replies kept short. Thinking is left alone.</div>
   </div>
   <div id="run-menu" class="menu chip-menu" role="dialog" aria-label="Running commands" hidden></div>
   <div id="net-menu" class="menu chip-menu" role="dialog" aria-label="Internet access" hidden></div>
@@ -246,6 +253,11 @@
       <summary>Context</summary>
       <label><input type="checkbox" id="guides" data-cmd="/guides"> Load AGENTS.md / CLAUDE.md <kbd>/guides</kbd></label>
       <label class="menu-num" title="Most tokens one model reply may take, reasoning included — stops a model stuck in a loop. 'off' = no cap.">Reply cap <input type="text" id="max-output-tokens" data-cmd="/max-output-tokens" size="7" placeholder="25000"> tokens</label>
+      <div class="menu-sub">Cavecat <kbd>/cavecat</kbd></div>
+      <div class="seg" role="radiogroup" aria-label="Cavecat">
+        <label title="The model writes as usual"><input type="radio" name="cavecat-view" value="off"> off</label>
+        <label title="Telegraphic plans and tool text, no narration between calls, compact command output, short replies"><input type="radio" name="cavecat-view" value="on"> on</label>
+      </div>
     </details>
     <details data-section="run">
       <summary>Running commands</summary>

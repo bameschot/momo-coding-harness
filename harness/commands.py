@@ -18,6 +18,7 @@ from . import session as session_mod
 from . import tools as tools_mod
 from . import transcript as transcript_mod
 from .compaction import content_text
+from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS
 from .harness import MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness, _mask_messages
 from .llm.base import THINK_LEVELS
 from .tools import dispatch
@@ -664,6 +665,24 @@ def handle(line: str, harness: Harness) -> CommandResult:
         session_mod.save_prefs(think_history=choice)
         harness.emit_status()
         return CommandResult(handled=True, output=f"Reasoning sent back: {labels[choice]}")
+
+    if cmd == "/cavecat":
+        labels = {"off": "off — the model writes as usual",
+                  "on": "on — telegraphic plans and tool text, no narration between calls, "
+                        "compact command output, short replies"}
+        if not arg:
+            return CommandResult(handled=True, output=f"Cavecat: {labels[harness.cavecat]}")
+        choice = arg.strip().lower()
+        if (on := _on_off(choice)) is not None:
+            choice = "on" if on else "off"
+        choice = CAVECAT_ALIASES.get(choice, choice)       # text/full/lite: earlier levels
+        if choice not in CAVECAT_LEVELS:
+            return _bad_choice(arg, "'off' or 'on'")
+        harness.cavecat = choice
+        session_mod.save_prefs(cavecat=choice)
+        harness.rebuild_system_prompt()
+        harness.emit_status()
+        return CommandResult(handled=True, output=f"Cavecat: {labels[choice]}")
 
     if cmd == "/companion-idle-recap":
         def _state() -> str:
@@ -1554,6 +1573,8 @@ Available commands:
                       Qwen3.8); the nearest one it takes is sent
   /think-history off|turn|all  Send the model's own reasoning back to it: none,
                       since your last message (default), or every turn (saved)
+  /cavecat [off|on]   Compress plans, tool text and command output, and keep
+                      replies short, to save tokens (saved)
   /run-confirm        Show run_command confirmation state (on/off)
   /run-confirm on|off Ask y/N before each run_command  (Shift+P toggles)
   /run-mode [new|classic]  new: save command output to a log, return a view

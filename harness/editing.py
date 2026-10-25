@@ -574,10 +574,15 @@ def _parse(lang: str | None, text: str):
         return None
 
 
-def _syntax_errors(p: Path, text: str, parsed) -> list[tuple[int, str]] | None:
-    """[(line, message)] of the file's syntax errors, [] when it parses, None
-    when it cannot be checked.  Python is compiled (exact); other code_nav
-    languages use tree-sitter's ERROR / MISSING nodes."""
+_SyntaxError = tuple[int, int | None, int | None, str]   # line, column, end column, message
+
+
+def _syntax_errors(p: Path, text: str, parsed) -> list[_SyntaxError] | None:
+    """[(line, column, end column, message)] of the file's syntax errors, []
+    when it parses, None when it cannot be checked.  Python is compiled (exact);
+    other code_nav languages use tree-sitter's ERROR / MISSING nodes.  Columns
+    are 1-based in characters, the end exclusive; None when the checker does
+    not say (or the error runs past the line)."""
     if p.suffix.lower() in (".py", ".pyi"):
         # A SyntaxWarning printed to stderr would land on the curses screen.
         with warnings.catch_warnings():
@@ -585,7 +590,10 @@ def _syntax_errors(p: Path, text: str, parsed) -> list[tuple[int, str]] | None:
             try:
                 compile(text, p.name, "exec", flags=ast.PyCF_ONLY_AST, dont_inherit=True)
             except SyntaxError as e:
-                return [(e.lineno or 1, e.msg)]
+                col = e.offset if e.offset and e.offset > 0 else None
+                end = (e.end_offset if col and e.end_lineno == e.lineno and e.end_offset
+                       and e.end_offset > col else None)
+                return [(e.lineno or 1, col, end, e.msg)]
             except (ValueError, RecursionError, MemoryError):
                 return None
         return []
@@ -594,17 +602,71 @@ def _syntax_errors(p: Path, text: str, parsed) -> list[tuple[int, str]] | None:
     root = parsed.tree.root_node
     if not root.has_error:
         return []
-    out: list[tuple[int, str]] = []
+    raw = text.encode("utf-8").split(b"\n")
+
+    def col(point) -> int:               # tree-sitter counts bytes
+        row, b = point
+        line = raw[row] if row < len(raw) else b""
+        return len(line[:b].decode("utf-8", "replace")) + 1
+
+    def span(n) -> tuple[int, int | None]:
+        start = col(n.start_point)
+        same = n.end_point[0] == n.start_point[0]
+        end = col(n.end_point) if same else None
+        return start, end if end and end > start else None
+
+    out: list[_SyntaxError] = []
     stack = [root]
     while stack and len(out) < 50:
         n = stack.pop()
         if n.is_missing:
-            out.append((n.start_point[0] + 1, f"missing '{n.type}'"))
+            out.append((n.start_point[0] + 1, *span(n), f"missing '{n.type}'"))
         elif n.type == "ERROR":
-            out.append((n.start_point[0] + 1, "syntax error"))
+            out.append((n.start_point[0] + 1, *span(n), "syntax error"))
         elif n.has_error:
             stack.extend(reversed(n.children))
-    return sorted(out)
+    return sorted(out, key=lambda e: (e[0], e[1] or 0))
+
+
+_CHAR_NAMES = {"\\": "backslash", '"': "double quote", "'": "single quote", "`": "backquote",
+               " ": "space", "\t": "tab"}
+_MARK_WIDTH = 120
+
+
+def _mark(lines: list[str], ln: int, col: int | None, end: int | None = None) -> str:
+    """Line ln as the file has it, with carets under the columns (col to end)
+    and the character at col named: a model told only "line 23" reads its own
+    slip as valid and goes looking at bytes."""
+    if not 0 < ln <= len(lines):
+        return ""
+    line = lines[ln - 1].rstrip("\n")
+    gutter = f"{ln:>6} | "
+    if col is None:
+        return f"\n{gutter}{line[:_MARK_WIDTH]}"
+    c = max(1, min(col, len(line) + 1)) - 1
+    lo = max(0, min(c - _MARK_WIDTH // 2, len(line) - _MARK_WIDTH))
+    shown = line[lo:lo + _MARK_WIDTH]
+    pad = "".join("\t" if ch == "\t" else " " for ch in shown[:c - lo])
+    ch = line[c] if c < len(line) else ""
+    what = ("end of line" if not ch else
+            f"'{ch}' ({_CHAR_NAMES[ch]})" if ch in _CHAR_NAMES else
+            f"'{ch}'" if ch.isprintable() else f"U+{ord(ch):04X}")
+    width = max(1, min(end - 1 - c, len(shown) - (c - lo))) if end else 1
+    here = f" here: {what}" if width == 1 else ""      # a span: its first character means little
+    return (f"\n{gutter}{'…' if lo else ''}{shown}"
+            f"\n{' ' * (len(gutter) - 2)}| {' ' if lo else ''}{pad}{'^' * width}{here}")
+
+
+def syntax_errors(p: Path, text: str) -> list[_SyntaxError] | None:
+    """The file's syntax errors as it would read with this text (see _syntax_errors)."""
+    return _syntax_errors(p, text, _parse(_lang(p), text))
+
+
+def syntax_mark(lines: list[str], err: _SyntaxError) -> str:
+    """"line N, column C: message" and the marked line, for a note elsewhere."""
+    ln, col, end, msg = err
+    at = f"line {ln}" + (f", column {col}" if col else "")
+    return f"{at}: {msg.rstrip('.')}{_mark(lines, ln, col, end)}"
 
 
 def _syntax_note(p: Path, before: list | None, after: list | None, lines: list[str],
@@ -617,15 +679,67 @@ def _syntax_note(p: Path, before: list | None, after: list | None, lines: list[s
         return ""
     lo, hi = first, max(first, last)
     dist = lambda e: 0 if lo <= e[0] <= hi else min(abs(e[0] - lo), abs(e[0] - hi))
-    ln, msg = min(after, key=dist)
-    text = lines[ln - 1].strip()[:160] if 0 < ln <= len(lines) else ""
+    err = min(after, key=dist)
+    ln, col, end, msg = err
+    at = f"line {ln}" + (f", column {col}" if col else "")
+    msg = msg.rstrip(".") + ("" if msg.endswith("?") else ".")
     if len(after) > len(before):
-        return (f"\nWARNING: {p.name} no longer parses after this change — line {ln}: `{text}` "
-                f"({msg}). The change WAS written; fix it with another edit.")
-    if dist((ln, msg)) <= _STILL_BROKEN_NEAR:
-        return (f"\nWARNING: {p.name} still does not parse — line {ln}: `{text}` ({msg}). "
-                f"Nothing here fixed it yet.")
+        return (f"\nWARNING: {p.name} no longer parses after this change — {at}: {msg}"
+                f"{_mark(lines, ln, col, end)}\nThe change WAS written; fix it with another edit.")
+    if dist(err) <= _STILL_BROKEN_NEAR:
+        return (f"\nWARNING: {p.name} still does not parse — {at}: {msg}"
+                f"{_mark(lines, ln, col, end)}\nNothing here fixed it yet.")
     return ""
+
+
+# ── one escape level too many ────────────────────────────────────────────────
+# Tool arguments arrive as plain text, but a model often escapes its code once
+# more, as if for a string literal: \" where the file needs ", \\ for \.  The
+# backslash lands in the file, breaks its syntax, and every repair attempt goes
+# through the same escaping again (sed, scratch scripts, write_file: 25-66
+# calls, 2026-10-25).  The file's own syntax check proves the slip: the text as
+# given adds errors and one level less does not.  Like the curly-quote repair,
+# the fixed text is written and the result says so.
+
+_UNESCAPE = (re.compile(r"""(?<!\\)\\(["'])"""),       # \" \'
+             re.compile(r"""\\([\\"'])"""),             # and \\
+             re.compile(r"""\\([\\"'nrt])"""))          # and \n \r \t
+_CONTROL = {"n": "\n", "r": "\r", "t": "\t"}
+_UNESCAPED = ('\\" → "', '\\" → " and \\\\ → \\', '\\" → ", \\\\ → \\ and \\n → a line break')
+
+
+def _unescape_candidates(text: str) -> list[tuple[str, str]]:
+    """[(text with one escape level removed, what was removed)], mildest first."""
+    out: list[tuple[str, str]] = []
+    for rx, what in zip(_UNESCAPE, _UNESCAPED):
+        cand = rx.sub(lambda m: _CONTROL.get(m.group(1), m.group(1)), text)
+        if cand != text and all(cand != c for c, _w in out):
+            out.append((cand, what))
+    return out
+
+
+def _escape_repair(p: Path, lang: str | None, before_text: str, new_text: str,
+                   build) -> tuple[str, str] | None:
+    """(new_text with one escape level removed, the note) when the file's syntax
+    check proves the slip, else None.  build(new) is the whole file as it would
+    be with new in place (None: does not apply)."""
+    if "\\" not in new_text:
+        return None
+    errs = lambda t: _syntax_errors(p, t, _parse(lang, t))
+    before = errs(before_text)
+    as_given = build(new_text)
+    if before is None or as_given is None:
+        return None
+    given = errs(as_given)
+    if given is None or len(given) <= len(before):
+        return None                      # it parses as written: real escapes, left alone
+    for cand, what in _unescape_candidates(new_text):
+        whole = build(cand)
+        if whole is not None and (e := errs(whole)) is not None and len(e) <= len(before):
+            return cand, (f" — written with one level of escaping removed ({what}): tool "
+                          f"arguments are not escaped a second time, so write quotes and "
+                          f"backslashes exactly as they should appear in the file")
+    return None
 
 
 def _changed_span(before: list[str], after: list[str]) -> tuple[int, int]:
@@ -926,15 +1040,22 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
                f"unchanged. Line {at} still reads: `{lines[at - 1].strip()[:200] if at <= len(lines) else ''}`")
         errs = _syntax_errors(f.p, content, _parse(lang, content))
         return msg + _syntax_note(f.p, errs, errs, lines, at, at + found.old.count("\n"))
+    repaired = ""
+    if match:
+        fix = _escape_repair(f.p, lang, content, new_string,
+                             lambda n: _find_edit(content, old_string, n, replace_all, match).text)
+        if fix:
+            new_string, repaired = fix
+            found = _find_edit(content, old_string, new_string, replace_all, match)
     err = f.save(found.text)
     if err:
         return err
     if replace_all:
-        head = f"Replaced {found.count} occurrence(s)"
+        head = f"Replaced {found.count} occurrence(s)" + repaired
         if "feedback" in features:
             head += _replaced_lines(content, found.old, found.new)
     else:
-        head = "OK — 1 change applied" + found.note
+        head = "OK — 1 change applied" + found.note + repaired
     nudge = ""
     if "symbol" in features and not replace_all:
         nudge = _rewrite_nudge(path, content, found.text, old_string, _parse(lang, content))
@@ -976,25 +1097,35 @@ def replace_symbol(path: str, name: str, new_source: str, *, workdir: Path, inde
     if isinstance(sym, str):
         return sym if sym.startswith("ERROR") else "ERROR: " + sym.strip("()")
     content = f.text
-    src = _strip_lineno_prefixes(f.lf(new_source))
     lines = split_lines(content, keepends=True)
     block = lines[sym.start - 1:sym.end]
-    body = src.strip("\n")
-    new_lines = body.split("\n") if body.strip() else []
-    # The definition keeps its place in the file: new_source's first line takes
-    # the indentation the old first line had (a method keeps its class indent).
-    base = _leading_ws(block[0]) if block else ""
-    head_ws = next((_leading_ws(ln) for ln in new_lines if ln.strip()), base)
-    char = _indent_char(lines)
-    if head_ws != base or (char == "\t" and any(ln.startswith(" ") for ln in new_lines)):
-        # Spaces from the model in a tab-indented file count _TAB_WIDTH to a tab.
-        scale = (1 / _TAB_WIDTH if char == "\t" and "\t" not in "".join(new_lines) else 1.0)
-        new_lines = [_shift(base, head_ws, _leading_ws(ln), scale, char) + ln.strip()
-                     if ln.strip() else "" for ln in new_lines]
-    eol = (_ending(block[0]) or "\n") if block else "\n"
-    last = _ending(block[-1]) if block else eol
-    rebuilt = "".join(ln + eol for ln in new_lines[:-1]) + (new_lines[-1] + last if new_lines else "")
-    new_content = "".join(lines[:sym.start - 1]) + rebuilt + "".join(lines[sym.end:])
+
+    def rebuild(src: str) -> tuple[str, list[str]]:
+        body = src.strip("\n")
+        new_lines = body.split("\n") if body.strip() else []
+        # The definition keeps its place in the file: new_source's first line takes
+        # the indentation the old first line had (a method keeps its class indent).
+        base = _leading_ws(block[0]) if block else ""
+        head_ws = next((_leading_ws(ln) for ln in new_lines if ln.strip()), base)
+        char = _indent_char(lines)
+        if head_ws != base or (char == "\t" and any(ln.startswith(" ") for ln in new_lines)):
+            # Spaces from the model in a tab-indented file count _TAB_WIDTH to a tab.
+            scale = (1 / _TAB_WIDTH if char == "\t" and "\t" not in "".join(new_lines) else 1.0)
+            new_lines = [_shift(base, head_ws, _leading_ws(ln), scale, char) + ln.strip()
+                         if ln.strip() else "" for ln in new_lines]
+        eol = (_ending(block[0]) or "\n") if block else "\n"
+        last = _ending(block[-1]) if block else eol
+        rebuilt = ("".join(ln + eol for ln in new_lines[:-1])
+                   + (new_lines[-1] + last if new_lines else ""))
+        return "".join(lines[:sym.start - 1]) + rebuilt + "".join(lines[sym.end:]), new_lines
+
+    src = _strip_lineno_prefixes(f.lf(new_source))
+    repaired = ""
+    if "match" in features:
+        fix = _escape_repair(f.p, lang, content, src, lambda n: rebuild(n)[0])
+        if fix:
+            src, repaired = fix
+    new_content, new_lines = rebuild(src)
     if new_content == content:
         return (f"No change: {sym.kind} {sym.qualname} in {path} already reads exactly like "
                 f"new_source.")
@@ -1002,7 +1133,7 @@ def replace_symbol(path: str, name: str, new_source: str, *, workdir: Path, inde
     if err:
         return err
     verb = "replaced" if new_lines else "deleted"
-    head = f"OK — {verb} {sym.kind} {sym.qualname} (was L{sym.start}-{sym.end})"
+    head = f"OK — {verb} {sym.kind} {sym.qualname} (was L{sym.start}-{sym.end})" + repaired
     return _after_edit(f, path, head, content, new_content, lang, features, index, cancel,
                        workdir, before_parsed=before)
 
@@ -1130,6 +1261,12 @@ def edit_files(edits, *, workdir: Path, index=None, cancel=None,
         if found.text == text:
             notes.append(f"  edit {i} ({e['path']}): no change — new_string equals old_string")
             continue
+        if match:
+            fix = _escape_repair(f.p, _lang(f.p), text, new,
+                                 lambda n: _find_edit(text, old, n, e["replace_all"], match).text)
+            if fix:
+                found = _find_edit(text, old, fix[0], e["replace_all"], match)
+                notes.append(f"  edit {i} ({e['path']}){fix[1]}")
         files[p][1] = found.text
     changed = [(p, f, text, shown) for p, (f, text, shown) in files.items() if text != f.text]
     if not changed:
@@ -1177,11 +1314,16 @@ def write_file(path: str, content: str, *, workdir: Path, index=None, cancel=Non
     except (OSError, UnicodeDecodeError):
         pass
     old_text = None
-    if {"feedback", "checks"} & features:
+    if {"feedback", "checks", "match"} & features:
         try:
             old_text = p.read_bytes().decode("utf-8") if p.is_file() else None
         except (OSError, UnicodeDecodeError):
             old_text = None
+    repaired = ""
+    if "match" in features:
+        fix = _escape_repair(p, _lang(p), old_text or "", content, lambda n: n)
+        if fix:
+            content, repaired = fix
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -1189,7 +1331,7 @@ def write_file(path: str, content: str, *, workdir: Path, index=None, cancel=Non
         return f"ERROR: {e}"
     # The harness inspects last_tool by name (not return value), but the model
     # uses this confirmation — with concrete size — to know the write landed.
-    out = f"Written: {path} ({_size_note(content)})"
+    out = f"Written: {path} ({_size_note(content)})" + repaired
     lang = _lang(p) if {"feedback", "checks"} & features else None
     if lang is None and not ("feedback" in features and p.suffix.lower() in (".py", ".pyi")):
         return out

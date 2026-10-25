@@ -737,3 +737,242 @@ budget.
   shell and failed.
 - Measuring these fixes needs a task where the first suite runs fail: a replay of the scraper
   session, or a bench whose plan has to debug.
+
+## Measuring `/cavecat` (`--cavecat`)
+
+`/cavecat on` compresses the model's plan steps and tool text, asks for no narration between
+tool calls, keeps its reply short, and has the harness compact command output; `off` is the
+baseline. Rounds 1–2 below ran under earlier levels (`lite`, then `text` and `full`, with a
+thinking rule at `full` since removed, and before the short-reply rule). See the main
+README's *Cavecat mode*. Whether it pays off depends
+on how far the model lets a style rule into its reasoning, and whether that costs it passes
+or extra rounds. Every run records, from the turn's `DoneEvent` and `ThinkEvent`s:
+
+| Field | What |
+|---|---|
+| `eval_tokens` | output tokens over the whole turn, thinking included |
+| `prompt_tokens` | the last request's prompt |
+| `prompt_total` | every request's prompt summed: what the turn re-read. A run that loops costs far more here than in output tokens. It counts the whole prompt each time, so with a server's prefix cache most of it is not recomputed: compare it across levels, not with output tokens |
+| `think_tokens` | the thinking: counted with the server's tokenizer (llama.cpp `/tokenize`), else estimated with `text_tokens` |
+| `preamble_tokens`, `args_tokens`, `reply_tokens` | the rest of the output, the same way: text alongside tool calls, the calls themselves (name and arguments), and text without calls (the reply). What the four leave of `eval_tokens` is call framing and template tokens. `split_exact` says whether they were counted or estimated; the summary prints them as shares of the output |
+| `think_sample` | the first ~400 characters of the first and last thought, to check the model follows the rule |
+
+The summary prints mean output tokens, seconds, prompt read and thinking per run next to the
+pass rate. Plan mode, where compressed plan text is re-sent on every step, is measured with
+`tdd_bench.py --cavecat`.
+
+The testbench, cheapest first:
+
+```bash
+# 0. offline, seconds: what compacted command output keeps (the `compact` column)
+python evals/run_output_bench.py                 # and --limit 3000
+# 1. live, ~12 min per level: --suite cavecat = the 5 shell tasks (long command output,
+#    the reply a third of the output: graded on facts in it) + 3 light edits (many quick
+#    calls: narration between them; a hidden check guards the passes)
+for lv in off on; do
+  python evals/run_evals.py --suite cavecat --runs 2 --cavecat $lv --max-run-secs 300 \
+    --cache cave.jsonl --json cave-$lv.json
+done
+# optional, slow: plan mode, where compressed plan text is re-sent on every step
+python evals/tdd_bench.py --runs 3 --cavecat on --json tdd-on.json   # and off
+```
+
+The heavy edits (`rewrite-function`, `signature-change`) take 5–10× as long and mostly
+measure thinking, which cavecat leaves alone; rounds 1–2 used them because the first
+thinking rule backfired there. `tests/test_run_output.py` checks the compaction itself on the
+shell project's real output, with no model.
+
+`--cavecat` is part of the `--cache` fingerprint (runs cached before it existed count as
+`off`); cached rows from before a field existed show no line for it.
+
+A run is cancelled after `--max-run-secs` (default 600, `0` = no limit) and graded as it is,
+marked `(capped)` and counted in the summary. `--timeout` only catches a model that goes
+silent; a 9B once spent 40+ tool calls disassembling bytecode to "prove" a stale cache, which
+`--timeout` never ends.
+
+### Round 1: the first rules (Ornith-1.5-9B Q8, edit suite, 3 runs per task)
+
+The first version had two levels that both compressed thinking: `lite` ("plain, short
+sentences; don't restate, hedge or re-check what is settled") and `full` ("drafts, not prose;
+fragments, conclusions only"). The run was cut short, so `full` has no numbers for the two
+heaviest tasks. Mean output tokens per run, and passes:
+
+| Task | off | lite | full |
+|---|---|---|---|
+| ambiguous-edit | 575, 3/3 | 749, 3/3 | 634, 3/3 |
+| nested-branch | 1,255, 3/3 | 1,276, 3/3 | 850, 3/3 |
+| two-edits | 2,175, 3/3 | 1,770, 3/3 | 1,586, 3/3 |
+| rewrite-function | 5,928, 2/3 | 4,185, 3/3 | 8,415, 2/2 |
+| rename-across | 3,252, 3/3 | 2,538, 3/3 | — |
+| signature-change | 3,745, 3/3 | 7,183, 3/3 | — |
+
+- **No pass was lost** (off 17/18, lite 18/18, full 11/11).
+- **Light edits got cheaper:** `full` used 23% fewer output tokens and 17% less time on the
+  three light tasks; `lite` about 5%.
+- **Hard edits backfired, after the first edit.** The first edit landed at the same call at
+  every level; what followed grew. `lite` on signature-change made 7–17 edits and 4–21 shell
+  runs (off: 5–8 and 1–8), one run with 12 scratch writes and 5 repeated commands; `full` on
+  rewrite-function made 4–6 edits and 7–8 runs with 3 repeated commands each. Shorter
+  reasoning moved the checking into tool calls, and every extra round re-reads the context,
+  which these output-token numbers don't show (hence `prompt_total`).
+- Over all six tasks `lite` came out flat (+5% tokens, same time).
+
+What changed after it: `lite` became `text`, which leaves thinking alone, and `full`'s
+thinking rule became "cut the narration, keep the reasoning; reason it through fully before an
+edit and after a failed run; don't re-run a command unchanged".
+
+### Round 2: `text`, and `full` with "keep the reasoning" (same model, 3 heavy tasks, 5 runs each)
+
+Means per run: output tokens, prompt read over all rounds (`prompt_total`), estimated
+thinking, tool calls, seconds, and passes.
+
+| Task | Level | Output | Prompt read | Thinking | Calls | Secs | Passed |
+|---|---|---|---|---|---|---|---|
+| rewrite-function | off | 8,476 | 245,692 | 4,522 | 19.4 | 324 | 4/5 (1 capped) |
+| | text | 7,594 | 254,167 | 3,239 | 21.0 | 297 | 4/5 (1 capped) |
+| | full | 7,099 | 199,378 | 3,695 | 15.2 | 265 | 5/5 |
+| rename-across | off | 2,441 | 75,498 | 929 | 13.4 | 100 | 5/5 |
+| | text | 2,353 | 81,026 | 863 | 14.8 | 97 | 5/5 |
+| | full | 2,379 | 97,832 | 937 | 13.0 | 99 | 5/5 |
+| signature-change | off | 2,999 | 184,260 | 796 | 20.8 | 128 | 5/5 |
+| | text | 2,672 | 154,289 | 805 | 19.2 | 111 | 4/5 |
+| | full | 4,210 | 242,528 | 1,676 | 25.2 | 172 | 4/5 |
+| **Sum of the three** | off | 13,916 | 505,450 | 6,246 | | 551 | 14/15 |
+| | text | 12,619 (−9%) | 489,482 (−3%) | 4,907 | | 505 (−8%) | 13/15 |
+| | full | 13,689 (−2%) | 539,738 (+7%) | 6,307 | | 536 (−3%) | 14/15 |
+
+- **The round-1 backfire is gone.** Neither level loops like `lite` did on signature-change.
+  `full` was the best level on rewrite-function, and worst on signature-change, where it
+  dropped to 4/5 and used 40% more output tokens.
+- **No clear win either.** Every difference in the totals is smaller than the spread between
+  runs of one level (rewrite-function `off` alone ranged 2.5k–16k output tokens), and each
+  level lost one or two passes. `text` is slightly cheaper; `full` re-read more prompt.
+- **The thinking rule is barely followed.** The `think_sample`s at `full` open the same way as
+  at `off` ("Let me start by exploring the project structure to understand…") and stay full
+  prose. This 9B's reasoning style hardly takes a system-prompt rule, so on it `full` mostly
+  changes behaviour (when to reason and re-run), not length.
+- So `off` stays the default. `text` is the safe level to try, and plan mode, where its
+  compressed plan text is re-sent every step, is still to be measured (`tdd_bench.py --cavecat`).
+- Since the thinking rule bought nothing measurable, it was removed afterwards: `full` is
+  now `text` plus the short-reply rule.
+
+### Round 3: `off` / `on`, on the testbench (same model, `--suite cavecat --runs 2`, 2026-10-25)
+
+Before this round the eval only estimated thinking (`len // 4`), which hid how the output
+splits up. Now the `DoneEvent` counts every part with the server's tokenizer. On two heavy
+`off` runs of rewrite-function, thinking was 56–82% of the output and text between calls only
+3–8%. That is why the testbench uses lighter tasks, where the parts cavecat can reach are
+larger. `on` is everything at once: the short reply, no narration between calls, telegraphic
+tool text, and compacted command output. Means per run:
+
+| Tasks | Level | Output | Reply | Between calls | Calls | Secs | Prompt read | Command output | Passed |
+|---|---|---|---|---|---|---|---|---|---|
+| shell (10 runs) | off | 601 | 196 | 44 | 3.5 | 34.1 | 39,903 | 5.7 KB | 10/10 facts |
+| | on | 406 (−32%) | 129 (−34%) | 23 (−48%) | 2.8 | 25.6 (−25%) | 34,880 (−13%) | 2.5 KB (−56%) | 10/10 facts |
+| light edits (6 runs) | off | 1,233 | 198 | 103 | 7.2 | 54.9 | 75,029 | 0.8 KB | 6/6 |
+| | on | 990 (−20%) | 123 (−38%) | 85 (−17%) | 6.8 | 46.6 (−15%) | 73,914 (−1%) | 0.8 KB | 6/6 |
+| **all 16** | off | 838 | | | | 41.9 | 53,075 | 3.9 KB (max 19.7) | |
+| | on | 625 (−25%) | | | | 33.5 (−20%) | 49,518 (−7%) | 1.9 KB (max 7.4) | |
+
+Output split over all 16 runs, exact: `off` is thinking 35%, between calls 8%, tool arguments
+25%, reply 24% and framing 8%. `on` is 31% / 7% / 31% / 20% / 10%.
+
+- **The first clear saving.** Every column moves the same way on both task groups, and no
+  pass or fact was lost. Paired run for run, `on` was faster on all 10 shell runs and on 5 of the 6 edits.
+  At 2 runs per task this is still a small sample, but unlike rounds 1–2 the gap is larger
+  than the spread.
+- **The short reply is the biggest single lever.** The reply shrank about 35% on both groups,
+  and on shell tasks it is a third of the output. Text between calls halved on shell tasks
+  but fell only 17% on the edits, so the rule is followed only partly.
+- **Compaction pays in calls, not only in bytes.** On shell-warning, `on` found the warning
+  in 2 calls both times; `off` took 3–4. The plain head-and-tail view hides the warning,
+  while the compacted log keeps it in view. The largest command result fell from 19.7 KB to
+  7.4 KB. On the edits, command output is too small to compact.
+- **Thinking fell too** (296 → 195 tokens/run), with no rule asking for it. Shorter turns
+  give less to reason about.
+- So `text` and `full` became one level, `on`. The testbench above is the measurement to
+  repeat on another model.
+
+## Round 3: verify guidance and narration (Ornith-1.5-9B Q8, `--cavecat off`, 2026-10-25)
+
+A census of the 1,378 tool calls in rounds 1–2 found rounds the coder role itself caused: 60
+`python -m py_compile` runs in 35 of 92 runs (`roles/coder.md` suggested it, though the edit
+result already reports syntax errors), 61 re-reads of a file just edited (the edit result shows
+the changed lines), and on average 3.5 calls after the last edit. Two prompt changes were
+measured one at a time, each with the heavy tasks ×5 and the light tasks ×3.
+
+New per-run fields: `prompt_cached` (of `prompt_total`, what llama.cpp's prompt cache held:
+`usage.prompt_tokens_details.cached_tokens`, else `timings.cache_n`) and `prompt_secs` (the
+server's time on the rest). In round 3, **89% of the prompt read was cached and prefill took
+about 15 s of a 150 s run**: generation, not re-reading the context, is where the time goes.
+So a round costs its output tokens plus a little prefill, and fewer rounds still matter most.
+
+`max_calls` for the edit tasks is now the fewest calls of a passing `off` run (4, 7, 8, 10, 10,
+14); before, "over call budget" fired on 62 of 65 heavy runs.
+
+**Stage 1, verify guidance (kept).** Principle 6 now says: run the one test or short command
+that covers the change; the edit result already reports syntax errors and shows the changed
+lines, so don't run a syntax check or re-read the file; once the check passes, stop. Against the
+24 `off` heavy runs of rounds 1–2: `py_compile` 0.54 → 0.13 per run (both in one broken run),
+re-reads after an edit 0.71 → 0.33, calls −7%, prompt read −10%, passes 13/15 (was 22/24),
+output tokens +18% (mostly one capped run). The habits it named went; the total moved within
+the noise.
+
+**Stage 2, lighter narration (reverted).** "Every response MUST contain text" and "Before each
+tool call: one sentence" became "your final response must contain text" and "one sentence before
+an edit or when your plan changes". Against stage 1:
+
+| | Stage 1 | Stage 2 |
+|---|---|---|
+| Light tasks (3×3) | 23.3 calls, 4,313 out, 185 s, 9/9 | 20.7 calls (−11%), 3,374 out (−22%), 153 s (−17%), 9/9 |
+| Heavy tasks (3×5) | 47.6 calls, 15,993 out, 611 s, 13/15 | 58.4 calls (+23%), 17,693 out (+11%), 678 s (+11%), 13/15 |
+| rewrite-function | 13.2 calls, median 8,259 out | 20.6 calls, median 12,315 out, 1 capped |
+| All six | 70.9 calls, 20,306 out, 22/24 | 79.1 calls (+12%), 21,066 out (+4%), 22/24 |
+
+Sums of per-task means. Lighter narration made the easy edits cheaper and the hardest one
+dearer (its median run too, not just an outlier): without a sentence before each call the 9B
+acts with less of a plan when the change is large. Reverted, as overall calls and output went up.
+
+**A recurring failure.** Both capped heavy-task failures across the two stages were the same:
+the model mangled nested quotes in an f-string inside `edit_file`'s `new_string`
+(`f"Pay {format_price(total, "EUR")"}"`), got the syntax warning, and then spent 25–50 calls on
+`od`, `ast.parse` and scratch probes of a file it believed valid, until `--max-run-secs`. That
+spiral, not verification habits, is now the largest single waste in this suite.
+
+## Round 4: escape repair and syntax watch (Ornith-1.5-9B Q8, `--cavecat off`, 2026-10-25)
+
+Three changes aimed at that spiral, all language-neutral and behind the existing edit features:
+
+- **The caret mark.** A syntax warning now gives line *and* column, and shows the line with a
+  caret under the spot, naming the character when it is a single one (`^ here: '\' (backslash)`).
+- **Escape repair** (`match`). When the text a write tool got contains a backslash, breaks the
+  file's syntax as given, and parses with one level of escaping removed (`\"` → `"`, then `\\`,
+  then `\n \t \r`), it is written unescaped and the result says so. Legitimate escapes parse as
+  given and are left alone. The tool descriptions now say text is written "exactly as it should
+  appear in the file — quotes and backslashes are not escaped again".
+- **Syntax watch** (`feedback`). While a file this turn wrote has more syntax errors than before
+  the turn, every later tool result carries "NOTE: <file> still does not parse since your edit"
+  with the mark; after two calls that don't edit it, also "Inspecting the file further won't
+  change it". It goes quiet once the file parses again.
+
+Offline, replaying the recorded failing calls: stage 2's three over-escaped edits are repaired
+on the first write; stage 1's moved quote gets a caret at the unclosed `{`.
+
+Live, heavy tasks ×8 and the other four ×3, against stages 1–2 (both narration variants):
+
+| Task | Stages 1–2 | Round 4 |
+|---|---|---|
+| signature-change | 8/10, **2 capped**, 24.0 calls, 5,184 out, 207 s | **8/8, 0 capped**, 23.0 calls, 4,011 out, 160 s |
+| rewrite-function | 8/10, 1 capped, 16.9 calls, 9,155 out, 338 s | 5/8, 0 capped, 13.8 calls, 7,635 out, 282 s |
+| ambiguous-edit | 6/6, 5.2 calls | 3/3, 6.0 calls |
+| nested-branch | 6/6, 6.7 calls | 3/3, 9.0 calls |
+| two-edits | 6/6, 10.2 calls | 3/3, 8.7 calls |
+| rename-across | 10/10, 12.1 calls | 3/3, 10.3 calls |
+
+- **No run hit the cap.** In 5 of the 8 signature-change runs a file stayed broken across calls
+  and got the "still does not parse" note; all 5 fixed it and passed.
+- **The repair never fired live**: no run over-escaped this time, so only the replay exercises it.
+- **rewrite-function's 3 failures are logic, not syntax**: `''` returned 0, `'1h-5m'` was
+  accepted, valid `'1h30m'` rejected. None had a syntax warning or note. Earlier rounds varied
+  as much on this task; 8 runs can't tell that apart from chance.
+- The light tasks are within the noise of 3 runs each.

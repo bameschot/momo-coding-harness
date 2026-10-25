@@ -27,6 +27,17 @@ def _template_efforts(template: str) -> tuple[str, ...]:
     return tuple(lv for lv in EFFORT_LEVELS if lv in found) if len(found) >= 2 else ()
 
 
+def _prompt_cost(usage: dict, timings: dict) -> dict:
+    """ChatResponse's cached_tokens / prompt_ms: the OpenAI-style usage detail
+    when the server sends it, else llama.cpp's own `timings`."""
+    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    if not isinstance(cached, int):
+        cached = timings.get("cache_n")
+    ms = timings.get("prompt_ms")
+    return {"cached_tokens": cached if isinstance(cached, int) else None,
+            "prompt_ms": float(ms) if isinstance(ms, (int, float)) else None}
+
+
 class LlamaCppClient(LLMClient):
     """Adapter for a running llama.cpp server via its OpenAI-compatible API.
 
@@ -193,6 +204,7 @@ class LlamaCppClient(LLMClient):
         calls: dict[int, dict] = {}
         finish = None
         usage: dict = {}
+        timings: dict = {}
         for line in lines:
             if not line.startswith("data:"):
                 continue
@@ -205,6 +217,8 @@ class LlamaCppClient(LLMClient):
                 continue
             if chunk.get("usage"):
                 usage = chunk["usage"]
+            if chunk.get("timings"):
+                timings = chunk["timings"]
             for choice in chunk.get("choices") or []:
                 delta = choice.get("delta") or {}
                 if (t := delta.get("reasoning_content")):
@@ -236,6 +250,7 @@ class LlamaCppClient(LLMClient):
             prompt_tokens=usage.get("prompt_tokens"),
             eval_tokens=usage.get("completion_tokens"),
             done_reason=finish,
+            **_prompt_cost(usage, timings),
         )
 
     @staticmethod
@@ -268,6 +283,7 @@ class LlamaCppClient(LLMClient):
             prompt_tokens=usage.get("prompt_tokens"),
             eval_tokens=usage.get("completion_tokens"),
             done_reason=choice.get("finish_reason"),
+            **_prompt_cost(usage, data.get("timings") or {}),
         )
 
     def context_length(self) -> int | None:
@@ -282,6 +298,18 @@ class LlamaCppClient(LLMClient):
         except Exception:
             pass
         return None
+
+    def count_tokens(self, texts: list[str]) -> list[int] | None:
+        """/tokenize, one request per text; None on any failure."""
+        try:
+            counts = []
+            for t in texts:
+                toks = self._client.request_json("POST", "/tokenize",
+                                                 {"content": t, "add_special": False})["tokens"]
+                counts.append(len(toks))
+            return counts
+        except Exception:
+            return None
 
     def loaded_models(self) -> list[str]:
         return self.list_models()        # a llama.cpp server holds exactly what it serves

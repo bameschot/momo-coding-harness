@@ -44,7 +44,7 @@ def run_command(command: str, timeout: int | None = None, tail: int | None = Non
                 net_access: str = "off", cancel=None, run_mode: str = "classic",
                 run_store: "run_store_mod.RunStore | None" = None,
                 run_output_limit: int = run_store_mod.DEFAULT_LIMIT,
-                run_exit: dict | None = None) -> str:
+                run_exit: dict | None = None, run_compact: bool = False) -> str:
     refusal, note = web_refusal(command, net_access)
     if refusal:
         return refusal
@@ -74,7 +74,8 @@ def run_command(command: str, timeout: int | None = None, tail: int | None = Non
     if new_mode:
         return note + _run_to_log(command, timeout, workdir, cancel, run_store,
                                   run_output_limit, tail, grep, context, defaulted, run_exit,
-                                  end_line=head, background=bool(background), wait_for=wait_for)
+                                  end_line=head, background=bool(background), wait_for=wait_for,
+                                  compact=run_compact)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         proc, stopped = exec_command(command, timeout, workdir, cancel, out, err)
         if proc is None:
@@ -143,10 +144,12 @@ def _start_background(command, timeout, defaulted, wait_for, workdir, cancel, lo
 
 def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, context,
                 defaulted=False, run_exit: dict | None = None, end_line: int | None = None,
-                background: bool = False, wait_for: str | None = None) -> str:
+                background: bool = False, wait_for: str | None = None,
+                compact: bool = False) -> str:
     """/run-mode new: stdout and stderr in order in one log file, and a bounded
     view of it back, ending with the log's full path for command_output.
-    background: start it, wait until it is ready, and leave it running."""
+    background: start it, wait until it is ready, and leave it running.
+    compact: collapse redundant lines of the default view (/cavecat)."""
     if background and len(running := store.running()) >= run_store_mod.MAX_BACKGROUND:
         return (f"ERROR: {len(running)} background commands are already running "
                 f"({', '.join(running)}) — stop_command one of them first")
@@ -173,7 +176,7 @@ def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, con
         limit = STOPPED_TAIL_CHARS
     body, hint = log_view(text, limit, tail, grep, context, 1 if end_line else None, end_line,
                           how=f'command_output(path="{run_id}", start_line=…, end_line=…) '
-                              f'shows them')
+                              f'shows them', compact=run_id if compact else None)
     foot = run_store_mod.footer(path, text, status, hint)
     if live:
         foot += (f'\n[running in the background — command_output(path="{run_id}") shows its '
@@ -236,6 +239,7 @@ TOOL = Tool(
     # Plan investigation may run commands (reproduce a bug, check the test
     # baseline) but not edit files until the plan is approved.
     run=run_command, order=500, group="edit & shell", modes=WRITE_ROLES | {"plan"},
-    inject=("net_access", "cancel", "run_mode", "run_store", "run_output_limit", "run_exit"),
+    inject=("net_access", "cancel", "run_mode", "run_store", "run_output_limit", "run_exit",
+            "run_compact"),
     windows_itself=new_run_mode, after=_after,
     example={"command": "python -m pytest", "tail": 30})

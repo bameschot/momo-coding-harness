@@ -38,6 +38,11 @@ MAX_BACKGROUND = 5            # background commands one session may keep running
 _TROUBLE_RE = re.compile(r"\b(?:error|errors|fail|failed|failure|failures|fatal|panic|"
                          r"traceback|exception|warning|warnings)\b", re.IGNORECASE)
 _TROUBLE_GREP = "error|fail|warning|traceback"
+# A line a test runner prints for a pass: a whole-word PASS/PASSED/ok/OK or a
+# check mark.  Only a run of them is collapsed, and never one with a trouble word.
+_PASS_RE = re.compile(r"(?:^|\s)(?:PASS|PASSED|ok|OK)(?=\s|$|[\]:,.;)])|[\u2713\u2714]")
+_DIGITS_RE = re.compile(r"\d+")
+COMPACT_MIN_SAVED = 10        # lines compact() must save, else the output is left as it is
 _LOG_RE = re.compile(r"r(\d+)(?:\.log)?")
 
 
@@ -349,6 +354,63 @@ def default_view(text: str, limit: int, how: str = "") -> tuple[str, bool]:
             + (f" — {how}" if how else "") + f"; {which}:]")
     return "\n".join(head + [note] + [rows[i] for i in shown] + [f"[… output continues at line {end + 1:,} …]"]
                      + tail), rest > 0
+
+
+def compact(text: str, run_id: str) -> str:
+    """/cavecat's "read less": the output with its runs of redundant lines
+    collapsed into a note naming their lines in the log (run_id's), so
+    command_output still reaches them.  Collapsed, in any language or tool:
+    passing lines (5+, none with a trouble word), the same line (3+), and
+    lines that differ only in their numbers (4+: counters, timestamps,
+    progress; the first and last stay).  A run is collapsed only when its
+    note is shorter than the lines it hides, and the whole is unchanged
+    unless it saves COMPACT_MIN_SAVED lines."""
+    lines = text.split("\n")
+    out: list[str] = []
+    saved = i = 0
+
+    def run_end(i: int, same) -> int:
+        j = i + 1
+        while j < len(lines) and same(lines[j]):
+            j += 1
+        return j
+
+    def look(a: int, b: int) -> str:            # 0-based [a, b) as log lines
+        return f'command_output(path="{run_id}", start_line={a + 1}, end_line={b})'
+
+    def collapse(i: int, j: int, rows: list[str]) -> bool:
+        """Replace lines [i, j) with rows, if that is shorter."""
+        nonlocal saved
+        if sum(len(s) + 1 for s in rows) >= sum(len(s) + 1 for s in lines[i:j]):
+            return False
+        out.extend(rows)
+        saved += j - i - len(rows)
+        return True
+
+    while i < len(lines):
+        ln = lines[i]
+        if _PASS_RE.search(ln) and not _TROUBLE_RE.search(ln):
+            j = run_end(i, lambda s: bool(_PASS_RE.search(s)) and not _TROUBLE_RE.search(s))
+            if j - i >= 5 and collapse(i, j, [f"[lines {i + 1:,}–{j:,}: {j - i:,} passing lines "
+                                              f"not shown — {look(i, j)}]"]):
+                i = j
+                continue
+        j = run_end(i, lambda s: s == ln)
+        if j - i >= 3 and collapse(i, j, [ln, f"[lines {i + 2:,}–{j:,}: the same line "
+                                              f"{j - i - 1:,} more times]"]):
+            i = j
+            continue
+        if _DIGITS_RE.search(ln):
+            mask = _DIGITS_RE.sub("#", ln)
+            j = run_end(i, lambda s: _DIGITS_RE.sub("#", s) == mask)
+            if j - i >= 4 and collapse(i, j, [ln, f"[lines {i + 2:,}–{j - 1:,}: {j - i - 2:,} "
+                                                  f"similar lines — {look(i + 1, j - 1)}]",
+                                              lines[j - 1]]):
+                i = j
+                continue
+        out.append(ln)
+        i += 1
+    return "\n".join(out) if saved >= COMPACT_MIN_SAVED else text
 
 
 def tail(lines: list[str], n: int) -> str:

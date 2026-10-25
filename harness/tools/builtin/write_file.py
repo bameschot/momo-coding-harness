@@ -15,7 +15,7 @@ TOOL = Tool(
         "do NOT wrap code in markdown code fences (no ```python or ``` markers) unless the target "
         "file is itself a Markdown document.",
         {"path":    {"type": "string", "description": "Destination file path, including the correct extension for the file type (e.g. 'process.py', 'output.csv', 'report.md')."},
-         "content": {"type": "string", "description": "Raw file content to write. For scripts, this is source code only — no surrounding markdown."}},
+         "content": {"type": "string", "description": "Raw file content to write, exactly as it should appear on disk — quotes and backslashes are not escaped again. For scripts, this is source code only — no surrounding markdown."}},
         ["path", "content"]),
     # Design mode writes one spec and revises it, so it has write_file too.
     run=editing.write_file, order=400, group="edit & shell", modes=WRITE_ROLES | {"design"},

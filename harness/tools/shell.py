@@ -211,11 +211,17 @@ def read_log(store: "run_store_mod.RunStore", path: Path) -> str:
 
 
 def log_view(text: str, limit: int, tail, grep, context, start_line=None, end_line=None,
-             how: str = ""):
+             how: str = "", compact: str | None = None):
     """(view, hint): the requested part of a log, and whether the footer should
     point at trouble lines a default view had to leave out.  how: what the note
-    on a cut default view says to pass for the rest."""
+    on a cut default view says to pass for the rest.  compact: the run id, to
+    collapse redundant lines of a default view (run_store.compact) — only when
+    the result fits limit whole, since a cut view numbers its lines."""
     if not (grep or tail or start_line is not None or end_line is not None):
+        if compact:
+            short = run_store_mod.compact(text, compact)
+            if short is not text and (not limit or len(short) <= limit):
+                return short, False
         return run_store_mod.default_view(text, limit, how)
     return run_store_mod.view(text, limit, tail_n=tail, pattern=grep, context=context or 0,
                               start_line=start_line, end_line=end_line), False

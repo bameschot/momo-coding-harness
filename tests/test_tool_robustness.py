@@ -241,6 +241,7 @@ class HarnessDispatch(Base):
             run_mode, run_store, run_output_limit = "classic", None, 5000
             search_sources = None
             edit_features = frozenset()
+            cavecat = "off"
             _cancel = threading.Event()
 
             def _read_budget(self):

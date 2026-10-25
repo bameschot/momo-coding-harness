@@ -34,7 +34,9 @@ LLAMA_SSE = [
     {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "read_file", "arguments": "{\"pa"}}]}}]},
     {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "th\": \"b.py\"}"}}]}}]},
     {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
-    {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 7}},
+    {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 7,
+                              "prompt_tokens_details": {"cached_tokens": 12}},
+     "timings": {"cache_n": 12, "prompt_n": 8, "prompt_ms": 40.5}},
 ]
 
 
@@ -128,7 +130,8 @@ class Stub(BaseHTTPRequestHandler):
                                                      "tool_calls": [{"function": {"name": "read_file",
                                                                                   "arguments": "{\"path\": \"b.py\"}"}}]},
                                          "finish_reason": "tool_calls"}],
-                            "usage": {"prompt_tokens": 20, "completion_tokens": 7}})
+                            "usage": {"prompt_tokens": 20, "completion_tokens": 7},
+                            "timings": {"cache_n": 15, "prompt_n": 5, "prompt_ms": 25}})
                 return
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -200,6 +203,7 @@ class Ollama(_Base):
         self.assertEqual([(c.name, c.arguments) for c in r.tool_calls],
                          [("read_file", {"path": "a.py"}), ("grep", {"q": "x"})])
         self.assertEqual((r.prompt_tokens, r.eval_tokens, r.done_reason), (12, 5, "stop"))
+        self.assertEqual((r.cached_tokens, r.prompt_ms), (None, None))   # Ollama doesn't say
         self.assertEqual(deltas, [("thinking", "hmm "), ("content", "Hel"), ("content", "lo")])
         body = Stub.requests[-1]["body"]
         self.assertEqual(body["options"], {"num_ctx": 4096})
@@ -291,6 +295,7 @@ class LlamaCpp(_Base):
         self.assertEqual((r.content, r.thinking), ("Hi", "think "))
         self.assertEqual([(c.name, c.arguments) for c in r.tool_calls], [("read_file", {"path": "b.py"})])
         self.assertEqual((r.prompt_tokens, r.eval_tokens, r.done_reason), (20, 7, "tool_calls"))
+        self.assertEqual((r.cached_tokens, r.prompt_ms), (12, 40.5))
         body = Stub.requests[-1]["body"]
         self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
         self.assertEqual(body["stream_options"], {"include_usage": True})
@@ -299,6 +304,7 @@ class LlamaCpp(_Base):
         r = self.client().chat([{"role": "user", "content": "hi"}], [])
         self.assertEqual((r.content, r.thinking), ("Hi", "think"))
         self.assertEqual(r.tool_calls[0].arguments, {"path": "b.py"})
+        self.assertEqual((r.cached_tokens, r.prompt_ms), (15, 25.0))   # from timings alone
 
     def test_context_length_and_models(self):
         c = self.client()

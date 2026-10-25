@@ -76,6 +76,11 @@ class ChatResponse:
     prompt_tokens: int | None = None
     eval_tokens: int | None = None
     done_reason: str | None = None   # "stop" | "length" | ... (provider-native)
+    # Of prompt_tokens, how many the server took from its prompt cache, and how
+    # long it spent on the rest; None when it doesn't say (Ollama's count is
+    # already only the processed part).
+    cached_tokens: int | None = None
+    prompt_ms: float | None = None
 
 
 class LLMClient(ABC):
@@ -175,6 +180,11 @@ class LLMClient(ABC):
         """Models the server holds in memory right now, most recent first; []
         when it can't say.  Used at startup when the saved model is gone."""
         return []
+
+    def count_tokens(self, texts: list[str]) -> list[int] | None:
+        """The model's own token count of each text, or None when the server
+        has no tokenizer endpoint (callers then estimate)."""
+        return None
 
     @abstractmethod
     def abort(self):

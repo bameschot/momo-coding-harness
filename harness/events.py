@@ -67,6 +67,7 @@ class StatusEvent:
     think_choices: list = field(default_factory=lambda: ["off", "on"])  # values the model honours
     think_known: bool = False     # the server said what the model takes
     think_history: str = "turn"   # /think-history: off | turn | all
+    cavecat: str = "off"          # /cavecat: off | on
     tools_off: list = field(default_factory=list)  # tools turned off for the current mode
     workspace_pending: list = field(default_factory=list)  # .momo/tools/ tools awaiting approval
     skills: list = field(default_factory=list)     # active skills, in load order
@@ -100,8 +101,18 @@ class DoneEvent:
     what the turn cost; all zero otherwise (the web UI's per-reply footer)."""
     secs: float = 0.0          # wall-clock time of the turn
     prompt_tokens: int = 0     # the last request's prompt, as the server counted it
+    prompt_total: int = 0      # every request's prompt summed: what the turn re-read
+    prompt_cached: int = 0     # of that, what the server's prompt cache held (llama.cpp)
+    prompt_secs: float = 0.0   # the server's time processing the rest (llama.cpp)
     eval_tokens: int = 0       # generated tokens over the whole turn, reasoning included
     tool_calls: int = 0
+    # eval_tokens split by what the model wrote; the rest is call framing and
+    # template tokens.  split_exact: counted by the server's tokenizer, else estimated.
+    think_tokens: int = 0      # reasoning
+    preamble_tokens: int = 0   # text alongside tool calls
+    args_tokens: int = 0       # tool calls: name and arguments
+    reply_tokens: int = 0      # text without tool calls: the reply
+    split_exact: bool = False
 
 @dataclass
 class AskUserEvent:

@@ -12,6 +12,7 @@ file), so what is measured is exactly what the model would be sent:
   ideal     /run-mode new with the case's best tail=/grep= call
   +follow   default, then that call through command_output when the default
             view missed a needle (the two calls a model would actually make)
+  compact   default with /cavecat's redundant-line collapsing (run_store.compact)
 
 A needle counts as found when its text appears in the result.  The fixed cost
 is reported too: the new schema is longer, and that is paid on every request.
@@ -139,9 +140,10 @@ def measure(case: Case, limit: int, wd: Path, store: run_store.RunStore) -> dict
     src.write_text(case.text + "\n")
     command = f"cat {src.name}; exit {case.exit_code}"
 
-    def run(mode, **args):
+    def run(mode, run_compact=False, **args):
         return tools.dispatch("run_command", {"command": command, **args}, wd,
-                              run_mode=mode, run_store=store, run_output_limit=limit)
+                              run_mode=mode, run_store=store, run_output_limit=limit,
+                              run_compact=run_compact)
 
     def found(out):
         return [n for n in case.needles if n in out]
@@ -155,12 +157,11 @@ def measure(case: Case, limit: int, wd: Path, store: run_store.RunStore) -> dict
         follow = default + tools.dispatch("command_output", {"path": path, **case.ideal}, wd,
                                           run_mode="new", run_store=store,
                                           run_output_limit=limit)
-    return {"case": case.id, "note": case.note, "n": len(case.needles),
-            "out": {"classic": classic, "default": default, "ideal": ideal, "+follow": follow},
-            "chars": {k: len(v) for k, v in (("classic", classic), ("default", default),
-                                              ("ideal", ideal), ("+follow", follow))},
-            "found": {k: len(found(v)) for k, v in (("classic", classic), ("default", default),
-                                                    ("ideal", ideal), ("+follow", follow))}}
+    out = {"classic": classic, "default": default, "ideal": ideal, "+follow": follow,
+           "compact": run("new", run_compact=True)}
+    return {"case": case.id, "note": case.note, "n": len(case.needles), "out": out,
+            "chars": {k: len(v) for k, v in out.items()},
+            "found": {k: len(found(v)) for k, v in out.items()}}
 
 
 def prompt_cost() -> dict[str, int]:
@@ -184,7 +185,7 @@ def main():
 
     rng = random.Random(args.seed)
     cases = [make(rng) for make in CASES]
-    kinds = ("classic", "default", "ideal", "+follow")
+    kinds = ("classic", "default", "ideal", "+follow", "compact")
     with tempfile.TemporaryDirectory() as tmp:
         wd = Path(tmp) / "wd"
         wd.mkdir()

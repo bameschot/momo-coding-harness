@@ -17,12 +17,13 @@ from . import registry
 # unblock the private network for itself.
 STATE = ("net_access", "net_max_bytes", "net_max_chars", "index", "cancel", "read_budget",
          "run_mode", "run_store", "run_output_limit", "search_sources", "edit_features",
-         "run_exit", "ctx")
+         "run_exit", "run_compact", "ctx")
 
 _DEFAULT_STATE = {"net_access": "off", "net_max_bytes": 0, "net_max_chars": 0, "index": None,
                   "cancel": None, "read_budget": None, "run_mode": "classic", "run_store": None,
                   "run_output_limit": run_store_mod.DEFAULT_LIMIT, "search_sources": None,
-                  "edit_features": editing.EDIT_FEATURES, "run_exit": None, "ctx": None}
+                  "edit_features": editing.EDIT_FEATURES, "run_exit": None, "run_compact": False,
+                  "ctx": None}
 
 _INT_RE = re.compile(r"\s*[-+]?\d+\s*")
 _PLACEHOLDER_RE = re.compile(r"^\s*\[written to [^\]]*\]\s*$")
@@ -90,6 +91,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              run_output_limit: int = run_store_mod.DEFAULT_LIMIT,
              search_sources=None,
              edit_features=editing.EDIT_FEATURES, run_exit: dict | None = None,
+             run_compact: bool = False,
              ctx: "registry.ToolRunContext | None" = None) -> str:
     """read_budget: characters one read_file may return (None = no limit).
     run_mode "new" with a run_store saves run_command output to a log (/run-mode).
@@ -97,12 +99,14 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
     edit_features: what the edit tools add to a plain edit (editing.EDIT_FEATURES).
     run_exit: run_command puts the command's exit code here as "code" (None when
     it was stopped or did not start), for a caller that must not parse the text.
+    run_compact: run_command collapses redundant output lines (/cavecat).
     ctx: the harness services a tool asks for with inject=("ctx",)."""
     state = {"net_access": net_access, "net_max_bytes": net_max_bytes,
              "net_max_chars": net_max_chars, "index": index, "cancel": cancel,
              "read_budget": read_budget, "run_mode": run_mode, "run_store": run_store,
              "run_output_limit": run_output_limit, "search_sources": search_sources,
              "edit_features": edit_features, "run_exit": run_exit,
+             "run_compact": run_compact,
              "ctx": ctx if ctx is not None else registry.ToolRunContext(workdir, cancel)}
     tool = _runnable(name)
     if tool is not None and index is not None and index_route and tool.index_route:

@@ -764,6 +764,7 @@ function applyStatus(s) {
   mc.disabled = !netOn;
   applyIndexStatus(s);
   applyThinkStatus(s);
+  applyCavecatStatus(s);
   applyMcpStatus(s);
   applySkillsStatus(s);
   refreshChipMenus();
@@ -807,6 +808,17 @@ function applyThinkStatus(s) {
     }
     return label;
   }));
+}
+
+// The CAVECAT chip, its menu and the View → Context radios: one setting, /cavecat.
+function applyCavecatStatus(s) {
+  const level = s.cavecat || "off";
+  const chip = $("#cavecat-badge");
+  chip.textContent = `CAVECAT: ${level}`;
+  chip.classList.toggle("active", level !== "off");
+  for (const r of document.querySelectorAll("input[name=cavecat], input[name=cavecat-view]")) {
+    r.checked = r.value === level;
+  }
 }
 
 // The INDEX badge and the View → Code index section, mirroring the NET ones.
@@ -1657,6 +1669,10 @@ $("#think-badge").onclick = (e) => toggleMenu(e, "#think-menu");
 for (const r of document.querySelectorAll("input[name=think-history]")) {
   r.onchange = () => send(`/think-history ${r.value}`);
 }
+$("#cavecat-badge").onclick = (e) => toggleMenu(e, "#cavecat-menu");
+for (const r of document.querySelectorAll("input[name=cavecat], input[name=cavecat-view]")) {
+  r.onchange = () => send(`/cavecat ${r.value}`);
+}
 $("#index-badge").onclick = (e) => toggleMenu(e, "#index-menu", "Code index", refreshIndexMenu);
 $("#mcp-btn").onclick = (e) => toggleMenu(e, "#mcp-menu", "MCP servers", refreshMcpMenu);
 $("#skills-btn").onclick = (e) => toggleMenu(e, "#skills-menu", "Skills", refreshSkillsMenu);
@@ -1825,6 +1841,7 @@ function syncViewMenu() {
 const MENUS = [["#view-btn", "#view-menu"], ["#model-btn", "#model-menu"],
                ["#ctx-btn", "#ctx-menu"], ["#index-badge", "#index-menu"],
                ["#tools-btn", "#tools-menu"], ["#think-badge", "#think-menu"],
+               ["#cavecat-badge", "#cavecat-menu"],
                ["#run-badge", "#run-menu"], ["#net-badge", "#net-menu"],
                ["#tools-badge", "#tools-off-menu"], ["#mcp-btn", "#mcp-menu"], ["#skills-btn", "#skills-menu"]];
 function closeMenu() {

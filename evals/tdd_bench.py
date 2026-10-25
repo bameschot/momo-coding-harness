@@ -45,6 +45,7 @@ from harness import tdd as tdd_mod  # noqa: E402
 from harness.commands import handle  # noqa: E402
 from harness.events import ChatEvent, ErrorEvent, ToolCallEvent, ToolResultEvent  # noqa: E402
 from harness.harness import Harness  # noqa: E402
+from harness.prompts import CAVECAT_LEVELS  # noqa: E402
 
 PROMPT = ("Add two features to the Inventory class in shop/inventory.py:\n"
           "1. remove(name, qty): decrease the stock of name by qty. Raise ValueError when qty "
@@ -103,6 +104,7 @@ def run_once(kind: str, args, keep: Path | None) -> dict:
     if not args.model:
         h.check_backend()      # adopt the model the server serves, as momo does at startup
     h.stream = False
+    h.cavecat = args.cavecat
     h._ask_user = lambda q: "y" if q.startswith("Execute this plan?") else "Use your recommendation."
     _count_calls(h.client)
     handle(f"/plan {kind}", h)
@@ -181,7 +183,7 @@ def run_once(kind: str, args, keep: Path | None) -> dict:
     step_cmd = str(plan_args.get("step_test_command") or "") if isinstance(plan_args, dict) else ""
     calls = _calls[first_call:]
     rec = {
-        "kind": kind, "model": h.client.model, "secs": round(total, 1),
+        "kind": kind, "model": h.client.model, "cavecat": args.cavecat, "secs": round(total, 1),
         "plan_done": h.plan is None, "calls": len(calls),
         "prompt_tokens": sum(c["prompt"] for c in calls),
         "eval_tokens": sum(c["eval"] for c in calls),
@@ -226,7 +228,8 @@ def summary(records: list[dict]) -> str:
         refusals = Counter()
         for r in rs:
             refusals.update(r["refusals"])
-        out += [f"\n{kind}: {len(rs)} runs",
+        levels = "/".join(sorted({r.get("cavecat", "off") for r in rs}))
+        out += [f"\n{kind}: {len(rs)} runs (cavecat {levels})",
                 f"  hidden 8/8        {sum(r['hidden']['passed'] == r['hidden']['total'] for r in rs)}/{len(rs)}"
                 f"   plans finished {sum(r['plan_done'] for r in rs)}/{len(rs)}"
                 f"   suite green {sum(r['suite_ok'] for r in rs)}/{len(rs)}",
@@ -255,6 +258,9 @@ def main():
     ap.add_argument("--provider", default="llamacpp", choices=("llamacpp", "ollama"))
     ap.add_argument("--model", default="", help="default: the model the server serves")
     ap.add_argument("--limit-min", type=float, default=45, help="per-run limit; the run is cancelled after it")
+    ap.add_argument("--cavecat", choices=CAVECAT_LEVELS, default="off",
+                    help="/cavecat for every run: compressed plan steps and step summaries "
+                         "(text), and thinking too (full)")
     ap.add_argument("--json", metavar="PATH", help="write the per-run records here")
     ap.add_argument("--keep", metavar="DIR", help="keep each run's project, events and messages here")
     ap.add_argument("--slow-suite", type=float, default=0, metavar="SECS",

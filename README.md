@@ -52,6 +52,7 @@ Options:
 | `--think` | last used / `on` | Thinking level: `off`, `on`, or an effort level (`low`, `medium`, `high`, `xhigh`, …) for models that take one. See [Thinking level](#thinking-level) |
 | `--no-think` | off | Same as `--think off` |
 | `--think-history` | last used / `turn` | Send the model's own reasoning back to it: `off`, `turn` (since your last message) or `all`. See [Sending reasoning back](#sending-reasoning-back) |
+| `--cavecat` | last `/cavecat`, else `off` | `on`: compress plans, tool text and command output, and keep replies short, to save tokens; `off`. See [Cavecat mode](#cavecat-mode) |
 | `--max-output-tokens` | last setting, else `25000` | Most tokens one model reply may take, reasoning included; `0` = no cap. See `/max-output-tokens` |
 | `--no-stream` | off | Wait for complete replies instead of streaming them as they are generated (streaming is on by default, in the TUI and the web UI) |
 | `--web` / `--no-web` | on | Serve the browser chat UI alongside the TUI |
@@ -175,6 +176,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
   - The **CTX meter** turns yellow at ≥ 75% and red at ≥ 90%, as in the TUI.
   - The **`THINK`** badge shows the [thinking level](#thinking-level). Clicking it opens a menu of the values the current model takes (e.g. off / on / low / medium / xhigh for Qwen3.8), plus your current choice, greyed out if the model can't take it. When the model gets something other than your choice, the badge shows both (`THINK: high→on`) and turns yellow. It shows `THINK: n/a` for a model that takes no thinking setting. Below the levels, **Send reasoning back** picks off / this turn / all turns ([`/think-history`](#sending-reasoning-back)).
+  - The **`CAVECAT`** badge shows whether [cavecat](#cavecat-mode) is `off` or `on`, and is highlighted when it's on. Clicking it opens a menu to switch it, like `/cavecat`.
   - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on. A **`NET: on`** / **`NET: local`** badge appears when internet access is on; click it to turn it off. Both are also in View → Network. The **`INDEX`** badge shows the [code index](#code-index): `off`, build progress (`building 812/1873`), or files and memory against the budget (`312 files · 4MB/100MB`). While the index is off, clicking it turns it on. While it is on, clicking it opens a popover like the CTX one: a meter of memory against the budget, a stacked bar and one row per part of the index (file records, definitions, imports, identifiers, text signatures), the same split per language, and Rebuild / Save now / Turn off. It turns yellow when the index is over its memory budget and has dropped a part.
   - **Tools** (wrench icon) opens the [tool picker](#turning-tools-on-and-off) for the current mode: one checkbox per tool, grouped, with the **Tool calls** master switch on top. Hovering a tool shows its description. A small count on the icon says how many tools are off in this mode.
   - **Skills** (book icon, right of the wrench) opens the [skills](#skills) menu: every skill with a checkbox, its title, what it covers and roughly how many tokens it adds to the system prompt. Active skills are listed first, a filter narrows the list, and a count on the icon says how many are active.
@@ -273,6 +275,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking level | `/think off\|on\|<level>` | The `THINK` badge in the status bar, not the View menu: how much the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Send reasoning back | `/think-history off\|turn\|all` | In the same `THINK` menu: whether the model sees its own earlier reasoning. Shared with the TUI |
+| Cavecat | `/cavecat off\|on` | The `CAVECAT` badge in the status bar, and View → Context (for phone width): compress plans, tool text and command output, and keep replies short. Shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
 | Command output | `/run-mode`, `/run-output-limit` | View → Context: save command output to a log and return a view, and the view's size in characters. Shared with the TUI |
 | Reply cap | `/max-output-tokens` | View → Context → Reply cap: the most tokens one model reply may take (default 25000, `off` for none). Shared with the TUI |
@@ -708,7 +711,9 @@ All file operations are sandboxed to the working directory. Paths that attempt t
 A small model copies `old_string` with slips, edits blind, and forgets the other places a change has to reach. So the edit tools (`harness/editing.py`) do more than replace text:
 
 - **They show the result.** A successful `edit_file` / `replace_symbol` returns the changed lines with three lines of context and their *new* line numbers, in `read_file`'s format, plus the definition they are in. An edit whose new text equals the old says "No change" with the line as it reads now, instead of "OK". The model can check the edit and copy from it without reading the file again.
-- **They warn about broken syntax.** If the file parsed before the edit and does not after it, the result says which line (Python is compiled; other languages use tree-sitter). An error that is still there next to the lines an edit touched is reported too — an attempted fix that did not fix it. The edit stays written, so a change made in two steps still works. `write_file` checks too.
+- **They warn about broken syntax.** If the file parsed before the edit and does not after it, the result says where: the line as the file has it, with a caret under the column (or the span) the checker reports and the character there named (Python is compiled; other languages use tree-sitter). Told only "line 28", a small model reads its own slip as valid. An error that is still there next to the lines an edit touched is reported too — an attempted fix that did not fix it. The edit stays written, so a change made in two steps still works. `write_file` checks too.
+- **They keep saying so.** While a file this turn's writes left unparseable stays that way, every later tool result (a read, a command, a scratch script) ends with a note and the marked line. After two calls that don't edit it, the note adds that inspecting further won't help and to fix the marked spot; after repeated failed fixes, to rewrite the line whole. A file that was already broken before the turn isn't blamed on it, and the notes stop once it parses again by any route (`harness/syntax_watch.py`).
+- **They undo an escape level too many.** A model often escapes code once more than the tool needs, as if for a string literal: `\"` where the file needs `"`, `\\` for `\`. The backslash lands in the file and breaks it, and every fix goes through the same escaping again. When the text as given adds syntax errors and the same text with one level of escaping removed doesn't, that is what gets written, and the result says so (`edit_file`, `edit_files`, `write_file`, `replace_symbol`). Escapes that parse as given, like a quote inside a string literal, are left alone. Files without a syntax check are written as given.
 - **They find what the model meant.** `old_string` still matches when only indentation, spacing or quote style differs, and when the replacement has a different number of lines. Lines the edit keeps are written back from the file, not from the model's copy. A match must be unique. If the model's text has lost its indentation, the edit is refused rather than guessed. A miss shows the closest block of the file with the first differing line; several matches are listed with the definition each is in.
 - **They point at what else must change.** If an edit removes or renames a definition, or changes its parameter list, the result lists the uses still left. With the code index on, that comes from the index; without it, from a scan of the project's files (1 s / 5,000 files at most, and the result says when it stopped early). A call on another object that only shares the name (`ledger.calc_tax()` after removing the function `calc_tax`) is not counted. An `edit_file` that copied most of a definition to rewrite it points at `replace_symbol`. An `old_string` that is in a different file says which one. A `write_file` that drops definitions the file had says so.
 - **They batch.** A small model makes one edit per turn, and each turn is a full model round-trip. `edit_files` takes every edit of a change (any files) in one call and writes all of them or none, and the leftover-use list points at it. In the eval it cut model turns by 19% with the index off and 27% with it on, and a rename from 22 tool calls to 13.
@@ -1275,17 +1280,19 @@ The system message is assembled by `Harness.system_prompt_sections()` (`harness/
                                         │ ------------------------------ │
  mode, roles/<mode>.md, plan ──────────▶│ 2 Role                         │
                                         │ ------------------------------ │
- workdir, date, OS, git, /net ─────────▶│ 3 Environment                  │
+ /cavecat on (not momo) ───────────────▶│ 3 Cavecat                 [if] │
                                         │ ------------------------------ │
- /guides on + AGENTS.md, … ────────────▶│ 4 Project guides          [if] │
+ workdir, date, OS, git, /net ─────────▶│ 4 Environment                  │
                                         │ ------------------------------ │
- /load-skill → skills/<name>.md ───────▶│ 5 Skill: <name>         [each] │
+ /guides on + AGENTS.md, … ────────────▶│ 5 Project guides          [if] │
                                         │ ------------------------------ │
-                  ┌─ /tool-ref ────────▶│ 6 Tool reference               │
+ /load-skill → skills/<name>.md ───────▶│ 6 Skill: <name>         [each] │
+                                        │ ------------------------------ │
+                  ┌─ /tool-ref ────────▶│ 7 Tool reference               │
  tools on in this │                     │ ------------------------------ │
-                  ├─ fetch_url or ─────▶│ 7 Using the internet      [if] │
+                  ├─ fetch_url or ─────▶│ 8 Using the internet      [if] │
  mode (/tools, ───┤  web_search on      │ ------------------------------ │
-                  ├─ index on/off ─────▶│ 8 Navigating code              │
+                  ├─ index on/off ─────▶│ 9 Navigating code              │
  /net, /index,    │                     └────────────────────────────────┘
  /run-mode)       └────────────────────▶ Tool schemas (JSON, sent alongside the prompt)
 ```
@@ -1296,16 +1303,17 @@ The system message is assembled by `Harness.system_prompt_sections()` (`harness/
 |---|---|---|---|
 | 1 | Code index banner | While the code index is on | `_index_banner` in `harness/prompts.py`: one line steering to the `index_*` tools |
 | 2 | Role | Always | `roles/<mode>.md` with `{workdir}` filled in; in plan mode also the draft plan, or, while executing, the coder role + plan-execution rules + the live plan with `▶` on the current step |
-| 3 | Environment | Always | `_environment`: working directory, today's date, OS/shell and git branch (when `run_command` is offered), how to run Python when there is no `python` command, and whether internet access is on or off |
-| 4 | Project guides | With `/guides on` and a guide file | `AGENTS.md`, `CLAUDE.md`, `MOMO.md`, … from the workdir |
-| 5 | Skill: &lt;name&gt; | One per loaded skill | `skills/<name>.md` |
-| 6 | Tool reference (N tools) | Always | Generated from the tool schemas; `/tool-ref full\|compact` picks the style |
-| 7 | Using the internet | While a net tool (`fetch_url`, `web_search`) is on | `_net_rules`: check versions and APIs rather than recall them, read the project's own manifests first, look up general facts when the topic is recent, you're unsure or the user asks, stop once answered, cite URLs |
-| 8 | Navigating code | Always | `_nav_rules`: how to find code with the tools this mode has; with the index on it becomes the index table (`index_search`, `index_callers`, …) |
+| 3 | Cavecat | With `/cavecat on`, in every mode but momo | `_cavecat_rules`: plans and tool text (`ask_user`, commit messages, specs in design mode) are compressed, there is no narration between tool calls, and the reply is kept short. See [Cavecat mode](#cavecat-mode) |
+| 4 | Environment | Always | `_environment`: working directory, today's date, OS/shell and git branch (when `run_command` is offered), how to run Python when there is no `python` command, and whether internet access is on or off |
+| 5 | Project guides | With `/guides on` and a guide file | `AGENTS.md`, `CLAUDE.md`, `MOMO.md`, … from the workdir |
+| 6 | Skill: &lt;name&gt; | One per loaded skill | `skills/<name>.md` |
+| 7 | Tool reference (N tools) | Always | Generated from the tool schemas; `/tool-ref full\|compact` picks the style |
+| 8 | Using the internet | While a net tool (`fetch_url`, `web_search`) is on | `_net_rules`: check versions and APIs rather than recall them, read the project's own manifests first, look up general facts when the topic is recent, you're unsure or the user asks, stop once answered, cite URLs |
+| 9 | Navigating code | Always | `_nav_rules`: how to find code with the tools this mode has; with the index on it becomes the index table (`index_search`, `index_callers`, …) |
 
-The parts are joined with `---` rules (the role follows the banner with a blank line only). The index banner goes first and the navigation rules last on purpose: a small model weighs the start and end of the prompt most. Role text is behaviour; tool usage lives in the generated parts, so the role files carry no tool tables that could go stale.
+The parts are joined with `---` rules (the role follows the banner with a blank line only). The index banner goes first and the navigation rules last on purpose: a small model weighs the start and end of the prompt most. Cavecat sits right after the role for the same reason. Role text is behaviour; tool usage lives in the generated parts, so the role files carry no tool tables that could go stale.
 
-The system message is rebuilt in place whenever something it depends on changes: the mode, a skill, the guides, the plan, or the tool set (`/tools`, `/net`, `/index`, `/run-mode`, `/tool-ref`). Sessions save the active skill list and reconstruct the system prompt from the current files on disk when loaded, so edits to role or skill files take effect on the next load.
+The system message is rebuilt in place whenever something it depends on changes: the mode, a skill, the guides, the plan, `/cavecat`, or the tool set (`/tools`, `/net`, `/index`, `/run-mode`, `/tool-ref`). Sessions save the active skill list and reconstruct the system prompt from the current files on disk when loaded, so edits to role or skill files take effect on the next load.
 
 ### Seeing the system prompt
 
@@ -1399,6 +1407,7 @@ Type any command in the input bar:
 | `/think` | Show the thinking level and what the current model takes |
 | `/think off\|on\|low\|medium\|high\|xhigh` | Set the model's thinking/reasoning level (saved). See [Thinking level](#thinking-level) |
 | `/think-history off\|turn\|all` | Send the model's own reasoning back to it: none, since your last message (default), or every turn (saved). See [Sending reasoning back](#sending-reasoning-back) |
+| `/cavecat [off\|on]` | Compress plans, tool text and command output, and keep replies short, to save tokens (saved). See [Cavecat mode](#cavecat-mode) |
 | `/companion-idle-recap on\|off` | When you've been idle, momo recaps the last turns in its speech bubble (at most once per turn, 5-minute cooldown; lines are kept in the session). Off by default; also `--companion-idle-recap` |
 | `/companion-idle-recap <secs>` | How long you must be idle before momo recaps (default 90, also `--companion-idle-recap-secs`) |
 | `/tools` | Pick the current mode's tools: a checklist in the TUI, the Tools menu in the web UI — see [Turning tools on and off](#turning-tools-on-and-off) |
@@ -1545,6 +1554,28 @@ Measured with the code-navigation evals on Qwen3.5-9B (llama.cpp, 13 task/mode p
 | Total time | ~22 min | ~13.5 min |
 
 Accuracy was unchanged, within the noise of 3 runs per task. The gain is efficiency: the model stopped re-planning after each tool result. It made a quarter fewer tool calls and finished in about 40% less time, and the slowest task (blast-radius) went from 117 s and 80 KB of tool output to 39 s and 8 KB. Hence `turn` is the default. `all` hasn't been measured.
+
+## Cavecat mode
+
+Cavecat is a nod to [caveman](https://github.com/akramsystems/caveman), the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat, and it starts from the other end: what gets compressed is mostly what the model writes for itself and for the harness, plus what the harness feeds it. Replies get shorter but **stay plain sentences**, and thinking is never touched. `/cavecat on` turns on all of it:
+
+- **Plans.** `create_plan` steps are put into the system prompt on every turn of [plan execution](#plan-mode), so a shorter plan saves tokens on every step. `complete_step` summaries and `revise_plan` steps too.
+- **Tool text.** `ask_user` questions, commit messages, and the specs written in design mode.
+- **Between tool calls.** No narration alongside a call (caveman's "no chatter between tool calls"); what the model found goes in its reply. The nudge that asks a model for text after 10 tool-only calls waits for 20 instead, and no longer asks for a progress line.
+- **Command output** ("read less", done by the harness, not the model). In `/run-mode new`, the default view of a `run_command` result collapses runs of redundant lines into a note naming their lines in the saved log: passing test lines (a whole-word `PASS`/`PASSED`/`ok`/`OK` or a check mark, none with an error/fail/warning word), the same line repeated, and lines that differ only in their numbers (counters, timestamps, progress; the first and last stay). Only when it saves at least 10 lines, and only when the result then fits the output limit whole. `tail=`/`grep=` views and `command_output` are never compacted, and `command_output` reaches every collapsed line.
+- **The reply**: the result first, then what changed and anything you must decide; no preamble, step-by-step recap or closing offer. Still plain sentences, not caveman.
+
+```
+/cavecat            # the current level
+/cavecat on         # all of the above
+/cavecat off        # as usual (the default)
+```
+
+Code, file contents (other than specs), paths, symbols, exact error text, numbers and test names are never compressed. It adds a short **Cavecat** part to the [system prompt](#system-prompt), right after the role, in every mode but momo: the companion keeps its voice.
+
+Saved in `prefs.json`; `--cavecat` sets it at startup. In the web UI it is the `CAVECAT` badge in the status bar, and View → Context. The TUI status bar shows `CAVECAT: <level>` while it's on. `text`, `full` and `lite`, earlier levels, now mean `on`.
+
+**Why thinking is left alone.** The first version compressed thinking at both levels, with rules like "conclusions only" and "don't re-check what is settled". On a 9B model it saved about a fifth of the output tokens on small edits, but on hard edits the model checked its work by tool call instead of by reasoning: up to three times the edits and shell runs after its first edit, scratch scripts, repeated commands. A second version had `full` cut only the narration and ask for full reasoning before an edit and after a failed run. It found no backfire, but no clear saving either: every difference was within the noise between runs, and the 9B mostly ignored the thinking style. So the thinking rule was removed. With it gone, `text` and `full` differed only by the short reply, and since the reply is the largest text share cavecat can reach (about a third of the output on shell tasks), the two became one `on`. The numbers are in [`evals/README.md`](evals/README.md#measuring-cavecat---cavecat), with a short testbench (`--suite cavecat`) to measure your own model.
 
 ## Context Management
 

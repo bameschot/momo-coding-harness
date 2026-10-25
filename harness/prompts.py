@@ -239,6 +239,58 @@ def _net_rules(role: str, tool_names: set[str], source_names: set[str]) -> str |
     return head + "\n\n" + "\n".join(f"- {b}" for b in bullets)
 
 
+# ── cavecat ──────────────────────────────────────────────────────────────────
+# /cavecat: caveman-style compression of what the model writes for itself and
+# the harness, and a short reply to the user.  A local model's output tokens
+# are wall-clock time, and plan text is in the prompt on every execution turn.
+# The harness side (run_store.compact on command output, a later tool-only
+# nudge) follows the same switch.
+
+CAVECAT_LEVELS = ("off", "on")
+# Earlier levels.  "lite" also trimmed thinking and made a 9B loop on hard
+# edits; "text" and "full" differed only by the short reply once the thinking
+# rule was gone, and the reply is the one large text bucket left to compress.
+CAVECAT_ALIASES = {"lite": "on", "text": "on", "full": "on"}
+
+# Thinking is left alone.  "Conclusions only" made a 9B verify by tool call
+# instead (more edits, reruns and scratch scripts); "cut the narration, keep the
+# reasoning" saved nothing measurable and the 9B's thinking ignored it.
+# The reply stays readable sentences, not caveman.
+_CAVECAT_REPLY = ("**Your reply:** short. Lead with the result, then what changed (file + change) "
+                  "and anything the user must decide. No preamble, step-by-step recap or closing "
+                  "offer. Plain sentences, still readable.")
+# caveman's "no chatter between tool calls": the text alongside a call is
+# output the user mostly never reads, and the reply says what was found.
+_CAVECAT_BETWEEN = ("**Between tool calls:** no narration. Call the next tool without "
+                    "announcing it; what you found goes in your reply at the end.")
+_CAVECAT_WRITE = ("telegraphic: verb + file + change. Not \"We should add retry logic to the "
+                  "fetch function so that…\" but \"Add retry to fetch() in net.py: 3 tries, "
+                  "1s backoff.\"")
+_CAVECAT_TEXT = {
+    "design":    "The Markdown specs you write and ask_user questions",
+    "chat":      "ask_user questions",
+    "plan":      "create_plan steps and ask_user questions",
+    "coding":    "ask_user questions and commit messages",
+    "plan-exec": "complete_step summaries, revise_plan steps, ask_user questions and commit "
+                 "messages",
+}
+
+
+def _cavecat_rules(level: str, role: str) -> str | None:
+    """The "Cavecat" section, or None when it is off or the role is momo."""
+    if level != "on" or role not in _CAVECAT_TEXT:
+        return None
+    write = ("terse bullets, one fact or decision each, no prose padding."
+             if role == "design" else _CAVECAT_WRITE)
+    bullets = [_CAVECAT_REPLY, _CAVECAT_BETWEEN,
+               f"**{_CAVECAT_TEXT[role]}:** {write}",
+               "**Never compress** code, file contents you write"
+               + (" other than specs" if role == "design" else "")
+               + ", paths, symbols, exact error text, numbers or test names."]
+    return ("## Cavecat\n\nCompress what you write for yourself and the harness, and keep "
+            "your reply short:\n\n" + "\n".join(f"- {b}" for b in bullets))
+
+
 # ── environment ──────────────────────────────────────────────────────────────
 
 def _git_state(workdir: Path) -> str:

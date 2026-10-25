@@ -11,7 +11,7 @@ from ..registry import WRITE_ROLES, Tool, tool_schema
 _PARAMS = {
     "path": {"type": "string", "description": "File to modify"},
     "old_string": {"type": "string", "description": "Exact text to find (copy it verbatim from read_file output)"},
-    "new_string": {"type": "string", "description": "Replacement text"},
+    "new_string": {"type": "string", "description": "Replacement text, exactly as it should appear in the file — quotes and backslashes are not escaped again"},
     "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default: false)"}}
 
 _CLASSIC = tool_schema("edit_file",

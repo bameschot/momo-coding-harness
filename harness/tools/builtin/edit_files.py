@@ -33,7 +33,7 @@ TOOL = Tool(
                    "items": {"type": "object",
                              "properties": {"path": {"type": "string"},
                                             "old_string": {"type": "string"},
-                                            "new_string": {"type": "string"},
+                                            "new_string": {"type": "string", "description": "Replacement text, exactly as it should appear in the file — quotes and backslashes are not escaped again"},
                                             "replace_all": {"type": "boolean"}},
                              "required": ["path", "old_string", "new_string"]}}},
         ["edits"]),

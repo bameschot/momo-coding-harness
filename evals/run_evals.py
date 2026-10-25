@@ -18,6 +18,8 @@ are statistical rather than pass/fail.  It lives outside tests/ so
                                                     # the result (evals/edit/checks.py)
     python evals/run_evals.py --suite edit --edit-features none
                                                     # the edit tools without their extras
+    python evals/run_evals.py --suite cavecat --runs 2 --cavecat on
+                                                    # /cavecat A/B (and --cavecat off)
 
 --cache keeps every run under a fingerprint of everything that can change its
 outcome: the task, the files of the project it runs in, the model and settings,
@@ -56,9 +58,13 @@ if not os.environ.get("MOMO_EVAL_KEEP_HOME"):
     os.environ["HOME"] = tempfile.mkdtemp(prefix="momo_eval_home_")
 
 from evals.edit.checks import run_check  # noqa: E402
-from evals.tasks import EDIT_TASKS, INDEX_TASKS, LANG_TASKS, SHELL_TASKS, TASKS  # noqa: E402
+from evals.tasks import (CAVECAT_TASKS, EDIT_TASKS, INDEX_TASKS, LANG_TASKS,  # noqa: E402
+                         SHELL_TASKS, TASKS)
+from harness.compaction import text_tokens  # noqa: E402
+from harness.events import ThinkEvent  # noqa: E402
 from harness.harness import (Harness, ChatEvent, DoneEvent, ErrorEvent,  # noqa: E402
                              ToolCallEvent, ToolResultEvent)
+from harness.prompts import CAVECAT_LEVELS  # noqa: E402
 
 
 _SHELL_SEARCH = re.compile(r"^\s*(grep|rg|ag|find|fd|ack)\b")
@@ -88,8 +94,10 @@ _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
 
 
 def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True,
-             run_mode="new", tool_ref="compact", think_history="off", edit_features=None):
-    """One task, one fresh conversation.  Returns what the model did."""
+             run_mode="new", tool_ref="compact", think_history="off", edit_features=None,
+             cavecat="off", max_secs=0):
+    """One task, one fresh conversation.  Returns what the model did.  A run
+    still going after max_secs (0 = no limit) is cancelled and graded as is."""
     workdir = REPO / task.workdir
     scratch = None
     if task.isolate or mode in _WRITE_MODES:
@@ -108,6 +116,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     h.stream = False          # deltas would just duplicate the final ChatEvent
     h.think = think
     h.think_history = think_history
+    h.cavecat = cavecat
     if edit_features is not None:
         h.edit_features = frozenset(edit_features)   # ignored by a harness without them
     # Nobody is there to answer: without this a run that calls ask_user blocks forever.
@@ -127,6 +136,8 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     shell_results: list[str] = []   # write tools emit a diff instead, so no zip with calls
     answer, err = "", None
     replies: list[str] = []
+    cost: dict = {}                 # the DoneEvent's token counts: what /cavecat saves
+    thoughts: list[str] = []        # the model's thinking, to see what /cavecat did to it
 
     def pump():
         nonlocal answer, err
@@ -148,18 +159,37 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
                 if ev.role == "assistant":
                     answer = ev.text
                     replies.append(ev.text or "")
+            elif isinstance(ev, ThinkEvent):
+                thoughts.append(ev.text or "")
             elif isinstance(ev, ErrorEvent):
                 err = getattr(ev, "text", str(ev))
             elif isinstance(ev, DoneEvent):
+                cost.update(eval_tokens=ev.eval_tokens, prompt_tokens=ev.prompt_tokens,
+                            prompt_total=ev.prompt_total, prompt_cached=ev.prompt_cached,
+                            prompt_secs=ev.prompt_secs, think_tokens=ev.think_tokens,
+                            preamble_tokens=ev.preamble_tokens, args_tokens=ev.args_tokens,
+                            reply_tokens=ev.reply_tokens, split_exact=ev.split_exact)
                 return
 
     t = threading.Thread(target=pump, daemon=True)
     t.start()
+    # --timeout only catches a silent model; one that keeps calling tools (a
+    # 9B once spent 40 calls disassembling bytecode) needs a wall-clock cap.
+    capped = threading.Event()
+
+    def cap():
+        capped.set()
+        h.cancel()
+    watchdog = threading.Timer(max_secs, cap) if max_secs else None
+    if watchdog:
+        watchdog.start()
     t0 = time.time()
     try:
         h.send(task.prompt)
     except Exception as e:                      # a transport failure is a result
         err = f"{type(e).__name__}: {e}"
+    if watchdog:
+        watchdog.cancel()
     t.join(timeout=timeout + 30)
     sub.close()
     h.shutdown_index()
@@ -172,8 +202,21 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     # follow-up question ("…in net.py. Want the callers too?") was still given.
     low = "\n".join(replies).lower()
     return {
-        "task": task.id, "mode": mode, "think": think, "index": index,
+        "task": task.id, "mode": mode, "think": think, "index": index, "cavecat": cavecat,
         "secs": round(time.time() - t0, 1),
+        "eval_tokens": cost.get("eval_tokens"), "prompt_tokens": cost.get("prompt_tokens"),
+        # Every round re-reads the context, so a run that loops costs more than
+        # its output tokens show; thinking is estimated (the server only counts
+        # output), with the first and last thought kept to read.
+        "prompt_total": cost.get("prompt_total"),
+        "prompt_cached": cost.get("prompt_cached"), "prompt_secs": cost.get("prompt_secs"),
+        # the DoneEvent's split (exact with llama.cpp); a run cut off before it, estimated
+        "think_tokens": cost["think_tokens"] if "think_tokens" in cost
+        else sum(text_tokens(t) for t in thoughts),
+        "preamble_tokens": cost.get("preamble_tokens"), "args_tokens": cost.get("args_tokens"),
+        "reply_tokens": cost.get("reply_tokens"), "split_exact": cost.get("split_exact"),
+        "think_sample": [t[:400] for t in (thoughts[:1] + thoughts[1:][-1:])],
+        "capped": capped.is_set(),
         "tools": names,
         "args": [c[1] for c in calls],
         "n_calls": len(names),
@@ -194,6 +237,11 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
                                    or "Retry the call with all required arguments" in r
                                    or "unknown tool" in r)),
         "coached_calls": sum(1 for r in results if r.startswith("ERROR")),
+        # The quoting-slip fixes (editing._escape_repair, syntax_watch): how often
+        # one level of escaping was taken off, and later results that still had
+        # to say a file this turn broke does not parse.
+        "escape_repairs": sum("one level of escaping removed" in r for r in results),
+        "syntax_notes": sum("still does not parse since your edit" in r for r in results),
         # Harness repairs, counted as model errors rather than successes.
         "repairs": sum(1 for r in results if r.startswith("(note: routed")),
         "shell_calls": sum(1 for n in names if n == "run_command"),
@@ -357,16 +405,17 @@ _env_cache: dict = {}
 
 def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
                 run_mode="new", tool_ref="compact", think_history="off",
-                edit_features=None) -> str:
+                edit_features=None, cavecat="off") -> str:
     """Everything that can change a run's outcome, hashed."""
     key = (task.workdir, mode, index, route, run_mode, tool_ref,
-           None if edit_features is None else tuple(sorted(edit_features)))
+           None if edit_features is None else tuple(sorted(edit_features)), cavecat)
     if key not in _env_cache:
         h = Harness(host=host, model=model, workdir=REPO / task.workdir, provider=provider)
         h.mode = mode
         h.index_route = route
         h.run_mode = run_mode
         h.tool_ref = tool_ref
+        h.cavecat = cavecat
         if edit_features is not None:
             h.edit_features = frozenset(edit_features)
         if index:
@@ -391,7 +440,8 @@ def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
                        **({} if route else {"route": False}),
                        **({} if run_mode == "new" else {"run_mode": run_mode}),
                        # Runs cached before reasoning could be sent back are "off".
-                       **({} if think_history == "off" else {"think_history": think_history})},
+                       **({} if think_history == "off" else {"think_history": think_history}),
+                       **({} if cavecat == "off" else {"cavecat": cavecat})},
                       sort_keys=True)
     return hashlib.sha256((spec + _env_cache[key]).encode()).hexdigest()[:24]
 
@@ -464,6 +514,34 @@ def summarise(rows):
     out.append(f"  coached calls    {sum(r['coached_calls'] for r in rows)}  "
                "(tool explained the mistake; costs a round trip)")
     out.append(f"  harness repairs  {sum(r['repairs'] for r in rows)}")
+    if any(r.get("capped") for r in rows):
+        out.append(f"  capped runs      {sum(bool(r.get('capped')) for r in rows)}  "
+                   "(cancelled at --max-run-secs, graded as they were)")
+    toks = [r["eval_tokens"] for r in rows if r.get("eval_tokens") is not None]
+    if toks:                        # cached runs from before the field have none
+        levels = "/".join(sorted({r.get("cavecat", "off") for r in rows}))
+        out.append(f"  output tokens    {statistics.mean(toks):,.0f}/run (max {max(toks):,}), "
+                   f"{statistics.mean(r['secs'] for r in rows):.1f}s/run  (cavecat {levels})")
+    read = [r for r in rows if r.get("prompt_total") is not None]
+    if read:                        # rows from before prompt_total / think_tokens have none
+        out.append(f"  prompt read      {statistics.mean(r['prompt_total'] for r in read):,.0f}"
+                   f" tokens/run over all rounds; thinking ~"
+                   f"{statistics.mean(r['think_tokens'] for r in read):,.0f} tokens/run")
+    split = [r for r in rows if r.get("preamble_tokens") is not None and r.get("eval_tokens")]
+    if split:                       # rows from before the DoneEvent split have none
+        total = sum(r["eval_tokens"] for r in split)
+        shares = {k: sum(r[f"{k}_tokens"] for r in split) / total
+                  for k in ("think", "preamble", "args", "reply")}
+        exact = {bool(r.get("split_exact")) for r in split}
+        out.append(f"  output split     thinking {shares['think']:.0%} · between calls "
+                   f"{shares['preamble']:.0%} · tool args {shares['args']:.0%} · reply "
+                   f"{shares['reply']:.0%} · framing {1 - sum(shares.values()):.0%}  "
+                   f"({'exact' if exact == {True} else 'estimated' if exact == {False} else 'partly exact'})")
+    cached = [r for r in read if r.get("prompt_cached") is not None and r["prompt_total"]]
+    if cached and any(r["prompt_cached"] for r in cached):     # llama.cpp only
+        share = sum(r["prompt_cached"] for r in cached) / sum(r["prompt_total"] for r in cached)
+        out.append(f"  prompt cache     {share:.0%} of it cached; "
+                   f"{statistics.mean(r['prompt_secs'] for r in cached):.1f}s prefill/run")
     if any(r.get("shell_chars") for r in rows):
         runs = [r for r in rows if r.get("shell_chars") is not None]
         modes = sorted({r.get("run_mode", "?") for r in runs})
@@ -546,18 +624,26 @@ def main():
     ap.add_argument("--no-think", dest="think", action="store_false")
     ap.add_argument("--think-history", choices=("off", "turn", "all"), default="off",
                     help="send the model's own reasoning back: off (as before), turn, all")
-    ap.add_argument("--timeout", type=int, default=600, help="per-run seconds")
+    ap.add_argument("--cavecat", choices=CAVECAT_LEVELS, default="off",
+                    help="/cavecat for every run: compress plans and tool text (text), and "
+                         "thinking too (full); compare tokens and pass rate across levels")
+    ap.add_argument("--timeout", type=int, default=600,
+                    help="seconds without any event before a run is given up (default: %(default)s)")
+    ap.add_argument("--max-run-secs", type=int, default=600,
+                    help="cancel a run still going after this many seconds and grade it as it "
+                         "is; 0 = no limit (default: %(default)s)")
     ap.add_argument("--tasks", nargs="*", help="only these task ids")
     ap.add_argument("--json", metavar="PATH", help="write the full per-run records here")
     ap.add_argument("--run-mode", choices=("new", "classic"), default="new",
                     help="/run-mode for every run: new (saved log + views) or classic")
     ap.add_argument("--tool-ref", choices=("full", "compact"), default="compact",
                     help="system prompt tool reference style (/tool-ref A/B)")
-    ap.add_argument("--suite", choices=("nav", "index", "lang", "shell", "edit", "all"),
+    ap.add_argument("--suite", choices=("nav", "index", "lang", "shell", "edit", "cavecat", "all"),
                     default="nav",
                     help="nav = the code-navigation tasks (default), index = the code-index "
                          "use cases, lang = 3 tasks per language on evals/lang/<lang>/project, "
-                         "edit = change requests on evals/edit/project, all = every task")
+                         "edit = change requests on evals/edit/project, cavecat = the "
+                         "shell tasks + 3 light edits (/cavecat A/B), all = every task")
     ap.add_argument("--edit-features", default=None, metavar="LIST",
                     help="what the edit tools add: 'all', 'none', or a comma list of "
                          f"{', '.join(_EDIT_FEATURE_NAMES)} (default: the harness default)")
@@ -579,7 +665,7 @@ def main():
 
     every = TASKS + INDEX_TASKS + LANG_TASKS + SHELL_TASKS + EDIT_TASKS
     pool = {"nav": TASKS, "index": INDEX_TASKS, "lang": LANG_TASKS, "shell": SHELL_TASKS,
-            "edit": EDIT_TASKS, "all": every}[args.suite]
+            "edit": EDIT_TASKS, "cavecat": CAVECAT_TASKS, "all": every}[args.suite]
     tasks = pool
     edit_features = None
     if args.edit_features is not None:
@@ -611,7 +697,7 @@ def main():
                                  model=args.model, provider=args.provider, host=args.host,
                                  route=args.route, run_mode=args.run_mode,
                                  tool_ref=args.tool_ref, think_history=args.think_history,
-                                 edit_features=edit_features)
+                                 edit_features=edit_features, cavecat=args.cavecat)
                 stored = [] if args.refresh else cache.get(fp, [])
             for i in range(args.runs):
                 if i < len(stored):
@@ -623,7 +709,8 @@ def main():
                                  think=args.think, timeout=args.timeout, index=args.index,
                                  route=args.route, run_mode=args.run_mode,
                                  tool_ref=args.tool_ref, think_history=args.think_history,
-                                 edit_features=edit_features)
+                                 edit_features=edit_features, cavecat=args.cavecat,
+                                 max_secs=args.max_run_secs)
                     source = ""
                     if cache_path and not r.get("err"):
                         with cache_path.open("a") as f:
@@ -633,6 +720,8 @@ def main():
                 if "passed" in r:
                     flag = ("  PASS" if r["passed"] else f"  FAIL: {r['check_detail'][:80]}") + (
                         f"  collateral: {', '.join(r['collateral'])}" if r["collateral"] else "")
+                if r.get("capped"):
+                    flag += "  (capped)"
                 print(f"[{len(rows):3d}] {task.id:22s} {mode:6s} run{i} "
                       f"{r['secs']:6.1f}s {r['n_calls']:2d} calls "
                       f"{len(r['hits'])}/{r['n_must']} facts{flag}"

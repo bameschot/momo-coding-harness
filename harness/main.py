@@ -14,7 +14,7 @@ from .controller import Controller
 from .events import ChatEvent
 from .harness import DEFAULT_MAX_OUTPUT_TOKENS, MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness
 from .llm.base import THINK_LEVELS
-from .prompts import MODES
+from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS, MODES
 from .tui import run_tui
 from .web import tls as tls_mod
 from .web.server import is_loopback, start_web_server
@@ -74,6 +74,9 @@ def main():
     parser.add_argument("--think-history", choices=THINK_HISTORY, default=None,
                         help="Send the model's own reasoning back to it: off, turn (since "
                              "the last user message) or all (default: last setting, else turn)")
+    parser.add_argument("--cavecat", choices=CAVECAT_LEVELS + tuple(CAVECAT_ALIASES), default=None,
+                        help="on: compress plans, tool text and command output, and keep "
+                             "replies short, to save tokens (default: last /cavecat, else off)")
     parser.add_argument("--net", choices=("off", "on", "local"), default="off",
                         help="Let the model fetch URLs with fetch_url: 'on' reaches the "
                              "public internet, 'local' also allows localhost and the LAN "
@@ -198,6 +201,9 @@ def main():
     harness.think_level = think if think in THINK_LEVELS else "on"
     history = args.think_history or prefs.get("think_history")
     harness.think_history = history if history in THINK_HISTORY else "turn"
+    cavecat = args.cavecat or prefs.get("cavecat")
+    cavecat = CAVECAT_ALIASES.get(cavecat, cavecat)     # a level saved before there were two
+    harness.cavecat = cavecat if cavecat in CAVECAT_LEVELS else "off"
     if args.no_stream:
         harness.stream = False
     harness.net_access = args.net

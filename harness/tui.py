@@ -1223,6 +1223,8 @@ class TUI:
                          + ("" if eff == ev.think_level else f"→{eff}"))
         if ev.think_history != "turn":
             parts.append(f"THINK-HIST: {ev.think_history}")
+        if ev.cavecat != "off":
+            parts.append(f"CAVECAT: {ev.cavecat}")
         self._st_extra = "".join(f" | {p}" for p in parts)
         mode = f"{ev.mode} (tdd)" if ev.mode == "plan" and ev.plan_kind == "tdd" else ev.mode
         self._st_mode  = f"{mode} [{ev.plan_progress}]" if ev.plan_progress else mode
