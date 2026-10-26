@@ -61,11 +61,25 @@ class Sections(Base):
         self.h.index = _StubIndex(self.home)
         keys = [s["key"] for s in self.h.system_prompt_sections()]
         self.h.index = None
-        self.assertEqual(keys, ["index", "role", "env", "guides", "skill:python", "tools", "nav"])
+        self.assertEqual(keys, ["index", "role", "guides", "skill:python", "tools", "env", "nav"])
         self.h.set_net_access("on")
         keys = [s["key"] for s in self.h.system_prompt_sections()]
         self.h.set_net_access("off")
-        self.assertEqual(keys[-2:], ["net", "nav"])
+        self.assertEqual(keys[-3:], ["net", "env", "nav"])
+
+    def test_another_directory_changes_the_prompt_only_after_the_tool_reference(self):
+        # what a server's prompt cache can share between projects
+        other = self.home / "other-project"
+        other.mkdir()
+        h2 = hmod.Harness(host="http://fake", model="fake", workdir=other)
+        h2.set_mode(self.h.mode)
+        try:
+            a, b = self.h._build_system_prompt(), h2._build_system_prompt()
+        finally:
+            h2.logger.close()
+        first = next(i for i in range(min(len(a), len(b))) if a[i] != b[i])
+        self.assertGreater(first, a.index(self.h._tool_ref) + len(self.h._tool_ref))
+        self.assertGreaterEqual(first, a.index("## Environment"))
 
     def net_section(self):
         return next((s["text"] for s in self.h.system_prompt_sections() if s["key"] == "net"),

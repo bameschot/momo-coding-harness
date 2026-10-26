@@ -136,6 +136,7 @@ class ThinkHistory(unittest.TestCase):
 
     def test_compaction_unsends_old_reasoning_first(self):
         self.h.think_history = "all"
+        self.h.think_keep = "off"           # the whole block is what compaction must stop sending
         big = "x" * 40000
         self.h.messages += [
             {"role": "user", "content": "q1"},

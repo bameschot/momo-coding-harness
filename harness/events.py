@@ -68,6 +68,7 @@ class StatusEvent:
     think_known: bool = False     # the server said what the model takes
     think_history: str = "turn"   # /think-history: off | turn | all
     cavecat: str = "off"          # /cavecat: off | on
+    think_keep: str = "lean"      # /think-keep: off | lean | more | most
     tools_off: list = field(default_factory=list)  # tools turned off for the current mode
     workspace_pending: list = field(default_factory=list)  # .momo/tools/ tools awaiting approval
     skills: list = field(default_factory=list)     # active skills, in load order

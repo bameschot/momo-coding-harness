@@ -514,7 +514,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
         <span class="chip ok">no required packages</span>
         <span class="chip ok">no build step</span>
         <span class="chip">Python 3.14</span>
-        <a class="chip sys" href="#cavecat" title="Cavecat mode: short replies, compacted command output, trimmed reasoning — runs ~20% faster on a 9B model">/cavecat on: ~20% faster</a>
+        <a class="chip sys" href="#cavecat" title="Cavecat mode: short replies, telegraphic plans, compacted command output — runs ~20% faster on a 9B model">/cavecat on: ~20% faster</a>
       </div>
     </div>
 
@@ -1607,7 +1607,7 @@ FAILED (failures=2)
 
   <section id="thinking" data-voice="thinking">
     <h2>Thinking &amp; reply length</h2>
-    <p>Three settings shape how a reasoning model works: how much it thinks, how long one reply may run, and whether it sees its own earlier reasoning. All three are remembered between runs and sit under the web UI's <code>THINK</code> badge.</p>
+    <p>Three settings shape how a reasoning model works: how much it thinks, how long one reply may run, and whether it sees its own earlier reasoning. All three, and how much of that reasoning is kept, are remembered between runs and sit under the web UI's <code>THINK</code> badge.</p>
 
     <h3 id="think-level">Thinking level</h3>
     <p><code>/think off|on|low|medium|high|xhigh</code> (or <code>--think</code>) sets how much the model reasons before it answers. Models take different levels (see the table below), so momo asks the server which ones this model takes and sends only those. It checks again at every message and on <code>/think</code>, because a llama.cpp server may have been relaunched with another model.</p>
@@ -1627,7 +1627,7 @@ FAILED (failures=2)
     </ul>
 
     <h3 id="think-history">Sending reasoning back</h3>
-    <p><code>/think-history off|turn|all</code> decides whether the model sees its own earlier reasoning (with <a href="#cavecat"><code>/cavecat on</code></a>, only its decision). <code>turn</code> (the default) sends it back for the current tool loop, since your last message. <code>all</code> also sends earlier turns, and <code>off</code> sends none. It is remembered, and in the web UI it is under the <code>THINK</code> menu.</p>
+    <p><code>/think-history off|turn|all</code> decides whether the model sees its own earlier reasoning (by default only its decision: see <a href="#think-keep"><code>/think-keep</code></a>). <code>turn</code> (the default) sends it back for the current tool loop, since your last message. <code>all</code> also sends earlier turns, and <code>off</code> sends none. It is remembered, and in the web UI it is under the <code>THINK</code> menu.</p>
     <ul>
       <li><strong>Why:</strong> models are trained to see their reasoning from the earlier steps of a tool loop. With <code>off</code>, the model sees its earlier tool calls without the reasoning behind them, and tends to plan again from scratch after every result.</li>
       <li><strong>Cost:</strong> sent reasoning counts toward the context (<em>Reasoning sent back</em> in the CTX breakdown). With <code>all</code>, compaction stops sending earlier turns' reasoning before it removes any messages.</li>
@@ -1646,6 +1646,14 @@ FAILED (failures=2)
     <p>The reasoning goes on the assistant message it led to (<code>reasoning_content</code> for llama.cpp, <code>thinking</code> for Ollama), and <code>preserve_thinking</code> is passed to templates that read it. A cut-off reply's reasoning is never sent back.</p>
     </details>
 
+    <h3 id="think-keep">Trimming what is sent back</h3>
+    <p><code>/think-keep off|lean|more|most</code> decides how much of that reasoning goes back. The model re-reads it on every later request of a tool loop, but what it needs from it is where it got to, so momo sends just the plan steps it listed and its closing sentences, plus a note saying how much was left out. A longer thought keeps more, though a smaller share: about the square root of its length, with a floor, so 1k chars keep ~380 and 10k ~1,200. Short thoughts go as they are, and code is never cut. Your transcript keeps all of it, and because the trim never changes once made, llama.cpp's prompt cache stays warm.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">commands</span></div><pre><code>/think-keep lean  <span class="com"># plan steps and closing sentences (the default)</span>
+/think-keep more  <span class="com"># twice as much; most: four times</span>
+/think-keep off   <span class="com"># send it back whole</span></code></pre></div>
+    <p><code>lean</code> suits small models and sends about a fifth of recorded reasoning; <code>more</code> or <code>most</code> leave a larger model more of its own thinking. It works with or without cavecat, is remembered between runs, and sits in the web UI's <code>THINK</code> menu under Send reasoning back.</p>
+    <p class="note"><strong>Measured</strong> on Ornith-9B: the trim made runs 9–22% faster than sending all of the reasoning back, and <code>lean</code> and <code>more</code> came out level. <code>/think-history off</code>, sending none, was faster still on that model.</p>
+
     <h3 id="model-notes">Model notes</h3>
     <div class="table-scroll"><table>
       <tr><th>Model</th><th>Thinking levels</th><th>Earlier reasoning its template shows</th></tr>
@@ -1659,12 +1667,11 @@ FAILED (failures=2)
 
   <section id="cavecat" data-voice="cavecat">
     <h2>Cavecat mode</h2>
-    <p>A nod to <a href="https://github.com/akramsystems/caveman">caveman</a>, the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat. On a local model, output tokens are wall-clock time, so <code>/cavecat on</code> trims the text a turn produces and what it re-reads: command output and its own earlier reasoning. How the model thinks is never constrained, and replies stay plain sentences.</p>
+    <p>A nod to <a href="https://github.com/akramsystems/caveman">caveman</a>, the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat. On a local model, output tokens are wall-clock time, so <code>/cavecat on</code> trims the text a turn produces and the command output it re-reads. How the model thinks is never constrained, and replies stay plain sentences. (The reasoning sent back is trimmed separately, by <a href="#think-keep"><code>/think-keep</code></a>.)</p>
     <ul>
       <li><strong>A short reply:</strong> the result first, then what changed and anything you must decide. No preamble, step-by-step recap or closing offer.</li>
       <li><strong>No narration between tool calls:</strong> the model calls the next tool without announcing it, and says what it found in the reply. The nudge that asks for text after 10 calls without any waits for 20, and stops asking for a progress line.</li>
       <li><strong>Telegraphic plans and tool text:</strong> <code>create_plan</code> steps (re-sent on every step of <a href="#plan">plan execution</a>), <code>complete_step</code> summaries, <code>ask_user</code> questions, commit messages and design specs, written as "verb + file + change".</li>
-      <li><strong>Only the decision of earlier reasoning is sent back</strong>, done by momo. With <a href="#think-history"><code>/think-history turn</code></a> the model re-reads its earlier reasoning on every later request; cavecat sends just the plan steps it listed and its closing paragraph, plus a note saying how much was left out. That is about a sixth of recorded reasoning. Your transcript keeps all of it, and because the trim never changes once made, llama.cpp's prompt cache stays warm. On Ornith-9B it made runs 9–22% faster than sending all of it; <code>/think-history off</code>, sending none, was faster still on that model.</li>
       <li><strong>Compacted command output</strong>, done by momo, not the model. In the default <code>run_command</code> view, runs of passing test lines, repeated lines and lines that differ only in their numbers collapse into a note naming their lines in the saved log, so <code>command_output</code> still reaches every one. Lines with an error, fail or warning word always stay. <code>tail=</code>/<code>grep=</code> views are never compacted.</li>
     </ul>
     <p>Code, file contents, paths, symbols, exact error text, numbers and test names are never compressed. It adds a short <strong>Cavecat</strong> part to the <a href="#system-prompt">system prompt</a>, right after the role, in every mode but momo: the companion keeps its voice.</p>
@@ -1699,29 +1706,29 @@ FAILED (failures=2)
         <div class="pd-row"><div class="pd-in"><code>/index</code> on</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Code index banner</span><span class="pd-tag">if index</span></div></div>
         <div class="pd-row"><div class="pd-in">mode · <code>roles/&lt;mode&gt;.md</code> · plan</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file"><span>Role</span></div></div>
         <div class="pd-row"><div class="pd-in"><code>/cavecat on</code> (not momo)</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Cavecat</span><span class="pd-tag">if on</span></div></div>
-        <div class="pd-row"><div class="pd-in">workdir · date · OS · git · <code>/net</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Environment</span></div></div>
         <div class="pd-row"><div class="pd-in"><code>/guides on</code> · <code>AGENTS.md</code>, …</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Project guides</span><span class="pd-tag">if guides</span></div></div>
         <div class="pd-row"><div class="pd-in"><code>/load-skill</code> · <code>skills/&lt;name&gt;.md</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part file cond"><span>Skill: &lt;name&gt;</span><span class="pd-tag">each skill</span></div></div>
         <div class="pd-row"><div class="pd-in">tools on in this mode · <code>/tool-ref</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Tool reference</span></div></div>
         <div class="pd-row"><div class="pd-in"><code>fetch_url</code> / <code>web_search</code> on</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part cond"><span>Using the internet</span><span class="pd-tag">if net</span></div></div>
+        <div class="pd-row"><div class="pd-in">workdir · date · OS · git · <code>/net</code></div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Environment</span></div></div>
         <div class="pd-row"><div class="pd-in">tools on · index on or off</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part"><span>Navigating code</span></div></div>
         <div class="pd-row"><div class="pd-in">the same tools, as JSON</div><div class="pd-arrow" aria-hidden="true">→</div><div class="pd-part aside"><span>Tool schemas</span><span class="pd-tag">sent alongside</span></div></div>
       </div>
       <div class="pd-legend"><span>generated by the harness</span><span class="file">from a file</span><span class="cond">only when its input is on</span></div>
       <figcaption>Parts are joined by <code>---</code> rules and rebuilt in place whenever an input changes.</figcaption>
     </figure>
-    <p>The index banner comes first and the navigation rules last on purpose: small models weigh the start and end of a prompt most. Cavecat sits right after the role for the same reason.</p>
+    <p>The index banner comes first and the navigation rules last on purpose: small models weigh the start and end of a prompt most. Cavecat sits right after the role for the same reason. Environment (working directory, date, git) comes late because it is what changes between projects and days: a llama.cpp server that reuses any shared prefix keeps everything before it cached when you start somewhere new. Models with recurrent layers (Ornith, Qwen3.5) only resume from checkpoints, so there it makes no difference.</p>
     <details><summary>What each part says</summary>
     <div class="table-scroll"><table>
       <tr><th>Part</th><th>When</th><th>What it says</th></tr>
       <tr><td>Code index banner</td><td class="wrap">Index on</td><td class="wrap">One line: find code with the <code>index_*</code> tools, not grep or find</td></tr>
       <tr><td>Role</td><td class="wrap">Always</td><td class="wrap"><code>roles/&lt;mode&gt;.md</code>; in plan mode also the draft plan, or the execution rules and the live plan</td></tr>
       <tr><td>Cavecat</td><td class="wrap">With <a href="#cavecat"><code>/cavecat on</code></a>, every mode but momo</td><td class="wrap">Keep the reply short, no narration between tool calls, telegraphic plan and tool text; never compress code, paths, error text or numbers</td></tr>
-      <tr><td>Environment</td><td class="wrap">Always</td><td class="wrap">Working directory, today's date, OS/shell and git branch (with <code>run_command</code>), "run it as <code>python3</code>" when there's no <code>python</code> command, internet on or off</td></tr>
       <tr><td>Project guides</td><td class="wrap">With <code>/guides on</code></td><td class="wrap">The workdir's <code>AGENTS.md</code>, <code>CLAUDE.md</code>, …</td></tr>
       <tr><td>Skill: &lt;name&gt;</td><td class="wrap">One per loaded skill</td><td class="wrap"><code>skills/&lt;name&gt;.md</code></td></tr>
       <tr><td>Tool reference</td><td class="wrap">Always</td><td class="wrap">Generated from the tool schemas, <code>/tool-ref full|compact</code></td></tr>
       <tr><td>Using the internet</td><td class="wrap">While <code>fetch_url</code> or <code>web_search</code> is on</td><td class="wrap">Check versions and APIs instead of recalling them; read the project's manifests first; look up general facts (e.g. Wikipedia) when the topic is recent, the model is unsure or you ask; stop once answered; cite URLs</td></tr>
+      <tr><td>Environment</td><td class="wrap">Always</td><td class="wrap">Working directory, today's date, OS/shell and git branch (with <code>run_command</code>), "run it as <code>python3</code>" when there's no <code>python</code> command, internet on or off</td></tr>
       <tr><td>Navigating code</td><td class="wrap">Always</td><td class="wrap">How to find code with this mode's tools; with the index on, a table of the <code>index_*</code> tools</td></tr>
       <tr><td>Tool schemas</td><td class="wrap">Always</td><td class="wrap">The JSON tool definitions sent <em>alongside</em> the prompt: they use context but aren't prompt text</td></tr>
     </table></div>
@@ -1988,6 +1995,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
       <tr><td><code>--think</code></td><td>last used / <code>on</code></td><td class="wrap">Thinking level: <code>off</code>, <code>on</code>, or an effort level (<code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, …) for models that take one. See <a href="#think-level">Thinking level</a>. <code>--no-think</code> is <code>--think off</code>.</td></tr>
       <tr><td><code>--think-history</code></td><td>last used / <code>turn</code></td><td class="wrap">Send the model's own reasoning back: <code>off</code>, <code>turn</code> (since your last message) or <code>all</code>. See <a href="#think-history">Sending reasoning back</a>.</td></tr>
+      <tr><td><code>--think-keep</code></td><td>last used / <code>lean</code></td><td class="wrap">How much of its earlier reasoning the model gets back: <code>lean</code>, <code>more</code>, <code>most</code> or <code>off</code>. See <a href="#think-keep">Trimming what is sent back</a>.</td></tr>
       <tr><td><code>--cavecat</code></td><td>last used / <code>off</code></td><td class="wrap"><code>on</code>: short replies, no narration between tool calls, telegraphic plans, compacted command output. See <a href="#cavecat">Cavecat mode</a>.</td></tr>
       <tr><td><code>--max-output-tokens</code></td><td>last used / <code>25000</code></td><td class="wrap">Most tokens one model reply may take, reasoning included; <code>0</code> = no cap. See <a href="#reply-cap">Reply cap</a>.</td></tr>
       <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
@@ -2021,6 +2029,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <tr><td><code>/scratch [clear]</code></td><td class="wrap">Show the <a href="#scratch">scratchpad</a>, or empty it (asks first)</td></tr>
       <tr><td><code>/think [off|on|&lt;level&gt;]</code></td><td class="wrap">Show or set the model's <a href="#thinking">thinking level</a> (remembered)</td></tr>
       <tr><td><code>/think-history off|turn|all</code></td><td class="wrap"><a href="#think-history">Send the model's own reasoning back</a> to it (remembered)</td></tr>
+      <tr><td><code>/think-keep [off|lean|more|most]</code></td><td class="wrap"><a href="#think-keep">How much of its earlier reasoning</a> the model gets back: <code>lean</code> (default) for small models, <code>more</code> or <code>most</code> for larger ones, <code>off</code> for all of it (remembered)</td></tr>
       <tr><td><code>/cavecat [off|on]</code></td><td class="wrap"><a href="#cavecat">Cavecat mode</a>: compress replies, plans, tool text and command output to save tokens (remembered)</td></tr>
       <tr><td><code>/tools [list|&lt;name&gt;]</code></td><td class="wrap">Pick this mode's tools, list them, or show one. See <a href="#tool-choices">Turning tools on and off</a></td></tr>
       <tr><td><code>/tools [&lt;name&gt;…] on|off</code></td><td class="wrap">Turn named tools on or off for this mode (saved in the session), or all tool calls</td></tr>

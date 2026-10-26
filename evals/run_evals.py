@@ -65,6 +65,7 @@ from harness.events import ThinkEvent  # noqa: E402
 from harness.harness import (Harness, ChatEvent, DoneEvent, ErrorEvent,  # noqa: E402
                              ToolCallEvent, ToolResultEvent)
 from harness.prompts import CAVECAT_LEVELS  # noqa: E402
+from harness.think_trim import KEEP_LEVELS  # noqa: E402
 
 
 _SHELL_SEARCH = re.compile(r"^\s*(grep|rg|ag|find|fd|ack)\b")
@@ -95,7 +96,7 @@ _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
 
 def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True,
              run_mode="new", tool_ref="compact", think_history="off", edit_features=None,
-             cavecat="off", think_trim="auto", max_secs=0):
+             cavecat="off", think_keep="lean", max_secs=0):
     """One task, one fresh conversation.  Returns what the model did.  A run
     still going after max_secs (0 = no limit) is cancelled and graded as is."""
     workdir = REPO / task.workdir
@@ -117,7 +118,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     h.think = think
     h.think_history = think_history
     h.cavecat = cavecat
-    h.think_trim = {"auto": None, "on": True, "off": False}[think_trim]
+    h.think_keep = think_keep
     if edit_features is not None:
         h.edit_features = frozenset(edit_features)   # ignored by a harness without them
     # Nobody is there to answer: without this a run that calls ask_user blocks forever.
@@ -195,7 +196,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     sub.close()
     h.shutdown_index()
     # What /think-history would send back now, against the reasoning it comes
-    # from (with --think-history turn: the whole turn's): what think_trim saved.
+    # from (with --think-history turn: the whole turn's): what /think-keep saved.
     sent = h._sent_reasoning()
     full = {id(m): len(m.get("content") or "") for m in h.messages if id(m) in sent}
     edit = _edit_outcome(task, workdir, h.messages) if task.check else {}
@@ -208,7 +209,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     low = "\n".join(replies).lower()
     return {
         "task": task.id, "mode": mode, "think": think, "index": index, "cavecat": cavecat,
-        "think_trim": think_trim, "reasoning_sent": sum(len(v) for v in sent.values()),
+        "think_keep": think_keep, "reasoning_sent": sum(len(v) for v in sent.values()),
         "reasoning_full": sum(full.values()),
         "secs": round(time.time() - t0, 1),
         "eval_tokens": cost.get("eval_tokens"), "prompt_tokens": cost.get("prompt_tokens"),
@@ -383,7 +384,8 @@ def _reruns(calls) -> int:
 # Harness code whose behaviour reaches the model's tool results; the prompt and
 # tool schemas are fingerprinted separately, as rendered.
 _CODE_FILES = ("harness/tools.py", "harness/code_nav.py", "harness/harness.py",
-               "harness/net.py", "harness/run_store.py", "harness/editing.py") + tuple(
+               "harness/net.py", "harness/run_store.py", "harness/editing.py",
+               "harness/think_trim.py") + tuple(
     sorted(p.relative_to(REPO).as_posix() for p in (REPO / "harness" / "tools").rglob("*.py")))
 # The index package (and the single module it was before, for an older worktree).
 _INDEX_CODE_FILES = ("harness/code_index.py",) + tuple(
@@ -412,7 +414,7 @@ _env_cache: dict = {}
 
 def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
                 run_mode="new", tool_ref="compact", think_history="off",
-                edit_features=None, cavecat="off", think_trim="auto") -> str:
+                edit_features=None, cavecat="off", think_keep="lean") -> str:
     """Everything that can change a run's outcome, hashed."""
     key = (task.workdir, mode, index, route, run_mode, tool_ref,
            None if edit_features is None else tuple(sorted(edit_features)), cavecat)
@@ -449,7 +451,7 @@ def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
                        # Runs cached before reasoning could be sent back are "off".
                        **({} if think_history == "off" else {"think_history": think_history}),
                        **({} if cavecat == "off" else {"cavecat": cavecat}),
-                       **({} if think_trim == "auto" else {"think_trim": think_trim})},
+                       **({} if think_keep == "lean" else {"think_keep": think_keep})},
                       sort_keys=True)
     return hashlib.sha256((spec + _env_cache[key]).encode()).hexdigest()[:24]
 
@@ -549,7 +551,7 @@ def summarise(rows):
     if sentback:                    # --think-history turn|all
         out.append(f"  reasoning sent   {statistics.mean(r['reasoning_sent'] for r in sentback):,.0f} "
                    f"of {statistics.mean(r['reasoning_full'] for r in sentback):,.0f} chars/run "
-                   f"at the end of the turn (think_trim {'/'.join(sorted({r.get('think_trim', 'auto') for r in sentback}))})")
+                   f"at the end of the turn (keep {'/'.join(sorted({r.get('think_keep', 'lean') for r in sentback}))})")
     cached = [r for r in read if r.get("prompt_cached") is not None and r["prompt_total"]]
     if cached and any(r["prompt_cached"] for r in cached):     # llama.cpp only
         share = sum(r["prompt_cached"] for r in cached) / sum(r["prompt_total"] for r in cached)
@@ -638,11 +640,12 @@ def main():
     ap.add_argument("--think-history", choices=("off", "turn", "all"), default="off",
                     help="send the model's own reasoning back: off (as before), turn, all")
     ap.add_argument("--cavecat", choices=CAVECAT_LEVELS, default="off",
-                    help="/cavecat for every run: compress plans and tool text (text), and "
-                         "thinking too (full); compare tokens and pass rate across levels")
-    ap.add_argument("--think-trim", choices=("auto", "on", "off"), default="auto",
-                    help="send back only the decision of earlier reasoning (harness/think_trim.py); "
-                         "auto = with --cavecat on. Only matters with --think-history turn|all")
+                    help="/cavecat for every run: on compresses plans, tool text and command "
+                         "output, and keeps replies short; compare tokens and pass rate")
+    ap.add_argument("--think-keep", choices=KEEP_LEVELS, default="lean",
+                    help="how much of the reasoning sent back is kept (/think-keep): lean, "
+                         "more (x2), most (x4), off (all of it). Only matters with "
+                         "--think-history turn|all")
     ap.add_argument("--timeout", type=int, default=600,
                     help="seconds without any event before a run is given up (default: %(default)s)")
     ap.add_argument("--max-run-secs", type=int, default=600,
@@ -714,7 +717,7 @@ def main():
                                  route=args.route, run_mode=args.run_mode,
                                  tool_ref=args.tool_ref, think_history=args.think_history,
                                  edit_features=edit_features, cavecat=args.cavecat,
-                                 think_trim=args.think_trim)
+                                 think_keep=args.think_keep)
                 stored = [] if args.refresh else cache.get(fp, [])
             for i in range(args.runs):
                 if i < len(stored):
@@ -727,7 +730,7 @@ def main():
                                  route=args.route, run_mode=args.run_mode,
                                  tool_ref=args.tool_ref, think_history=args.think_history,
                                  edit_features=edit_features, cavecat=args.cavecat,
-                                 think_trim=args.think_trim, max_secs=args.max_run_secs)
+                                 think_keep=args.think_keep, max_secs=args.max_run_secs)
                     source = ""
                     if cache_path and not r.get("err"):
                         with cache_path.open("a") as f:

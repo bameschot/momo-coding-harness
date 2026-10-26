@@ -19,6 +19,7 @@ from . import tools as tools_mod
 from . import transcript as transcript_mod
 from .compaction import content_text
 from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS
+from .think_trim import KEEP_LEVELS
 from .harness import MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness, _mask_messages
 from .llm.base import THINK_LEVELS
 from .tools import dispatch
@@ -665,6 +666,24 @@ def handle(line: str, harness: Harness) -> CommandResult:
         session_mod.save_prefs(think_history=choice)
         harness.emit_status()
         return CommandResult(handled=True, output=f"Reasoning sent back: {labels[choice]}")
+
+    if cmd == "/think-keep":
+        labels = {"off": "off — earlier reasoning is sent back whole",
+                  "lean": "lean — the plan steps and closing sentences, ~√ of the length (small models)",
+                  "more": "more — twice lean's share",
+                  "most": "most — four times lean's share (large models)"}
+        if not arg:
+            note = "" if harness.think_history != "off" else " (applies with /think-history turn|all)"
+            return CommandResult(handled=True,
+                                 output=f"Earlier reasoning kept: {labels[harness.think_keep]}{note}")
+        choice = arg.strip().lower()
+        if choice not in KEEP_LEVELS:
+            return _bad_choice(arg, "'off', 'lean', 'more' or 'most'")
+        harness.think_keep = choice
+        session_mod.save_prefs(think_keep=choice)
+        harness.emit_status()
+        return CommandResult(handled=True, output=f"Earlier reasoning kept: {labels[choice]}"
+                             " — the next request re-reads the reasoning sent back once")
 
     if cmd == "/cavecat":
         labels = {"off": "off — the model writes as usual",
@@ -1573,6 +1592,10 @@ Available commands:
                       Qwen3.8); the nearest one it takes is sent
   /think-history off|turn|all  Send the model's own reasoning back to it: none,
                       since your last message (default), or every turn (saved)
+  /think-keep [off|lean|more|most]  How much of the reasoning sent back is kept:
+                      its plan steps and closing sentences; lean (default)
+                      suits small models, more (x2) or most (x4) larger ones,
+                      off sends it whole (saved)
   /cavecat [off|on]   Compress plans, tool text and command output, and keep
                       replies short, to save tokens (saved)
   /run-confirm        Show run_command confirmation state (on/off)

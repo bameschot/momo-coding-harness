@@ -73,6 +73,7 @@ class Breakdown(Base):
              "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "x.py"}}}]},
             {"role": "tool", "name": "read_file", "content": "r" * 1200},
         ]
+        self.h.think_keep = "off"           # count the reasoning whole; /think-keep's trim has its own tests
         c = self.cats()
         self.assertEqual(c["user"]["tokens"], 100)
         self.assertEqual(c["assistant"]["tokens"], 50)

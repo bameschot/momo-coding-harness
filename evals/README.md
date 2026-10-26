@@ -895,6 +895,8 @@ Output split over all 16 runs, exact: `off` is thinking 35%, between calls 8%, t
 
 ### Round 4: trimming the reasoning sent back (same model, `--suite cavecat --runs 2`, 2026-10-25)
 
+*The fixed-size trim measured here was replaced by the adaptive one of [Round 6](#round-6-a-budget-that-grows-with-the-reasoning-and-think-keep-same-model---suite-cavecat---runs-2-2026-10-26).*
+
 With `/think-history turn` the model re-reads its earlier reasoning on every later request.
 `harness/think_trim.py` sends back only the decision instead: the plan steps and the closing
 paragraph, with a note saying how much was left out.
@@ -927,6 +929,117 @@ Live, all at `--cavecat on`. Means per run:
   because a trimmed step is byte-identical on later requests.
 - **On this model, sending nothing was still fastest,** with nothing lost. The ordering is
   none < trimmed < full in both task groups, though each cell is 2 runs per task.
+
+### Round 5: a tighter trim, and Environment after the tool reference (same model, `--suite cavecat --runs 2`, 2026-10-26)
+
+*The fixed-size trim measured here was replaced by the adaptive one of [Round 6](#round-6-a-budget-that-grows-with-the-reasoning-and-think-keep-same-model---suite-cavecat---runs-2-2026-10-26).*
+
+Two changes, measured together:
+
+- **The trim got tighter.** It now cuts thoughts from 200 chars (was 400). A one-paragraph
+  thought keeps its plan steps and last two sentences, where before it was sent whole. The
+  closing prose is capped at 400 chars of whole sentences (was 800, cut at a word). Offline it
+  would not send 85% of the 279 recorded thoughts' reasoning (was 83%), and 167 of them are now
+  trimmed.
+- **Environment moved behind the fixed prompt.** The working directory, date and git state now
+  sit after the tool reference and internet rules, just before the navigation rules. Two
+  working directories' prompts, rendered by the server, now first differ 93% of the way in
+  (was 76%). Ornith is a hybrid with recurrent layers, and llama.cpp reuses its cache only
+  from checkpoints at the ends of earlier prompts. A prompt that diverges mid-way reuses 0
+  tokens, before and after the move, so on this model the move can't show. On models that
+  reuse any shared prefix (pure attention, such as Qwen3, gpt-oss, or Gemma 4 with
+  `--swa-full`), the system text up to the tool reference now stays cached across directories
+  and days. That only helps a session's first request.
+
+Live, `--cavecat on --think-history turn --think-trim on`, against round 4's trim. Means per
+run:
+
+| Trim | Tasks | Secs | Thinking | Calls | Prompt read | Cached | Sent / full chars | Passed |
+|---|---|---|---|---|---|---|---|---|
+| round 4 | shell | 30.6 | 291 | 2.5 | 33,743 | 68% | 506 / 928 | all facts |
+| | edits | 53.2 | 498 | 7.3 | 80,538 | 86% | 1,108 / 1,780 | 6/6 |
+| tighter | shell | **29.1** | **219** | 2.8 | 37,937 | 71% | 410 / 754 | all facts |
+| | edits | 59.1 | 625 | 7.7 | 87,961 | 87% | 1,087 / 2,192 | 6/6 |
+
+- **Live, it sent 51% of the reasoning, against 59%.** That is less than the offline cut,
+  because most thoughts within a turn are still short.
+- **Shell tasks were a little faster with less thinking; edits a little slower with more.**
+  Both are within run-to-run noise. On edits, one `two-edits` run (96 s, 1,270 thinking tokens)
+  and one 9-call `ambiguous-edit` run account for the gap. The same tasks spread as widely
+  between runs within any one setting (`two-edits` with the full reasoning: 74 s and 114 s).
+  At 2 runs per task, the tighter trim neither helped nor hurt measurably. It was kept: it
+  sends less, loses nothing, and the cached share held.
+- **The ordering from round 4 stands.** On this model, `--think-history off` (25.6 s / 46.6 s)
+  is still the fastest.
+
+### Round 6: a budget that grows with the reasoning, and `/think-keep` (same model, `--suite cavecat --runs 2`, 2026-10-26)
+
+*Since then `/think-keep` is a setting of its own: `off|lean|more|most`, default `lean`, on
+with or without cavecat. The evals' `--think-trim on|off` became `--think-keep LEVEL|off`; the
+runs below are `--think-keep lean` and `more` at `--cavecat on`.*
+
+The trims of rounds 4–5 kept the same few hundred chars whatever the thought's length:
+
+- a 10k-char thought kept about as much as a 1k one;
+- the cap was tuned on a 9B model, though the harness also serves larger ones.
+
+`harness/think_trim.py` now keeps `budget = max(300, 12·√chars) × level`, at `/think-keep`
+`lean` ×1 (the default), `more` ×2 or `most` ×4. The budget is filled in this order:
+- plan steps first, up to half of it;
+- then backwards from the end: whole paragraphs, the last one cut at sentence boundaries;
+- code is kept whole or not at all, and code the call repeats becomes a pointer.
+
+A thought is sent as it is when the trim would save under a quarter of it, so anything under
+~400 chars at lean. This replaced the earlier rules (the 200-char minimum, the 400-char
+decision, the two sentences of a one-paragraph thought, the 1,200-char step cap). `--think-keep`
+is now an eval flag, and `harness/think_trim.py` is in the eval cache's fingerprint.
+
+`evals/think_trim_bench.py --keep LEVEL`, over the same 279 recorded thoughts (518k chars).
+Share not sent:
+
+| Thought length | Chars | `lean` | `more` | `most` |
+|---|---|---|---|---|
+| < 500 | 35,959 | 7% | 0% | 0% |
+| 500–1,000 | 28,005 | 56% | 0% | 0% |
+| 1,000–2,000 | 26,315 | 68% | 40% | 0% |
+| 2,000–4,000 | 54,505 | 78% | 57% | 0% |
+| 4,000–8,000 | 100,336 | 84% | 70% | 35% |
+| 8,000+ | 272,798 | 91% | 83% | 66% |
+| **all** | 517,918 | **80%** | **65%** | **42%** |
+
+- **`lean` sends a fifth of the reasoning** (round 5's fixed trim: 15%). It sends more of long
+  thoughts and leaves short ones whole.
+- **The trim is stable** on every thought at every level.
+Live, `--cavecat on --think-history turn` (then `--think-trim on`, now `--think-keep lean|more`), against the trims of rounds 4–5.
+Means per run:
+
+| Trim | Tasks | Secs | Thinking | Calls | Prompt read | Cached | Sent / full chars | Passed |
+|---|---|---|---|---|---|---|---|---|
+| round 4 | shell | 30.6 | 291 | 2.5 | 33,743 | 68% | 506 / 928 | all facts |
+| | edits | 53.2 | 498 | 7.3 | 80,538 | 86% | 1,108 / 1,780 | 6/6 |
+| round 5 | shell | 29.1 | 219 | 2.8 | 37,937 | 71% | 410 / 754 | all facts |
+| | edits | 59.1 | 625 | 7.7 | 87,961 | 87% | 1,087 / 2,192 | 6/6 |
+| adaptive, `lean` | shell | 32.6 | 297 | 2.8 | 38,691 | 71% | 622 / 1,013 | all facts |
+| | edits | 54.1 | 499 | 7.5 | 82,332 | 86% | 1,122 / 1,759 | 6/6 |
+| adaptive, `more` | shell | 29.7 | 240 | 2.5 | 34,033 | 68% | 688 / 797 | all facts |
+| | edits | 54.3 | 489 | 6.7 | 82,422 | 86% | 1,526 / 1,747 | 6/6 |
+
+- **Nothing was lost at either level.** Every fact was found and every edit passed, with no
+  capped runs.
+- **Live, `lean` sent 63% of the reasoning and `more` 87%.** Offline, the shares were 20% and
+  35%. Most thoughts within a turn are short, and the floor now sends those whole.
+- **The four trims are within noise of each other.**
+  - At `lean`, the 32.6 s on shell tasks is mostly `shell-cause`: 59 s and 61 s, against
+    49 s in round 5. That task's spread across rounds is larger than any trim's effect.
+  - Edits sit at 53–55 s for every trim but round 5's.
+  - Sending more back (`more`) did not make Ornith think more here, unlike sending all of it
+    (round 4: 39.1 s / 58.5 s).
+- **The prompt cache held:** 79% cached and about 11–12 s of prefill per run at both levels.
+- **Kept:** the adaptive trim, with `lean` as the default.
+  - On Ornith, `--think-history off` is still fastest (25.6 s / 46.6 s); among the trims,
+    neither level is measurably better.
+  - `more` and `most` cost little here, so they are a safe choice for larger models that make
+    use of their earlier reasoning. Measure them there.
 
 ## Round 3: verify guidance and narration (Ornith-1.5-9B Q8, `--cavecat off`, 2026-10-25)
 

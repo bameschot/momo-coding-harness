@@ -120,6 +120,11 @@
     <label title="The model never sees its earlier reasoning"><input type="radio" name="think-history" value="off"> off</label>
     <label title="The model sees its reasoning since your last message — its current tool loop"><input type="radio" name="think-history" value="turn"> this turn</label>
     <label title="The model sees its reasoning from every turn still in history — uses more context"><input type="radio" name="think-history" value="all"> all turns</label>
+    <div class="menu-sub">Earlier reasoning kept <kbd>/think-keep</kbd></div>
+    <label title="Send earlier reasoning back whole"><input type="radio" name="think-keep" value="off"> off</label>
+    <label title="The plan steps and closing sentences, about the square root of its length — suits small models"><input type="radio" name="think-keep" value="lean"> lean</label>
+    <label title="Twice lean's share"><input type="radio" name="think-keep" value="more"> more</label>
+    <label title="Four times lean's share — suits large models"><input type="radio" name="think-keep" value="most"> most</label>
   </div>
   <div id="cavecat-menu" class="menu think-menu" role="dialog" aria-label="Cavecat" hidden>
     <div class="menu-title">Cavecat <kbd>/cavecat</kbd></div>

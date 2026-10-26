@@ -52,6 +52,7 @@ Options:
 | `--think` | last used / `on` | Thinking level: `off`, `on`, or an effort level (`low`, `medium`, `high`, `xhigh`, …) for models that take one. See [Thinking level](#thinking-level) |
 | `--no-think` | off | Same as `--think off` |
 | `--think-history` | last used / `turn` | Send the model's own reasoning back to it: `off`, `turn` (since your last message) or `all`. See [Sending reasoning back](#sending-reasoning-back) |
+| `--think-keep` | last `/think-keep`, else `lean` | How much of its earlier reasoning the model gets back: `lean`, `more` (×2), `most` (×4), or `off` (all of it). See [Trimming the reasoning sent back](#trimming-the-reasoning-sent-back) |
 | `--cavecat` | last `/cavecat`, else `off` | `on`: compress plans, tool text and command output, and keep replies short, to save tokens; `off`. See [Cavecat mode](#cavecat-mode) |
 | `--max-output-tokens` | last setting, else `25000` | Most tokens one model reply may take, reasoning included; `0` = no cap. See `/max-output-tokens` |
 | `--no-stream` | off | Wait for complete replies instead of streaming them as they are generated (streaming is on by default, in the TUI and the web UI) |
@@ -175,7 +176,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - Clicking the **model name** opens a model picker listing the models on the backend, like `/model`. llama.cpp serves a single model, so there the list is informational.
   - Also shown: provider@host and the working directory. The working directory is shortened from the front on narrow windows.
   - The **CTX meter** turns yellow at ≥ 75% and red at ≥ 90%, as in the TUI.
-  - The **`THINK`** badge shows the [thinking level](#thinking-level). Clicking it opens a menu of the values the current model takes (e.g. off / on / low / medium / xhigh for Qwen3.8), plus your current choice, greyed out if the model can't take it. When the model gets something other than your choice, the badge shows both (`THINK: high→on`) and turns yellow. It shows `THINK: n/a` for a model that takes no thinking setting. Below the levels, **Send reasoning back** picks off / this turn / all turns ([`/think-history`](#sending-reasoning-back)).
+  - The **`THINK`** badge shows the [thinking level](#thinking-level). Clicking it opens a menu of the values the current model takes (e.g. off / on / low / medium / xhigh for Qwen3.8), plus your current choice, greyed out if the model can't take it. When the model gets something other than your choice, the badge shows both (`THINK: high→on`) and turns yellow. It shows `THINK: n/a` for a model that takes no thinking setting. Below the levels, **Send reasoning back** picks off / this turn / all turns ([`/think-history`](#sending-reasoning-back)). Under it, **Earlier reasoning kept** picks off / lean / more / most ([`/think-keep`](#trimming-the-reasoning-sent-back)).
   - The **`CAVECAT`** badge shows whether [cavecat](#cavecat-mode) is `off` or `on`, and is highlighted when it's on. Clicking it opens a menu to switch it, like `/cavecat`.
   - The **`RUN: auto` / `RUN: confirm`** badge toggles `run_command` confirmation (`/run-confirm`). A **`TOOLS: off`** badge appears when tools are disabled. Click it to turn them back on. A **`NET: on`** / **`NET: local`** badge appears when internet access is on; click it to turn it off. Both are also in View → Network. The **`INDEX`** badge shows the [code index](#code-index): `off`, build progress (`building 812/1873`), or files and memory against the budget (`312 files · 4MB/100MB`). While the index is off, clicking it turns it on. While it is on, clicking it opens a popover like the CTX one: a meter of memory against the budget, a stacked bar and one row per part of the index (file records, definitions, imports, identifiers, text signatures), the same split per language, and Rebuild / Save now / Turn off. It turns yellow when the index is over its memory budget and has dropped a part.
   - **Tools** (wrench icon) opens the [tool picker](#turning-tools-on-and-off) for the current mode: one checkbox per tool, grouped, with the **Tool calls** master switch on top. Hovering a tool shows its description. A small count on the icon says how many tools are off in this mode.
@@ -275,6 +276,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Diff style | `/diff-style compact\|git` | Compact `± path (+N −M)` header, or `diff --git` / `---` / `+++` headers |
 | Thinking level | `/think off\|on\|<level>` | The `THINK` badge in the status bar, not the View menu: how much the **model** reasons before answering. Unlike the display toggles above, this is shared with the TUI |
 | Send reasoning back | `/think-history off\|turn\|all` | In the same `THINK` menu: whether the model sees its own earlier reasoning. Shared with the TUI |
+| Earlier reasoning kept | `/think-keep off\|lean\|more\|most` | In the same `THINK` menu: how much of its earlier reasoning the model gets back. Shared with the TUI |
 | Cavecat | `/cavecat off\|on` | The `CAVECAT` badge in the status bar, and View → Context (for phone width): compress plans, tool text and command output, and keep replies short. Shared with the TUI |
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
 | Command output | `/run-mode`, `/run-output-limit` | View → Context: save command output to a log and return a view, and the view's size in characters. Shared with the TUI |
@@ -1282,19 +1284,19 @@ The system message is assembled by `Harness.system_prompt_sections()` (`harness/
                                         │ ------------------------------ │
  /cavecat on (not momo) ───────────────▶│ 3 Cavecat                 [if] │
                                         │ ------------------------------ │
- workdir, date, OS, git, /net ─────────▶│ 4 Environment                  │
+ /guides on + AGENTS.md, … ────────────▶│ 4 Project guides          [if] │
                                         │ ------------------------------ │
- /guides on + AGENTS.md, … ────────────▶│ 5 Project guides          [if] │
+ /load-skill → skills/<name>.md ───────▶│ 5 Skill: <name>         [each] │
                                         │ ------------------------------ │
- /load-skill → skills/<name>.md ───────▶│ 6 Skill: <name>         [each] │
-                                        │ ------------------------------ │
-                  ┌─ /tool-ref ────────▶│ 7 Tool reference               │
+                  ┌─ /tool-ref ────────▶│ 6 Tool reference               │
  tools on in this │                     │ ------------------------------ │
-                  ├─ fetch_url or ─────▶│ 8 Using the internet      [if] │
- mode (/tools, ───┤  web_search on      │ ------------------------------ │
+ mode (/tools, ───┼─ fetch_url or ─────▶│ 7 Using the internet      [if] │
+ /net, /index,    │  web_search on      │ ------------------------------ │
+ /run-mode)       │   workdir, date, ──▶│ 8 Environment                  │
+                  │   OS, git, /net     │ ------------------------------ │
                   ├─ index on/off ─────▶│ 9 Navigating code              │
- /net, /index,    │                     └────────────────────────────────┘
- /run-mode)       └────────────────────▶ Tool schemas (JSON, sent alongside the prompt)
+                  │                     └────────────────────────────────┘
+                  └────────────────────▶ Tool schemas (JSON, sent alongside the prompt)
 ```
 
 `[if]` parts appear only when their input is on, `[each]` repeats per loaded skill; the `---` lines are the rules that join the parts. When any input changes, the message is rebuilt in place.
@@ -1304,14 +1306,14 @@ The system message is assembled by `Harness.system_prompt_sections()` (`harness/
 | 1 | Code index banner | While the code index is on | `_index_banner` in `harness/prompts.py`: one line steering to the `index_*` tools |
 | 2 | Role | Always | `roles/<mode>.md` with `{workdir}` filled in; in plan mode also the draft plan, or, while executing, the coder role + plan-execution rules + the live plan with `▶` on the current step |
 | 3 | Cavecat | With `/cavecat on`, in every mode but momo | `_cavecat_rules`: plans and tool text (`ask_user`, commit messages, specs in design mode) are compressed, there is no narration between tool calls, and the reply is kept short. See [Cavecat mode](#cavecat-mode) |
-| 4 | Environment | Always | `_environment`: working directory, today's date, OS/shell and git branch (when `run_command` is offered), how to run Python when there is no `python` command, and whether internet access is on or off |
-| 5 | Project guides | With `/guides on` and a guide file | `AGENTS.md`, `CLAUDE.md`, `MOMO.md`, … from the workdir |
-| 6 | Skill: &lt;name&gt; | One per loaded skill | `skills/<name>.md` |
-| 7 | Tool reference (N tools) | Always | Generated from the tool schemas; `/tool-ref full\|compact` picks the style |
-| 8 | Using the internet | While a net tool (`fetch_url`, `web_search`) is on | `_net_rules`: check versions and APIs rather than recall them, read the project's own manifests first, look up general facts when the topic is recent, you're unsure or the user asks, stop once answered, cite URLs |
+| 4 | Project guides | With `/guides on` and a guide file | `AGENTS.md`, `CLAUDE.md`, `MOMO.md`, … from the workdir |
+| 5 | Skill: &lt;name&gt; | One per loaded skill | `skills/<name>.md` |
+| 6 | Tool reference (N tools) | Always | Generated from the tool schemas; `/tool-ref full\|compact` picks the style |
+| 7 | Using the internet | While a net tool (`fetch_url`, `web_search`) is on | `_net_rules`: check versions and APIs rather than recall them, read the project's own manifests first, look up general facts when the topic is recent, you're unsure or the user asks, stop once answered, cite URLs |
+| 8 | Environment | Always | `_environment`: working directory, today's date, OS/shell and git branch (when `run_command` is offered), how to run Python when there is no `python` command, and whether internet access is on or off |
 | 9 | Navigating code | Always | `_nav_rules`: how to find code with the tools this mode has; with the index on it becomes the index table (`index_search`, `index_callers`, …) |
 
-The parts are joined with `---` rules (the role follows the banner with a blank line only). The index banner goes first and the navigation rules last on purpose: a small model weighs the start and end of the prompt most. Cavecat sits right after the role for the same reason. Role text is behaviour; tool usage lives in the generated parts, so the role files carry no tool tables that could go stale.
+The parts are joined with `---` rules (the role follows the banner with a blank line only). The Environment part (working directory, date, git state) comes late because it is the part that changes between projects and days: a llama.cpp server that reuses any shared prompt prefix then keeps everything before it cached when you start in another directory or on a new day. On a model with recurrent layers (Ornith, Qwen3.5) the server only resumes from checkpoints at the ends of earlier prompts, so this neither helps nor hurts there. The index banner goes first and the navigation rules last on purpose: a small model weighs the start and end of the prompt most. Cavecat sits right after the role for the same reason. Role text is behaviour; tool usage lives in the generated parts, so the role files carry no tool tables that could go stale.
 
 The system message is rebuilt in place whenever something it depends on changes: the mode, a skill, the guides, the plan, `/cavecat`, or the tool set (`/tools`, `/net`, `/index`, `/run-mode`, `/tool-ref`). Sessions save the active skill list and reconstruct the system prompt from the current files on disk when loaded, so edits to role or skill files take effect on the next load.
 
@@ -1407,6 +1409,7 @@ Type any command in the input bar:
 | `/think` | Show the thinking level and what the current model takes |
 | `/think off\|on\|low\|medium\|high\|xhigh` | Set the model's thinking/reasoning level (saved). See [Thinking level](#thinking-level) |
 | `/think-history off\|turn\|all` | Send the model's own reasoning back to it: none, since your last message (default), or every turn (saved). See [Sending reasoning back](#sending-reasoning-back) |
+| `/think-keep [off\|lean\|more\|most]` | How much of its earlier reasoning the model gets back: `lean` (default) suits small models, `more` (×2) or `most` (×4) larger ones, `off` all of it (saved). See [Trimming the reasoning sent back](#trimming-the-reasoning-sent-back) |
 | `/cavecat [off\|on]` | Compress plans, tool text and command output, and keep replies short, to save tokens (saved). See [Cavecat mode](#cavecat-mode) |
 | `/companion-idle-recap on\|off` | When you've been idle, momo recaps the last turns in its speech bubble (at most once per turn, 5-minute cooldown; lines are kept in the session). Off by default; also `--companion-idle-recap` |
 | `/companion-idle-recap <secs>` | How long you must be idle before momo recaps (default 90, also `--companion-idle-recap-secs`) |
@@ -1525,7 +1528,7 @@ Compaction summaries and the companion's recaps always ask for no reasoning, wha
 /think-history off      # the model never sees its earlier reasoning
 ```
 
-Saved in `prefs.json`; `--think-history` sets it at startup. In the web UI it is in the `THINK` menu. With [`/cavecat on`](#cavecat-mode) only the decision of earlier reasoning is sent back (its plan steps and closing paragraph); the transcript keeps it all.
+Saved in `prefs.json`; `--think-history` sets it at startup. In the web UI it is in the `THINK` menu. By default only the decision of earlier reasoning is sent back (its plan steps and closing sentences, more of a longer thought); [`/think-keep`](#trimming-the-reasoning-sent-back) sets how much, or `off` for all of it. The transcript keeps it all.
 
 During a tool loop the model reasons, calls a tool, gets the result, and reasons again. Chat templates are written for the model to see its reasoning from the earlier steps of that loop. The templates of the local models show what each expects:
 
@@ -1555,14 +1558,27 @@ Measured with the code-navigation evals on Qwen3.5-9B (llama.cpp, 13 task/mode p
 
 Accuracy was unchanged, within the noise of 3 runs per task. The gain is efficiency: the model stopped re-planning after each tool result. It made a quarter fewer tool calls and finished in about 40% less time, and the slowest task (blast-radius) went from 117 s and 80 KB of tool output to 39 s and 8 KB. Hence `turn` is the default. `all` hasn't been measured.
 
+### Trimming the reasoning sent back
+
+```
+/think-keep             # the current level
+/think-keep lean        # the plan steps and closing sentences (default)
+/think-keep more        # twice as much
+/think-keep most        # four times as much
+/think-keep off         # send it back whole
+```
+
+With `/think-history` `turn` or `all`, the model re-reads its earlier reasoning on every later request. `/think-keep` sends only where it got to: the plan steps it listed and its closing sentences, with code the tool call repeats replaced by a pointer to the call, and a note saying how much was left out (`harness/think_trim.py`). How much is kept grows with the square root of the thought's length, with a floor: `max(300, 12·√chars)` at `lean`, so 1k chars keep ~380, 10k ~1,200 and 30k ~2,100. A long thought keeps more, but a smaller share, since deliberation grows faster than decisions. Prose is cut only at sentence boundaries, code never; a thought under ~400 chars goes as it is. On recorded sessions `lean` sends a fifth of the reasoning (`more` a third, `most` three fifths), from 93% of thoughts under 500 chars to 9% of those over 8,000. The transcript keeps all of it. The trim is a pure function of the history, so a step's trimmed reasoning is identical on every later request and llama.cpp's prompt cache misses only once per step. A lossless trim (only what the context already holds, and "Let me…" narration) was tried first and took 1–9% off: most reasoning is deliberation full of names and numbers. On Ornith-9B, sending reasoning back made the model reason more (it copies what it sees); the trim made runs 9–22% faster than sending it all, and sending none (`/think-history off`) was faster still. A Qwen3.5 eval favoured sending it back, so measure your own model ([`evals/README.md`](evals/README.md#round-6-a-budget-that-grows-with-the-reasoning-and-think-keep-same-model---suite-cavecat---runs-2-2026-10-26)).
+
+`lean` suits small models and is what was measured on Ornith-9B; `more` (×2) or `most` (×4) leaves a larger model more of its own thinking, and `off` sends all of it. It works with or without [cavecat](#cavecat-mode). Saved in `prefs.json`; `--think-keep` sets it at startup. In the web UI it is in the `THINK` menu, under Send reasoning back; the TUI status bar shows `KEEP: <level>` when it isn't `lean`.
+
 ## Cavecat mode
 
-Cavecat is a nod to [caveman](https://github.com/akramsystems/caveman), the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat, and it starts from the other end: what gets compressed is mostly what the model writes for itself and for the harness, plus what the harness feeds it. Replies get shorter but **stay plain sentences**, and how the model thinks is never constrained (only what is sent back of it is shortened). `/cavecat on` turns on all of it:
+Cavecat is a nod to [caveman](https://github.com/akramsystems/caveman), the skill that makes a model talk like a caveman to save tokens. Momo is a cat, so here it's cavecat, and it starts from the other end: what gets compressed is mostly what the model writes for itself and for the harness, plus what the harness feeds it. Replies get shorter but **stay plain sentences**, and how the model thinks is never constrained. (The reasoning sent back is trimmed separately, by [`/think-keep`](#trimming-the-reasoning-sent-back).) `/cavecat on` turns on all of it:
 
 - **Plans.** `create_plan` steps are put into the system prompt on every turn of [plan execution](#plan-mode), so a shorter plan saves tokens on every step. `complete_step` summaries and `revise_plan` steps too.
 - **Tool text.** `ask_user` questions, commit messages, and the specs written in design mode.
 - **Between tool calls.** No narration alongside a call (caveman's "no chatter between tool calls"); what the model found goes in its reply. The nudge that asks a model for text after 10 tool-only calls waits for 20 instead, and no longer asks for a progress line.
-- **Reasoning sent back** (done by the harness). With [`/think-history`](#sending-reasoning-back) `turn` or `all`, the model re-reads its earlier reasoning on every later request. Cavecat sends only its decision: the plan steps it listed and its closing paragraph, with code the tool call repeats replaced by a pointer to the call, and a note saying how much was left out (`harness/think_trim.py`). On recorded sessions that leaves about a sixth of the reasoning. The transcript keeps all of it. The trim is a pure function of the history, so a step's trimmed reasoning is identical on every later request and llama.cpp's prompt cache misses only once per step. A lossless trim (only what the context already holds, and "Let me…" narration) was tried first and took 1–9% off: most reasoning is deliberation full of names and numbers. On Ornith-9B, sending reasoning back made the model reason more (it copies what it sees); the trim made runs 9–22% faster than sending it all, and sending none (`/think-history off`) was faster still. A Qwen3.5 eval favoured sending it back, so measure your own model ([`evals/README.md`](evals/README.md#measuring-cavecat---cavecat)).
 - **Command output** ("read less", done by the harness, not the model). In `/run-mode new`, the default view of a `run_command` result collapses runs of redundant lines into a note naming their lines in the saved log: passing test lines (a whole-word `PASS`/`PASSED`/`ok`/`OK` or a check mark, none with an error/fail/warning word), the same line repeated, and lines that differ only in their numbers (counters, timestamps, progress; the first and last stay). Only when it saves at least 10 lines, and only when the result then fits the output limit whole. `tail=`/`grep=` views and `command_output` are never compacted, and `command_output` reaches every collapsed line.
 - **The reply**: the result first, then what changed and anything you must decide; no preamble, step-by-step recap or closing offer. Still plain sentences, not caveman.
 

@@ -242,7 +242,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self.think_level: str = "on"
         self.think_history: str = "turn"    # /think-history, see THINK_HISTORY
         self.cavecat: str = "off"           # /cavecat, see prompts.CAVECAT_LEVELS
-        self.think_trim: bool | None = None  # evals only: force the think_trim; None follows cavecat
+        self.think_keep: str = "lean"       # /think-keep, see think_trim.KEEP_LEVELS
         self._trim_cache: dict[tuple, str] = {}
         self.max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS   # /max-output-tokens, 0 = off
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
@@ -1111,7 +1111,6 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         # Next to the role, so a small model weighs it; nav keeps the last slot.
         if (cave := _cavecat_rules(self.cavecat, role_name)):
             add("cavecat", "Cavecat", cave)
-        add("env", "Environment", _environment(self.workdir, names, self.net_access))
         # The user's own instructions sit next to the role they refine, not
         # behind the (large) tool reference.
         self._guides_text = ""
@@ -1137,6 +1136,13 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         net = _net_rules(role_name, names, set(self.search_sources.sources))
         if net:
             add("net", "Using the internet", net)
+        # The parts that change with the directory and the day (working directory,
+        # date, git state) come after everything that doesn't, so a server that
+        # reuses any shared prefix keeps the role, rules and tool reference cached
+        # across projects and days.  (A recurrent or hybrid model, e.g. Ornith or
+        # Qwen3.5, only resumes from checkpoints at earlier prompt ends: no gain or
+        # loss there.)  Nav keeps the last slot.
+        add("env", "Environment", _environment(self.workdir, names, self.net_access))
         add("nav", "Navigating code" + (" (code index)" if index_on else ""),
             _nav_rules(role_name, names, index_on))
         return secs
@@ -1443,13 +1449,13 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                 and nxt.get("role") == "assistant"}
 
     def _trims_thinking(self) -> bool:
-        """Send back only the decision of earlier reasoning (think_trim): with
-        /cavecat on, unless an eval forces it (think_trim True/False)."""
-        return self.cavecat != "off" if self.think_trim is None else self.think_trim
+        """Send back only the decision of earlier reasoning (think_trim):
+        unless /think-keep is off."""
+        return self.think_keep != "off"
 
     def _sent_reasoning(self) -> dict[int, str]:
         """id of each stored thinking message the next request sends back ->
-        the text it sends: the whole reasoning, or with /cavecat on its trim.
+        the text it sends: the whole reasoning, or with /think-keep its trim.
         Trims are cached: the inputs of an earlier step never change."""
         sent = self._sent_thinking()
         if not sent:
@@ -1461,11 +1467,11 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                 continue
             text = m.get("content") or ""
             if trims:
-                key = (id(m), len(text), id(nxt))
+                key = (id(m), len(text), id(nxt), self.think_keep)
                 if key not in self._trim_cache:
                     if len(self._trim_cache) > 256:
                         self._trim_cache.clear()
-                    self._trim_cache[key] = think_trim.trim(text, nxt)
+                    self._trim_cache[key] = think_trim.trim(text, nxt, self.think_keep)
                 text = self._trim_cache[key]
             out[id(m)] = text
         return out
@@ -2226,6 +2232,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             think_known=self.client.thinking_caps().known,
             think_history=self.think_history,
             cavecat=self.cavecat,
+            think_keep=self.think_keep,
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
             workspace_pending=[t.name for t in self.workspace_tools.by_status("pending")],
             skills=list(self.active_skills),
