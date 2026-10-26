@@ -514,7 +514,6 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
         <span class="chip ok">no required packages</span>
         <span class="chip ok">no build step</span>
         <span class="chip">Python 3.14</span>
-        <a class="chip sys" href="#cavecat" title="Cavecat mode: short replies, telegraphic plans, compacted command output — runs ~20% faster on a 9B model">/cavecat on: ~20% faster</a>
       </div>
     </div>
 
@@ -646,6 +645,11 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       <h3><svg class="icon" aria-hidden="true"><use href="#i-flask"/></svg>Measured, not guessed</h3>
       <p>Unit tests check that the tools work. A separate eval suite checks whether a small local model actually <em>uses</em> them, run several times with the spread reported.</p>
       <a class="more" href="#dev">Tests &amp; evals →</a>
+    </div>
+    <div class="card" style="--c: var(--think)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg>Earlier reasoning, trimmed</h3>
+      <p>In a tool loop the model re-reads its earlier reasoning on every request. momo sends back only where it got to: the plan steps and closing sentences, a bit more of a longer thought. <code>/think-keep more</code> or <code>most</code> leaves a larger model more, and <code>off</code> sends it whole. On a 9B model, runs were 9–22% faster than sending all of it.</p>
+      <a class="more" href="#think-keep">Trimming what is sent back →</a>
     </div>
   </div>
 
