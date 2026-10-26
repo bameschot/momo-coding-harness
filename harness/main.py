@@ -12,7 +12,8 @@ from . import run_store as run_store_mod
 from . import session as session_mod
 from .controller import Controller
 from .events import ChatEvent
-from .harness import DEFAULT_MAX_OUTPUT_TOKENS, MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness
+from .harness import (DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_UNDO_MAX, MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY,
+                      Harness)
 from .llm.base import THINK_LEVELS
 from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS, MODES
 from .think_trim import KEEP_LEVELS
@@ -62,6 +63,9 @@ def main():
     parser.add_argument("--max-output-tokens", type=int, default=None, metavar="N",
                         help="most tokens one model reply may take, 0 = no cap "
                              "(default: last /max-output-tokens setting, else 25000)")
+    parser.add_argument("--undo-max", type=int, default=None, metavar="N",
+                        help="turns of file checkpoints /undo can go back, 0 = no cap "
+                             "(default: last /undo-max setting, else 20)")
     parser.add_argument("--run-output-limit", type=int, default=None, metavar="N",
                         help="Chars in run_command's default view in run mode new, 0 = off "
                              "(default: last /run-output-limit setting, else off)")
@@ -273,6 +277,12 @@ def main():
                          f"{MIN_MAX_OUTPUT_TOKENS}")
         cap = DEFAULT_MAX_OUTPUT_TOKENS
     harness.max_output_tokens = cap
+    undo_max = args.undo_max if args.undo_max is not None else prefs.get("undo_max", DEFAULT_UNDO_MAX)
+    if not isinstance(undo_max, int) or isinstance(undo_max, bool) or undo_max < 0:
+        if args.undo_max is not None:
+            parser.error("--undo-max: expected 0 (no cap) or a number of turns")
+        undo_max = DEFAULT_UNDO_MAX
+    harness.undo_max = undo_max
     harness.rebuild_system_prompt()     # the run_command schema depends on run_mode
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 

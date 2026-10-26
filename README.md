@@ -55,6 +55,7 @@ Options:
 | `--think-keep` | last `/think-keep`, else `lean` | How much of its earlier reasoning the model gets back: `lean`, `more` (×2), `most` (×4), or `off` (all of it). See [Trimming the reasoning sent back](#trimming-the-reasoning-sent-back) |
 | `--cavecat` | last `/cavecat`, else `off` | `on`: compress plans, tool text and command output, and keep replies short, to save tokens; `off`. See [Cavecat mode](#cavecat-mode) |
 | `--max-output-tokens` | last setting, else `25000` | Most tokens one model reply may take, reasoning included; `0` = no cap. See `/max-output-tokens` |
+| `--undo-max` | last `/undo-max`, else `20` | Turns of file checkpoints `/undo` can go back before the oldest is dropped; `0` = no cap (back to the last `/keep`). See [Undoing file changes](#undoing-file-changes) |
 | `--no-stream` | off | Wait for complete replies instead of streaming them as they are generated (streaming is on by default, in the TUI and the web UI) |
 | `--web` / `--no-web` | on | Serve the browser chat UI alongside the TUI |
 | `--web-host` | `127.0.0.1` | Interface for the web UI (a non-loopback host requires an access token) |
@@ -168,7 +169,7 @@ The browser and the terminal are two views of **the same session**, not separate
 ```
 
 - **Status bar**
-  - **Sessions** (clock icon) opens the [session drawer](#sessions) and **Workspace files** (folder icon) opens the [workspace browser](#workspace-files).
+  - **Sessions** (clock icon) opens the [session drawer](#sessions) and **Workspace files** (folder icon) opens the [workspace browser](#workspace-files). **Changes** (file ± icon) opens the [Changes drawer](#changes); its count says how many files momo changed since the last keep.
   - The **connection dot** is green while the page is connected to the harness and red while it reconnects. It reconnects on its own after a harness restart.
   - The **mode picker** switches between design, chat, plan, coding and momo, like `/design`, `/code` and so on, or Shift+Tab.
   - In plan mode a **plan type** selector (normal / TDD) sits next to it, like `/plan normal` and `/plan tdd`. It is locked while a plan is executing.
@@ -194,6 +195,7 @@ The browser and the terminal are two views of **the same session**, not separate
     - **Retry** sends the same message again and replaces the reply it got. Attachments are included.
     - **Edit** puts the typed text back into the input box, shown with an *Editing your last message* banner. Enter sends the edited version, and the original attachments are kept. ✕ or Esc cancels.
     - Both drop the old reply, and everything after it, from the conversation the model sees. They aren't offered while the model is working or a plan is executing, nor on answers to questions or on `/commands`. The TUI has `/retry`.
+    - When the reply being replaced changed files, both first ask *That reply changed N files. Put them back as before, too?* **Yes** retries from the files as they were before it, **No** retries against the files as they are now. See [Undoing file changes](#undoing-file-changes).
   - When you've scrolled up, new messages don't pull you down. A **↓ New messages** button appears instead. Long replies are shown from their beginning.
 - **Plan drawer** shows the current plan with its checklist and **Run**, **Resume** and **Cancel plan** buttons, which send `/plan run`, `/plan resume` and `/plan cancel`.
 - **Input box**
@@ -231,6 +233,33 @@ The **Sessions** button (clock icon, top left) opens the session drawer. It list
 - Neither is possible while the model is working.
 - **Delete** a session with the trash button that appears when you hover over it (always visible on touch screens), then confirm. To delete several, click **Select**, tick them (or **Select all**) and click **Delete**. Its `.json` file and its `.log` are both removed. This can't be undone.
 - The session that is open can't be deleted: it has no trash button and can't be selected. Start a **+ New** one first, or load another.
+
+### Changes
+
+The **Changes** button (file ± icon, top left, next to Workspace files) opens a drawer of everything momo changed since your last **keep**. It works like the workspace browser and shares its slot on the left.
+
+```
+┌ Changes ──────── [By turn] [Since keep]   [Keep all] ✕ ┐
+│ ▾ #2 turn 2 · rename calc_tax to tax_for   3 files cmd ⟲│
+│     M  ledger.py      src    +2 −2                       │
+│     M  report.py      src    +2 −2                       │
+│     R  notes.txt → notes.md  docs                        │
+│ ▸ #1 turn 1 · add a --verbose flag          1 file     ⟲│
+│ ──────────────────────────────────────────────────────── │
+│ 5 files changed since keep · +9 −5 · 2 checkpoints       │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **By turn** (the default) lists the checkpoints newest first: one per message you sent, or per plan step, with its first line as the label. Each one folds open to its files, marked `A`dded, `M`odified, `D`eleted or `R`enamed, with line counts. The newest is open. `cmd` marks a turn that ran commands (see [what isn't tracked](#undoing-file-changes)).
+- **Since keep** lists each file once, with its net change: what **Keep all** would accept. A file that is back as it was isn't listed.
+- **Clicking a file** shows its diff in the drawer, in the view's diff style (compact or git), with word-level marks. In By turn that's what the turn changed; in Since keep it's the change since the keep point, against the file on disk. From the diff:
+  - **Revert this file** puts that one file back as it was at the last keep, and drops it from every checkpoint. A rename's source comes back with it.
+  - **Open file** shows the file in the workspace browser.
+  - **Copy diff** copies a unified diff.
+- **⟲** on a checkpoint undoes it *and every later one* (`/undo <n>`). A confirmation names the files it restores, the ones it skips because they were changed outside momo since, and the ones it can't restore. When only skipped files are left, ⟲ offers to overwrite them.
+- **Keep all** accepts everything (`/keep`) after a confirmation. The drawer empties, and undo can't go back past this point.
+- Every diff in the conversation has a **changes** link in its header, which opens the drawer at that file.
+- The drawer refreshes while the model works. Its actions wait until the turn is over, and their reports appear in the conversation in both windows. The model is told about reverted files with your next message.
 
 ### Workspace files
 
@@ -405,6 +434,12 @@ The page talks to the harness through a small JSON API, which can also be script
 | `GET /api/files?path=&hidden=0\|1` | Workspace directory listing |
 | `GET /api/file?path=` | A workspace file converted to text (same conversion as uploads) |
 | `GET /api/files/search?q=` | Fuzzy workspace path search (top 30) |
+| `GET /api/changes` | The file checkpoints since the last keep: `{turns: [{id, turn, label, step, ran_commands, files: [{path, rel, op, from?, added, removed, restorable}]}], since_keep: [...], undo_max}` |
+| `GET /api/changes/diff?path=&checkpoint=` | One changed file's diff (`body` as in a `diff` event); without `checkpoint`, since the keep point. Only for a path in the stack |
+| `GET /api/changes/preview?checkpoint=` | What undoing back to that checkpoint would do: `{ids, restore, conflicts, lost, ran_commands, text}` |
+| `POST /api/undo` `{"checkpoint": n\|null, "force": false}` | Like `/undo [force] [n]`, without the question. `409` while a turn runs |
+| `POST /api/changes/revert` `{"path", "force"}` | Put one file back as at the last keep |
+| `POST /api/keep` | Accept every file change (`/keep`) |
 | `POST /api/upload` | Raw file bytes (`Content-Type: application/octet-stream`, URL-encoded name in `X-Filename`). Returns `{name, text, kind, chars, pages, truncated}`, or `{error}` with status 422 for binary or unreadable files |
 
 ```bash
@@ -467,6 +502,7 @@ curl -sN localhost:8765/api/events          # watch the live event stream
   - **/ command autocomplete**: typing `/` at the start of the input lists the matching slash commands with their usage and description. It uses the same keys as `@`. A picked command that takes an argument gets a trailing space so you can type the argument.
   - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
 - **Chat pane scrolling** — `↑`/`↓`, `PgUp`/`PgDn`. When a table or other wide content is present, `←`/`→` scrolls horizontally (chat focus required). While you are scrolled up, new output does not pull the view down; the status line shows `▼ NEW (PgDn)` until you are back at the bottom. Resizing the terminal re-wraps the transcript to the new width.
+- **Changes** — `/changes` opens the [file checkpoints](#undoing-file-changes) over the chat pane, newest first, each with its files: `↑`/`↓` move, `Enter` shows the highlighted file's diff (`↑`/`↓`/`PgUp`/`PgDn` scroll it, `Esc` goes back), `Tab` switches between *by turn* and *since keep*, `u` undoes back to before the highlighted checkpoint, `r` reverts the highlighted file, `k` keeps everything, `Esc` closes. Actions close the overlay and ask `[y/N]` in the chat. The status bar shows `UNDO: n` while there are checkpoints.
 - **Tool picker** — `/tools` opens a checklist of the current mode's tools over the chat pane: `↑`/`↓` move, `Space`/`Enter` turn the highlighted tool on or off, `?` prints its full description and parameters, `Esc` closes. The highlighted tool's description is shown under the list. The status bar shows `TOOLS: N off` while tools are off in this mode. See [Turning tools on and off](#turning-tools-on-and-off).
 - **System prompt** — `/system-prompt` opens the composed system prompt in `$PAGER` (`less -R` if unset); `q` returns to momo. See [Seeing the system prompt](#seeing-the-system-prompt).
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green.
@@ -724,6 +760,38 @@ A small model copies `old_string` with slips, edits blind, and forgets the other
 
 `grep_files` returns at most 200 matches; `find_files` returns at most 100 files. Results over the cap include a trailer explaining how many were omitted.
 
+### Undoing file changes
+
+Before a write tool changes a file (`write_file`, `edit_file`, `edit_files`, `replace_symbol`, `append_to_file`, `delete_file`, `move_file`, and workspace or custom tools that declare the paths they write), momo saves what the file looked like. The changes of one turn form a **checkpoint**: the files as they were before your message, or before a plan step. The [Changes drawer](#changes) shows them with their diffs, and these commands work on them (also in the TUI):
+
+| Command | Effect |
+|---|---|
+| `/changes` | Open the Changes drawer (web) or overlay (TUI) |
+| `/undo` | Put back the files the last turn changed. It lists them and asks `[y/N]`. Repeat it to go further back, one turn at a time |
+| `/undo <n>` | Undo checkpoint `#n` and every later one |
+| `/undo force [n]` | The same, but also overwrite files changed outside momo since |
+| `/undo list` | The checkpoints since the last `/keep`, newest first, with their files |
+| `/undo file [force] <path>` | Put one file back as it was at the last `/keep` |
+| `/keep` | Accept every change. The checkpoints and their saved copies are deleted, and undo can't go back past this point |
+| `/undo-max [n\|off]` | How many turns of checkpoints are kept (default 20, saved, also `--undo-max`). Past the cap the oldest is dropped, with one notice. `off` keeps everything back to the last `/keep`. Lowering it below what is in use asks first |
+
+How it behaves:
+
+- **Back to before the turn.** Only the first change to a file in a turn saves its old contents, so an undo restores the file as it was before your message, however many edits the model made to it.
+- **Your own edits are safe.** momo also records each file as it left it. A file changed since, in your editor or by a command, is skipped and stays in the stack until `/undo force`. Undo goes back newest first, one checkpoint at a time, so an edit you made *between* two turns survives undoing both.
+- **Creates, deletes, renames and modes.** A file the turn created is deleted, a deleted one comes back with its permissions, a renamed file or folder moves back, and a symlink is restored as a link.
+- **Retry and Edit** ask whether the replaced reply's files go back too (see [Message actions](#layout)).
+- **The model is told.** Your next message starts with a note listing the files you reverted, so the model reads them again instead of trusting what it saw.
+- **The stack lasts until you keep.** It survives restarts with the session, is cleared by `/keep`, `/clear` and `/new`, and belongs to its session: loading another session shows that one's checkpoints. The TUI's status bar shows `UNDO: n` while there are any.
+
+What it doesn't do:
+
+- **Commands aren't tracked.** What `run_command` changes (`sed -i`, a formatter, code generation, `git checkout`) isn't seen. The checkpoint only notes that the turn ran commands, and the confirmation says so.
+- **Big files aren't saved.** Files over 5 MB are noted, not copied. An undo can't restore their contents (it says so), except by moving back a file that was renamed.
+- **Folders that were created stay.** An undo removes the files a turn created, but leaves empty folders.
+
+The copies live in `.momo/checkpoints/<session>/` (git-ignored, never indexed), stored once per distinct content. A checkpoint is only written once a call actually changes something, so a failed or no-op edit costs nothing. Because `.momo/` is writable by the model, an undo never writes outside the working directory or into `.momo/`, whatever the index there says.
+
 ### Turning tools on and off
 
 Each mode (design, chat, plan, coding, momo) has its own tool choices. Turn a tool off and the model no longer sees it in that mode: it disappears from the tool schemas and from the generated tool reference in the system prompt. The other modes keep it. A call to a tool that is off anyway (from recovered text or an older context) returns an error and does not run.
@@ -902,7 +970,8 @@ Each workspace gets a folder of momo's own, `.momo/`, made the first time someth
 ├── tools.json            # their roles, categories and interpreter, committed
 ├── scratch/              # the model's scratchpad (scratch_write), kept between sessions
 ├── plan.md               # the plan, while one exists (Plan mode)
-└── runs/<session>/rN.log # saved run_command output (Command output)
+├── runs/<session>/rN.log # saved run_command output (Command output)
+└── checkpoints/<session>/ # what files looked like before each turn, until /keep (Undoing file changes)
 ```
 
 **The scratchpad.** Small models put throwaway scripts and results wherever they happen to be, often in the project root. The scratchpad gives them a place for it. Every mode offers `scratch_write`, and the system prompt's Environment section names the folder (only while the tool is offered): *write temporary scripts, notes and intermediate results there, never into the project tree.* Reading back needs no new tool: `read_file`, `grep_file` and `list_directory` take `.momo/scratch/...` paths, and `run_command` can run `python3 .momo/scratch/probe.py`. Commands also get the folder's absolute path as `$MOMO_SCRATCH`.
@@ -1468,7 +1537,13 @@ Type any command in the input bar:
 | `/fast-compact` | Compact context without LLM summarisation (instant) |
 | `/clear` | Clear conversation history and discard any active plan (removes `.momo/plan.md`, like `/plan cancel`) |
 | `/new` | Save this session and start a new, empty one (same model, host and mode) |
-| `/retry` | Re-send your last message, replacing the reply it got |
+| `/retry` | Re-send your last message, replacing the reply it got. When that reply changed files, asks whether they go back too |
+| `/changes` | Open the Changes drawer (web) or overlay (TUI): what momo changed since the last `/keep`, per turn, with diffs. See [Undoing file changes](#undoing-file-changes) |
+| `/undo [force] [n]` | Put back the files the last turn changed, or checkpoint `#n` and every later one (asks first). `force` also overwrites files changed since |
+| `/undo list` | List the file checkpoints since the last `/keep` |
+| `/undo file [force] <path>` | Put one file back as it was at the last `/keep` |
+| `/keep` | Accept every file change: undo can't go back past this point |
+| `/undo-max [n\|off]` | How many turns of file checkpoints are kept (default 20, saved; `off` = no cap) |
 | `/cost` | Show token usage for this session, aggregated by mode and model (in/out/total tokens per combination) |
 | `/sessions` | List up to 20 recent sessions with mode and model |
 | `/session` | Show the current session file path |
@@ -1667,6 +1742,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`, except what belo
 ├── index/<hash>.pickle      # saved code index per workdir (/index save, /index-persist)
 ├── index/<hash>.filter      # which files that workdir's index covers (/index-filter)
 ├── runs/<timestamp>/rN.log  # run_command output only when the workdir's .momo/ can't be used
+├── checkpoints/<timestamp>/ # file checkpoints, likewise only when .momo/ can't be used
 ├── search_sources/*.json    # your web_search sources (/search-sources save, or add your own)
 ├── tools/*.py               # your custom tools (Adding a tool); folder 0700, files 0600
 ├── workspace-tools-approved.json  # which workspace tools (.momo/tools/) you approved or denied
@@ -1680,7 +1756,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`, except what belo
 
 | Path | What | Notes |
 |---|---|---|
-| `prefs.json` | Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode and output view, reply cap (`/max-output-tokens`) | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
+| `prefs.json` | Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode and output view, reply cap (`/max-output-tokens`), undo history (`/undo-max`) | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
 | `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |
@@ -1690,6 +1766,6 @@ Everything momo keeps between runs lives in `~/.momo-harness/`, except what belo
 | `search_sources/*.json` | Your own `web_search` sources: ones you wrote, and ones saved with `/search-sources save` | Loaded after the shipped sources; a file with a shipped name overrides it. Never read from the workdir. Specs may not hold credential headers |
 | `tls/` | momo's local CA and HTTPS certificate | Deleting it creates a new CA on the next `--web-tls auto` start; every device must trust it again |
 
-In each workdir: `.momo/` (scratchpad, `plan.md` while a plan exists, `runs/` command logs; see [Scratchpad and the `.momo/` folder](#scratchpad-and-the-momo-folder)). Elsewhere: `conversation-<timestamp>.md` from `/export`, and the web UI's theme, view and notification settings in each browser's `localStorage`. The `/token` value and the web UI access token are never stored anywhere.
+In each workdir: `.momo/` (scratchpad, `plan.md` while a plan exists, `runs/` command logs, `checkpoints/` file copies for undo until `/keep`; see [Scratchpad and the `.momo/` folder](#scratchpad-and-the-momo-folder)). Elsewhere: `conversation-<timestamp>.md` from `/export`, and the web UI's theme, view and notification settings in each browser's `localStorage`. The `/token` value and the web UI access token are never stored anywhere.
 
 Keep `~/.momo-harness/` private: sessions and logs contain your conversations, tool output from your code and your project paths.

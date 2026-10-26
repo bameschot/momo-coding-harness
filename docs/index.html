@@ -458,6 +458,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
   <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.2 7.5 9.5 4.3-1.3 7.5-4.9 7.5-9.5V6z"/><path d="m9 12 2.2 2.2L15.5 10"/></symbol>
   <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4 17a8 8 0 1 1 16 0"/><path d="m12 17 4-5"/><path d="M4 17h16"/></symbol>
   <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></symbol>
   <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.64-6.36L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></symbol>
   <symbol id="i-paw" viewBox="0 0 24 24"><ellipse cx="12" cy="16" rx="4.2" ry="3.6"/><circle cx="6.2" cy="10.5" r="1.8"/><circle cx="9.6" cy="6.8" r="1.8"/><circle cx="14.4" cy="6.8" r="1.8"/><circle cx="17.8" cy="10.5" r="1.8"/></symbol>
   <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></symbol>
@@ -593,6 +594,11 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       <h3><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg>Terminal and web UI, one session</h3>
       <p>A terminal UI and a browser window share one session, so you can type in either. Edits show as coloured diffs.</p>
       <div style="margin-top: auto"><a class="more" href="#tui">TUI docs →</a> &nbsp; <a class="more" href="#web">Web UI docs →</a></div>
+    </div>
+    <div class="card" style="--c: var(--ok)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-undo"/></svg>Undo what the model changed</h3>
+      <p>Every turn is a checkpoint. See each file's diff, take any number of turns back, and keep the result when you're happy. Works without git, and never overwrites your own edits.</p>
+      <a class="more" href="#undo">Undoing changes →</a>
     </div>
     <div class="card" style="--c: var(--ok)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg>Plan, approve, execute</h3>
@@ -968,6 +974,7 @@ ollama serve</code></pre></div>
       <tr><td><kbd>Shift+P</kbd></td><td>chat</td><td class="wrap">Toggle <code>run_command</code> confirmation</td></tr>
       <tr><td><kbd>Shift+C</kbd></td><td>chat</td><td class="wrap">Interrupt the running response</td></tr>
     </table></div>
+    <p><code>/changes</code> opens the file checkpoints over the chat pane; see <a href="#changes">The Changes drawer</a> for its keys.</p>
   </section>
 
   <section id="web" data-voice="web">
@@ -976,8 +983,9 @@ ollama serve</code></pre></div>
     <p>The browser and terminal show the same session: answer the model in either. View options, such as hiding thinking, are per window.</p>
     <h3>What's in it</h3>
     <ul>
-      <li><strong>Status bar:</strong> sessions, file browser, mode and model pickers, the CTX meter (click for a breakdown), setting badges, and buttons for <a href="#mcp">MCP</a>, <a href="#tool-choices">tools</a> and <a href="#skills">skills</a>.</li>
+      <li><strong>Status bar:</strong> sessions, file browser, <a href="#changes">changes</a>, mode and model pickers, the CTX meter (click for a breakdown), setting badges, and buttons for <a href="#mcp">MCP</a>, <a href="#tool-choices">tools</a> and <a href="#skills">skills</a>.</li>
       <li><strong>Transcript:</strong> streamed replies, collapsible thinking and tool calls, coloured diffs and Yes/No question cards.</li>
+      <li><strong>Changes drawer:</strong> every file momo changed since the last keep, per turn, with diffs, undo and keep. See <a href="#changes">The Changes drawer</a>.</li>
       <li><strong>Input:</strong> <kbd>/</kbd> command and <kbd>@</kbd> path autocomplete, a message queue while the model is busy, and Retry / Edit.</li>
       <li><strong>Attachments:</strong> drag, paste or pick files; text and PDFs become text.</li>
       <li><strong>Notifications:</strong> a kitten mew and optional desktop notifications.</li>
@@ -1377,6 +1385,76 @@ def run(path: str = ".", limit: int = 20, *, workdir: Path) -> str:
       <li><strong>They point at what else must change:</strong> after a rename or signature change, the result lists the remaining uses.</li>
       <li><strong>They batch:</strong> <code>edit_files</code> makes every edit of a change in one call.</li>
     </ul>
+    <p>Every edit can be taken back: see <a href="#undo">Undoing changes</a>.</p>
+  </section>
+
+  <section id="undo" data-voice="undo">
+    <h2>Undoing changes</h2>
+    <p>Before a write tool changes a file, momo saves what it looked like. All the changes of one message (or one plan step) form a <strong>checkpoint</strong>. You can go back through them one turn at a time, look at every diff, and <strong>keep</strong> the result once you're happy with it. It doesn't need git, and it doesn't touch your own uncommitted work.</p>
+    <p>Covered: <code>write_file</code>, <code>edit_file</code>, <code>edit_files</code>, <code>replace_symbol</code>, <code>append_to_file</code>, <code>delete_file</code>, <code>move_file</code>, and <a href="#workspace-tools">workspace</a> or <a href="#custom-tools">custom tools</a> that declare the paths they write.</p>
+
+    <h3 id="undo-commands">Commands</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>/undo</code></td><td class="wrap">Put back the files the last turn changed. It lists them and asks first. Repeat it to go further back.</td></tr>
+      <tr><td><code>/undo &lt;n&gt;</code></td><td class="wrap">Undo checkpoint #n and every later one</td></tr>
+      <tr><td><code>/undo force [n]</code></td><td class="wrap">Also overwrite files changed outside momo since</td></tr>
+      <tr><td><code>/undo list</code></td><td class="wrap">The checkpoints since the last keep, newest first, with their files</td></tr>
+      <tr><td><code>/undo file [force] &lt;path&gt;</code></td><td class="wrap">Put one file back as it was at the last keep</td></tr>
+      <tr><td><code>/keep</code></td><td class="wrap">Accept every change. Undo can't go back past this point.</td></tr>
+      <tr><td><code>/changes</code></td><td class="wrap">Open the <a href="#changes">Changes</a> drawer (web) or overlay (TUI)</td></tr>
+      <tr><td><code>/undo-max [n|off]</code></td><td class="wrap">How many turns the stack keeps (default 20, remembered, also <code>--undo-max</code>). <code>off</code> keeps everything back to the last keep.</td></tr>
+    </table></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">momo</span></div><pre><code>&gt; /undo
+Undo checkpoint #2 (turn 2 · rename calc_tax to tax_for)?
+Restore: src/ledger.py, src/report.py, docs/notes.md, notes.txt
+Note: these turns ran commands — what they changed is not tracked. [y/N]
+&gt; y
+Reverted 3 files (back to before turn 2): src/ledger.py, src/report.py, docs/notes.md → notes.txt
+1 checkpoint left.</code></pre></div>
+
+    <h3 id="changes">The Changes drawer</h3>
+    <p>In the web UI, the <strong>Changes</strong> button next to Workspace files shows how many files momo changed since the last keep. It opens a drawer that works like the file browser:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">Changes</span></div><pre><code>┌ Changes ──────── [By turn] [Since keep]   [Keep all] ✕ ┐
+│ ▾ #2 turn 2 · rename calc_tax to tax_for   3 files cmd ⟲│
+│     <span class="com">M</span>  ledger.py      src    +2 −2                       │
+│     <span class="com">M</span>  report.py      src    +2 −2                       │
+│     <span class="com">R</span>  notes.txt → notes.md  docs                        │
+│ ▸ #1 turn 1 · add a --verbose flag          1 file     ⟲│
+│ ──────────────────────────────────────────────────────── │
+│ 5 files changed since keep · +9 −5 · 2 checkpoints       │
+└──────────────────────────────────────────────────────────┘</code></pre></div>
+    <ul>
+      <li><strong>By turn</strong> lists the checkpoints newest first, labelled with your message. Each one folds open to its files: <strong>A</strong>dded, <strong>M</strong>odified, <strong>D</strong>eleted or <strong>R</strong>enamed, with line counts. <code>cmd</code> marks a turn that ran commands.</li>
+      <li><strong>Since keep</strong> lists each file once with its net change: what <strong>Keep all</strong> accepts.</li>
+      <li><strong>Click a file</strong> for its diff, with word-level marks. From there: <strong>Revert this file</strong>, <strong>Open file</strong> or <strong>Copy diff</strong>.</li>
+      <li><strong>⟲</strong> undoes a checkpoint and every later one. The confirmation names what it restores and what it skips.</li>
+      <li>Every diff in the conversation has a <strong>changes</strong> link that opens the drawer at that file.</li>
+      <li>It fills in while the model works. Its actions wait until the turn is over, and their reports appear in both windows.</li>
+    </ul>
+    <p>In the <a href="#tui">TUI</a>, <code>/changes</code> shows the same list over the chat pane, and the status bar shows <code>UNDO: n</code> while there are checkpoints.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td class="wrap">Move. In a diff: scroll (also <kbd>PgUp</kbd> / <kbd>PgDn</kbd>).</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td class="wrap">The highlighted file's diff (<kbd>Esc</kbd> goes back)</td></tr>
+      <tr><td><kbd>Tab</kbd></td><td class="wrap">Switch between <em>by turn</em> and <em>since keep</em></td></tr>
+      <tr><td><kbd>u</kbd></td><td class="wrap">Undo back to before the highlighted checkpoint</td></tr>
+      <tr><td><kbd>r</kbd></td><td class="wrap">Revert the highlighted file</td></tr>
+      <tr><td><kbd>k</kbd></td><td class="wrap">Keep everything</td></tr>
+      <tr><td><kbd>Esc</kbd> / <kbd>q</kbd></td><td class="wrap">Close. Actions close the overlay and ask <code>[y/N]</code> in the chat.</td></tr>
+    </table></div>
+
+    <h3 id="undo-how">How it behaves</h3>
+    <ul>
+      <li><strong>Back to before the turn.</strong> Only the first change to a file in a turn saves its old contents, so an undo restores the file as it was before your message, however many edits the model made.</li>
+      <li><strong>Your own edits are safe.</strong> momo also notes each file as it left it. A file you changed since, in your editor or with a command, is skipped and stays in the stack until <code>/undo force</code>. Undo goes back newest first, so an edit you made <em>between</em> two turns survives undoing both.</li>
+      <li><strong>Creates, deletes, renames.</strong> Created files are removed, deleted ones come back with their permissions, renamed files and folders move back, and symlinks come back as links.</li>
+      <li><strong>Retry and Edit</strong> ask whether the files the replaced reply changed should go back too, so a retry can start from the files as they were.</li>
+      <li><strong>The model is told.</strong> Your next message starts with a note listing the files you reverted, so the model reads them again.</li>
+      <li><strong>It lasts until you keep.</strong> The stack survives a restart with its session, and <code>/keep</code>, <code>/clear</code> and <code>/new</code> clear it. Past the <code>/undo-max</code> cap the oldest checkpoint is dropped, with one notice.</li>
+    </ul>
+    <p class="note"><strong>Not tracked:</strong> what <code>run_command</code> changes (<code>sed -i</code>, formatters, code generation). The checkpoint only notes that commands ran. Files over 5 MB are noted but not saved, and folders a turn created stay after an undo.</p>
+    <p>The saved copies live in <code>.momo/checkpoints/&lt;session&gt;/</code>, stored once per distinct content, and only once a call has actually changed something. Since the model can write to <code>.momo/</code>, an undo never writes outside the working directory or into <code>.momo/</code>, whatever the files there say.</p>
   </section>
 
   <section id="run-output" data-voice="run-output">
@@ -1410,7 +1488,8 @@ FAILED (failures=2)
 ├── tools.json            <span class="com"># their roles, categories and Python, committed</span>
 ├── scratch/              <span class="com"># the model's scratchpad, kept between sessions</span>
 ├── plan.md               <span class="com"># the plan, while one exists</span>
-└── runs/&lt;session&gt;/r1.log <span class="com"># saved run_command output</span></code></pre></div>
+├── runs/&lt;session&gt;/r1.log <span class="com"># saved run_command output</span>
+└── checkpoints/&lt;session&gt;/ <span class="com"># files as they were before each turn, until /keep</span></code></pre></div>
     <p><strong>The scratchpad.</strong> Small models tend to drop throwaway scripts in the project root. Instead, momo tells the model to put temporary scripts and notes in <code>.momo/scratch/</code> with <code>scratch_write</code>. Commands can reach it as <code>$MOMO_SCRATCH</code>. It can't write outside that folder, and searches and the index skip it.</p>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Description</th></tr>
@@ -1785,6 +1864,7 @@ FAILED (failures=2)
       <tr><td><code>--think-keep</code></td><td>last used / <code>lean</code></td><td class="wrap"><code>lean</code>, <code>more</code>, <code>most</code> or <code>off</code>. See <a href="#think-keep">Trimming</a>.</td></tr>
       <tr><td><code>--cavecat</code></td><td>last used / <code>off</code></td><td class="wrap">See <a href="#cavecat">Cavecat mode</a></td></tr>
       <tr><td><code>--max-output-tokens</code></td><td>last used / <code>25000</code></td><td class="wrap">See <a href="#reply-cap">Reply cap</a>; <code>0</code> = no cap</td></tr>
+      <tr><td><code>--undo-max</code></td><td>last used / <code>20</code></td><td class="wrap">Turns of file checkpoints <code>/undo</code> can go back; <code>0</code> = no cap</td></tr>
       <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
       <tr><td><code>--web</code> / <code>--no-web</code></td><td>on</td><td class="wrap">Serve the browser UI alongside the TUI</td></tr>
       <tr><td><code>--web-host</code></td><td><code>127.0.0.1</code></td><td class="wrap">Interface to bind. Any non-loopback host requires a token.</td></tr>
@@ -1941,7 +2021,11 @@ python momo-coding-harness.py --web-host 0.0.0.0 --web-cert momo.pem --web-key m
       <tr><th>Command</th><th>Description</th></tr>
       <tr><td><code>/clear</code></td><td class="wrap">Clear the history and discard any plan</td></tr>
       <tr><td><code>/new</code></td><td class="wrap">Save this session and start an empty one</td></tr>
-      <tr><td><code>/retry</code></td><td class="wrap">Re-send your last message, replacing the reply it got</td></tr>
+      <tr><td><code>/retry</code></td><td class="wrap">Re-send your last message, replacing the reply it got (asks whether the files it changed go back too)</td></tr>
+      <tr><td><code>/changes</code></td><td class="wrap">What momo changed since the last <code>/keep</code>, per turn, with diffs, undo and keep (a drawer in the web UI, an overlay in the TUI)</td></tr>
+      <tr><td><code>/undo [force] [n]</code></td><td class="wrap">Put back the files the last turn changed, or checkpoint #n and every later one; <code>/undo list</code>, <code>/undo file &lt;path&gt;</code></td></tr>
+      <tr><td><code>/keep</code></td><td class="wrap">Accept every file change: undo can't go back past this point</td></tr>
+      <tr><td><code>/undo-max [n|off]</code></td><td class="wrap">Turns of file checkpoints kept (default 20, remembered)</td></tr>
       <tr><td><code>/compact</code>, <code>/fast-compact</code></td><td class="wrap">Compact the context with or without an LLM summary</td></tr>
       <tr><td><code>/context [n|n%]</code></td><td class="wrap">Show usage, or set the limit in tokens or as a % of the model's maximum</td></tr>
       <tr><td><code>/tool-result [n]</code></td><td class="wrap">Character cap per tool result (0 = unlimited)</td></tr>
@@ -2000,6 +2084,9 @@ python momo-coding-harness.py --web-host 0.0.0.0 --web-cert momo.pem --web-key m
       <tr><td><code>GET /api/export</code></td><td class="wrap">The conversation as a Markdown download; <code>?full=1</code> for the full log</td></tr>
       <tr><td><code>GET /api/mcp</code></td><td class="wrap">MCP servers with their state, tools and config files</td></tr>
       <tr><td><code>GET /api/mcp/resource</code></td><td class="wrap"><code>?server=&amp;uri=</code>: a resource as <code>{name, text}</code> (<code>/api/mcp/resources?server=</code> lists them)</td></tr>
+      <tr><td><code>GET /api/changes</code></td><td class="wrap">The file checkpoints since the last keep, per turn and net per file</td></tr>
+      <tr><td><code>GET /api/changes/diff</code></td><td class="wrap"><code>?path=&amp;checkpoint=</code>: one changed file's diff; without <code>checkpoint</code>, since the keep</td></tr>
+      <tr><td><code>POST /api/undo</code></td><td class="wrap"><code>{"checkpoint": n|null, "force": false}</code>, like <code>/undo</code>; also <code>POST /api/changes/revert</code> <code>{"path"}</code> and <code>POST /api/keep</code></td></tr>
       <tr><td><code>POST /api/mcp/servers</code></td><td class="wrap"><code>{"action": "add"|"remove", "name", "entry"}</code>: edit <code>mcp.json</code>. Needs an <code>Origin</code> header.</td></tr>
     </table></div>
 <div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>curl -s localhost:8765/api/state | jq .status
@@ -2020,6 +2107,8 @@ curl -sN localhost:8765/api/events</code></pre></div>
 │   └── 3f2a9c…e1.filter  <span class="com"># which files that index covers (/index-filter)</span>
 ├── runs/
 │   └── 2026-09-23T18-04-11/r1.log  <span class="com"># run_command output, only when the workdir's .momo/ can't be used</span>
+├── checkpoints/
+│   └── 2026-09-23T18-04-11/        <span class="com"># file checkpoints for /undo, likewise only as a fallback</span>
 ├── search_sources/
 │   └── docsrs.json       <span class="com"># your web_search sources (/search-sources save)</span>
 ├── tools/
@@ -2308,6 +2397,10 @@ const SPEECH = {
   how: [
     "< you, me, and the model", "< the model asks, i run it", "< tools go round and round",
     "< modes pick the tools", "< i'm also a mode. and a cat",
+  ],
+  undo: [
+    "< oops? /undo", "< back to before, purrr", "< your edits? i won't touch", "< /keep when you're happy",
+    "< no git needed~", "< sed -i? i didn't see that",
   ],
   editing: [
     "< i show what changed~", "< broke the syntax? i'll say", "< close enough? i'll find it",

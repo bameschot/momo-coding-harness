@@ -9,6 +9,8 @@ import { applySkillsStatus, initSkills, refreshSkillsMenu } from "./skills.js";
 import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
 import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, formatSize, icon, loadJSON,
          makeResizable, openLayer, saveJSON, toast } from "./dom.js";
+import { applyChangesStatus, changesDirty, initChanges, openChanges } from "./changes.js";
+import { diffBox } from "./diff.js";
 import { initFiles, openFiles, showFile } from "./files.js";
 import { clamped, closeFind, findOpen, initFind, openFind, refreshFind } from "./find.js";
 import { addCopyButtons, renderMarkdown } from "./markdown.js";
@@ -386,116 +388,8 @@ function renderDiff(ev) {
     t.state.textContent = "applied";
   }
   if (!view.diff) return null;
-  const box = el("div", "diff");
-  if (ev.op === "move") {
-    const h = el("div", "diff-head");
-    h.append("± renamed ", ev.path, " → ", pathLink(ev.dst, 0, "dpath"));
-    box.append(h);
-    return box;
-  }
-  const head = el("div", "diff-head");
-  const link = ev.op === "delete" ? el("span", "", ev.path) : pathLink(ev.path, 0, "dpath");
-  if (view.diffStyle === "git") {
-    head.classList.add("git");
-    const first = el("div", "", "diff --git ");
-    first.append(link);
-    head.append(first,
-                el("div", "minus", `--- ${ev.is_new ? "/dev/null" : "a/" + ev.path}`),
-                el("div", "plus", `+++ ${ev.op === "delete" ? "/dev/null" : "b/" + ev.path}`));
-  } else {
-    const name = el("span", "", "± ");
-    name.append(link);
-    head.append(name);
-    const stat = el("span", "stat");
-    if (ev.is_new) stat.innerHTML = `(new file <span class="add">+${ev.added}</span>)`;
-    else if (ev.op === "delete") stat.innerHTML = `(deleted <span class="del">−${ev.removed}</span>)`;
-    else stat.innerHTML = `(<span class="add">+${ev.added}</span> <span class="del">−${ev.removed}</span>)`;
-    head.append(stat);
-  }
-  box.append(head);
-
-  const body = el("div", "diff-body");
-  const numW = Math.max(1, ...ev.body.flatMap(([, o, n]) => [o, n]).filter((x) => x != null).map((x) => String(x).length));
-  const fmt = (n) => (n == null ? "" : String(n)).padStart(numW);
-  const words = pairWords(ev.body);
-  const addLines = (from, to) => {
-    for (let i = from; i < to; i++) {
-      const [kind, o, n, text] = ev.body[i];
-      const row = el("div", `dl ${kind}`);
-      const txt = el("span", "txt");
-      const parts = words.get(i);
-      if (parts) {
-        txt.append(text[0]);
-        for (const [piece, changed] of parts) txt.append(changed ? el("span", "dw", piece) : piece);
-      } else txt.textContent = text;
-      row.append(el("span", "gut", `${fmt(o)} ${fmt(n)}`), txt);
-      body.append(row);
-    }
-  };
-  addLines(0, Math.min(DIFF_MAX, ev.body.length));
-  box.append(body);
-  if (ev.body.length > DIFF_MAX) {
-    const more = el("button", "link-btn more", `show ${ev.body.length - DIFF_MAX} more diff lines`);
-    more.type = "button";
-    more.onclick = () => { addLines(DIFF_MAX, ev.body.length); more.remove(); };
-    box.append(more);
-  }
-  return box;
-}
-
-// Word-level changes: where k removed lines are followed directly by k added
-// ones, line j of each pair is compared token by token and the tokens that
-// differ are marked.  index in body → [[text, changed], …] (without the +/-).
-const WORD_RX = /\w+|\s+|[^\w\s]/g;
-function pairWords(body) {
-  const out = new Map();
-  for (let i = 0; i < body.length;) {
-    if (body[i][0] !== "del") { i++; continue; }
-    let d = i;
-    while (d < body.length && body[d][0] === "del") d++;
-    let a = d;
-    while (a < body.length && body[a][0] === "add") a++;
-    if (a - d === d - i) {
-      for (let k = 0; k < d - i; k++) {
-        const parts = tokenDiff(body[i + k][3].slice(1), body[d + k][3].slice(1));
-        if (parts) { out.set(i + k, parts[0]); out.set(d + k, parts[1]); }
-      }
-    }
-    i = Math.max(a, i + 1);
-  }
-  return out;
-}
-function tokenDiff(a, b) {
-  const x = a.match(WORD_RX) || [], y = b.match(WORD_RX) || [];
-  if (!x.length || !y.length || x.length * y.length > 160_000) return null;
-  // LCS table, then walk it to mark what is not shared.
-  const m = x.length, n = y.length;
-  const L = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
-  for (let i = m - 1; i >= 0; i--) {
-    for (let j = n - 1; j >= 0; j--) {
-      L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
-    }
-  }
-  const keepX = new Array(m).fill(false), keepY = new Array(n).fill(false);
-  for (let i = 0, j = 0; i < m && j < n;) {
-    if (x[i] === y[j]) { keepX[i++] = true; keepY[j++] = true; }
-    else if (L[i + 1][j] >= L[i][j + 1]) i++;
-    else j++;
-  }
-  // Lines that share little are a rewrite: marking every word says nothing.
-  const shared = keepX.filter(Boolean).length;
-  if (shared < 0.4 * Math.max(m, n)) return null;
-  const merge = (toks, keep) => {
-    const parts = [];
-    toks.forEach((t, i) => {
-      const changed = !keep[i] && t.trim() !== "";
-      const last = parts[parts.length - 1];
-      if (last && last[1] === changed) last[0] += t;
-      else parts.push([t, changed]);
-    });
-    return parts;
-  };
-  return [merge(x, keepX), merge(y, keepY)];
+  return diffBox(ev, { style: view.diffStyle, link: (p) => pathLink(p, 0, "dpath"), max: DIFF_MAX,
+                       onChanges: ev.op === "move" ? null : () => showChanges(ev.path) });
 }
 
 // What a finished turn cost, under its reply (DoneEvent; zero for compaction).
@@ -705,6 +599,7 @@ function applyStatus(s) {
     ? `Server not reachable at ${s.host} — showing the last known model. /host <url> points momo elsewhere.`
     : "Switch model";
   $("#host").textContent = `${s.provider}@${s.host.replace(/^https?:\/\//, "")}`;
+  applyChangesStatus(s);
   updateConnDot();
   $("#workdir").textContent = s.workdir;
   $("#workdir").title = `${s.workdir} — click to browse, right-click to copy`;
@@ -752,6 +647,8 @@ function applyStatus(s) {
   const rl = $("#run-output-limit");
   if (document.activeElement !== rl && s.run_output_limit != null)
     rl.value = s.run_output_limit ? String(s.run_output_limit) : "off";
+  const um = $("#undo-max");
+  if (document.activeElement !== um && s.undo_max != null) um.value = s.undo_max ? String(s.undo_max) : "off";
   const mo = $("#max-output-tokens");
   if (document.activeElement !== mo && s.max_output_tokens != null)
     mo.value = s.max_output_tokens ? String(s.max_output_tokens) : "off";
@@ -890,6 +787,7 @@ function applyBusy(b, w) {
   }
   busy = b; waiting = w;
   document.body.classList.toggle("is-busy", busy);
+  if (busy !== wasBusy) changesDirty();     // its undo buttons wait while a turn runs
   if (wasBusy && !busy) {
     if (Date.now() - busySince > NOTIFY_MIN_TURN_MS) {
       signal("finish", "momo finished", lastAssistantText().split("\n").find((l) => l.trim()) || "The turn is complete.");
@@ -1062,6 +960,7 @@ function handleEvents(evs) {
         if (ev.type === "user") $(".welcome")?.remove();
         if (ev.type === "tool_call") setActivity(`running ${ev.name}`);
         else if (ev.type === "tool_result" || ev.type === "diff") setActivity("thinking");
+        if (ev.type === "diff") changesDirty();
         if (ev.type === "error" || (ev.type === "chat" && ev.role === "system" && ev.text.startsWith("ERROR"))) {
           lastServerError = { text: ev.type === "error" ? ev.text : ev.text.replace(/^ERROR:\s*/, ""), at: Date.now() };
         }
@@ -1206,6 +1105,7 @@ function applyView(v) {
     toggleMenu({ stopPropagation() {} }, "#tools-menu", "Tools", refreshToolsMenu);
   }
   if (v.mcp_picker) openSettings("mcp");
+  if (v.changes_menu) showChanges();
   let changed = false;
   for (const [k, val] of Object.entries(v)) {
     const key = VIEW_MAP[k];
@@ -2359,12 +2259,13 @@ const DRAWERS = {
   "#plan-drawer": hideDrawer("#plan-drawer"),
   "#sessions-drawer": hideDrawer("#sessions-drawer"),
   "#files-drawer": hideDrawer("#files-drawer"),
+  "#changes-drawer": hideDrawer("#changes-drawer"),
 };
 
 // The left drawers (sessions, workspace files) share one slot: opening one
 // closes the other, and the button of the open one closes it.  True when `id`
 // ends up open.
-const LEFT = ["#sessions-drawer", "#files-drawer"];
+const LEFT = ["#sessions-drawer", "#files-drawer", "#changes-drawer"];
 function openDrawer(id) {
   const opening = $(id).hidden;
   for (const d of LEFT) if (d !== id) closeLayer($(d));
@@ -2389,6 +2290,12 @@ $("#workdir").oncontextmenu = async (e) => {
   try { await copyText(status.workdir); toast(`Copied ${status.workdir}`); } catch { toast("Copy failed", "error"); }
 };
 $("#files-btn").onclick = () => { if (openDrawer("#files-drawer")) openFiles(); };
+$("#changes-btn").onclick = () => { if (openDrawer("#changes-drawer")) openChanges(); };
+// The Changes drawer open (not toggled), optionally at one file's diff.
+function showChanges(rel = null) {
+  if ($("#changes-drawer").hidden) openDrawer("#changes-drawer");
+  openChanges(rel);
+}
 
 // ── settings drawer ───────────────────────────────────────────────────────────
 // Every setting, in collapsible sections whose open/closed state is remembered.
@@ -2542,6 +2449,7 @@ function paletteActions() {
     ...sections.map(([s, name]) => ({ label: `Settings: ${name}`, desc: "Open the settings here", run: () => openSettings(s) })),
     { label: "Sessions", desc: "Open, rename or delete saved sessions", run: () => $("#sessions-btn").click() },
     { label: "Workspace files", desc: "Browse and preview the workspace", run: () => $("#files-btn").click() },
+    { label: "Changes", desc: "What momo changed since the last keep: diffs, undo, keep", run: () => showChanges() },
     ...(state?.plan ? [{ label: "Plan", desc: "The current plan", run: () => $("#plan-btn").click() }] : []),
     { label: "System prompt", desc: "What the model gets as its system message", run: openPromptDrawer },
     { label: "Context breakdown", desc: "Where the context is spent; compact it", run: () => toggleMenu(fakeClick, "#ctx-menu", "Context", refreshCtxMenu) },
@@ -2590,6 +2498,13 @@ for (const [id, min] of [["#settings-drawer", 360], ["#prompt-drawer", 420], ["#
   makeResizable($(id), "left", `momo.width.${id.slice(1)}`, min);
 }
 initSessions({ send, post, close: DRAWERS["#sessions-drawer"] });
+initChanges({
+  open: () => openDrawer("#changes-drawer"),
+  post,
+  showFile: (rel) => showFile(rel),
+  diffStyle: () => view.diffStyle,
+  busy: () => busy && !waiting,
+});
 initFiles({
   open: () => openDrawer("#files-drawer"),
   attach: (f) => {

@@ -22,10 +22,10 @@ from .llm import make_client
 
 # CommandResult fields that change how a frontend renders, not harness state.
 VIEW_FIELDS = ("tool_output", "think_output", "md_render", "diff_output", "diff_style", "companion",
-               "tool_picker", "mcp_picker", "show_system_prompt")
+               "tool_picker", "mcp_picker", "show_system_prompt", "changes_menu")
 
 # Commands that mutate harness.messages — refused while a worker thread runs.
-_MUTATING = ("/clear", "/compact", "/fast-compact", "/new", "/retry")
+_MUTATING = ("/clear", "/compact", "/fast-compact", "/new", "/retry", "/undo", "/keep")
 # Commands that switch the mode: the running turn keeps its tool set, so a new
 # mode's prompt and rules would not match what the model can call.
 _MODE_COMMANDS = ("/code", "/design", "/chat", "/momo")
@@ -41,7 +41,7 @@ def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
     return (cmd in _MUTATING or cmd in _MODE_COMMANDS
             or (cmd == "/plan" and arg != "show")
             or (cmd in ("/session", "/workspace", "/workdir", "/run-mode", "/scratch",
-                        "/search-sources", "/host", "/model") and bool(arg))
+                        "/search-sources", "/host", "/model", "/undo-max") and bool(arg))
             # a per-tool change (/tools <name> on|off) and a reload of the custom
             # tools alter the running turn's tools
             or (cmd == "/tools" and len(parts) > 1
@@ -114,6 +114,7 @@ class Controller:
         self._lock = threading.RLock()
         self._busy = False
         self._pending_confirm: Callable[[], str | None] | None = None
+        self._pending_decline: Callable[[], str | None] | None = None   # on a "no", if set
         self.web_url: str | None = None  # set by main when the web server is up
         # Idle recap state (see _idle_tick).
         self._last_activity = time.monotonic()
@@ -348,12 +349,44 @@ class Controller:
             return "Not available while a plan is executing."
         return None
 
-    def retry_last(self) -> bool:
-        """Re-send the last user message, discarding everything that followed it."""
+    def _ask(self, question: str, yes: Callable[[], str | None],
+             no: Callable[[], str | None] | None = None) -> None:
+        """A y/N question the next submitted line answers (from either window)."""
+        self._pending_confirm, self._pending_decline = yes, no
+        self._system(question + CONFIRM_SUFFIX)
+
+    def _offer_revert(self, again: Callable[[bool], bool]) -> bool:
+        """Before a retry or an edit replaces the last reply: when that turn
+        changed files, ask whether they go back too, and call again(revert)
+        with the answer.  True when it asked."""
+        h = self.harness
+        turn = h._turn_count
+        files = {f["path"] for t in h.checkpoints.turns() if t["turn"] == turn for f in t["files"]}
+        if not files:
+            return False
+        n = len(files)
+        self._ask(f"That reply changed {n} file{'s' if n != 1 else ''}. Put "
+                  f"{'them' if n != 1 else 'it'} back as before, too?",
+                  lambda: again(True) and None, lambda: again(False) and None)
+        return True
+
+    def _revert_turn(self) -> None:
+        h = self.harness
+        ids = [t["id"] for t in h.checkpoints.turns() if t["turn"] == h._turn_count]
+        if ids:
+            self._system(h.undo_files(min(ids)))
+
+    def retry_last(self, revert: bool | None = None) -> bool:
+        """Re-send the last user message, discarding everything that followed it.
+        revert: also put back the files that reply changed (None: ask, if any)."""
         with self._lock:
             if (err := self._resend_guard()):
                 self._system(err)
                 return False
+            if revert is None and self._offer_revert(self.retry_last):
+                return True
+            if revert:
+                self._revert_turn()
             content = self.harness.truncate_at_last_user()
             if content is None:
                 self._system("Nothing to retry.")
@@ -363,8 +396,9 @@ class Controller:
             self._run_bg(self.harness.send, content)
             return True
 
-    def edit_last(self, text: str) -> bool:
-        """Replace the typed part of the last user message (keeping its attachments) and re-send."""
+    def edit_last(self, text: str, revert: bool | None = None) -> bool:
+        """Replace the typed part of the last user message (keeping its attachments)
+        and re-send.  revert: as for retry_last."""
         with self._lock:
             if (err := self._resend_guard()):
                 self._system(err)
@@ -377,6 +411,10 @@ class Controller:
             if not text.strip() and not atts:
                 self._system("The edited message is empty.")
                 return False
+            if revert is None and self._offer_revert(lambda r: self.edit_last(text, r)):
+                return True
+            if revert:
+                self._revert_turn()
             self.harness.truncate_at_last_user()
             full = attach_mod.compose(text, atts) if atts else text.strip()
             if text.strip() and (not self.harness.input_history or self.harness.input_history[-1] != text.strip()):
@@ -385,6 +423,16 @@ class Controller:
             self.bus.put(UserEvent(attach_mod.summarize(full)))
             self._run_bg(self.harness.send, full)
             return True
+
+    def file_action(self, action: Callable[[], str]) -> dict:
+        """An undo, revert or keep from the Changes menu: refused while a turn
+        runs; the report goes to every window's transcript."""
+        with self._lock:
+            if self._busy and not self.waiting:
+                return {"ok": False, "error": _BUSY_MSG}
+            msg = action()
+            self._system(msg)
+            return {"ok": True, "message": msg}
 
     def last_user_message(self) -> dict | None:
         """{typed, attachments: [names]} for the web UI's edit action."""
@@ -455,12 +503,15 @@ class Controller:
         # A pending y/N confirmation consumes this line.
         if self._pending_confirm is not None:
             action, self._pending_confirm = self._pending_confirm, None
+            decline, self._pending_decline = self._pending_decline, None
             if text.lower() in ("y", "yes"):
                 output = action()
-                if output:
-                    self._system(output)
+            elif decline is not None:
+                output = decline()
             else:
-                self._system("Cancelled.")
+                output = "Cancelled."
+            if output:
+                self._system(output)
             return SubmitOutcome()
 
         if text.startswith("/"):
@@ -534,8 +585,7 @@ class Controller:
             self._run_bg(self.harness.send, result.send_prompt)
             return SubmitOutcome()
         if result.confirm_prompt:
-            self._pending_confirm = result.confirm_action
-            self._system(result.confirm_prompt + CONFIRM_SUFFIX)
+            self._ask(result.confirm_prompt, result.confirm_action)
         elif result.output:
             self._system(result.output)
         return SubmitOutcome()

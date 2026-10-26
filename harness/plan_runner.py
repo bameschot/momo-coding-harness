@@ -418,6 +418,7 @@ class PlanRunnerMixin:
             self.emit_status()
             n = len(plan.steps)
             self.event_queue.put(ChatEvent("system", f"▶ Plan step {idx + 1}/{n}: {step.title}"))
+            self.checkpoints.begin_turn(self._turn_count, step.title, step=f"step {idx + 1}/{n}")
             # A TDD stage starts with its tests switched on and run once (red first),
             # and with the test files as they are then, to audit at its gate.
             switched = (self._tdd_switch_on(step)

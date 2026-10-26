@@ -15,6 +15,7 @@
 <!-- Icon set: 24×24 line icons, stroked with currentColor (sized and styled by .icon in app.css). -->
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
   <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.64-6.36L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-changes" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 9.5v5M9.5 12h5M9.5 17.5h5"/></symbol>
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4.3l2 2.2h8.7A1.5 1.5 0 0 1 21 9.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></symbol>
   <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></symbol>
   <symbol id="i-plan" viewBox="0 0 24 24"><path d="M11 6h9M11 12h9M11 18h9"/><path d="M3.5 6.5 5 8l3-3"/><path d="M3.5 12.5 5 14l3-3"/><path d="M4 18h3"/></symbol>
@@ -46,6 +47,7 @@
   <div class="status-row">
     <button id="sessions-btn" class="icon-btn" type="button" title="Sessions" aria-label="Sessions"><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg></button>
     <button id="files-btn" class="icon-btn" type="button" title="Workspace files" aria-label="Workspace files"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></button>
+    <button id="changes-btn" class="icon-btn" type="button" title="Changes (nothing to undo)" aria-label="Changes"><svg class="icon" aria-hidden="true"><use href="#i-changes"/></svg><span id="changes-count" class="count" hidden></span></button>
     <span class="brand"><span id="conn-dot" class="dot" title="Disconnected"></span><span class="brand-name">momo</span></span>
     <label class="mode-pick">
       <span class="sr-only">Mode</span>
@@ -196,6 +198,34 @@
   </div>
 </aside>
 
+<aside id="changes-drawer" class="drawer left" aria-label="Changes" hidden>
+  <div class="drawer-head">
+    <strong>Changes</strong>
+    <span id="changes-views" class="changes-views" role="group" aria-label="Show">
+      <button type="button" class="btn small" data-view="turns" aria-pressed="true" title="Per turn, newest first: undo a turn and every later one">By turn</button>
+      <button type="button" class="btn small" data-view="keep" aria-pressed="false" title="The net change per file since the last keep">Since keep</button>
+    </span>
+    <span class="spacer"></span>
+    <button id="changes-keep" type="button" class="btn primary small" title="Accept every change: undo can't go back past this point (/keep)">Keep all</button>
+    <button class="icon-btn drawer-close" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <div id="changes-list" class="drawer-body tree"></div>
+  <div id="changes-foot" class="drawer-actions changes-foot"><span id="changes-summary" class="muted small"></span></div>
+  <div id="change-preview" class="file-preview" hidden>
+    <div class="preview-head">
+      <button id="change-back" class="icon-btn" type="button" title="Back to the changes" aria-label="Back to the changes"><svg class="icon" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
+      <span id="change-name" class="mono field"></span>
+    </div>
+    <div id="change-actions" class="preview-actions">
+      <button id="change-revert" type="button" class="btn small danger with-icon"><svg class="icon sm" aria-hidden="true"><use href="#i-retry"/></svg> <span>Revert this file</span></button>
+      <button id="change-open" type="button" class="btn small">Open file</button>
+      <button id="change-copy" type="button" class="btn small">Copy diff</button>
+      <span id="change-meta" class="muted small"></span>
+    </div>
+    <div id="change-diff" class="change-diff"></div>
+  </div>
+</aside>
+
 <aside id="filter-drawer" class="side-drawer" aria-label="Code index filter" hidden>
   <div class="drawer-head">
     <strong>Index filter</strong>
@@ -313,6 +343,7 @@
       <button type="button" id="prompt-open" class="link-btn"><svg class="icon sm" aria-hidden="true"><use href="#i-file"/></svg> System prompt… <kbd>/system-prompt</kbd></button>
       <a id="export-link" class="link-btn" href="api/export" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download conversation (.md)</a>
       <a id="export-full-link" class="link-btn" href="api/export?full=1" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download full log (.md)</a>
+      <label class="menu-num" title="How many turns of file changes undo can go back (the Changes drawer, /undo) before the oldest is dropped. 'off' = back to the last keep.">Undo history <input type="text" id="undo-max" data-cmd="/undo-max" size="5" placeholder="20"> turns <kbd>/undo-max</kbd></label>
     </details>
   </div>
 </aside>

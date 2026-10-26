@@ -28,6 +28,12 @@ Routes
   GET  /api/files     ?path= → directory listing (read-only, confined to the workspace)
   GET  /api/file      ?path= → file contents as text (same conversion as uploads)
   GET  /api/files/search ?q= → fuzzy path search for @-mentions
+  GET  /api/changes   the file checkpoints since the last /keep: per turn, and net per file
+  GET  /api/changes/diff ?path=&checkpoint= → one file's diff (no checkpoint: since keep)
+  GET  /api/changes/preview ?checkpoint= → what undoing back to it would restore / skip
+  POST /api/undo      {"checkpoint": n|null, "force": bool} → like /undo [force] [n]
+  POST /api/changes/revert {"path", "force"} → put one file back as at the last /keep
+  POST /api/keep      accept every file change (/keep)
 
 Security: bound to loopback by default, with Host-header checks against DNS
 rebinding.  On a non-loopback bind an access token is required (``?token=`` once,
@@ -62,8 +68,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import attachments as attach_mod
+from .. import checkpoints as checkpoints_mod
 from .. import companion
 from .. import ignore_rules
+from ..diff import build_diff_body
 from ..file_search import fuzzy_search, workspace_files
 from .. import session as session_mod
 from ..momo_dir import MOMO_DIR
@@ -83,7 +91,7 @@ _STATIC_FILES = {
     **{f"/{name}": (name, "text/javascript; charset=utf-8")
        for name in ("app.js", "dom.js", "markdown.js", "highlight.js", "notify.js",
                     "companion.js", "sessions.js", "files.js", "chips.js", "palette.js", "find.js",
-                    "mcp.js", "skills.js")},
+                    "mcp.js", "skills.js", "diff.js", "changes.js")},
 }
 _MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
@@ -468,6 +476,27 @@ class WebServer:
                     self._file(h.workdir, arg("path"))
                 elif path == "/api/files/search":
                     self._json({"results": fuzzy_search(workspace_files(h.workdir), arg("q"))})
+                elif path == "/api/changes":
+                    store = h.checkpoints
+                    self._json({"turns": store.turns(), "since_keep": store.cumulative(),
+                                "undo_max": h.undo_max, "workdir": str(h.workdir)})
+                elif path in ("/api/changes/diff", "/api/changes/preview"):
+                    cp = arg("checkpoint")
+                    if cp and not cp.isdigit():
+                        self._send(HTTPStatus.BAD_REQUEST, b"checkpoint must be a number\n")
+                        return
+                    cp = int(cp) if cp else None
+                    if path == "/api/changes/preview":
+                        plan = h.checkpoints.preview(cp)
+                        self._json({**plan, "text": checkpoints_mod.describe(plan)})
+                        return
+                    # Only a path the store tracks: never a way to read any file.
+                    diff = h.checkpoints.diff(arg("path"), cp)
+                    if diff is None:
+                        self._json({"error": "not a changed file"}, HTTPStatus.NOT_FOUND)
+                    else:
+                        body, _, _ = build_diff_body(diff.pop("old"), diff.pop("new"))
+                        self._json({**diff, "body": body})
                 else:
                     self._send(HTTPStatus.NOT_FOUND, b"Not found\n")
 
@@ -639,6 +668,21 @@ class WebServer:
                         msg += "\n" + note
                     c._system(msg)
                     self._json({"ok": True, "message": msg})
+                elif path in ("/api/undo", "/api/changes/revert", "/api/keep"):
+                    cp, force, fpath = data.get("checkpoint"), data.get("force") is True, data.get("path")
+                    if path == "/api/undo" and cp is not None and (
+                            not isinstance(cp, int) or isinstance(cp, bool)):
+                        self._send(HTTPStatus.BAD_REQUEST, b"Expected {checkpoint: n|null, force}\n")
+                        return
+                    if path == "/api/changes/revert" and not isinstance(fpath, str):
+                        self._send(HTTPStatus.BAD_REQUEST, b"Expected {path, force}\n")
+                        return
+                    h = c.harness
+                    action = (lambda: h.undo_files(cp, force)) if path == "/api/undo" else \
+                        (lambda: h.revert_file(fpath, force)) if path == "/api/changes/revert" else \
+                        h.keep_files
+                    res = c.file_action(action)
+                    self._json(res, HTTPStatus.OK if res["ok"] else HTTPStatus.CONFLICT)
                 elif path == "/api/edit":
                     text = data.get("text")
                     if not isinstance(text, str):

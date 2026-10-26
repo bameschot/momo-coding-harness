@@ -26,6 +26,7 @@ from .tools import workspace as workspace_mod
 from . import tdd as tdd_mod
 from .editing import EDIT_FEATURES
 from . import run_store as run_store_mod
+from . import checkpoints as checkpoints_mod
 from . import net as net_mod
 from . import search as search_mod
 from . import tools as tools_mod
@@ -167,6 +168,8 @@ THINK_HISTORY = ("off", "turn", "all")
 # /max-output-tokens: the most tokens one model reply may take (0 = no cap).
 DEFAULT_MAX_OUTPUT_TOKENS = 25_000
 MIN_MAX_OUTPUT_TOKENS = 256
+# /undo-max: file checkpoints kept before the oldest is dropped (0 = no cap).
+DEFAULT_UNDO_MAX = checkpoints_mod.DEFAULT_MAX_TURNS
 
 
 def clean_title(reply: str) -> str:
@@ -219,6 +222,15 @@ _RETRY_TEXT = {
 }
 
 
+def _files(n: int) -> str:
+    return f"{n} file{'s' if n != 1 else ''}"
+
+
+def _checkpoint_name(t: dict) -> str:
+    """How /undo names a checkpoint: 'turn 7' or 'turn 7, step 2/5'."""
+    return f"turn {t['turn']}" + (f", {t['step']}" if t.get("step") else "")
+
+
 def _has_model(available: list[str], name: str) -> bool:
     """Ollama lists an untagged name with its implicit :latest tag."""
     return name in available or f"{name}:latest" in available
@@ -259,6 +271,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self.edit_features: frozenset[str] = EDIT_FEATURES
         self.run_output_limit: int = run_store_mod.DEFAULT_LIMIT   # /run-output-limit
         self._run_store: run_store_mod.RunStore | None = None
+        # File checkpoints for /undo, /keep and the Changes menu (checkpoints.py).
+        self.undo_max: int = DEFAULT_UNDO_MAX     # /undo-max, 0 = no cap
+        self._checkpoints: checkpoints_mod.CheckpointStore | None = None
+        self._reverted: list[str] = []   # files the user put back: told to the model with the next message
         # Internet access for fetch_url: "off" | "on" (public hosts only) |
         # "local" (also loopback/LAN).  Off by default and never persisted --
         # this is the only tool that sends data off the machine.  /net
@@ -1033,7 +1049,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                             run_output_limit=self.run_output_limit,
                             search_sources=self.search_sources,
                             edit_features=self.edit_features, run_exit=run_exit,
-                            run_compact=self.cavecat != "off")
+                            run_compact=self.cavecat != "off", checkpoints=self.checkpoints)
         except Exception as e:
             return f"ERROR: {name} failed: {type(e).__name__}: {e}"
         finally:
@@ -1053,6 +1069,98 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             if root.parent != run_store_mod.runs_root():
                 run_store_mod.prune_stale()       # logs from before .momo/ empty themselves
         return store
+
+    @property
+    def checkpoints(self) -> "checkpoints_mod.CheckpointStore":
+        """This session's file checkpoints in this workdir (/undo, the Changes
+        menu).  Reads what an earlier run saved; writes nothing until a tool writes."""
+        store = self._checkpoints
+        if store is None or store.session != self._ts or store.workdir != self.workdir.resolve():
+            store = checkpoints_mod.CheckpointStore(self.workdir, self._ts, self.undo_max)
+            store.note = lambda text: self.event_queue.put(ChatEvent("system", text))
+            self._checkpoints = store
+        return store
+
+    def changes_summary(self) -> dict:
+        """The Changes menu's badge: checkpoints and distinct files in the stack."""
+        store = self.checkpoints
+        return {"undo_count": store.count(), "changes_files": store.files_changed()}
+
+    def undo_files(self, checkpoint: int | None = None, force: bool = False) -> str:
+        """Put back what checkpoint and every later one changed (None: the newest
+        one); the report, which the model also gets with the next message."""
+        store = self.checkpoints
+        turns = {t["id"]: t for t in store.turns()}
+        r = store.undo_to(checkpoint, force)
+        if not (r["restored"] or r["skipped"] or r["failed"]):
+            return "Nothing to undo — no file changes since the last /keep."
+        self._after_revert(r["restored"])
+        taken = [turns[i] for i in r["ids"] if i in turns]
+        # A rename that went back is one change: "docs/notes.md → notes.txt".
+        done = set(r["restored"])
+        pairs = {f["rel"]: f["from"] for t in turns.values() for f in t["files"]
+                 if f.get("from") and f["rel"] in done and f["from"] in done}
+        shown = [f"{rel} → {pairs[rel]}" if rel in pairs else rel
+                 for rel in r["restored"] if rel not in pairs.values()]
+        lines = []
+        if r["restored"]:
+            where = (f" (back to before {_checkpoint_name(taken[-1])})" if taken else "")
+            lines.append(f"Reverted {_files(len(shown))}{where}: " + ", ".join(shown))
+        if r["skipped"]:
+            lines.append("Skipped, changed since momo wrote them (/undo force overwrites): "
+                         + ", ".join(r["skipped"]))
+        for rel, why in r["failed"]:
+            lines.append(f"Could not restore {rel}: {why}")
+        left = store.count()
+        lines.append(f"{left} checkpoint{'s' if left != 1 else ''} left." if left
+                     else "Nothing left to undo.")
+        self.emit_status()
+        return "\n".join(lines)
+
+    def revert_file(self, path: str, force: bool = False) -> str:
+        """Put one file back as it was at the last /keep."""
+        store = self.checkpoints
+        rel = next((f["rel"] for t in store.turns() for f in t["files"] if f["path"] == path),
+                   None) or next((r["rel"] for r in store.cumulative() if r["path"] == path), path)
+        err = store.revert_file(path, force)
+        if err:
+            return f"Could not revert {rel}: {err}"
+        self._after_revert([rel])
+        self.emit_status()
+        return f"Reverted {rel} to how it was at the last /keep."
+
+    def keep_files(self) -> str:
+        """Accept every file change: the checkpoints are forgotten (/keep)."""
+        n, files = self.checkpoints.keep()
+        self.emit_status()
+        if not n:
+            return "Nothing to keep — no file changes since the last /keep."
+        return (f"Kept {_files(files)} from {n} checkpoint{'s' if n != 1 else ''}; "
+                f"/undo can't go back past this point.")
+
+    def set_undo_max(self, n: int) -> int:
+        """Set /undo-max; returns how many checkpoints that dropped now."""
+        self.undo_max = n
+        dropped = self.checkpoints.set_max_turns(n)
+        self.emit_status()
+        return dropped
+
+    def _after_revert(self, rels: list[str]) -> None:
+        """Files went back behind the model's back: forget what it read of
+        them, and tell it with the next message."""
+        if not rels:
+            return
+        if self.index is not None:
+            self.index.invalidate([str(self.workdir / r) for r in rels])
+        self._last_run = self._last_failed_call = None
+        self._reverted = list(dict.fromkeys(self._reverted + rels))
+
+    def _take_file_note(self, text: str) -> str:
+        if not self._reverted:
+            return text
+        names, self._reverted = ", ".join(self._reverted), []
+        return (f"[momo: the user reverted these files to an earlier version since your last "
+                f"reply — read them again before relying on what you saw: {names}]\n\n{text}")
 
     def drop_run_logs(self) -> None:
         """Delete the saved command output: the conversation that could refer to
@@ -1570,6 +1678,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._cancel.clear()
         self._turn_count += 1
         self._start_turn_stats()
+        text = self._take_file_note(text)
+        self.checkpoints.begin_turn(self._turn_count, (text.strip().splitlines() or [""])[0])
         try:
             self._mcp_before_turn()
             if self._plan_executing():
@@ -2213,6 +2323,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             run_mode=self.run_mode,
             run_output_limit=self.run_output_limit,
             max_output_tokens=self.max_output_tokens,
+            undo_max=self.undo_max,
+            **self.changes_summary(),
             net_access=self.net_access,
             net_confirm=self.net_confirm,
             net_max_bytes=self.net_max_bytes,
@@ -2358,6 +2470,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         # the "current" session the web drawer marks.
         self.logger.close()
         self._ts = path.stem
+        self._reverted = []
         self.logger = Logger(self._ts)
         self.messages = data["messages"]
         self.compacted = data.get("compacted", [])
@@ -2454,6 +2567,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             self._autosave()
         self.logger.close()
         self.drop_run_logs()
+        self.checkpoints.keep()     # a new conversation starts with nothing to undo
+        self._reverted = []
         self._ts = session_mod.new_timestamp()
         self.logger = Logger(self._ts)
         self.plan = None

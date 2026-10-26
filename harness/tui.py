@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from . import md_render
 from .commands import help_commands
+from .diff import build_diff_body
 from .file_search import fuzzy_search, workspace_files_nowait
 from .controller import Controller
 from .events import (AskUserEvent, ChatEvent, CompanionEvent, DeltaEvent, DiffEvent,
@@ -442,6 +443,9 @@ class TUI:
         # /tools: the per-role tool picker, drawn over the chat pane while open.
         # {"items": harness.tool_choices(), "idx": highlighted row}
         self._picker: dict | None = None
+        # /changes: the Changes overlay, drawn over the chat pane while open.
+        # {"view": "turns"|"keep", "rows": [...], "idx", "diff": None | {lines, top}}
+        self._changes: dict | None = None
         # Status bar components — assembled (with DIR shortening) in _draw_status.
         self._st_mode  = harness.mode
         self._st_model = harness.client.model
@@ -559,6 +563,7 @@ class TUI:
         self._update_suggest()
         self._draw_suggest()
         self._draw_picker()
+        self._draw_changes()
         if self._companion_win is not None:
             self._companion.draw(self._companion_win, L["cols"])
         self._draw_status()
@@ -852,6 +857,7 @@ class TUI:
 
     def _open_picker(self, kind: str = "tools"):
         self._close_suggest()
+        self._changes = None
         self._picker = {"kind": kind, "items": self._picker_items(kind), "idx": 0}
 
     def _reload_picker(self):
@@ -961,6 +967,153 @@ class TUI:
         _put(win, y, 0, (" " + "─" * (width - 2)).ljust(width), width, curses.color_pair(_C_BORDER))
         for k, line in enumerate(desc):
             _put(win, y + 1 + k, 0, (" " + line).ljust(width), width, curses.color_pair(_C_SYSTEM))
+        win.noutrefresh()
+
+    # ── /changes overlay ──────────────────────────────────────────────────────
+
+    def _changes_rows(self, view: str) -> list[dict]:
+        """The overlay's rows: per checkpoint a header and its files ("turns"),
+        or one row per file with its net change since the last /keep ("keep")."""
+        store = self.harness.checkpoints
+
+        def file_row(f: dict, checkpoint: int | None) -> dict:
+            name = f"{f['from']} → {f['rel']}" if f.get("from") else f["rel"]
+            counts = f"  +{f['added']} -{f['removed']}" if f["added"] or f["removed"] else ""
+            lost = "  (no saved copy)" if not f["restorable"] else ""
+            return {"kind": "file", "f": f, "checkpoint": checkpoint,
+                    "text": f"     {f['op']} {name}{counts}{lost}"}
+        if view == "keep":
+            return [file_row(f, None) for f in store.cumulative()]
+        rows = []
+        for t in store.turns():
+            what = f"turn {t['turn']}" + (f", {t['step']}" if t.get("step") else "")
+            n = len(t["files"])
+            cmd = "  [ran commands: not tracked]" if t.get("ran_commands") else ""
+            rows.append({"kind": "turn", "t": t, "checkpoint": t["id"],
+                         "text": f" #{t['id']}  {what} · {t['label'] or '(no message)'}"
+                                 f"  ({n} file{'s' if n != 1 else ''}){cmd}"})
+            rows.extend(file_row(f, t["id"]) for f in t["files"])
+        return rows
+
+    def _open_changes(self, view: str = "turns"):
+        self._close_suggest()
+        self._changes = {"view": view, "rows": self._changes_rows(view), "idx": 0, "diff": None}
+
+    def _reload_changes(self):
+        c = self._changes
+        if c is not None and c["diff"] is None:
+            rows = self._changes_rows(c["view"])
+            self._changes = {**c, "rows": rows, "idx": min(c["idx"], max(0, len(rows) - 1))}
+
+    def _changes_diff(self, row: dict) -> dict | None:
+        """The highlighted file's diff as overlay lines [(text, color, attr)]."""
+        f = row["f"]
+        d = self.harness.checkpoints.diff(f["path"], row["checkpoint"])
+        if d is None:
+            return None
+        body, added, removed = build_diff_body(d["old"], d["new"])
+        where = f"in #{row['checkpoint']}" if row["checkpoint"] is not None else "since keep"
+        name = f"{f['from']} → {d['rel']}" if f.get("from") else d["rel"]
+        lines = [(f" ± {name}  (+{added} -{removed}, {where})", _C_DIFF_META, curses.A_BOLD)]
+        num_w = max((len(str(n)) for _, o, nw, _ in body for n in (o, nw) if n is not None),
+                    default=1)
+        fmt = lambda n: str(n).rjust(num_w) if n is not None else " " * num_w   # noqa: E731
+        for kind, old_no, new_no, text in body:
+            lines.append((f" {fmt(old_no)} {fmt(new_no)} │ {text}",
+                          self._DIFF_KIND_COLOR.get(kind, _C_TOOL_RES),
+                          curses.A_BOLD if kind == "hunk" else 0))
+        if not body:
+            lines.append(("   (no line changes)", _C_SYSTEM, 0))
+        return {"lines": lines, "top": 0, "row": row}
+
+    def _changes_run(self, command: str):
+        """An action: the overlay closes and the command's y/N question shows in
+        the chat, answered in the input box like any other."""
+        self._changes = None
+        self.controller.submit(command, source="tui")
+        self._drain_events()
+
+    def _changes_key(self, key) -> str | None:
+        """Keys while the Changes overlay is open: ↑/↓ move, Enter shows a file's
+        diff (↑/↓ PgUp/PgDn scroll it, Esc back), Tab switches By turn / Since
+        keep, u undoes back to before the highlighted checkpoint, r reverts the
+        highlighted file, k keeps everything, Esc/q close.  Other keys: None."""
+        c = self._changes
+        d = c["diff"]
+        page = max(1, self._layout["chat_h"] - 4)
+        if d is not None:
+            n = len(d["lines"])
+            if key in (_KEY_ESC, "q", "Q", curses.KEY_BACKSPACE, curses.KEY_LEFT):
+                c["diff"] = None
+                self._reload_changes()
+            elif key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                step = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                        curses.KEY_PPAGE: -page, curses.KEY_NPAGE: page}[key]
+                d["top"] = max(0, min(d["top"] + step, n - 1))
+            elif key in ("r", "R"):
+                self._changes_run(f"/undo file {d['row']['f']['rel']}")
+            else:
+                return None
+            return "full"
+        rows = c["rows"]
+        row = rows[c["idx"]] if rows else None
+        if key in (_KEY_ESC, "q", "Q"):
+            self._changes = None
+        elif key in (curses.KEY_UP, curses.KEY_DOWN) and rows:
+            c["idx"] = (c["idx"] + (1 if key == curses.KEY_DOWN else -1)) % len(rows)
+        elif key in ("\t", 9):
+            self._open_changes("keep" if c["view"] == "turns" else "turns")
+        elif key in (13, curses.KEY_ENTER, "\n") and row and row["kind"] == "file":
+            c["diff"] = self._changes_diff(row)
+        elif key in ("u", "U") and row and row["checkpoint"] is not None:
+            self._changes_run(f"/undo {row['checkpoint']}")
+        elif key in ("r", "R") and row and row["kind"] == "file":
+            self._changes_run(f"/undo file {row['f']['rel']}")
+        elif key in ("k", "K") and rows:
+            self._changes_run("/keep")
+        else:
+            return None
+        return "full"
+
+    def _draw_changes(self):
+        c = self._changes
+        if c is None or self._chat_win is None:
+            return
+        win = self._chat_win
+        cols = self._layout["cols"]
+        content_h = self._layout["chat_h"] - 1  # bottom row is the h-scrollbar
+        width = max(10, cols - 2)
+        d = c["diff"]
+        if d is not None:
+            header = " Change   ↑↓ PgUp/PgDn scroll · r revert this file · Esc back"
+            lines = d["lines"]
+            n = min(len(lines) - d["top"], content_h - 1)
+            top = content_h - max(n, 1) - 1
+            _put(win, top, 0, header.ljust(width), width, curses.A_BOLD | curses.color_pair(_C_FOCUS))
+            for i in range(n):
+                text, color, attr = lines[d["top"] + i]
+                _put(win, top + 1 + i, 0, text.ljust(width), width, curses.color_pair(color) | attr)
+            win.noutrefresh()
+            return
+        view = "By turn" if c["view"] == "turns" else "Since keep"
+        header = (f" Changes — {view}   ↑↓ move · Enter diff · u undo to here · r revert file"
+                  f" · k keep all · Tab {'since keep' if c['view'] == 'turns' else 'by turn'} · Esc close")
+        rows = c["rows"] or [{"kind": "none", "text": "   Nothing to undo — no file changes since "
+                                                     "the last /keep."}]
+        n = min(len(rows), content_h - 1)
+        if n <= 0:
+            return
+        idx = min(c["idx"], len(rows) - 1)
+        first = min(max(0, idx - n + 1), len(rows) - n)
+        top = content_h - n - 1
+        _put(win, top, 0, header.ljust(width), width, curses.A_BOLD | curses.color_pair(_C_FOCUS))
+        for k, i in enumerate(range(first, first + n)):
+            r = rows[i]
+            attr = (curses.A_REVERSE | curses.color_pair(_C_FOCUS) if i == idx and c["rows"]
+                    else curses.color_pair(_C_DIFF_META) | curses.A_BOLD if r["kind"] == "turn"
+                    else curses.color_pair(_C_SYSTEM) | curses.A_DIM if r["kind"] == "none"
+                    else curses.color_pair(_C_CMD))
+            _put(win, top + 1 + k, 0, r["text"].ljust(width), width, attr)
         win.noutrefresh()
 
     # ── adding lines to chat buffer ───────────────────────────────────────────
@@ -1227,6 +1380,8 @@ class TUI:
             parts.append(f"KEEP: {ev.think_keep}")
         if ev.cavecat != "off":
             parts.append(f"CAVECAT: {ev.cavecat}")
+        if ev.undo_count:
+            parts.append(f"UNDO: {ev.undo_count}")
         self._st_extra = "".join(f" | {p}" for p in parts)
         mode = f"{ev.mode} (tdd)" if ev.mode == "plan" and ev.plan_kind == "tdd" else ev.mode
         self._st_mode  = f"{mode} [{ev.plan_progress}]" if ev.plan_progress else mode
@@ -1239,6 +1394,7 @@ class TUI:
             workspace_files_nowait(self.harness.workdir)   # warm the new tree's @-search list
         self._st_dir   = ev.workdir
         self._reload_picker()     # mode, net or index may have changed its rows
+        self._reload_changes()    # an undo or a write may have changed the stack
 
     def _new_stream_part(self, kind: str, text: str = "") -> _StreamPart:
         cols = self._layout["cols"]
@@ -1345,6 +1501,9 @@ class TUI:
             self._open_picker()
         if v.pop("mcp_picker", None):
             self._open_picker("mcp")
+        if v.pop("changes_menu", None):
+            self._picker = None
+            self._open_changes()
         if v.pop("show_system_prompt", None):
             self._drain_events()  # the echoed command first
             self._show_system_prompt()
@@ -1605,6 +1764,8 @@ class TUI:
         "input" when only the input box changed, None when nothing is to draw."""
         chat = self._focus == "chat"
         if self._picker is not None and (res := self._picker_key(key)) is not None:
+            return res
+        if self._changes is not None and (res := self._changes_key(key)) is not None:
             return res
 
         # A pasted block (bracketed paste) or a typed character.

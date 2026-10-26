@@ -240,8 +240,8 @@ button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border)
 }
 .tool-tip-name { font-weight: 600; margin-bottom: 2px; }
 .tool-tip-lock { color: var(--warn); margin-bottom: 4px; }
-#tools-btn, #mcp-btn, #skills-btn { position: relative; }
-#tools-btn .count, #mcp-btn .count, #skills-btn .count {
+#tools-btn, #mcp-btn, #skills-btn, #changes-btn { position: relative; }
+#tools-btn .count, #mcp-btn .count, #skills-btn .count, #changes-btn .count {
   position: absolute; top: 0; right: 0; min-width: 14px; height: 14px; padding: 0 3px;
   border-radius: var(--r-sm); background: var(--warn); color: var(--surface);
   font-size: 10px; line-height: 14px; text-align: center; font-weight: 600;
@@ -572,6 +572,41 @@ details.think.live summary { font-style: italic; }
 .tree-item.dir > .tree-row .tree-name { font-weight: 600; }
 .tree-size { color: var(--muted); font-size: var(--fs-xs); }
 .tree-kids { padding-left: 14px; border-left: 1px solid var(--border); margin-left: 9px; }
+
+/* ── changes drawer: checkpoints per turn, a file's diff ──────────────────── */
+#changes-btn .count { background: var(--focus); }
+.changes-views { display: inline-flex; gap: 4px; }
+.change-turn { margin-bottom: 2px; }
+.change-turn-head { display: flex; align-items: center; gap: 2px; }
+.change-turn-head .tree-row { flex: 1; min-width: 0; padding: 4px 6px; }
+.change-id { color: var(--muted); }
+.change-label { font-family: var(--sans); }
+.change-undo { flex: none; opacity: .65; }
+.change-turn-head:hover .change-undo, .change-undo:focus-visible { opacity: 1; }
+@media (hover: none) { .change-undo { opacity: 1; } }
+.change-turn .inline-confirm { flex-wrap: wrap; }
+.change-file .tree-name .muted { font-size: var(--fs-xs); }
+.change-op {
+  flex: none; width: 16px; text-align: center; font-weight: 700; font-size: var(--fs-xs);
+  border-radius: var(--r-sm); color: var(--surface); background: var(--muted);
+}
+.change-op.op-A { background: var(--add); }
+.change-op.op-D { background: var(--del); }
+.change-op.op-M { background: var(--warn); }
+.change-op.op-R { background: var(--focus); }
+.change-file .tree-size .add { color: var(--add); }
+.change-file .tree-size .del { color: var(--del); }
+.change-warn {
+  margin-left: 6px; padding: 0 4px; border: 1px solid var(--warn); border-radius: var(--r-sm);
+  color: var(--warn); font-size: var(--fs-xs);
+}
+.changes-empty, .changes-note { padding: 10px 8px; line-height: 1.5; }
+.changes-foot { align-items: center; padding: 8px 16px; }
+.changes-foot:empty, .changes-foot:has(#changes-summary:empty) { display: none; }
+.change-diff { flex: 1; overflow: auto; padding: 0 8px 8px; }
+.change-diff .diff { margin: 8px 0; }
+.diff-changes { margin-left: auto; font-weight: 400; font-size: var(--fs-xs); }
+.diff-head.git .diff-changes { float: right; }
 
 .file-preview { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .preview-head { display: flex; align-items: center; gap: 6px; padding: 8px 12px 0; min-width: 0; }

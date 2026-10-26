@@ -49,6 +49,9 @@ class StatusEvent:
     run_mode: str = "new"         # /run-mode: "new" (saved log + view) | "classic"
     run_output_limit: int = 0     # /run-output-limit: chars per run_command view (0 = off)
     max_output_tokens: int = 25000  # /max-output-tokens: cap on one model reply (0 = off)
+    undo_max: int = 20            # /undo-max: file checkpoints kept (0 = no cap)
+    undo_count: int = 0           # file checkpoints since the last /keep
+    changes_files: int = 0        # distinct files they changed (the Changes button's badge)
     net_access: str = "off"     # "off" | "on" | "local"
     net_confirm: bool = True    # ask y/N before a write request
     net_max_bytes: int = 2097152  # ceiling on one fetch_url download

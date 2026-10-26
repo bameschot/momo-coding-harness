@@ -49,6 +49,7 @@ def make_tui(keys=(), cols=80, chat_h=10):
     t._companion = T._Companion()
     t._spinner_frame = 0
     t._picker = None
+    t._changes = None
     return t
 
 
@@ -262,6 +263,120 @@ class ToolPicker(unittest.TestCase):
     def test_esc_closes(self):
         self.t._handle_key(T._KEY_ESC)
         self.assertIsNone(self.t._picker)
+
+
+
+class _Win:
+    def __init__(self):
+        self.lines = {}
+
+    def addnstr(self, y, x, text, n, attr=0):
+        self.lines[y] = text[:n]
+
+    def noutrefresh(self):
+        pass
+
+
+class ChangesOverlay(unittest.TestCase):
+    """/changes: the checkpoint stack over the chat pane, a file's diff, and the
+    actions that go through /undo and /keep (answered y/N in the input box)."""
+
+    def setUp(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from harness.checkpoints import CheckpointStore
+        from harness.tools import dispatch
+        self.tmp = tempfile.TemporaryDirectory()
+        home = Path(self.tmp.name).resolve()
+        self.env = mock.patch.dict(os.environ, {"HOME": str(home)})
+        self.env.start()
+        wd = home / "project"
+        wd.mkdir()
+        (wd / "a.py").write_text("x = 1\n")
+        store = CheckpointStore(wd, "s")
+        store.begin_turn(1, "first change")
+        dispatch("write_file", {"path": "a.py", "content": "x = 2\n"}, wd, checkpoints=store)
+        store.begin_turn(2, "second change")
+        dispatch("write_file", {"path": "b.py", "content": "new\n"}, wd, checkpoints=store)
+
+        class H:
+            checkpoints = store
+
+        class C:
+            def __init__(self):
+                self.sent = []
+
+            def submit(self, text, source="tui"):
+                self.sent.append(text)
+
+        self.t = make_tui()
+        self.t.harness, self.t.controller = H(), C()
+        self.t._focus = "input"
+        self.t._sugg, self.t._sugg_idx, self.t._sugg_waiting = [], -1, False
+        self.t._drain_events = lambda: None
+        self.t._open_changes()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def texts(self):
+        return [r["text"] for r in self.t._changes["rows"]]
+
+    def test_rows_are_turns_newest_first_with_their_files(self):
+        rows = self.texts()
+        self.assertIn("#2  turn 2 · second change", rows[0])
+        self.assertIn("A b.py", rows[1])
+        self.assertIn("#1  turn 1 · first change", rows[2])
+        self.assertIn("M a.py  +1 -1", rows[3])
+
+    def test_enter_shows_the_diff_and_esc_goes_back(self):
+        t = self.t
+        for _ in range(3):
+            t._handle_key(curses.KEY_DOWN)
+        t._handle_key(13)
+        lines = [x[0] for x in t._changes["diff"]["lines"]]
+        self.assertIn("a.py", lines[0])
+        self.assertTrue(any(line.endswith("-x = 1") for line in lines))
+        self.assertTrue(any(line.endswith("+x = 2") for line in lines))
+        t._chat_win, t._layout = _Win(), {"cols": 100, "chat_h": 20}
+        with mock.patch.object(curses, "color_pair", lambda n: 0):
+            t._draw_changes()
+        self.assertIn("+x = 2", "\n".join(t._chat_win.lines.values()))
+        t._handle_key(T._KEY_ESC)
+        self.assertIsNone(t._changes["diff"])
+        self.assertIsNotNone(t._changes)
+
+    def test_actions_go_through_the_commands(self):
+        t = self.t
+        t._handle_key(curses.KEY_DOWN)
+        t._handle_key(curses.KEY_DOWN)               # turn #1
+        t._handle_key("u")
+        self.assertEqual(t.controller.sent, ["/undo 1"])
+        self.assertIsNone(t._changes)
+        t._open_changes()
+        t._handle_key(curses.KEY_DOWN)               # b.py
+        t._handle_key("r")
+        t._open_changes()
+        t._handle_key("k")
+        self.assertEqual(t.controller.sent, ["/undo 1", "/undo file b.py", "/keep"])
+
+    def test_tab_shows_the_net_change_per_file(self):
+        self.t._handle_key(9)
+        self.assertEqual(self.t._changes["view"], "keep")
+        self.assertEqual([r.strip() for r in self.texts()], ["M a.py  +1 -1", "A b.py  +1 -0"])
+
+    def test_empty_stack_and_close(self):
+        self.t.harness.checkpoints.keep()
+        self.t._open_changes()
+        self.t._chat_win, self.t._layout = _Win(), {"cols": 100, "chat_h": 20}
+        with mock.patch.object(curses, "color_pair", lambda n: 0):
+            self.t._draw_changes()
+        self.assertIn("Nothing to undo", "\n".join(self.t._chat_win.lines.values()))
+        self.t._handle_key("q")
+        self.assertIsNone(self.t._changes)
 
 
 if __name__ == "__main__":

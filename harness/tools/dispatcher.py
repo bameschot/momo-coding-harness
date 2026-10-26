@@ -92,7 +92,8 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              search_sources=None,
              edit_features=editing.EDIT_FEATURES, run_exit: dict | None = None,
              run_compact: bool = False,
-             ctx: "registry.ToolRunContext | None" = None) -> str:
+             ctx: "registry.ToolRunContext | None" = None,
+             checkpoints=None) -> str:
     """read_budget: characters one read_file may return (None = no limit).
     run_mode "new" with a run_store saves run_command output to a log (/run-mode).
     search_sources: the session's web_search sources (None = the default set).
@@ -100,7 +101,9 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
     run_exit: run_command puts the command's exit code here as "code" (None when
     it was stopped or did not start), for a caller that must not parse the text.
     run_compact: run_command collapses redundant output lines (/cavecat).
-    ctx: the harness services a tool asks for with inject=("ctx",)."""
+    ctx: the harness services a tool asks for with inject=("ctx",).
+    checkpoints: the session's checkpoints.CheckpointStore; a write tool's paths
+    are recorded in it before the call and after it (/undo, the Changes menu)."""
     state = {"net_access": net_access, "net_max_bytes": net_max_bytes,
              "net_max_chars": net_max_chars, "index": index, "cancel": cancel,
              "read_budget": read_budget, "run_mode": run_mode, "run_store": run_store,
@@ -115,7 +118,15 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
             return routed
     if tool is not None:
         _ensure_momo_dir(tool, args, workdir)
-    result = run(name, args, workdir, state)
+    touched = _checkpoint(checkpoints, tool, args)
+    try:
+        result = run(name, args, workdir, state)
+    finally:
+        if touched:
+            try:
+                checkpoints.after(touched)
+            except OSError:
+                pass        # the write happened; only its undo copy is missing
     if tool is None:
         return result
     if tool.after is not None:
@@ -123,6 +134,21 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
     if index is not None and tool.writes:
         index.invalidate(written_paths(tool, args))
     return result
+
+
+def _checkpoint(checkpoints, tool: "registry.Tool | None", args: dict) -> list:
+    """Record what a write tool is about to change; the paths to finish after
+    the call.  A command's changes can't be seen: the checkpoint notes it ran."""
+    if checkpoints is None or tool is None:
+        return []
+    if tool.name == "run_command":
+        checkpoints.note_command()
+    if not (tool.writes or tool.written):
+        return []
+    try:
+        return checkpoints.record(written_paths(tool, args), tool.name)
+    except OSError:
+        return []           # no room for the copy: the write itself still goes ahead
 
 
 def _runnable(name: str) -> "registry.Tool | None":

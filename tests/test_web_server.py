@@ -119,6 +119,42 @@ class WebServer(unittest.TestCase):
         _, body = self.request("GET", "/api/state")
         self.assertGreater(json.loads(body)["max_upload"], 0)
 
+    def test_changes_drawer_api(self):
+        from harness.tools import dispatch
+        (self.home / "a.py").write_text("x = 1\n")
+        store = self.h.checkpoints
+        store.begin_turn(1, "edit a")
+        dispatch("write_file", {"path": "a.py", "content": "x = 2\n"}, self.h.workdir,
+                 checkpoints=store)
+        for name in ("/diff.js", "/changes.js"):
+            self.assertEqual(self.request("GET", name)[0].status, 200)
+        r, body = self.request("GET", "/api/changes")
+        data = json.loads(body)
+        (t,) = data["turns"]
+        (f,) = t["files"]
+        self.assertEqual((t["label"], f["rel"], f["op"]), ("edit a", "a.py", "M"))
+        self.assertEqual([x["rel"] for x in data["since_keep"]], ["a.py"])
+        r, body = self.request("GET", f"/api/changes/diff?path={f['path']}&checkpoint={t['id']}")
+        d = json.loads(body)
+        self.assertNotIn("old", d)
+        self.assertIn(["add", None, 1, "+x = 2"], d["body"])
+        # Only a tracked path has a diff: the endpoint never reads any other file.
+        r, _ = self.request("GET", f"/api/changes/diff?path={self.home / 'prefs.json'}")
+        self.assertEqual(r.status, 404)
+        self.assertEqual(self.request("GET", "/api/changes/diff?checkpoint=x")[0].status, 400)
+        plan = json.loads(self.request("GET", f"/api/changes/preview?checkpoint={t['id']}")[1])
+        self.assertEqual(plan["restore"], ["a.py"])
+        self.c._busy = True
+        r, _ = self.request("POST", "/api/undo", {"checkpoint": t["id"]})
+        self.assertEqual(r.status, 409)
+        self.c._busy = False
+        self.assertEqual(self.request("POST", "/api/undo", {"checkpoint": "1"})[0].status, 400)
+        r, body = self.request("POST", "/api/undo", {"checkpoint": t["id"]})
+        self.assertIn("Reverted 1 file", json.loads(body)["message"])
+        self.assertEqual((self.home / "a.py").read_text(), "x = 1\n")
+        r, body = self.request("POST", "/api/keep", {})
+        self.assertIn("Nothing to keep", json.loads(body)["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

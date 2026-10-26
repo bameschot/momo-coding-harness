@@ -12,6 +12,7 @@ from . import code_index, ignore_rules, momo_dir
 from .tools import workspace as workspace_mod
 from .mcp import config as mcp_config
 from . import net as net_mod
+from . import checkpoints as checkpoints_mod
 from . import run_store as run_store_mod
 from . import search as search_mod
 from . import session as session_mod
@@ -106,7 +107,112 @@ class CommandResult:
     tool_picker: bool | None = None         # frontend opens its per-role tool picker
     mcp_picker: bool | None = None          # frontend opens its MCP server picker / popover
     show_system_prompt: bool | None = None  # frontend shows the composed system prompt
+    changes_menu: bool | None = None        # frontend opens the Changes menu (/changes)
 
+
+
+def _changes_listing(harness: Harness) -> str:
+    """/undo list: the checkpoint stack, newest first."""
+    turns = harness.checkpoints.turns()
+    if not turns:
+        return "No file changes since the last /keep."
+    lines = ["File checkpoints since the last /keep, newest first "
+             "(/undo <n> goes back to before #n; /changes shows the diffs):"]
+    for t in turns:
+        what = f"turn {t['turn']}" + (f", {t['step']}" if t.get("step") else "")
+        note = "  (ran commands: their changes are not tracked)" if t.get("ran_commands") else ""
+        lines.append(f"  #{t['id']}  {what} · {t['label'] or '(no message)'}{note}")
+        for f in t["files"]:
+            name = f"{f['from']} → {f['rel']}" if f.get("from") else f["rel"]
+            counts = f"  +{f['added']} −{f['removed']}" if f["added"] or f["removed"] else ""
+            lost = "  (can't be restored)" if not f["restorable"] else ""
+            lines.append(f"       {f['op']} {name}{counts}{lost}")
+    return "\n".join(lines)
+
+
+def _undo(harness: Harness, arg: str) -> CommandResult:
+    """/undo [force] [n] | /undo list"""
+    words = arg.lower().split()
+    if words[:1] == ["list"]:
+        return CommandResult(handled=True, output=_changes_listing(harness))
+    if words[:1] == ["file"]:
+        return _undo_file(harness, arg.split(None, 1)[1] if len(words) > 1 else "")
+    force = "force" in words
+    rest = [w.lstrip("#") for w in words if w != "force"]
+    checkpoint = None
+    if rest:
+        if len(rest) > 1 or not rest[0].isdigit():
+            return CommandResult(handled=True, output="Usage: /undo [force] [n] | /undo list")
+        checkpoint = int(rest[0])
+    store = harness.checkpoints
+    plan = store.preview(checkpoint)
+    if not plan["ids"]:
+        return CommandResult(handled=True, output=(
+            f"No checkpoint #{checkpoint} — /undo list shows them." if checkpoint is not None
+            else "Nothing to undo — no file changes since the last /keep."))
+    if not plan["restore"] and not (force and plan["conflicts"]):
+        return CommandResult(handled=True, output="Nothing can be undone:\n"
+                             + checkpoints_mod.describe(plan, force))
+    turns = {t["id"]: t for t in store.turns()}
+    ids = plan["ids"]
+    first = turns[ids[-1]]
+    what = (f"checkpoint #{ids[0]} (turn {first['turn']} · {first['label'] or 'no message'})"
+            if len(ids) == 1 else f"{len(ids)} checkpoints (#{ids[-1]}–#{ids[0]})")
+    return CommandResult(handled=True,
+                         confirm_prompt=f"Undo {what}?\n" + checkpoints_mod.describe(plan, force),
+                         confirm_action=lambda: harness.undo_files(checkpoint, force))
+
+
+def _undo_file(harness: Harness, arg: str) -> CommandResult:
+    """/undo file [force] <path>: one file back as it was at the last /keep."""
+    parts = arg.split(None, 1)
+    force = bool(parts) and parts[0].lower() == "force"
+    rel = ((parts[1] if len(parts) > 1 else "") if force else arg).strip()
+    if not rel:
+        return CommandResult(handled=True, output="Usage: /undo file [force] <path>")
+    store = harness.checkpoints
+    keys = ({r["path"] for r in store.cumulative()}
+            | {f["path"] for t in store.turns() for f in t["files"]})
+    # A link is tracked as itself (delete/move) or as its target (the edit tools).
+    found = (store.resolve(rel, tool) for tool in ("write_file", "delete_file"))
+    path = next((str(p) for p in found if p is not None and str(p) in keys), None)
+    if path is None:
+        return CommandResult(handled=True, output=f"{rel} has no changes since the last /keep.")
+    return CommandResult(handled=True,
+                         confirm_prompt=(f"Put {rel} back as it was at the last /keep"
+                                         + (", overwriting your own changes to it?" if force else "?")),
+                         confirm_action=lambda: harness.revert_file(path, force))
+
+
+def _undo_max(harness: Harness, arg: str) -> CommandResult:
+    """/undo-max [n|off]"""
+    def _state() -> str:
+        n, used = harness.undo_max, harness.checkpoints.count()
+        cap = f"{n} turns" if n else "no cap (back to the last /keep)"
+        return f"undo history: {cap} · {used} checkpoint{'s' if used != 1 else ''} in use"
+    if not arg:
+        return CommandResult(handled=True, output=_state())
+    if arg.lower() in ("off", "0", "none"):
+        n = 0
+    else:
+        try:
+            n = int(arg)
+        except ValueError:
+            return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
+        if n < 1:
+            return CommandResult(handled=True, output="ERROR: keep at least 1 turn, or off")
+
+    def _apply() -> str:
+        dropped = harness.set_undo_max(n)
+        session_mod.save_prefs(undo_max=n)
+        return _state() + (f" — dropped the {dropped} oldest" if dropped else "")
+    drop = harness.checkpoints.would_drop(n)
+    if drop:
+        return CommandResult(handled=True, confirm_prompt=(
+            f"Keeping {n} turn{'s' if n != 1 else ''} drops the {drop} oldest checkpoint"
+            f"{'s' if drop != 1 else ''} now: their changes can't be undone any more. Continue?"),
+            confirm_action=_apply)
+    return CommandResult(handled=True, output=_apply())
 
 
 _ON = ("on", "true", "1", "yes")
@@ -537,6 +643,25 @@ def handle(line: str, harness: Harness) -> CommandResult:
     if cmd == "/retry":
         return CommandResult(handled=True, retry=True)
 
+    if cmd == "/changes":
+        return CommandResult(handled=True, changes_menu=True)
+
+    if cmd == "/undo":
+        return _undo(harness, arg)
+
+    if cmd == "/keep":
+        n, files = harness.checkpoints.count(), harness.checkpoints.files_changed()
+        if not n:
+            return CommandResult(handled=True, output="Nothing to keep — no file changes since "
+                                                      "the last /keep.")
+        return CommandResult(handled=True, confirm_prompt=(
+            f"Keep all file changes ({files} file{'s' if files != 1 else ''} from {n} "
+            f"checkpoint{'s' if n != 1 else ''})? /undo can't go back past this point."),
+            confirm_action=harness.keep_files)
+
+    if cmd == "/undo-max":
+        return _undo_max(harness, arg)
+
     if cmd == "/clear":
         # An active plan goes too: it refers to a conversation that no longer exists.
         # (Safe here — the Controller rejects /clear while a plan step is running.)
@@ -547,6 +672,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.messages = [system_msg]
         harness.compacted = []
         harness.drop_run_logs()
+        harness.checkpoints.keep()      # the turns they belonged to are gone
         guides_note = harness.reload_guides()
         harness.refresh_status()
         return CommandResult(handled=True, output="Conversation cleared" + plan_note
@@ -1565,6 +1691,14 @@ Available commands:
   /clear              Clear conversation history and discard any active plan
   /new                Save this session and start a new, empty one
   /retry              Re-send your last message (drops the reply it got)
+  /changes            Open the Changes menu: every file momo changed since the
+                      last /keep, per turn, with diffs, undo and keep
+  /undo [force] [n]   Put back the files the last turn changed (or checkpoint
+                      #n and every later one); force overwrites files changed since
+  /undo list          List the file checkpoints since the last /keep
+  /undo file [force] <path>  Put one file back as it was at the last /keep
+  /keep               Accept the file changes: /undo can't go back past this point
+  /undo-max [n|off]   How many turns of file checkpoints are kept (default 20, saved)
   /workspace          Show current working directory (alias: /workdir)
   /workspace <path>   Set working directory for file operations
   /scratch            Show the model's scratchpad (.momo/scratch/): size and newest files

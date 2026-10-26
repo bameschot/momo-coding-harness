@@ -1,8 +1,9 @@
 """The workspace's own harness folder, <workdir>/.momo/.
 
 It holds the model's scratchpad (scratch/), the plan file (plan.md), the
-run_command logs (runs/<session>/), and the workspace tools (tools/) with their
-settings (tools.json).  A `.gitignore` inside it keeps everything but the
+run_command logs (runs/<session>/), the file checkpoints for /undo
+(checkpoints/<session>/, checkpoints.py), and the workspace tools (tools/) with
+their settings (tools.json).  A `.gitignore` inside it keeps everything but the
 tools out of git without touching a tracked file; the tools are meant to be
 committed.  The code index, grep_files and find_files never look inside
 (paths.SKIP_DIRS, ignore_rules).
