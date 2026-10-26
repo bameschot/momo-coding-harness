@@ -1014,6 +1014,73 @@ ollama serve</code></pre></div>
   <section id="tools" data-group="How it works" data-voice="tools">
     <h2>Tools</h2>
     <p>What the model can call, by group. The model only sees the tools its current mode offers. File tools can't leave the working directory; <code>run_command</code> is a shell and can, so <code>/run-confirm on</code> lets you approve each command. With the <a href="#index">code index</a> on, its <code>index_*</code> tools join these. You can also <a href="#tool-structure">add your own</a>.</p>
+    <h3 id="tool-use">How momo uses tools</h3>
+    <p>Every request to the model includes the current mode's tools. The model answers with text, or with one or more tool calls. momo runs the calls and sends each result back, and this repeats until the model answers in text.</p>
+    <figure class="flow" aria-label="How a tool call is handled">
+      <div class="flow-col">
+        <div class="box harness"><div class="flow-who">harness</div>Offer the tools<small>this mode's tools, minus the ones you turned off, as JSON schemas plus a tool reference in the system prompt</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">model</div>Call a tool<small>through the function-calling API, or written as text, which momo recovers</small></div>
+        <div class="side"><b>no tool calls</b> → the text is the answer; the turn ends</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness cond"><div class="flow-who">harness</div>Ask you first<small><code>run_command</code> with <code>/run-confirm on</code>, <code>fetch_url</code> writes, MCP tools that change things</small></div>
+        <div class="side"><b>declined</b> → the model is told, and nothing runs</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Check the arguments, then run<small>in your working directory</small></div>
+        <div class="side"><b>bad arguments</b> → an <code>ERROR:</code> saying how to fix the call</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Return the result<small>capped to fit the context, with hints; edits are also shown to you as a diff</small></div>
+        <div class="side"><b>100 rounds</b> (40 in design mode) → stop</div>
+        <div class="back">↺ back to the model</div>
+      </div>
+      <div class="flow-legend"><span class="model">model</span><span class="harness">harness</span><span class="harness cond">only in some cases</span></div>
+      <figcaption>One tool call, from offer to result.</figcaption>
+    </figure>
+    <p>Small models make predictable mistakes with tools. momo catches the common ones:</p>
+    <ul>
+      <li><strong>Calls written as text</strong> (<code>&lt;tool_call&gt;{…}&lt;/tool_call&gt;</code> and the formats of Hermes, Mistral, Phi, DeepSeek and others) are recovered and run like native calls.</li>
+      <li><strong>Wrong types are fixed:</strong> <code>"40"</code> and <code>"true"</code> become a number and a boolean when the schema asks for one.</li>
+      <li><strong>Bad calls get useful errors.</strong> An unknown, missing or extra argument returns an <code>ERROR:</code> that lists the valid arguments, often with a hint such as "to change part of a file, use edit_file".</li>
+      <li><strong>Obvious mix-ups are routed:</strong> <code>write_file</code> with <code>old_string</code>/<code>new_string</code> runs as <code>edit_file</code>.</li>
+      <li><strong>Unsafe writes are refused,</strong> such as file content copied from a shortened tool result.</li>
+      <li><strong>Repeated failures are flagged:</strong> making the exact same failing call again adds a note to change the arguments.</li>
+      <li><strong>Silent loops get a nudge:</strong> after 10 rounds of tool calls without any text (20 with <a href="#cavecat">cavecat</a>), the model is asked for a short progress update.</li>
+    </ul>
+
+    <h3 id="tool-schema">The tool schema</h3>
+    <p>Each tool is described to the model by a JSON schema in the common function-calling format. It is all the model knows about the tool, so the first sentence of each description says what the tool is for. This is <code>read_file</code>'s schema:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">json</span></div><pre><code>{
+  "type": "function",
+  "function": {
+    "name": "read_file",
+    "description": "Read a file, optionally restricting to a line range. A read too large for the context left is refused with the number of lines that fit — then read a smaller range, or search the file with grep_file.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path":       {"type": "string",  "description": "File to read"},
+        "start_line": {"type": "integer", "description": "1-based start line (default: 1); a negative number counts from the end, e.g. -50 reads the last 50 lines"},
+        "end_line":   {"type": "integer", "description": "1-based end line inclusive (default: EOF)"}
+      },
+      "required": ["path"]
+    }
+  }
+}</code></pre></div>
+    <div class="table-scroll"><table>
+      <tr><th>Field</th><th>Meaning</th></tr>
+      <tr><td><code>name</code></td><td class="wrap">What the model calls</td></tr>
+      <tr><td><code>description</code></td><td class="wrap">What the tool does and when to use it. The model chooses tools by it.</td></tr>
+      <tr><td><code>properties</code></td><td class="wrap">Each argument, with its type (<code>string</code>, <code>integer</code>, <code>boolean</code>, <code>array</code> …) and a description</td></tr>
+      <tr><td><code>required</code></td><td class="wrap">The arguments the model must always pass</td></tr>
+    </table></div>
+    <p><strong>In the system prompt.</strong> The same schemas also generate the tool reference in the <a href="#system-prompt">system prompt</a>. It gives each tool an example call in text form, for models that don't use the function-calling API well:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">tool reference (compact)</span></div><pre><code>- **read_file**(path, start_line?, end_line?) — Read a file, optionally restricting to a line range.
+  &lt;tool_call&gt;{"name": "read_file", "arguments": {"path": "main.py", "start_line": 1, "end_line": 40}}&lt;/tool_call&gt;</code></pre></div>
+    <ul>
+      <li><code>/tool-ref compact</code> (default) gives one line per tool. <code>/tool-ref full</code> adds the whole description and a parameter table, at the cost of more context.</li>
+      <li>Schemas can change with your settings. For example, <code>run_command</code> only takes <code>tail</code> and <code>grep</code> in <code>/run-mode new</code>, and the internet tools only appear with <code>/net on</code>.</li>
+      <li><code>/system-prompt</code> shows exactly what the model receives. To write a schema for your own tool, see <a href="#tool-structure">How tools are built</a>.</li>
+    </ul>
+
     <h3>Read-only (all modes)</h3>
     <div class="table-scroll"><table>
       <tr><th>Tool</th><th>Description</th></tr>
@@ -1878,6 +1945,7 @@ python momo-coding-harness.py --web-host 0.0.0.0 --web-cert momo.pem --web-key m
       <tr><td><code>/compact</code>, <code>/fast-compact</code></td><td class="wrap">Compact the context with or without an LLM summary</td></tr>
       <tr><td><code>/context [n|n%]</code></td><td class="wrap">Show usage, or set the limit in tokens or as a % of the model's maximum</td></tr>
       <tr><td><code>/tool-result [n]</code></td><td class="wrap">Character cap per tool result (0 = unlimited)</td></tr>
+      <tr><td><code>/tool-ref compact|full</code></td><td class="wrap">How much of the <a href="#tool-schema">tool reference</a> goes into the system prompt</td></tr>
       <tr><td><code>/run-mode new|classic</code></td><td class="wrap">How <a href="#run-output">command output</a> is returned</td></tr>
       <tr><td><code>/run-output-limit [n]</code></td><td class="wrap">Characters in <code>run_command</code>'s default view</td></tr>
       <tr><td><code>/max-output-tokens [n|off]</code></td><td class="wrap">The <a href="#reply-cap">reply cap</a> (remembered)</td></tr>
@@ -2211,6 +2279,7 @@ const SPEECH = {
     "< grep is love", "< read_symbol by line no.", "< find_references!",
     "< sandboxed to the workdir", "< .. escapes? rejected", "< edit_file: one match only",
     "< run_command can ask first", "< code_outline a folder!",
+    "< \"40\" → 40, i fix it", "< <tool_call> works too~",
   ],
   "tool-structure": [
     "< one file, one tool", "< /tools reload!", "< TOOL = Tool(...)",
