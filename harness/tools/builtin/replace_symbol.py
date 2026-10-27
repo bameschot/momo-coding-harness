@@ -17,6 +17,7 @@ TOOL = Tool(
          "name":       {"type": "string", "description": "The definition to replace: 'parse', a qualified 'Parser.parse', or a line number inside it like '120'"},
          "new_source": {"type": "string", "description": "The complete new definition, from its first line (decorator or signature) to its last, exactly as it should appear in the file — quotes and backslashes are not escaped again"}},
         ["path", "name", "new_source"]),
+    discoverable=True,
     run=editing.replace_symbol, order=450, group="edit & shell", needs_edit_feature="symbol",
     requires=lambda: code_nav.AVAILABLE, inject=("index", "cancel", "edit_features"),
     writes=("path",), body_arg="new_source", diff=True,

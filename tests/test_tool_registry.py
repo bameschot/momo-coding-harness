@@ -71,7 +71,8 @@ class DerivedTables(unittest.TestCase):
         self.assertEqual(tools.KEEPS_GREEN, (
             {t["function"]["name"] for t in tools.READ_ONLY_TOOLS + tools.CODE_NAV_TOOLS}
             | tools.INDEX_TOOL_NAMES
-            | {"command_output", "stop_command", "ask_user", "complete_step", "scratch_write"}))
+            | {"command_output", "stop_command", "ask_user", "complete_step", "scratch_write",
+               "find_tools"}))
 
     def test_diff_locked_and_index_tables(self):
         self.assertEqual(tools.DIFF_TOOLS, {"edit_file", "append_to_file", "replace_symbol",
@@ -84,7 +85,7 @@ class DerivedTables(unittest.TestCase):
     def test_groups(self):
         groups = {t.name: t.group for t in registry.builtins()}
         self.assertEqual({n for n, g in groups.items() if g == "ask & plan"},
-                         {"ask_user", "create_plan", "complete_step", "revise_plan"})
+                         {"ask_user", "create_plan", "complete_step", "revise_plan", "find_tools"})
         self.assertEqual(groups["scratch_write"], "edit & shell")
 
 

@@ -91,15 +91,28 @@ def render_tool_reference(tool_list: list[dict], style: str = "full") -> str:
     return "\n\n".join(sections)
 
 
+def signature(tool: dict) -> str:
+    """The parameter list as the compact reference shows it: `path, start_line?`."""
+    params = tool["function"]["parameters"]
+    required = set(params.get("required", []))
+    return ", ".join(p if p in required else p + "?" for p in params.get("properties", {}))
+
+
+def summary(tool: dict) -> str:
+    """The first sentence of a tool's description."""
+    return _first_sentence(tool["function"].get("description", "").strip())
+
+
+def example_call(tool: dict) -> str:
+    """`<tool_call>{...}</tool_call>` with the tool's example arguments."""
+    example = json.dumps({"name": tool["function"]["name"], "arguments": example_args(tool)},
+                         ensure_ascii=False)
+    return f"<tool_call>{example}</tool_call>"
+
+
 def _render_compact_reference(tool_list: list[dict]) -> str:
     entries = []
     for tool in tool_list:
-        fn = tool["function"]
-        params = fn["parameters"]
-        required = set(params.get("required", []))
-        sig = ", ".join(p if p in required else p + "?" for p in params.get("properties", {}))
-        example = json.dumps({"name": fn["name"], "arguments": example_args(tool)},
-                             ensure_ascii=False)
-        entries.append(f"- **{fn['name']}**({sig}) — {_first_sentence(fn.get('description', '').strip())}\n"
-                       f"  `<tool_call>{example}</tool_call>`")
+        entries.append(f"- **{tool['function']['name']}**({signature(tool)}) — {summary(tool)}\n"
+                       f"  `{example_call(tool)}`")
     return _TOOL_REFERENCE_INTRO_COMPACT + "\n\n" + "\n".join(entries)

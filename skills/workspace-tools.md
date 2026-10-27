@@ -90,6 +90,7 @@ def _walk(root: Path):
 | `order` | int | no | Its position in the tool list. Default 9500. |
 | `timeout` | int | no | Seconds before the call is killed, 1-900. Default 120. |
 | `confirm` | bool | no | `true`: momo asks the user before every call. Use it for anything irreversible or external. |
+| `discoverable` | bool | no | By default (`/tools discover extensions`) a workspace tool is listed in the prompt's "More tools" catalog and declared only once the model loads it (`find_tools`). `false` keeps it declared: use that for a tool most tasks in this project need. |
 
 ### `run`
 

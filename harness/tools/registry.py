@@ -21,6 +21,19 @@ from dataclasses import dataclass, field, replace
 # Roles a tool can be offered in: the five modes, plus an approved plan while
 # it executes (it runs with the coding tools and the step-tracking tools).
 ROLES = ("design", "chat", "plan", "coding", "momo", "plan-exec")
+# /tools discover: which tools are listed in the prompt and declared only once
+# loaded.  "extensions": custom, workspace and MCP tools (every built-in stays
+# declared); "all": also the built-ins marked discoverable; "off": none.
+DISCOVER_MODES = ("off", "extensions", "all")
+DEFAULT_DISCOVER = "extensions"
+
+
+def discover_mode(value) -> str:
+    """A saved or given /tools discover setting as a mode: true/false were saved
+    before the modes, when on listed the discoverable built-ins too."""
+    if isinstance(value, bool):
+        return "all" if value else "off"
+    return value if value in DISCOVER_MODES else DEFAULT_DISCOVER
 ALL_ROLES = frozenset(ROLES)
 WRITE_ROLES = frozenset({"coding", "momo", "plan-exec"})
 
@@ -51,6 +64,10 @@ class ToolContext:
     net_on: bool = False
     tdd: bool = False
     search_sources: object = None    # search.SourceRegistry, for web_search's source list
+    # /tools discover (DISCOVER_MODES): on-demand tools are offered only once
+    # loaded (find_tools).
+    discover: str = "off"
+    loaded: frozenset = frozenset()
 
 
 @dataclass(frozen=True)
@@ -85,6 +102,11 @@ class Tool:
     needs_run_mode: str | None = None    # only in this /run-mode
     needs_edit_feature: str | None = None
     requires: Callable[[], bool] | None = None    # e.g. tree-sitter installed
+    # With /tools discover: listed in the prompt, offered once loaded.  None is
+    # the default by kind: a built-in only with discover "all" when True; a
+    # custom or workspace tool on demand unless False (see on_demand).
+    discoverable: bool | None = None
+    needs_discover: bool = False     # only while /tools discover is on (find_tools)
     # How it is treated.
     writes: tuple = ()               # path arguments it writes (index invalidation, .momo/)
     written: Callable[[dict], list] | None = None  # the written paths, when not plain arguments
@@ -98,6 +120,7 @@ class Tool:
     windows_itself: Callable[[ToolContext], bool] | None = None   # exempt from /tool-result
     index_route: Callable | None = None   # (args, workdir, index, cancel) -> answer or None
     after: Callable | None = None         # (result, args, workdir, index) -> result
+    suggests: tuple = ()             # tools its results may name: loaded when named (/tools discover)
     source: str = "builtin"          # or the custom tool file
 
     @property
@@ -111,6 +134,14 @@ class Tool:
     def available(self) -> bool:
         return self.requires is None or self.requires()
 
+    def on_demand(self, mode: str) -> bool:
+        """Whether /tools discover mode lists this tool instead of declaring it."""
+        if mode == "off" or self.needs_discover:
+            return False
+        if self.source == "builtin":
+            return mode == "all" and self.discoverable is True
+        return self.discoverable is not False
+
     def schema_for(self, ctx: ToolContext) -> dict | None:
         """The schema this tool shows in ctx, or None when it is not offered."""
         if ctx.role not in self.modes or not self.available():
@@ -122,6 +153,10 @@ class Tool:
         if self.needs_run_mode is not None and ctx.run_mode != self.needs_run_mode:
             return None
         if self.needs_edit_feature is not None and self.needs_edit_feature not in ctx.edit_features:
+            return None
+        if self.needs_discover and ctx.discover == "off":
+            return None
+        if self.on_demand(ctx.discover) and self.name not in ctx.loaded:
             return None
         key = self.select(ctx) if self.select else ""
         schema = self.variants[key] if key else self.schema
@@ -215,14 +250,28 @@ def offered(ctx: ToolContext) -> list[dict]:
     return [s for t in all_tools() if (s := t.schema_for(ctx)) is not None]
 
 
+def catalog(ctx: ToolContext) -> list[dict]:
+    """The discoverable tools ctx.role could load (/tools discover), loaded or
+    not, in order: the schemas they have once loaded."""
+    full = replace(ctx, discover="off")
+    return [s for t in all_tools()
+            if t.on_demand(ctx.discover) and (s := t.schema_for(full)) is not None]
+
+
 def universe(ctx: ToolContext) -> list[dict]:
     """Every tool ctx.role can be offered, whatever the internet and code index
     toggles (the /tools pickers): those tools in their plain schema, the others
-    as with both toggles off."""
-    off = replace(ctx, index_on=False, net_on=False)
+    as with both toggles off.  Discoverable tools count as loaded; find_tools
+    is listed only while /tools discover is on."""
+    off = replace(ctx, index_on=False, net_on=False, discover="off")
     out = []
     for t in all_tools():
-        if t.needs_index or t.needs_net:
+        if t.needs_discover:
+            if ctx.discover == "off":
+                continue
+            if (s := t.schema_for(replace(off, discover=ctx.discover))) is not None:
+                out.append(s)
+        elif t.needs_index or t.needs_net:
             if ctx.role in t.modes and t.available():
                 out.append(t.schema)
         elif (s := t.schema_for(off)) is not None:

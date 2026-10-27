@@ -941,6 +941,7 @@ class TUI:
             header = f" Tools — {self.harness.mode} mode   ↑↓ move · Space toggle · ? details · Esc close"
         name_w = max((len(c["name"]) for c in items), default=0)
         rows = [f" [{'x' if c['enabled'] else ' '}] {c['name'].ljust(name_w)}  {c['group']}"
+                + (f" · {c['state']}" if c.get("state", "core") != "core" else "")
                 + (f" · {c['note']}" if c["note"] else "") for c in items]
         width = min(cols - 2, max([len(header), 72] + [len(r) for r in rows]) + 2)
         # The highlighted tool's description under the list, cut to a few lines
@@ -1352,6 +1353,8 @@ class TUI:
             parts.append("TOOLS: off")
         elif ev.tools_off:
             parts.append(f"TOOLS: {len(ev.tools_off)} off")
+        if ev.tools_enabled and ev.tools_listed:
+            parts.append(f"TOOLS: {ev.tools_listed} on demand ({ev.tools_loaded} loaded)")
         if ev.run_confirm:
             parts.append("RUN: confirm")
         if ev.net_access != "off":

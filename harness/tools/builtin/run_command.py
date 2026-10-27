@@ -238,6 +238,7 @@ TOOL = Tool(
     select=lambda ctx: "classic" if ctx.run_mode == "classic" else "",
     # Plan investigation may run commands (reproduce a bug, check the test
     # baseline) but not edit files until the plan is approved.
+    suggests=("stop_command",),
     run=run_command, order=500, group="edit & shell", modes=WRITE_ROLES | {"plan"},
     inject=("net_access", "cancel", "run_mode", "run_store", "run_output_limit", "run_exit",
             "run_compact"),

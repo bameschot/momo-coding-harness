@@ -228,6 +228,11 @@ class MCPManager:
         hit = self._names.get(name)
         return hit[0] if hit else None
 
+    def exposure(self, name: str) -> str | None:
+        """The exposure of an exposed tool's server ("discover" | "direct")."""
+        hit = self._names.get(name)
+        return self.clients[hit[0]].cfg.exposure if hit else None
+
     def policy(self, name: str) -> tuple[str, bool]:
         """(confirm mode, read-only?) for an exposed tool name."""
         server, tool, _ = self._names[name]
@@ -380,6 +385,7 @@ class MCPManager:
                          "resources": c.has_resources,
                          "resource_count": c.resource_count if c.state == "ready" else 0,
                          "confirm": c.cfg.confirm,
+                         "exposure": c.cfg.exposure,
                          "untrusted": c.cfg.untrusted,
                          "server": convert.clean(" ".join(str(info.get(k, "")) for k in ("name", "version")).strip(), 100)})
         return rows

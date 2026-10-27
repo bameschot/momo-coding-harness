@@ -31,6 +31,7 @@ TOOL = Tool(
         "Stop a background run_command and all it started.",
         {"path": {"type": "string", "description": "Log path or id (e.g. r3)"}},
         ["path"]),
+    discoverable=True,
     run=stop_command, order=520, group="edit & shell", modes=WRITE_ROLES | {"plan"},
     needs_run_mode="new", inject=("run_store", "run_output_limit"), keeps_green=True,
     windows_itself=new_run_mode, example={"path": "r2"})

@@ -40,5 +40,6 @@ TOOL = Tool(
          "path":    {"type": "string", "description": "File to search"},
          "group":   {"type": "integer", "description": "Capture group to return (default: 0 = whole match)"}},
         ["pattern", "path"]),
+    discoverable=True,
     run=grep_extract, order=160, group="files", modes=ALL_ROLES, keeps_green=True,
     example={"pattern": "def (\\w+)", "path": "main.py", "group": 1})

@@ -22,6 +22,7 @@ from .tools import (DIFF_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, L
                     NET_TOOL_NAMES, RUN_STORE_TOOLS, ToolContext, ToolRunContext, dispatch,
                     registry, render_tool_reference)
 from .tools import custom as custom_mod
+from .tools import discover as discover_mod
 from .tools import workspace as workspace_mod
 from . import tdd as tdd_mod
 from .editing import EDIT_FEATURES
@@ -262,6 +263,14 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         # Per-role tool choices: mode -> names the user turned off (/tools <name>
         # on|off, the web Tools menu, the TUI picker).  Saved with the session.
         self.disabled_tools: dict[str, set[str]] = {}
+        # /tools discover (registry.DISCOVER_MODES): the on-demand tools (custom,
+        # workspace and "discover"-exposure MCP tools; with "all" also the built-ins
+        # marked discoverable) are listed in the prompt's catalog and declared only
+        # once loaded (find_tools, a result naming one, /tools load).  A pref; the
+        # loaded set is saved with the session and never shrinks by itself, since
+        # every change to the tool list costs a full prompt re-read.
+        self.tools_discover: str = registry.DEFAULT_DISCOVER
+        self.loaded_tools: set[str] = set()
         self.run_confirm: bool = False  # when True, prompt y/N before each run_command; toggle via /run-confirm or Shift+P
         # /run-mode: "new" saves run_command output to a log and returns a view of
         # it (tail / grep / head+tail) plus command_output; "classic" returns it all.
@@ -331,6 +340,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._last_failed_call: tuple[str, str] | None = None
         self._syntax_watch = SyntaxWatch()   # files this turn's writes left unparseable
         self._tool_ref = ""
+        self._catalog_text = ""       # the prompt's "More tools" section (/tools discover)
         # How the prompt's tool reference is rendered: "full" (every description
         # and parameter table) or "compact" (one line per tool; the native
         # schemas carry the rest).  /tool-ref
@@ -739,7 +749,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             tdd = self.mode == "plan" and self.plan_kind == "tdd"
         return ToolContext(role=role, run_mode=self.run_mode, edit_features=self.edit_features,
                            index_on=self.index is not None, net_on=self.net_access != "off",
-                           tdd=tdd, search_sources=self.search_sources)
+                           tdd=tdd, search_sources=self.search_sources,
+                           discover=self.tools_discover, loaded=frozenset(self.loaded_tools))
 
     def _current_tools(self) -> list[dict]:
         """Tool set for the current mode (and, in plan mode, the current phase):
@@ -753,19 +764,109 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         off = self.disabled_tools.get(self.mode, set()) - _LOCKED_TOOLS
         if off:
             tools = [t for t in tools if t["function"]["name"] not in off]
+        if self.tools_discover != "off" and not self._tool_catalog():
+            # Nothing left to load in this role: find_tools would only cost tokens.
+            tools = [t for t in tools if t["function"]["name"] != discover_mod.FIND_TOOLS]
         return tools
+
+    # ── loading tools on demand (/tools discover) ─────────────────────────────
+
+    def _tool_catalog(self) -> list[dict]:
+        """The tools the prompt's "More tools" catalog lists for this role,
+        loaded or not, less the ones the user turned off; [] with discovery off."""
+        if self.tools_discover == "off":
+            return []
+        cat = registry.catalog(self._tool_ctx()) + self._mcp_catalog()
+        off = self.disabled_tools.get(self.mode, set())
+        return [t for t in cat if t["function"]["name"] not in off]
+
+    def load_tools(self, names, source: str) -> list[str]:
+        """Load catalog tools so the next request declares them; returns the
+        names newly loaded.  Names not in this role's catalog are skipped (the
+        callers check them first when the model needs to hear why)."""
+        catalog = {t["function"]["name"] for t in self._tool_catalog()}
+        new = [n for n in dict.fromkeys(names) if n in catalog and n not in self.loaded_tools]
+        if new:
+            self.loaded_tools.update(new)
+            self.event_queue.put(ChatEvent("system", f"Loaded {', '.join(new)} ({source})."))
+        return new
+
+    def _load_suggested(self, name: str, result: str) -> None:
+        """A result that names a tool its tool may point at (Tool.suggests: a
+        background run_command names stop_command) loads it, so the model can
+        follow the pointer without a find_tools call first."""
+        if self.tools_discover == "off":
+            return
+        tool = registry.get(name)
+        if tool is None or not tool.suggests:
+            return
+        named = discover_mod.mentioned(result, set(tool.suggests) - self.loaded_tools)
+        if named:
+            self.load_tools(sorted(named), f"named in {name}'s result")
+
+    def unload_tools(self, names) -> list[str]:
+        """/tools unload: drop loaded tools; returns the ones that were loaded."""
+        gone = [n for n in dict.fromkeys(names) if n in self.loaded_tools]
+        self.loaded_tools.difference_update(gone)
+        return gone
+
+    def _find_tools(self, args: dict) -> str:
+        """The find_tools call: load by exact names, else the best matches for
+        a query, and give back what the model needs to call them."""
+        catalog = self._tool_catalog()
+        by_name = {t["function"]["name"]: t for t in catalog}
+        names = args.get("names") or []
+        if isinstance(names, str):
+            names = [n.strip() for n in names.replace(",", " ").split()]
+        names = [str(n).strip() for n in names if str(n).strip()]
+        query = str(args.get("query") or "").strip()
+        listing = ", ".join(by_name) or "(none)"
+        if not names and not query:
+            return f"ERROR: pass names (from the More tools list) or a query. Loadable: {listing}"
+        if names:
+            off = self.disabled_tools.get(self.mode, set())
+            turned_off = [n for n in names if n in off]
+            unknown = [n for n in names if n not in by_name and n not in off]
+            if turned_off:
+                return f"ERROR: {', '.join(turned_off)} turned off for this role by the user."
+            if unknown:
+                declared = {t["function"]["name"] for t in self._current_tools()}
+                have = [n for n in unknown if n in declared]
+                if have and len(have) == len(unknown):
+                    return f"{', '.join(have)} already available — call it directly."
+                return (f"ERROR: no loadable tool named {', '.join(unknown)}. "
+                        f"Loadable: {listing}")
+            if len(names) > discover_mod.MAX_LOAD:
+                return f"ERROR: load at most {discover_mod.MAX_LOAD} tools per call."
+        else:
+            names = discover_mod.rank(query, catalog)
+            if not names:
+                return f"No loadable tool matches \"{query}\". Loadable: {listing}"
+        new = self.load_tools(names, "find_tools")
+        head = (f"Loaded {', '.join(new)}. Call these directly from now on:" if new
+                else "Already loaded. Call these directly:")
+        return head + "\n" + discover_mod.render_loaded([by_name[n] for n in names])
 
     # ── per-role tool choices ─────────────────────────────────────────────────
 
     def _role_universe(self) -> list[dict]:
-        """Every tool the current role can be offered, whatever the toggles."""
-        return registry.universe(self._tool_ctx()) + self._mcp_tools()
+        """Every tool the current role can be offered, whatever the toggles
+        (loaded or not, with /tools discover on)."""
+        mcp = self._mcp_tools()
+        declared = {t["function"]["name"] for t in mcp}
+        out = (registry.universe(self._tool_ctx()) + mcp
+               + [t for t in self._mcp_catalog() if t["function"]["name"] not in declared])
+        if not self._tool_catalog():     # nothing on demand: find_tools is not offered
+            out = [t for t in out if t["function"]["name"] != discover_mod.FIND_TOOLS]
+        return out
 
     def tool_choices(self) -> list[dict]:
         """The current role's tools for the frontends' pickers:
-        [{name, group, enabled, locked, note, desc, params}], where params is
-        [(name, description, required)] from the schema."""
+        [{name, group, enabled, locked, note, state, desc, params}], where params is
+        [(name, description, required)] from the schema and state is "core", or
+        "on demand" / "loaded" for a catalog tool (/tools discover)."""
         off = self.disabled_tools.get(self.mode, set())
+        catalog = {t["function"]["name"] for t in self._tool_catalog()}
         out = []
         universe = sorted(self._role_universe(),
                           key=lambda t: _group_rank(_tool_group(t["function"]["name"])))
@@ -775,7 +876,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                 t = search_mod.web_search_tool(t, self.search_sources)
             group = _tool_group(name)
             locked, note = False, ""
-            if name in _LOCKED_TOOLS:
+            if name == discover_mod.FIND_TOOLS:
+                locked, note = True, "loads the others while /tools discover is on"
+            elif name in _LOCKED_TOOLS:
                 locked, note = True, ("plan mode needs it" if self.mode == "plan"
                                       else "the running plan needs it")
             elif self.index is not None and name in INDEX_REPLACES:
@@ -791,8 +894,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             required = set(schema.get("required") or ())
             params = [(p, spec.get("description", ""), p in required)
                       for p, spec in (schema.get("properties") or {}).items()]
+            state = ("core" if name not in catalog else
+                     "loaded" if name in self.loaded_tools else "on demand")
             out.append({"name": name, "group": group, "enabled": on,
-                        "locked": locked, "note": note,
+                        "locked": locked, "note": note, "state": state,
                         "desc": t["function"].get("description", ""), "params": params})
         return out
 
@@ -894,6 +999,29 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             self.disabled_tools[mode] -= names
             if not self.disabled_tools[mode]:
                 del self.disabled_tools[mode]
+
+    def set_tools_discover(self, mode: str) -> str:
+        """/tools discover off|extensions|all (a pref): which tools are listed in
+        the prompt and declared only once loaded."""
+        self.tools_discover = mode
+        session_mod.save_prefs(tools_discover=mode)
+        self.rebuild_system_prompt()
+        self.emit_status()
+        return self.discover_summary()
+
+    def discover_summary(self) -> str:
+        """One line on /tools discover: the mode and what it lists now."""
+        what = {"off": "every tool is declared to the model",
+                "extensions": "custom, workspace and MCP tools load on demand; built-ins "
+                              "stay declared",
+                "all": "custom, workspace and MCP tools and the rarely needed built-ins "
+                       "load on demand"}[self.tools_discover]
+        line = f"Load tools on demand: {self.tools_discover} — {what}"
+        if self.tools_discover != "off":
+            n = len(self._tool_catalog())
+            line += (f" ({n} on demand in {self.mode} mode, {len(self.loaded_tools)} loaded)"
+                     if n else " (none in this mode now)")
+        return line
 
     def set_net_access(self, access: str) -> None:
         """/net off|on|local.  Turning it on turns every net tool on in every role."""
@@ -1185,6 +1313,14 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                          "sep": sep if secs else ""})
 
         tools = self._current_tools()
+        # /tools discover: the catalog lists the loadable tools, loaded or not,
+        # and the reference and rules cover only the others, so the prompt never
+        # depends on what was loaded and a load leaves it (and the server's
+        # cached prefix up to the tool list) as it was.
+        catalog = self._tool_catalog()
+        listed = {t["function"]["name"] for t in catalog}
+        if listed:
+            tools = [t for t in tools if t["function"]["name"] not in listed]
         names = {t["function"]["name"] for t in tools}
         index_on = self.index is not None and "index_text" in names
         if index_on:
@@ -1237,10 +1373,14 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         # mode's tool set, so it is always in sync with the real tools (the role
         # .md files carry no tool tables).  Kept so the context breakdown can
         # attribute it to tools without re-rendering.
-        if (mcp := self._mcp_prompt_section(names)):
+        if (mcp := self._mcp_prompt_section(names | listed)):
             add("mcp", "MCP servers", mcp)
         self._tool_ref = render_tool_reference(tools, self.tool_ref)
         add("tools", f"Tool reference ({len(tools)} tools, {self.tool_ref})", self._tool_ref)
+        self._catalog_text = discover_mod.render_catalog(catalog) if catalog else ""
+        if catalog:
+            add("discover", f"More tools ({len(catalog)}, load with find_tools)",
+                self._catalog_text)
         net = _net_rules(role_name, names, set(self.search_sources.sources))
         if net:
             add("net", "Using the internet", net)
@@ -1369,10 +1509,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             if role == "system":
                 # The generated tool reference is part of the system prompt text,
                 # but it is spent on tools, so it is attributed to them.
-                ref = self._tool_ref
-                if ref and ref in text:
-                    cats["tools"] += text_tokens(ref)
-                    text = text.replace(ref, "", 1)
+                for ref in (self._tool_ref, self._catalog_text):
+                    if ref and ref in text:
+                        cats["tools"] += text_tokens(ref)
+                        text = text.replace(ref, "", 1)
                 guides = self._guides_text
                 if guides and guides in text:
                     cats["guides"] += text_tokens(guides)
@@ -1846,7 +1986,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             # tool API.  Suppress the raw content in that case — the tool events
             # shown in the TUI carry the information without redundancy.
             if not _calls and content:
-                recovered = _extract_text_tool_calls(content, tools)
+                # The catalog too: a text call to a tool not loaded yet loads it.
+                recovered = _extract_text_tool_calls(content, tools + self._tool_catalog())
                 if recovered:
                     _calls = [(r["name"], r["arguments"]) for r in recovered]
                     content = ""
@@ -1976,6 +2117,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             })
 
             self._turn_stats["calls"] += len(_calls)
+            loaded_before = set(self.loaded_tools)
             for name, args in _calls:
                 # complete_step ends the step: calls after it in the same batch are not
                 # run, but each still gets a result so the call/result pairing holds.
@@ -2013,10 +2155,17 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                     if snap_path:
                         diff_old, diff_existed = self._read_text_safe(snap_path)
 
+                # A catalog tool called before it was loaded (a text call, or a
+                # server that let an undeclared name through): load it and run it.
+                if self.tools_discover != "off" and name not in self.loaded_tools:
+                    self.load_tools([name], "called directly")
+
                 if name in self.disabled_tools.get(self.mode, ()):
                     # Offered no schema, but a text-recovered call or an older
                     # context can still name it.
                     result = f"ERROR: {name} is turned off for this role by the user."
+                elif name == discover_mod.FIND_TOOLS:
+                    result = self._find_tools(args if isinstance(args, dict) else {})
                 elif name == "ask_user":
                     # Block the worker thread until the TUI routes the user's answer back.
                     # The TUI detects AskUserEvent, switches to waiting-for-input state,
@@ -2119,6 +2268,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                 # Store the tool name on the message so export/replay can label
                 # results and templates can match responses to their calls.
                 self.messages.append({"role": "tool", "name": name, "content": result})
+                self._load_suggested(name, result)
                 if executing and self.plan.tdd:
                     self._track_tdd_green(name, args)
 
@@ -2134,6 +2284,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                     tool_only_turns = 0  # terminal action; suppress nudge on follow-up
                 elif last_tool != "write_file":
                     last_tool = name
+
+            # Tools loaded in this batch are declared from the next request on.
+            if self.loaded_tools != loaded_before and tools:
+                tools = self._current_tools()
 
             # The user approved the plan: stop investigating and let the caller
             # drive execution.  Remaining calls in the batch have already run.
@@ -2346,6 +2500,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             cavecat=self.cavecat,
             think_keep=self.think_keep,
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
+            tools_discover=self.tools_discover,
+            tools_loaded=len(self.loaded_tools),
+            tools_listed=len(self._tool_catalog()),
             workspace_pending=[t.name for t in self.workspace_tools.by_status("pending")],
             skills=list(self.active_skills),
             **self._index_status_fields(),
@@ -2453,6 +2610,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             momo_recap_turn=self._momo_recap_turn,
             turn_count=self._turn_count,
             disabled_tools={m: sorted(n) for m, n in self.disabled_tools.items()},
+            loaded_tools=sorted(self.loaded_tools),
             title=self.title,
             title_turn=self._title_turn,
             title_locked=self.title_locked,
@@ -2526,6 +2684,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self.client.forget_thinking_caps()
         self.active_skills = data.get("active_skills", [])
         self.disabled_tools = {m: set(n) for m, n in (data.get("disabled_tools") or {}).items() if n}
+        self.loaded_tools = {str(n) for n in data.get("loaded_tools") or ()}
         saved_plan = data.get("plan")
         self.plan = Plan.from_dict(saved_plan) if saved_plan else None
         self.plan_phase = (data.get("plan_phase") or "investigating") if self.plan else "investigating"
@@ -2581,6 +2740,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._title_turn = 0
         self._turn_count = 0
         self.disabled_tools = {}
+        self.loaded_tools = set()
         self._guides = self._read_guides() if self.guides else []
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
         self.compacted = []

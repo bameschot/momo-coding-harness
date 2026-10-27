@@ -130,6 +130,10 @@ For `write_file` and `append_to_file` tool results stored in the message history
 
 When the model calls the `ask_user` tool, the worker thread blocks on `_user_input_queue.get()` and emits an `AskUserEvent`. The TUI sets `_waiting_for_input = True`, updates the status bar to `? waiting for input`, and routes the next submitted line back to the harness via `harness.provide_user_input()`. The worker thread then unblocks and continues the agentic loop with the answer injected as a tool result.
 
+### Tools on demand (`/tools discover`)
+
+Which tools are on demand is `Tool.on_demand(mode)` (`tools/registry.py`): in `extensions` (the default) every custom and workspace tool unless `discoverable=False`, in `all` also the built-ins marked `discoverable=True`; MCP tools follow their server's `exposure`. `_run_loop` receives its tool list once, but with discovery on a batch can load tools: `find_tools` (answered in the loop, like `ask_user`), a call to a catalog tool that is not loaded yet, or a result that names a tool its tool lists in `Tool.suggests` (`_load_suggested`). After such a batch the loop re-reads `_current_tools()`, so the next request declares them. Text tool-call recovery matches the catalog as well as the declared tools. The system prompt is built from the core tools plus the full catalog (`tools/discover.py`), never from what is loaded, so a load leaves it unchanged; the loaded set is saved with the session.
+
 ---
 
 ## Qwen3-Specific Handling

@@ -17,6 +17,7 @@ from .harness import (DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_UNDO_MAX, MIN_MAX_OUTPU
 from .llm.base import THINK_LEVELS
 from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS, MODES
 from .think_trim import KEEP_LEVELS
+from .tools import registry as registry_mod
 from .tui import run_tui
 from .web import tls as tls_mod
 from .web.server import is_loopback, start_web_server
@@ -57,6 +58,11 @@ def main():
                         help="run_command output: 'new' saves it to a log and returns a view "
                              "(tail/grep, command_output); 'classic' returns all of it "
                              "(default: last /run-mode setting, else new)")
+    parser.add_argument("--tools-discover", choices=("off", "extensions", "all"), default=None,
+                        help="Which tools are listed in the prompt and declared only once the model "
+                             "loads them (find_tools): 'extensions' = custom, workspace and MCP "
+                             "tools, 'all' = also rarely needed built-ins, 'off' = none "
+                             "(default: last /tools discover setting, else extensions)")
     parser.add_argument("--tool-ref", choices=("full", "compact"), default=None,
                         help="System prompt tool reference: 'full' or 'compact' (one line per "
                              "tool) (default: last /tool-ref setting, else compact)")
@@ -260,6 +266,8 @@ def main():
     harness.mcp_enabled = flag_or_pref(args.mcp, "mcp", True)
     run_mode = args.run_mode or prefs.get("run_mode", "new")
     harness.run_mode = run_mode if run_mode in ("new", "classic") else "new"
+    harness.tools_discover = registry_mod.discover_mode(
+        args.tools_discover or prefs.get("tools_discover", registry_mod.DEFAULT_DISCOVER))
     tool_ref = args.tool_ref or prefs.get("tool_ref", "compact")
     harness.tool_ref = tool_ref if tool_ref in ("full", "compact") else "compact"
     limit = args.run_output_limit if args.run_output_limit is not None \

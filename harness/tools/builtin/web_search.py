@@ -20,6 +20,7 @@ TOOL = Tool(
          "max_results": {"type": "integer", "description": f"Results to list (default {search._DEFAULT_RESULTS}, maximum {search._MAX_RESULTS})"},
          "read":        {"type": "boolean", "description": "Also fetch the top pages and return the passages that match the query (default false)"}},
         []),
+    suggests=("add_search_source",),
     run=search.web_search, order=810, group="net", modes=ALL_ROLES, needs_net=True,
     inject=("net_access", "net_max_bytes", "net_max_chars", "cancel", "search_sources"),
     adapt=_sources, windows_itself=lambda ctx: True,

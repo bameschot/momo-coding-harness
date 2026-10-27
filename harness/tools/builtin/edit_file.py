@@ -49,6 +49,7 @@ TOOL = Tool(
     select=lambda ctx: "" if "match" in ctx.edit_features else "classic",
     # Design mode revises the spec it wrote: edit_file changes a section
     # without rewriting a long document (which a small context can truncate).
+    suggests=("replace_symbol",),
     run=editing.edit_file, order=440, group="edit & shell", modes=WRITE_ROLES | {"design"},
     inject=("index", "cancel", "edit_features"), writes=("path",), body_arg="new_string",
     diff=True,

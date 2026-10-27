@@ -110,9 +110,25 @@ class MCPMixin:
         return self.mode != "coding" and not self._plan_executing()
 
     def _mcp_tools(self) -> list[dict]:
+        """The MCP tools declared to the model: with /tools discover on, those
+        of "discover" servers only once loaded (they are in _mcp_catalog)."""
         if not self.mcp_enabled:
             return []
-        return self.mcp.tool_schemas(read_only_only=self._mcp_read_only_role())
+        tools = self.mcp.tool_schemas(read_only_only=self._mcp_read_only_role())
+        if self.tools_discover != "off":
+            tools = [t for t in tools if not self._mcp_discoverable(t["function"]["name"])
+                     or t["function"]["name"] in self.loaded_tools]
+        return tools
+
+    def _mcp_catalog(self) -> list[dict]:
+        """The MCP tools /tools discover lists for loading, loaded or not."""
+        if not self.mcp_enabled or self.tools_discover == "off":
+            return []
+        return [t for t in self.mcp.tool_schemas(read_only_only=self._mcp_read_only_role())
+                if self._mcp_discoverable(t["function"]["name"])]
+
+    def _mcp_discoverable(self, name: str) -> bool:
+        return self.mcp.is_mcp(name) and self.mcp.exposure(name) == "discover"
 
     def _is_mcp_tool(self, name: str) -> bool:
         return self.mcp_enabled and (self.mcp.is_mcp(name) or name in RESOURCE_TOOLS)

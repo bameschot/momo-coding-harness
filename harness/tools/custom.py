@@ -27,8 +27,8 @@ from . import dispatcher, registry
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 # Fields that only make sense for a built-in tool: the harness loop answers
 # harness tools itself, locked tools keep plan mode working, diffs and index
-# routes rely on harness internals.
-_BUILTIN_ONLY = ("harness", "locked", "diff", "index_route")
+# routes rely on harness internals, and needs_discover is find_tools' own gate.
+_BUILTIN_ONLY = ("harness", "locked", "diff", "index_route", "needs_discover")
 _MODULE_PREFIX = "momo_custom_tools."
 
 

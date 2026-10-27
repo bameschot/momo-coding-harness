@@ -49,6 +49,7 @@ Options:
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--run-mode` | last `/run-mode`, else `new` | `new`: `run_command` saves its output to a log and returns a view of it; `classic`: returns all of it (see [Command output](#command-output)) |
 | `--run-output-limit` | last setting, else `0` (off) | Characters in `run_command`'s default view in run mode `new`; `0` = the whole output |
+| `--tools-discover` | last `/tools discover`, else `extensions` | Which tools are listed in the prompt and declared only once the model loads them: `extensions` (custom, workspace and MCP tools), `all` (also rarely needed built-ins) or `off`. See [Loading tools on demand](#loading-tools-on-demand) |
 | `--think` | last used / `on` | Thinking level: `off`, `on`, or an effort level (`low`, `medium`, `high`, `xhigh`, …) for models that take one. See [Thinking level](#thinking-level) |
 | `--no-think` | off | Same as `--think off` |
 | `--think-history` | last used / `turn` | Send the model's own reasoning back to it: `off`, `turn` (since your last message) or `all`. See [Sending reasoning back](#sending-reasoning-back) |
@@ -503,7 +504,7 @@ curl -sN localhost:8765/api/events          # watch the live event stream
   - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
 - **Chat pane scrolling** — `↑`/`↓`, `PgUp`/`PgDn`. When a table or other wide content is present, `←`/`→` scrolls horizontally (chat focus required). While you are scrolled up, new output does not pull the view down; the status line shows `▼ NEW (PgDn)` until you are back at the bottom. Resizing the terminal re-wraps the transcript to the new width.
 - **Changes** — `/changes` opens the [file checkpoints](#undoing-file-changes) over the chat pane, newest first, each with its files: `↑`/`↓` move, `Enter` shows the highlighted file's diff (`↑`/`↓`/`PgUp`/`PgDn` scroll it, `Esc` goes back), `Tab` switches between *by turn* and *since keep*, `u` undoes back to before the highlighted checkpoint, `r` reverts the highlighted file, `k` keeps everything, `Esc` closes. Actions close the overlay and ask `[y/N]` in the chat. The status bar shows `UNDO: n` while there are checkpoints.
-- **Tool picker** — `/tools` opens a checklist of the current mode's tools over the chat pane: `↑`/`↓` move, `Space`/`Enter` turn the highlighted tool on or off, `?` prints its full description and parameters, `Esc` closes. The highlighted tool's description is shown under the list. The status bar shows `TOOLS: N off` while tools are off in this mode. See [Turning tools on and off](#turning-tools-on-and-off).
+- **Tool picker** — `/tools` opens a checklist of the current mode's tools over the chat pane: `↑`/`↓` move, `Space`/`Enter` turn the highlighted tool on or off, `?` prints its full description and parameters, `Esc` closes. The highlighted tool's description is shown under the list. The status bar shows `TOOLS: N off` while tools are off in this mode, and `TOOLS: N on demand (M loaded)` while [tools load on demand](#loading-tools-on-demand). See [Turning tools on and off](#turning-tools-on-and-off).
 - **System prompt** — `/system-prompt` opens the composed system prompt in `$PAGER` (`less -R` if unset); `q` returns to momo. See [Seeing the system prompt](#seeing-the-system-prompt).
 - **Focus** — Press `Tab` to toggle focus between Chat and Input. The active pane border highlights green.
 - **Tool call visibility** — `/tool-output on|off` switches between full tool output and abbreviated mode (first 50 chars + `…`). Argument values are cut to 60 characters either way, as in the web UI; a written file's content shows in the diff.
@@ -658,7 +659,7 @@ Switch modes with `/design`, `/chat`, `/plan`, `/code`, `/momo`, or `Shift+Tab`.
 
 ## Available Tools
 
-Each tool is one file in [`harness/tools/builtin/`](harness/tools/builtin/): its schema (what the model sees), the function that runs it, and how the harness treats it. The per-mode tool lists, the tool reference in the system prompt and the `/tools` pickers are all built from those files. You can add your own tools the same way, see [Adding a tool](#adding-a-tool).
+Each tool is one file in [`harness/tools/builtin/`](harness/tools/builtin/): its schema (what the model sees), the function that runs it, and how the harness treats it. The per-mode tool lists, the tool reference in the system prompt and the `/tools` pickers are all built from those files. You can add your own tools the same way, see [Adding a tool](#adding-a-tool). Your own tools and MCP tools are listed instead of declared until the model loads them, see [Loading tools on demand](#loading-tools-on-demand).
 
 ### Read-only (all modes)
 
@@ -813,6 +814,61 @@ In the web UI, the wrench button in the status bar opens the same list. Hover a 
 - Plan mode's choices apply both while investigating and while executing a plan.
 - Changing tools is refused while a turn is running; interrupt or wait first.
 
+### Loading tools on demand
+
+Every declared tool costs prompt tokens twice: its schema goes with every request, and its line in the tool reference sits in the system prompt. Every MCP server, custom tool and workspace tool adds to that, and a server can bring dozens. So by default momo **lists** those tools in a **More tools** section of the system prompt, one line each, and declares them only once the model loads one:
+
+```
+## More tools (load with find_tools)
+- mcp__github__search_issues(query, repo?) — Search issues and pull requests.
+- mcp__github__get_issue(repo, number) — Get one issue with its comments.
+- todo_count(path) — Count the TODO and FIXME comments per file under a folder of the project, most first.
+…
+```
+
+`/tools discover` picks which tools are listed instead of declared:
+
+| Mode | On demand | Declared |
+|---|---|---|
+| `extensions` (the default) | [Custom](#adding-a-tool), [workspace](#workspace-tools) and [MCP](#mcp-servers) tools | Every built-in tool |
+| `all` | The same, plus the rarely needed built-ins: `append_to_file`, `replace_symbol`, `file_info`, `grep_extract`, `stop_command`, `file_dependencies`, `index_status`, `add_search_source` | The other built-ins |
+| `off` | None | Everything, as before this existed |
+
+With no MCP servers and no custom or workspace tools, `extensions` changes nothing: there is nothing to list, so neither the catalog nor `find_tools` is in the prompt.
+
+A listed tool is loaded, and from then on declared like any other, in one of three ways:
+
+| How | When |
+|---|---|
+| `find_tools` | The model asks for it: `names=["mcp__github__get_issue"]` loads those tools, `query="search issues"` loads the best matches (at most three, only those close to the best). The result gives each loaded tool's parameters and an example call. |
+| A result names it | A tool result that points at one loads it: in `all` mode a background `run_command` names `stop_command`, and an edit that rewrote most of a function names `replace_symbol`. (`Tool.suggests` says which tools a tool's results may name, so file contents that mention a tool never load it.) |
+| A call to it | A call to a listed tool that comes through anyway (a text-format call, or a server that lets an undeclared name pass) loads it and runs. |
+
+How it behaves:
+
+- **A preference** (`/tools discover off|extensions|all`, `--tools-discover`), saved like `/run-mode`.
+- **Loaded tools stay loaded** for the session and are saved with it; `/new` starts with none. That is deliberate: chat templates put the tool list in the system turn, so every change to it makes the server read the whole prompt again. Loading once and keeping the tool costs that once.
+- **Loading never changes the system prompt.** The catalog always lists every on-demand tool, loaded or not, and the tool reference covers only the others, so only the request's tool list grows. A model that writes its calls as text gets the example from `find_tools`' result. Each MCP server's own instructions stay in the prompt whether its tools are loaded or not.
+- **Keeping one declared.** A custom tool with `discoverable=False`, a workspace tool with `"discoverable": false`, or an MCP server with `"exposure": "direct"` stays declared in every mode but `off`'s. A tool's role, run mode and toggles still apply, and a tool you turned off is neither listed nor loadable.
+- **Why built-ins stay declared by default.** Three A/B rounds on a 9B model (`evals/README.md`) found that a built-in the model has a habit for gets worked around rather than loaded: with `delete_file`, `move_file`, `command_output`, `edit_files` and `scratch_write` on demand it deleted with `rm`, renamed with `mv` (neither can be undone with `/undo`), re-ran commands, edited file by file, and wrote check scripts into the project. With those declared, `all` mode showed no regressions, but saved only 8–13% of the first request, so it is opt-in.
+
+| Role, toggles (built-ins only) | `off` / `extensions` | `all` | Saved |
+|---|---|---|---|
+| design | 4,700 tokens | 4,400 | 6% |
+| coding | 6,800 | 5,900 | 13% |
+| coding, index on (the default) | 8,100 | 7,400 | 8% |
+| coding, index and internet on | 9,800 | 8,600 | 11% |
+
+(Prompt tool reference + catalog + schemas, estimated at 4 characters per token. An MCP server's tools cost about 20 tokens each listed, against a few hundred declared.)
+
+| Command | Effect |
+|---|---|
+| `/tools discover [off\|extensions\|all]` | Show or set which tools load on demand (saved) |
+| `/tools load <name>…` | Load listed tools now |
+| `/tools unload <name>…\|all` | Declare them no more (the next request re-sends the tool list) |
+
+`/tools list` marks each tool `· on demand` or `· loaded`; the web UI's Tools menu has a **Load on demand** picker and the same tags; the TUI status bar shows `TOOLS: N on demand (M loaded)` while any are listed.
+
 ## Adding a tool
 
 A tool is one Python file that ends with `TOOL = Tool(...)`. The built-in ones live in `harness/tools/builtin/`, and dropping a new file there registers it: no list or table elsewhere needs editing. **Your own tools** go in `~/.momo-harness/tools/`, where momo loads them at start and on `/tools reload`. A complete example is [`docs/examples/tools/word_count.py`](docs/examples/tools/word_count.py):
@@ -849,12 +905,14 @@ TOOL = Tool(
 | `keeps_green` | False | It changes no file, so a TDD plan's passing tests stay valid after a call |
 | `confirm` | False | Ask the user before each call |
 | `needs_net` / `needs_index` | False | Only offered while `/net` / `/index` is on |
+| `discoverable` | on demand | `False` keeps your tool declared; by default it is listed in the prompt and declared once loaded (see [Loading tools on demand](#loading-tools-on-demand)) |
+| `suggests` | none | On-demand tools its results may name; a result that names one loads it |
 | `writes`, `body_arg` | none | Path arguments it writes (re-indexed after the call) and the argument holding file text (refused when it holds a history placeholder or a cut-off note) |
 | `variants`, `select`, `adapt` | none | Other schemas for some contexts (run mode, TDD plan, …), and a last change to the schema per context |
 
 `inject=("ctx",)` gives the tool a small context instead of the harness itself: `ctx.workdir`, `ctx.cancel`, `ctx.ask_user(question)` (blocks until the user answers) and `ctx.note(text)` (a line in the chat).
 
-**Custom tools are code that runs inside momo**, so momo only loads them from `~/.momo-harness/tools/`, never from the workdir, where a cloned repository could bring one along. The folder must be yours and not writable by others (`chmod 700`), and so must each file (`chmod 600`). A file that fails to load is reported at start and in `/tools list`, and momo starts without it; `/tools errors` shows the traceback. Custom tools cannot reuse a built-in name, use the `mcp_` prefix, or set the fields only the harness can honour (`harness`, `locked`, `diff`, `index_route`). Files starting with `_` are helpers for the others and are not loaded as tools.
+**Custom tools are code that runs inside momo**, so momo only loads them from `~/.momo-harness/tools/`, never from the workdir, where a cloned repository could bring one along. The folder must be yours and not writable by others (`chmod 700`), and so must each file (`chmod 600`). A file that fails to load is reported at start and in `/tools list`, and momo starts without it; `/tools errors` shows the traceback. Custom tools cannot reuse a built-in name, use the `mcp_` prefix, or set the fields only the harness can honour (`harness`, `locked`, `diff`, `index_route`, `needs_discover`). Files starting with `_` are helpers for the others and are not loaded as tools.
 
 | Command | Effect |
 |---|---|
@@ -1145,6 +1203,7 @@ The approval is remembered per workdir and per server entry, so editing the entr
 | Key | Default | |
 |---|---|---|
 | `confirm` | `writes` | `always`, `writes` (ask unless the tool is annotated read-only) or `never` |
+| `exposure` | `discover` | `discover` lists the server's tools in the prompt until the model loads them ([Loading tools on demand](#loading-tools-on-demand)), `direct` declares them all. With `/tools discover off` every server's are declared |
 | `tools` | all | `{"include": [...], "exclude": [...]}`, fnmatch patterns on the server's tool names |
 | `timeout` | `120` | Seconds per call |
 | `untrusted` | `true` for http | Wrap results in an untrusted-content fence, like `fetch_url` |
@@ -1489,6 +1548,8 @@ Type any command in the input bar:
 | `/tools on\|off` | Enable or disable tool calls entirely (off = model receives no tool schemas) |
 | `/tools reload` | Load your custom tools in `~/.momo-harness/tools/` again — see [Adding a tool](#adding-a-tool) |
 | `/tools errors` | Why a custom or workspace tool file did not load, with the traceback |
+| `/tools discover [off\|extensions\|all]` | Which tools load on demand: custom, workspace and MCP tools (the default), also rarely needed built-ins, or none — see [Loading tools on demand](#loading-tools-on-demand) |
+| `/tools load\|unload <name>…` | Load a listed tool now, or declare it no more (`unload all`: every one) |
 | `/tools approve\|deny <name>` | Let a [workspace tool](#workspace-tools) run, or keep it from running |
 | `/tools roles\|category\|enable\|disable <name> …` | A workspace tool's roles, category, or on/off for this workspace (saved in `.momo/tools.json`) |
 | `/tools check [name]`, `/tools init`, `/tools venv` | Check workspace tools without running them; create `.momo/tools/` with the guide; set up its virtualenv |

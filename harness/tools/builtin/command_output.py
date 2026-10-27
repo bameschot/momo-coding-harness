@@ -40,6 +40,7 @@ TOOL = Tool(
          "end_line":   {"type": "integer", "description": "Last line (inclusive)"}},
         ["path"]),
     # It follows run_command: wherever that is offered, in /run-mode new.
+    suggests=("stop_command",),
     run=command_output, order=510, group="edit & shell", modes=WRITE_ROLES | {"plan"},
     needs_run_mode="new", inject=("run_store", "run_output_limit"), keeps_green=True,
     windows_itself=new_run_mode, example={"path": "r1", "grep": "FAILED|Error"})

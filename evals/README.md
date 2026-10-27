@@ -1124,3 +1124,143 @@ Live, heavy tasks ×8 and the other four ×3, against stages 1–2 (both narrati
   accepted, valid `'1h30m'` rejected. None had a syntax warning or note. Earlier rounds varied
   as much on this task; 8 runs can't tell that apart from chance.
 - The light tasks are within the noise of 3 runs each.
+
+## Tools on demand (`/tools discover`, `--suite discover`)
+
+`/tools discover all` declares only the commonly needed built-ins and lists the
+rest in the system prompt until the model loads them (`find_tools`, a call by name,
+or a result naming one; see the README's "Loading tools on demand"). It saves
+6–13% of the prompt spent on tools (coding with the index on: ~8,100 → ~7,400
+tokens, after round 2 below), more with MCP servers, and it stays **off by default** until this A/B
+shows the model still reaches the tools it needs.
+
+```bash
+python evals/run_evals.py --suite discover --runs 3 --tools-discover off --json off.json
+python evals/run_evals.py --suite discover --runs 3 --tools-discover all --json on.json
+# and the nav and edit suites, which must not get worse with it on:
+python evals/run_evals.py --suite all --runs 3 --tools-discover all --json all-on.json
+```
+
+The `discover` suite: `discover-rename` (`move_file`, core again since round 3),
+`discover-background` (`stop_command`, on demand, named by the background
+`run_command` result), `discover-delete` (`delete_file`, core again since
+round 1, kept as a check) and `discover-control`, a plain `edit_file` change
+that needs only core tools.
+The checks are in `evals/edit/checks.py` (`rename_module`, `delete_module`,
+`slug_clean`).
+
+The summary adds `first request` (the estimated prompt plus tool schemas of
+the first request, the cost the setting cuts) and, for runs with it on,
+`find_tools calls` and the tools loaded. Per run, the JSON has
+`first_request_tokens`, `find_tools_calls` and `loaded_tools`.
+
+**Turn it on by default when**, against the reference model: the ideal tool is
+used no less often than with it off (the `discover` suite and `--suite all`),
+rejected and coached calls do not rise, and the first request is at least
+~20% smaller.
+
+### Round 1 (Ornith-1.5-9B Q8 on llama.cpp, 2026-10-27): stays off
+
+Off and on side by side, the same build. discover/shell/edit 3 runs per task
+(index off), nav 2 runs with `--index`; 79 runs per condition.
+
+| suite | result off → on | ideal tool | tool calls | prompt read/run (all rounds) |
+|---|---|---|---|---|
+| discover | checks 9/9 → 9/9, facts 3/3 → 3/3 | 12/12 → **9/12** | 96 → 92 | 75.5k → 56.8k (−25%) |
+| shell | facts 100% → 100% | 15/15 → 15/15 | 51 → **58** | 41.0k → 34.9k (−15%) |
+| edit | checks 17/18 → 18/18 | — | 192 → **216** | 93.2k → 88.1k (−5%) |
+| nav (index) | recall about even | 26/26 → 26/26 | 98 → 76 | 30.1k → 28.4k (−6%) |
+
+First request: 9,421 → 7,274 tokens (−23%) in coding with the index off;
+7,335 → 6,645 (−9%) on nav (mostly chat mode, index on). Over all 79 runs
+the prompt read fell 11% and the wall time was the same (6,499 s vs 6,497 s);
+the server's prompt cache hit 85% → 77% on discover, since each load
+re-sends the tool list.
+
+What worked: `move_file` was loaded with `find_tools` in all three renames,
+and `stop_command` loaded itself from the background `run_command` result in
+all three server runs. What did not, all three tools the model has a habit
+for:
+
+- **`delete_file`**: 0/3 loaded; every run deleted with `rm` through
+  `run_command` instead (3/3 used `delete_file` with it off). That bypasses
+  `/undo` and the diff.
+- **`command_output`**: used 5 times off, 0 on; three commands were re-run
+  instead (0 off). A foreground `run_command` result does not name it, yet
+  `run_command`'s own description points at it.
+- **`edit_files`**: off, every `rename-across` run did the rename in one
+  `edit_files` call (9–12 calls); on, it was loaded from a leftover-use hint
+  only after the model had started editing file by file, and two of three
+  runs made 8 `edit_file` calls (20–22 calls).
+
+So the first criterion fails and the default stays off. Next: make
+`delete_file`, `command_output` and `edit_files` core (about 750 tokens back
+into the prompt) and rerun discover-delete, shell and edit.
+
+(The nav run first crashed copying the repo for a coding-mode task:
+`.scratch/` holds a browser profile with sockets; the copy now skips it.)
+
+### Round 2 (same model and setup, 2026-10-27): closer, still off
+
+`delete_file`, `command_output` and `edit_files` declared again (coding with
+the index on: ~8,100 → ~7,000 tokens on demand, −13%). discover, shell and
+edit rerun, 3 runs per task, off and on side by side again.
+
+| suite | result off → on | ideal tool | tool calls | prompt read/run |
+|---|---|---|---|---|
+| discover | checks 9/9 → 9/9 | 12/12 → 11/12 | 98 → 111 | 73.5k → 66.2k (−10%) |
+| shell | facts 24/24 → 24/24 | 15/15 → 15/15 | 46 → 46 | 36.2k → 32.5k (−10%) |
+| edit, without rewrite-function | checks 14/15 → 15/15 | — | 161 → 159 | 109k → 81k (an off outlier) |
+| rewrite-function | checks 3/3 → 2/3 | — | 39 → **86** | 3 of 3 runs on hit the 600 s cap |
+
+First request 9,421 → 8,025 tokens (−15%, coding, index off).
+
+Fixed: every delete used `delete_file`; no reruns, `command_output` used
+(2 off, 4 on); `rename-across` 12/10/12 calls on against 13/10/12 off.
+`stop_command` loaded itself from the result in 3/3, two of them done in
+2 calls.
+
+Still wrong:
+
+- **`scratch_write`**: in all three capped `rewrite-function` runs the model
+  wrote throwaway check scripts with `write_file`, first to `/tmp` (refused,
+  outside the workdir), then into the project (`shop/_verify_duration.py`,
+  `private_check.py`), later `.momo/scratch/`, and spent its time on that. The
+  Environment section's scratchpad rule is only there while `scratch_write`
+  is declared (`prompts._environment`), so on demand the model lost it. No
+  run off, and none in round 1, wrote such scripts, so it is partly chance,
+  but the missing rule is what turns it into a loop.
+- **`move_file`**: one rename of three used `mv` through `run_command`
+  (5/6 loaded it over both rounds); like `rm`, that bypasses `/undo`.
+
+Next: declare `scratch_write` (or keep its rule while it is on demand) and
+consider `move_file`, then rerun discover and edit.
+
+### Round 3 (same model and setup, 2026-10-27): no regressions left
+
+`move_file` and `scratch_write` declared again too. On demand in coding with
+the index on: `file_info`, `grep_extract`, `index_status`, `append_to_file`,
+`replace_symbol`, `stop_command` (~8,100 → ~7,400 tokens, −8%; −13% with the
+index off). discover and edit rerun, 3 runs per task.
+
+| suite | result off → on | ideal tool | tool calls | prompt read/run | s/run |
+|---|---|---|---|---|---|
+| discover | checks 9/9 → 9/9 | 12/12 → 12/12 | 107 → 100 | 76.8k → 68.4k (−11%) | 80 → 79 |
+| edit | checks 17/18 → 18/18 | — | 209 → 192 | 112k → 89k (−21%) | 138 → 120 |
+
+First request 9,421 → 8,507 tokens (−10%). No run was capped; rejected calls
+0 in both. `rewrite-function`, capped three times on in round 2, took 6–10
+calls on against 15–18 off. Coached calls on edit rose 3 → 12, but 8 are one
+`signature-change` run (32 calls) stuck on quote escaping in `edit_file`,
+with nothing loaded and no on-demand tool involved; round 2 had the same kind
+of run off (28 calls).
+
+Decision: the model now reaches what it needs with discovery on, but what
+is left on demand saves 8–13% of the first request, short of the ~20% this
+section set as the bar. So the built-ins stay declared by default: the
+setting became three modes, and the default `extensions` lists only custom,
+workspace and MCP tools, whose cost grows with every server and tool. The
+rounds above are `all` against `off` (they ran as `--tools-discover on`,
+which meant `all`); none of these tasks has an extension tool, so
+`extensions` and `off` give them the same prompt. Not measured yet: how
+reliably the model loads an MCP tool it needs.

@@ -18,6 +18,7 @@ TOOL = Tool(
          "content": {"type": "string", "description": "Raw file content to write, exactly as it should appear on disk — quotes and backslashes are not escaped again. For scripts, this is source code only — no surrounding markdown."}},
         ["path", "content"]),
     # Design mode writes one spec and revises it, so it has write_file too.
+    suggests=("replace_symbol",),
     run=editing.write_file, order=400, group="edit & shell", modes=WRITE_ROLES | {"design"},
     inject=("index", "cancel", "edit_features"), writes=("path",), body_arg="content", diff=True,
     example={"path": "hello.py", "content": "print('hello!')"})

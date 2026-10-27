@@ -53,7 +53,8 @@ CATEGORY_ROLES = {
 }
 # The keys a TOOL literal may have (skills/workspace-tools.md lists exactly these).
 KEYS = {"name": str, "description": str, "parameters": dict, "required": list,
-        "category": str, "example": dict, "order": int, "timeout": int, "confirm": bool}
+        "category": str, "example": dict, "order": int, "timeout": int, "confirm": bool,
+        "discoverable": bool}
 REQUIRED_KEYS = ("name", "description", "parameters")
 DEFAULT_ORDER = 9500          # after the personal custom tools (9000)
 DEFAULT_TIMEOUT = 120
@@ -455,6 +456,7 @@ def _as_tool(info: WorkspaceTool, python: Path) -> registry.Tool:
         order=meta.get("order", DEFAULT_ORDER), group="workspace", modes=info.roles,
         inject=("cancel",), example=meta.get("example"), keeps_green=info.category == "read",
         needs_net=info.category == "net", confirm=bool(meta.get("confirm", False)),
+        discoverable=meta.get("discoverable"),       # None: on demand by default
         after=_marks_index if info.category in ("write", "run") else None,
         source=f"workspace:{info.path}")
 

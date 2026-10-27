@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import code_index, ignore_rules, momo_dir
+from .tools import registry
 from .tools import workspace as workspace_mod
 from .mcp import config as mcp_config
 from . import net as net_mod
@@ -330,6 +331,9 @@ def _tool_listing(harness) -> str:
     """/tools list: the current role's tools, grouped, ✓ on / ✗ off."""
     lines = [f"Tool calls: {'on' if harness.tools_enabled else 'off'} — "
              f"tools in {harness.mode} mode (/tools <name> on|off):"]
+    if harness.tools_discover != "off":
+        lines.append(f"  Load on demand: {harness.tools_discover} — · on demand tools are listed "
+                     "in the prompt and load with find_tools (/tools discover)")
     group = None
     for c in harness.tool_choices():
         if c["group"] != group:
@@ -337,7 +341,8 @@ def _tool_listing(harness) -> str:
             lines.append(f"  {group}")
         mark = "✓" if c["enabled"] else "✗"
         note = f"  ({'locked: ' if c['locked'] else ''}{c['note']})" if c["note"] else ""
-        lines.append(f"    {mark} {c['name']}{note}")
+        state = f"  · {c['state']}" if c.get("state", "core") != "core" else ""
+        lines.append(f"    {mark} {c['name']}{state}{note}")
     report = harness.custom_tools
     for file, why in report.errors:
         lines.append(f"  custom tool {file} not loaded: {why}")
@@ -447,12 +452,51 @@ def _tool_details(harness, name: str) -> str | None:
     if c is None:
         return None
     state = f"{'on' if c['enabled'] else 'off'} in {harness.mode} mode"
+    if c.get("state", "core") != "core":
+        state += f", {c['state']}"
     note = f" ({'locked: ' if c['locked'] else ''}{c['note']})" if c["note"] else ""
     lines = [f"{c['name']} — {c['group']} — {state}{note}", "", c["desc"]]
     if c["params"]:
         lines += ["", "Parameters (* = required):"]
         lines += [f"  {'*' if req else ' '} {p}: {d}" for p, d, req in c["params"]]
     return "\n".join(lines)
+
+
+def _discover_command(harness, parts: list[str]) -> CommandResult:
+    """/tools discover [off|extensions|all], /tools load <name>...,
+    /tools unload <name>...|all."""
+    sub, names = parts[0], parts[1:]
+    if sub == "discover":
+        if not names:
+            return CommandResult(handled=True, output=harness.discover_summary())
+        mode = names[0].lower()
+        if (on := _on_off(mode)) is not None:      # on: the default mode
+            mode = registry.DEFAULT_DISCOVER if on else "off"
+        if mode not in registry.DISCOVER_MODES or len(names) > 1:
+            return _bad_choice(" ".join(names), "'off', 'extensions' or 'all'")
+        return CommandResult(handled=True, output=harness.set_tools_discover(mode))
+    if harness.tools_discover == "off":
+        return CommandResult(handled=True, output=(
+            "ERROR: loading tools on demand is off (/tools discover extensions|all); every "
+            "tool is already declared"))
+    if not names:
+        return CommandResult(handled=True, output=f"Usage: /tools {sub} <name>...")
+    if sub == "load":
+        catalog = {t["function"]["name"] for t in harness._tool_catalog()}
+        unknown = [n for n in names if n not in catalog]
+        new = harness.load_tools([n for n in names if n in catalog], "/tools load")
+        lines = [f"Loaded: {', '.join(new)}" if new else "Nothing new loaded"]
+        if unknown:
+            lines.append(f"Not loadable in {harness.mode} mode: {', '.join(unknown)} "
+                         f"(on demand: {', '.join(sorted(catalog)) or 'none'})")
+    else:
+        gone = harness.unload_tools(sorted(harness.loaded_tools) if names == ["all"] else names)
+        lines = [f"Unloaded: {', '.join(gone)} — the next request re-sends the tool list, "
+                 "so the server re-reads the prompt once" if gone else "None of those is loaded"]
+    harness.emit_status()
+    if len(harness.messages) > 1:
+        harness._autosave()
+    return CommandResult(handled=True, output="\n".join(lines))
 
 
 def _index_filter(harness, arg: str) -> CommandResult:
@@ -905,6 +949,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=harness.reload_custom_tools())
         if parts == ["errors"]:
             return CommandResult(handled=True, output=_custom_tool_errors(harness))
+        if parts[0] in ("discover", "load", "unload"):
+            return _discover_command(harness, parts)
         if (ws := _workspace_tools_command(harness, parts)) is not None:
             return ws
         if len(parts) == 1:
@@ -917,7 +963,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
         if on is None:
             return CommandResult(handled=True, output=(
                 "Usage: /tools on|off | /tools list | /tools reload | /tools errors | "
-                "/tools <name> [<name>...] on|off"))
+                "/tools <name> [<name>...] on|off | /tools discover off|extensions|all | "
+                "/tools load|unload <name>..."))
         return CommandResult(handled=True, output="\n".join(
             harness.set_tool_enabled(name, on) for name in parts[:-1]))
 
@@ -1748,6 +1795,8 @@ Available commands:
   /tools list         List this mode's tools and whether each is on
   /tools reload       Load the custom tools in ~/.momo-harness/tools/ again
   /tools errors       Why a custom tool file did not load (with the traceback)
+  /tools discover off|extensions|all  Which tools load on demand: custom, workspace and MCP tools (extensions, the default), also rarely needed built-ins (all), or none
+  /tools load|unload <name>…  Load an on-demand tool now, or unload it (unload all: every one)
   /tools approve <name>|all  Let a workspace tool (.momo/tools/) run, after reading it
   /tools deny <name>  Keep a workspace tool from running
   /tools roles <name> <role,…>|auto  Which modes offer a workspace tool (saved in .momo/tools.json)

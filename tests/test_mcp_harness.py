@@ -67,6 +67,7 @@ class Base(unittest.TestCase):
         cfg_mod.global_path().write_text(json.dumps({"mcpServers": self.servers}))
         _Scripted.replies, _Scripted.seen_tools = [], []
         self.h = hmod.Harness(host="http://fake", model="fake", workdir=self.work)
+        self.h.tools_discover = "off"    # declared, not on demand (tests/test_tool_discovery.py)
         self.h.set_mode("coding")
         self.h.start_mcp()
         self.assertEqual(self.h.mcp.wait_ready(15), [])

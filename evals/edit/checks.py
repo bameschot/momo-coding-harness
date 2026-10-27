@@ -18,6 +18,31 @@ def src(rel):
 """
 
 SCRIPTS = {
+    # The discover suite (evals/tasks.py DISCOVER_TASKS): tasks whose ideal tool is
+    # one /tools discover leaves on demand, plus a control that needs none.
+    # shop/util.py renamed to shop/text.py, its one importer (the tests) updated.
+    "rename_module": """
+assert not (ROOT / "shop/util.py").exists(), "shop/util.py still exists"
+from shop.text import slug, parse_duration
+assert "shop.util" not in src("tests/test_shop.py"), "the tests still import shop.util"
+import tests.test_shop
+assert slug("A b") == "a-b"
+""",
+    # The unused shop/reports.py deleted; everything else still imports.
+    "delete_module": """
+import importlib
+assert not (ROOT / "shop/reports.py").exists(), "shop/reports.py still exists"
+for m in ("cart", "checkout", "inventory", "pricing", "shipping", "util"):
+    importlib.import_module("shop." + m)
+import tests.test_shop
+""",
+    # Control: a plain edit_file change.
+    "slug_clean": """
+from shop.util import slug
+assert slug("Hello, World!") == "hello-world", slug("Hello, World!")
+assert slug("A  b") == "a-b", slug("A  b")
+assert slug("x2 y") == "x2-y", slug("x2 y")
+""",
     # Only items_with_tag changes: [] instead of None; the other three Nones stay.
     "ambiguous_edit": """
 from shop.inventory import Inventory, Item

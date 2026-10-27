@@ -39,6 +39,7 @@ TOOL = Tool(
         ["edits"]),
     # edit_files re-indexes its own files (editing.py, before its definition
     # checks), so it names them for .momo/ only (written), not in writes.
+    suggests=("replace_symbol",),
     run=editing.edit_files, order=460, group="edit & shell", needs_edit_feature="batch",
     inject=("index", "cancel", "edit_features"), written=edit_paths, guard=_guard, diff=True,
     example={"edits": [{"path": "src/api.py", "old_string": "load(path)", "new_string": "load(path, strict=True)"},

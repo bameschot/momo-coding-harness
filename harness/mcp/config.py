@@ -30,6 +30,9 @@ from ..paths import momo_home
 
 PROJECT_FILE = ".mcp.json"
 CONFIRM_MODES = ("always", "writes", "never")
+# With /tools discover on: "discover" lists a server's tools in the prompt's
+# catalog until loaded (find_tools); "direct" declares them all as before.
+EXPOSURES = ("discover", "direct")
 DEFAULT_TIMEOUT = 120.0
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -54,6 +57,7 @@ class ServerConfig:
     headers: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
     confirm: str = "writes"
+    exposure: str = "discover"
     include: list[str] | None = None
     exclude: list[str] = field(default_factory=list)
     timeout: float = DEFAULT_TIMEOUT
@@ -139,6 +143,10 @@ def parse_entry(name: str, entry, source: str) -> ServerConfig:
     if confirm not in CONFIRM_MODES:
         raise ConfigError(f"{name}: 'confirm' must be one of {', '.join(CONFIRM_MODES)}")
     cfg.confirm = confirm
+    exposure = str(entry.get("exposure", "discover")).lower()
+    if exposure not in EXPOSURES:
+        raise ConfigError(f"{name}: 'exposure' must be one of {', '.join(EXPOSURES)}")
+    cfg.exposure = exposure
     tools = entry.get("tools") or {}
     if not isinstance(tools, dict):
         raise ConfigError(f"{name}: 'tools' must be an object with include/exclude lists")

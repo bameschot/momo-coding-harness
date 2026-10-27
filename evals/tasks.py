@@ -453,5 +453,42 @@ EDIT_TASKS: list[Task] = [
 # which cavecat leaves alone.
 #     python evals/run_evals.py --suite cavecat --runs 2 --cavecat off
 #     python evals/run_evals.py --suite cavecat --runs 2 --cavecat on
+# Tools on demand (/tools discover): the tasks whose ideal tool discovery left
+# out of the declared set, so with it on the model has to load it (find_tools,
+# a call by name, or a result naming it); discover-control needs only core
+# tools.  discover-rename and discover-delete stay as checks: move_file and
+# delete_file are core again since the A/B, where the model used mv and rm
+# instead of loading them.  Run both ways:
+#     python evals/run_evals.py --suite discover --tools-discover off --json off.json
+#     python evals/run_evals.py --suite discover --tools-discover on --json on.json
+DISCOVER_TASKS: list[Task] = [
+    Task(id="discover-rename",
+         prompt="Rename the module shop/util.py to shop/text.py and update every import of it "
+                "in the project, the tests included.",
+         ideal=frozenset({"move_file"}), must=(), max_calls=4, modes=("coding",),
+         workdir=_EDIT, isolate=True, check="rename_module",
+         allowed=("shop/util.py", "shop/text.py", "tests/test_shop.py"),
+         note="move_file (core since round 3; mv skips /undo), then one edit_file in the tests"),
+    Task(id="discover-delete",
+         prompt="Nothing uses shop/reports.py any more. Delete it.",
+         ideal=frozenset({"delete_file"}), must=(), max_calls=3, modes=("coding",),
+         workdir=_EDIT, isolate=True, check="delete_module", allowed=("shop/reports.py",),
+         note="delete_file (core since round 1); rm through run_command works but skips /undo"),
+    Task(id="discover-background",
+         prompt="Start a web server for this folder in the background with "
+                "`python3 -u -m http.server 0 --bind 127.0.0.1`, tell me which port it is "
+                "serving on, then stop it. Don't change any files.",
+         ideal=frozenset({"stop_command"}), must=("port",), max_calls=3, modes=("coding",),
+         workdir=_SHELL, isolate=True,
+         note="run_command background=true names stop_command, which loads it"),
+    Task(id="discover-control",
+         prompt="In shop/util.py, make slug() drop every character that is not a letter, a "
+                "digit or a space before it joins the words, so 'Hello, World!' becomes "
+                "'hello-world'." + _NO_TESTS,
+         ideal=frozenset({"edit_file", "replace_symbol"}), must=(), max_calls=3,
+         modes=("coding",), workdir=_EDIT, isolate=True, check="slug_clean",
+         allowed=("shop/util.py",), note="control: only core tools are needed"),
+]
+
 _CAVECAT_EDITS = ("ambiguous-edit", "nested-branch", "two-edits")
 CAVECAT_TASKS: list[Task] = SHELL_TASKS + [t for t in EDIT_TASKS if t.id in _CAVECAT_EDITS]

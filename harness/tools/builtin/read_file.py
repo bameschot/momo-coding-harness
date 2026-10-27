@@ -96,5 +96,6 @@ TOOL = Tool(
          "start_line": {"type": "integer", "description": "1-based start line (default: 1); a negative number counts from the end, e.g. -50 reads the last 50 lines"},
          "end_line": {"type": "integer", "description": "1-based end line inclusive (default: EOF)"}},
         ["path"]),
+    suggests=("file_info",),
     run=read_file, order=130, group="files", modes=ALL_ROLES, keeps_green=True,
     inject=("read_budget",), example={"path": "main.py", "start_line": 1, "end_line": 40})

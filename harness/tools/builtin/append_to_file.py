@@ -12,5 +12,6 @@ TOOL = Tool(
         {"path":    {"type": "string", "description": "File to append to (created if absent)"},
          "content": {"type": "string", "description": "Text to add at the end of the file."}},
         ["path", "content"]),
+    discoverable=True, suggests=("replace_symbol",),
     run=editing.append_to_file, order=430, group="edit & shell", writes=("path",),
     body_arg="content", diff=True, example={"path": "notes.md", "content": "\n## New section\n"})

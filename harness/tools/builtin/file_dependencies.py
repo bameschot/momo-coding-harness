@@ -17,6 +17,7 @@ TOOL = Tool(
         {"path":      {"type": "string", "description": "Source file to inspect"},
          "direction": {"type": "string", "description": "'both' (default), 'imports' for only what it imports, or 'importers' for only what imports it"}},
         ["path"]),
+    discoverable=True,
     run=code_nav.file_dependencies, order=340, group="code nav", modes=ALL_ROLES,
     keeps_green=True, requires=lambda: code_nav.AVAILABLE, hidden_by_index=True,
     example={"path": "src/parser.py"})

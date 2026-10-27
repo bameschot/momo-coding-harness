@@ -453,6 +453,7 @@ class WebServer:
                     self._json({"skills": h.skill_choices()})
                 elif path == "/api/tools":
                     self._json({"mode": h.mode, "tools_enabled": h.tools_enabled,
+                                "tools_discover": h.tools_discover,
                                 "tools": h.tool_choices(), "workspace": h.workspace_choices()})
                 elif path == "/api/index-filter":
                     text, fpath = h.index_filter()

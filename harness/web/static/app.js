@@ -1973,7 +1973,23 @@ function renderToolsMenu(menu, b) {
   const master = el("label");
   master.append(check(b.tools_enabled, false, (on) => send(`/tools ${on ? "on" : "off"}`)),
                 " Tool calls", el("kbd", null, "/tools"));
-  const rows = [el("div", "menu-title", `Tools — ${b.mode} mode`), master];
+  const discover = el("label");
+  const pick = document.createElement("select");
+  for (const [value, text] of [["off", "off"], ["extensions", "custom, workspace, MCP"],
+                               ["all", "also rare built-ins"]]) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = text;
+    pick.append(o);
+  }
+  pick.value = b.tools_discover || "off";
+  pick.disabled = !b.tools_enabled;
+  pick.onchange = () => send(`/tools discover ${pick.value}`);
+  discover.append("Load on demand ", pick, el("kbd", null, "/tools discover"));
+  discover.title = "Tools listed in the prompt instead of declared; they load when the model "
+    + "asks for them with find_tools or a result names them. Built-ins stay declared "
+    + "unless you pick 'also rare built-ins'.";
+  const rows = [el("div", "menu-title", `Tools — ${b.mode} mode`), master, discover];
   let group = null;
   for (const t of b.tools) {
     if (t.group !== group) { group = t.group; rows.push(el("div", "menu-sub", group)); }
@@ -1984,12 +2000,13 @@ function renderToolsMenu(menu, b) {
     lab.setAttribute("aria-description", t.desc);
     lab.append(check(t.enabled, t.locked || !b.tools_enabled,
                      (on) => send(`/tools ${t.name} ${on ? "on" : "off"}`)), " " + t.name);
+    if (t.state && t.state !== "core") lab.append(el("span", "muted small tool-state", t.state));
     if (t.note) lab.append(el("span", "muted small tool-note", t.note));
     rows.push(lab);
   }
   // Tools waiting for approval go on top, where the badge points; otherwise last.
   const ws = workspaceRows(b);
-  if ((b.workspace || []).some((w) => w.status === "pending")) rows.splice(2, 0, ...ws);
+  if ((b.workspace || []).some((w) => w.status === "pending")) rows.splice(3, 0, ...ws);
   else rows.push(...ws);
   menu.replaceChildren(...rows);
   // A refresh (after a toggle) replaces the rows under the pointer: keep the

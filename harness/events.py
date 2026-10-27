@@ -73,6 +73,9 @@ class StatusEvent:
     cavecat: str = "off"          # /cavecat: off | on
     think_keep: str = "lean"      # /think-keep: off | lean | more | most
     tools_off: list = field(default_factory=list)  # tools turned off for the current mode
+    tools_discover: str = "off"    # /tools discover: off | extensions | all
+    tools_loaded: int = 0          # tools loaded on demand this session
+    tools_listed: int = 0          # tools on demand in this mode (the prompt's catalog)
     workspace_pending: list = field(default_factory=list)  # .momo/tools/ tools awaiting approval
     skills: list = field(default_factory=list)     # active skills, in load order
     index_enabled: bool = False   # /index: the code index and its index_* tools

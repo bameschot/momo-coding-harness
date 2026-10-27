@@ -58,8 +58,8 @@ if not os.environ.get("MOMO_EVAL_KEEP_HOME"):
     os.environ["HOME"] = tempfile.mkdtemp(prefix="momo_eval_home_")
 
 from evals.edit.checks import run_check  # noqa: E402
-from evals.tasks import (CAVECAT_TASKS, EDIT_TASKS, INDEX_TASKS, LANG_TASKS,  # noqa: E402
-                         SHELL_TASKS, TASKS)
+from evals.tasks import (CAVECAT_TASKS, DISCOVER_TASKS, EDIT_TASKS, INDEX_TASKS,  # noqa: E402
+                         LANG_TASKS, SHELL_TASKS, TASKS)
 from harness.compaction import text_tokens  # noqa: E402
 from harness.events import ThinkEvent  # noqa: E402
 from harness.harness import (Harness, ChatEvent, DoneEvent, ErrorEvent,  # noqa: E402
@@ -96,7 +96,7 @@ _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
 
 def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True,
              run_mode="new", tool_ref="compact", think_history="off", edit_features=None,
-             cavecat="off", think_keep="lean", max_secs=0):
+             cavecat="off", think_keep="lean", max_secs=0, tools_discover="off"):
     """One task, one fresh conversation.  Returns what the model did.  A run
     still going after max_secs (0 = no limit) is cancelled and graded as is."""
     workdir = REPO / task.workdir
@@ -105,11 +105,14 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         # A mode with write tools gets a throwaway copy: a model answering a
         # question has written its answer into the real repo (safe_path_calls.txt).
         # The copy leaves out the venv and the eval cache — the cache holds old
-        # model answers that grep_files would otherwise find.
+        # model answers that grep_files would otherwise find — and .scratch/, the
+        # git-ignored live-check area (a browser profile there holds sockets and
+        # dangling links that copytree cannot copy).
         scratch = tempfile.TemporaryDirectory(prefix="momo_eval_wd_")
         workdir = Path(scratch.name) / "project"
         shutil.copytree(REPO / task.workdir, workdir,
-                        ignore=shutil.ignore_patterns("__pycache__", ".venv", ".cache", ".momo"))
+                        ignore=shutil.ignore_patterns("__pycache__", ".venv", ".cache", ".momo",
+                                                      ".scratch"))
     h = Harness(host=host, model=model, workdir=workdir, provider=provider)
     h.mode = mode
     h.run_mode = run_mode
@@ -121,6 +124,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     h.think_keep = think_keep
     if edit_features is not None:
         h.edit_features = frozenset(edit_features)   # ignored by a harness without them
+    h.tools_discover = tools_discover    # /tools discover A/B (a harness without it ignores it)
     # Nobody is there to answer: without this a run that calls ask_user blocks forever.
     # The model mostly asks "want me to look into X too?" once it has answered, so
     # decline — an open-ended reply sent it exploring and its last message then
@@ -131,6 +135,8 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         h.set_index(True)
         h.index.wait_fresh()  # the build is not the model's time
     h.messages = [{"role": "system", "content": h._build_system_prompt()}]
+    # The first request's prompt plus tool schemas: what /tools discover saves.
+    first_request_tokens = h._estimate(schemas=True)
 
     sub = h.event_queue.subscribe(replay=False)
     calls: list[tuple[str, dict]] = []
@@ -287,6 +293,11 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         "err": err,
         "answer": answer,
         **({"edit_features": sorted(edit_features)} if edit_features is not None else {}),
+        # /tools discover: what the first request cost, and how tools got loaded.
+        "tools_discover": tools_discover,
+        "first_request_tokens": first_request_tokens,
+        "find_tools_calls": sum(1 for n in names if n == "find_tools"),
+        "loaded_tools": sorted(getattr(h, "loaded_tools", ())),
         **edit,
     }
 
@@ -414,10 +425,12 @@ _env_cache: dict = {}
 
 def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
                 run_mode="new", tool_ref="compact", think_history="off",
-                edit_features=None, cavecat="off", think_keep="lean") -> str:
+                edit_features=None, cavecat="off", think_keep="lean",
+                tools_discover="off") -> str:
     """Everything that can change a run's outcome, hashed."""
     key = (task.workdir, mode, index, route, run_mode, tool_ref,
-           None if edit_features is None else tuple(sorted(edit_features)), cavecat)
+           None if edit_features is None else tuple(sorted(edit_features)), cavecat,
+           tools_discover)
     if key not in _env_cache:
         h = Harness(host=host, model=model, workdir=REPO / task.workdir, provider=provider)
         h.mode = mode
@@ -427,6 +440,7 @@ def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
         h.cavecat = cavecat
         if edit_features is not None:
             h.edit_features = frozenset(edit_features)
+        h.tools_discover = tools_discover
         if index:
             h.set_index(True)
         prompt = h._build_system_prompt()
@@ -514,6 +528,15 @@ def summarise(rows):
         firsts = [r["first_tool"] for r in rows if r["first_tool"]]
         out.append(f"  first tool is index_*  {sum(t.startswith('index_') for t in firsts)}/{len(firsts)}")
     out.append(f"  ideal tool used  {sum(r['used_ideal'] for r in rows)}/{total}")
+    first = [r["first_request_tokens"] for r in rows if r.get("first_request_tokens") is not None]
+    if first:                       # rows from before the field have none
+        disc = [r for r in rows if r.get("tools_discover") not in (None, False, "off")]
+        out.append(f"  first request    {statistics.mean(first):,.0f} tokens (prompt + tool "
+                   f"schemas); tools on demand in {len(disc)}/{total} runs")
+        if disc:
+            loads = sum(len(r.get("loaded_tools") or ()) for r in disc)
+            out.append(f"  find_tools calls {sum(r['find_tools_calls'] for r in disc)}, "
+                       f"{loads} tools loaded over {len(disc)} runs")
     out.append(f"  over call budget {sum(r['over_budget'] for r in rows)}/{total}")
     changed = [r for r in rows if r.get("file_changes") and "passed" not in r]
     if any("passed" not in r for r in rows):
@@ -657,15 +680,22 @@ def main():
                     help="/run-mode for every run: new (saved log + views) or classic")
     ap.add_argument("--tool-ref", choices=("full", "compact"), default="compact",
                     help="system prompt tool reference style (/tool-ref A/B)")
-    ap.add_argument("--suite", choices=("nav", "index", "lang", "shell", "edit", "cavecat", "all"),
+    ap.add_argument("--suite", choices=("nav", "index", "lang", "shell", "edit", "cavecat",
+                                        "discover", "all"),
                     default="nav",
                     help="nav = the code-navigation tasks (default), index = the code-index "
                          "use cases, lang = 3 tasks per language on evals/lang/<lang>/project, "
                          "edit = change requests on evals/edit/project, cavecat = the "
-                         "shell tasks + 3 light edits (/cavecat A/B), all = every task")
+                         "shell tasks + 3 light edits (/cavecat A/B), discover = tasks whose "
+                         "ideal tool is on demand (/tools discover A/B), all = every task")
     ap.add_argument("--edit-features", default=None, metavar="LIST",
                     help="what the edit tools add: 'all', 'none', or a comma list of "
                          f"{', '.join(_EDIT_FEATURE_NAMES)} (default: the harness default)")
+    ap.add_argument("--tools-discover", choices=("off", "extensions", "all"), default="off",
+                    help="/tools discover for every run: all = the rarely needed built-ins "
+                         "are listed and loaded on demand too (find_tools), extensions = "
+                         "only custom/workspace/MCP tools (none in these tasks), off = all "
+                         "declared (A/B: off against all)")
     ap.add_argument("--index", action="store_true",
                     help="turn the code index on, so the model gets the index_* tools")
     ap.add_argument("--no-index-route", dest="route", action="store_false", default=True,
@@ -682,9 +712,10 @@ def main():
     if "://" not in args.host:
         ap.error(f"--host needs a scheme, e.g. http://{args.host}")
 
-    every = TASKS + INDEX_TASKS + LANG_TASKS + SHELL_TASKS + EDIT_TASKS
+    every = TASKS + INDEX_TASKS + LANG_TASKS + SHELL_TASKS + EDIT_TASKS + DISCOVER_TASKS
     pool = {"nav": TASKS, "index": INDEX_TASKS, "lang": LANG_TASKS, "shell": SHELL_TASKS,
-            "edit": EDIT_TASKS, "cavecat": CAVECAT_TASKS, "all": every}[args.suite]
+            "edit": EDIT_TASKS, "cavecat": CAVECAT_TASKS, "discover": DISCOVER_TASKS,
+            "all": every}[args.suite]
     tasks = pool
     edit_features = None
     if args.edit_features is not None:
@@ -717,7 +748,8 @@ def main():
                                  route=args.route, run_mode=args.run_mode,
                                  tool_ref=args.tool_ref, think_history=args.think_history,
                                  edit_features=edit_features, cavecat=args.cavecat,
-                                 think_keep=args.think_keep)
+                                 think_keep=args.think_keep,
+                                 tools_discover=args.tools_discover)
                 stored = [] if args.refresh else cache.get(fp, [])
             for i in range(args.runs):
                 if i < len(stored):
@@ -730,7 +762,8 @@ def main():
                                  route=args.route, run_mode=args.run_mode,
                                  tool_ref=args.tool_ref, think_history=args.think_history,
                                  edit_features=edit_features, cavecat=args.cavecat,
-                                 think_keep=args.think_keep, max_secs=args.max_run_secs)
+                                 think_keep=args.think_keep, max_secs=args.max_run_secs,
+                                 tools_discover=args.tools_discover)
                     source = ""
                     if cache_path and not r.get("err"):
                         with cache_path.open("a") as f:

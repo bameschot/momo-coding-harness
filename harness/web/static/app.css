@@ -229,6 +229,8 @@ button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border)
 .skills-list { max-height: 160px; overflow-y: auto; }
 .tools-menu label.mono { font-size: var(--fs-sm); padding: 2px 0; }
 .tool-note { margin-left: auto; font-family: var(--sans); }
+.tool-state { margin-left: auto; font-family: var(--sans); }
+.tool-state + .tool-note { margin-left: 8px; }
 .ws-tool { padding: 3px 0; font-size: var(--fs-sm); }
 .ws-tool-head { display: flex; gap: 6px; align-items: center; }
 .ws-tool-actions { display: flex; gap: 10px; margin: 1px 0 0 14px; }
