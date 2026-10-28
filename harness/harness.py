@@ -6,6 +6,7 @@ import queue
 import shlex
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import session as session_mod
@@ -14,10 +15,11 @@ from .diff import build_diff_body
 from .events import EventBus, BusyEvent, DeltaEvent, StreamEndEvent
 from .llm import make_client
 from .logger import Logger
-from .compaction import (CompactionMixin, calls_tokens, content_text, format_for_summary,
+from .compaction import (CompactionMixin, _paired_calls, calls_tokens, content_text, format_for_summary,
                          new_summary_state, text_tokens)
 from .plan import Plan
 from .plan_runner import TDD_MAX_REFUSALS, PlanRunnerMixin, keeps_green
+from .story_runner import DEFAULT_STORIES_CAP, StoryRunnerMixin
 from .mcp_mixin import MCPMixin
 from .tools import (DIFF_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, LOCKED_TOOLS,
                     NET_TOOL_NAMES, RUN_STORE_TOOLS, ToolContext, ToolRunContext, dispatch,
@@ -33,15 +35,19 @@ from . import net as net_mod
 from . import search as search_mod
 from . import tools as tools_mod
 from .syntax_watch import SyntaxWatch
+from .loop_guard import MAX_RESETS as DEFAULT_LOOP_RESETS, THRESHOLD as DEFAULT_LOOP_GUARD, Hit, LoopGuard
+from . import transcript as transcript_mod
 from . import think_trim
 from .tools.dispatcher import written_paths
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
                      StatusEvent, ThinkEvent, ToolCallEvent, ToolResultEvent)
 from .prompts import (_index_banner, MODES,
-                      _PLAN_EXECUTION_RULES, _PLAN_TDD_EXECUTION_RULES, _PLAN_TDD_RULES,
+                      _PLAN_EXECUTION_RULES, _PLAN_STORIES_RULES, _PLAN_TDD_EXECUTION_RULES,
+                      _PLAN_TDD_RULES, _STORY_EXECUTION_RULES,
                       _ROLE_LOADERS, _coding_prompt, _environment,
-                      _cavecat_rules, _load_role, _nav_rules, _net_rules, planner_for_tdd)
+                      _cavecat_rules, _load_role, _nav_rules, _net_rules, _story_writer_prompt,
+                      planner_for_tdd)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls)
 
@@ -224,6 +230,78 @@ _RETRY_TEXT = {
 }
 
 
+# ask_choice: the user added information instead of picking an option, and the
+# model rewrites the question with it in view.
+_CHOICE_MAX_ROUNDS = 3   # refinements before the user's words go back to the model as-is
+_CHOICE_REFINE_PROMPT = (
+    "Do not call any tool. You asked the user this multiple-choice question:\n\n"
+    "{question}\n{options}\n\n"
+    "Instead of picking an option, the user added this information:\n\n{notes}\n\n"
+    "Rewrite the question and its options with that information in mind: drop options "
+    "it rules out, add any it suggests, keep 2-6 short, distinct options. Reply with "
+    "only JSON, no other text: {{\"question\": \"...\", \"options\": [\"...\", \"...\"]}}")
+
+
+def _choice_options(options) -> list[str] | None:
+    """ask_choice's options, stripped; None unless they are 2-6 non-empty strings."""
+    if not isinstance(options, list) or not 2 <= len(options) <= 6:
+        return None
+    if not all(isinstance(o, str) and o.strip() for o in options):
+        return None
+    return [o.strip() for o in options]
+
+
+def _match_choice(answer: str, options: list[str]) -> int | None:
+    """The index of the option an answer picks — its number or its exact text."""
+    text = answer.strip().rstrip(".").strip()
+    if text.isdigit() and 1 <= int(text) <= len(options):
+        return int(text) - 1
+    lowered = [o.lower() for o in options]
+    return lowered.index(text.lower()) if text.lower() in lowered else None
+
+
+def _numbered(options: list[str]) -> str:
+    return "\n".join(f"  {i}. {o}" for i, o in enumerate(options, 1))
+
+
+# A loop reset (_break_loop): the request for the model's own analysis of the
+# loop, sent with the loop still in view, and the nudge that replaces the loop.
+_LOOP_ANALYSIS_PROMPT = (
+    "STOP. You are stuck in a loop: {what} — {count} times{between}. Do not call any tool. Those steps will be removed from the conversation "
+    "and replaced by what you write now, so write down everything worth keeping, "
+    "under these headings:\n\n"
+    "## What I was trying to do\n"
+    "## What I repeated\n({repeated})\n"
+    "## Why it is not working\n(the actual cause — not just \"it failed\")\n"
+    "## What I know now\n(facts learned, and every file I changed)\n"
+    "## A different approach\n(concrete next steps that do not repeat that call and stay "
+    "within what the user asked for and allowed — if there is none, say what to ask the "
+    "user)\n\n"
+    "Be brief and specific.")
+# Marked as the harness's: a 9B read an unmarked nudge as the user's word, and
+# "files they changed are still changed" as news that the file it polled had
+# changed.  So the nudge names what the loop changed, or says it changed nothing.
+_LOOP_NUDGE = (
+    "[Note from the harness, not the user] {removed}{changes}Do not repeat {what}. "
+    "Continue with the different approach from your analysis; if it found none that "
+    "fits what the user asked, stop and tell the user what is blocking you.")
+# What the analysis lists under "What I repeated", per kind of loop.
+_LOOP_REPEATED = {
+    "call": "the exact call, and what it returned each time",
+    "error": "the calls that failed, and the error each returned",
+    "churn": "each change I made to that code, and how the check failed after it",
+}
+# Edit churn's first warning (a Hit with severity "nudge"): the history stays.
+# Patching a failing check line by line is how a 9B looped on a WebSocket frame
+# encoder for a whole plan step, so it asks for the expected output first.
+_CHURN_NUDGE = (
+    "[Note from the harness, not the user] You have changed {owner} {count} times and the "
+    "check still fails (last: \"{error}\"). Stop patching. Before the next edit, write "
+    "down the exact output the code should produce for one concrete input — from the "
+    "spec, the docs or a known example, not from the code — then compare the code with "
+    "it line by line. If you cannot tell what the right output is, ask the user.")
+
+
 def _files(n: int) -> str:
     return f"{n} file{'s' if n != 1 else ''}"
 
@@ -238,7 +316,7 @@ def _has_model(available: list[str], name: str) -> bool:
     return name in available or f"{name}:latest" in available
 
 
-class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
+class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
     def __init__(self, host: str, model: str, workdir: Path, provider: str = "ollama"):
         self.workdir = workdir.resolve()
         self.mode = "design"
@@ -256,7 +334,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self.think_level: str = "on"
         self.think_history: str = "turn"    # /think-history, see THINK_HISTORY
         self.cavecat: str = "off"           # /cavecat, see prompts.CAVECAT_LEVELS
-        self.think_keep: str = "lean"       # /think-keep, see think_trim.KEEP_LEVELS
+        self.think_keep: str = "off"        # /think-keep, see think_trim.KEEP_LEVELS
         self._trim_cache: dict[tuple, str] = {}
         self.max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS   # /max-output-tokens, 0 = off
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
@@ -283,6 +361,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._run_store: run_store_mod.RunStore | None = None
         # File checkpoints for /undo, /keep and the Changes menu (checkpoints.py).
         self.undo_max: int = DEFAULT_UNDO_MAX     # /undo-max, 0 = no cap
+        # /loop-guard: repeats that make a loop (0 = off), and resets per turn
+        # before the turn is stopped.
+        self.loop_guard: int = DEFAULT_LOOP_GUARD
+        self.loop_resets: int = DEFAULT_LOOP_RESETS
         self._checkpoints: checkpoints_mod.CheckpointStore | None = None
         self._reverted: list[str] = []   # files the user put back: told to the model with the next message
         # Internet access for fetch_url: "off" | "on" (public hosts only) |
@@ -323,9 +405,19 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         # for later) → "executing" (approved; paused if not currently running).
         self.plan: Plan | None = None
         self.plan_phase: str = "investigating"
-        # The type of the next plan create_plan makes: "normal" | "tdd" (/plan tdd).
-        # A plan that exists keeps its own kind (plan.kind).
+        # The type of the next plan create_plan makes: "normal" | "tdd" | "stories"
+        # (/plan tdd, /plan stories).  A plan that exists keeps its own kind (plan.kind).
         self.plan_kind: str = "normal"
+        # A stories plan's phase at work: "story-writer" while its stories are
+        # written, "story-exec" while one runs; None otherwise.  It replaces the
+        # role (tools and prompt) for that while.
+        self.story_role: str | None = None
+        # /plan stories approve each|once, /plan stories cap N
+        self.stories_approve: str = "each"
+        self.stories_cap: int = DEFAULT_STORIES_CAP
+        self._writing: dict | None = None    # a story-writing pass: its phase and mode
+        self._story: dict | None = None      # the story running: phase, id, refusals, …
+        self._story_failure: str = ""
         # A running TDD stage: test files as the stage started (audited at the
         # gate), gate refusals in a row, and whether the user paused the plan.
         self._tdd_snapshot: dict[str, str] | None = None
@@ -429,10 +521,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         """A y/N question through the ask_user plumbing; only y / yes allows."""
         return self._ask_user(question).strip().lower() in ("y", "yes")
 
-    def _ask_user(self, question: str) -> str:
+    def _ask_user(self, question: str, options: list[str] | None = None) -> str:
         """Emit an AskUserEvent and block the worker thread until a frontend answers."""
         self.awaiting_input = True
-        self.event_queue.put(AskUserEvent(question))
+        self.event_queue.put(AskUserEvent(question, list(options or [])))
         # Only ever called from a worker thread, so the harness is busy by definition.
         self.event_queue.put(BusyEvent(busy=True, waiting=True))
         try:
@@ -749,14 +841,17 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         """What decides the tool set: the role (an executing plan is its own),
         the run mode, edit features, code index, internet and a TDD plan."""
         executing = self._plan_executing()
-        if executing:
+        stories = self.mode == "plan" and self.plan_kind == "stories"
+        if self.story_role:
+            role, tdd, stories = self.story_role, False, True
+        elif executing:
             role, tdd = "plan-exec", self.plan.tdd
         else:
             role = self.mode if self.mode in MODES else "coding"
             tdd = self.mode == "plan" and self.plan_kind == "tdd"
         return ToolContext(role=role, run_mode=self.run_mode, edit_features=self.edit_features,
                            index_on=self.index is not None, net_on=self.net_access != "off",
-                           tdd=tdd, search_sources=self.search_sources,
+                           tdd=tdd, stories=stories, search_sources=self.search_sources,
                            discover=self.tools_discover, loaded=frozenset(self.loaded_tools))
 
     def _current_tools(self) -> list[dict]:
@@ -1334,7 +1429,15 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             # First and last (the navigation section), where a small model
             # weighs it most.
             add("index", "Code index banner", _index_banner(names))
-        if self._plan_executing():
+        if self.story_role == "story-writer":
+            role = _story_writer_prompt(str(self.workdir))
+            label = "Role: story writer"
+        elif self.story_role == "story-exec":
+            # One story runs with the coding agent's prompt; the story itself is
+            # the first user message of its fresh context.
+            role = (_coding_prompt(str(self.workdir)) + "\n\n---\n\n" + _STORY_EXECUTION_RULES)
+            label = "Role: coding (story)"
+        elif self._plan_executing():
             # Execution runs with exactly the coding agent's prompt plus the plan.
             tdd = ("\n\n" + _PLAN_TDD_EXECUTION_RULES) if self.plan.tdd else ""
             role = (_coding_prompt(str(self.workdir)) + "\n\n---\n\n" + _PLAN_EXECUTION_RULES
@@ -1346,6 +1449,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             label = f"Role: {self.mode}"
             if self.mode == "plan" and self.plan_kind == "tdd":
                 role = planner_for_tdd(role) + "\n\n---\n\n" + _PLAN_TDD_RULES
+            if self.mode == "plan" and self.plan_kind == "stories":
+                role += "\n\n---\n\n" + _PLAN_STORIES_RULES
             if self.mode == "plan" and self.plan is not None and self.plan_phase == "executing":
                 role += ("\n\n---\n\n## Plan in progress\n\nThe user approved this plan and it is "
                          f"paused at step {self.plan.progress()}. If the user wants it changed, "
@@ -1358,7 +1463,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                          "call create_plan again with the complete plan.\n\n"
                          + self.plan.render_for_prompt())
         add("role", label, role, sep="\n\n")
-        role_name = "plan-exec" if self._plan_executing() else self.mode
+        role_name = self.story_role or ("plan-exec" if self._plan_executing() else self.mode)
         # Next to the role, so a small model weighs it; nav keeps the last slot.
         if (cave := _cavecat_rules(self.cavecat, role_name)):
             add("cavecat", "Cavecat", cave)
@@ -1868,7 +1973,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         """Run the model/tool loop on the current history until the model gives a
         text-only reply.  Returns the outcome: "done", "empty" (no usable reply),
         "cancelled", "error", "limit" (iteration cap), or "plan_approved" (the
-        user approved a create_plan).  The caller emits DoneEvent and autosaves."""
+        user approved a create_plan), "gate" (a TDD step paused) or "loop" (the model
+        kept looping after /loop-guard's resets).  The caller emits DoneEvent and
+        autosaves."""
         _MAX_ITERATIONS = max_iterations
         # Consecutive tool-only turns before injecting a respond prompt.  /cavecat
         # asks for no text between calls, so there it only catches a runaway.
@@ -1880,6 +1987,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._step_summary = None  # set by complete_step; ends the loop after this batch
         self._last_run = self._last_failed_call = None  # the user may have changed files
         self._syntax_watch.reset()
+        guard = LoopGuard(self.loop_guard)
+        loop_resets = 0
 
         iteration = 0
         tool_only_turns = 0
@@ -1898,12 +2007,18 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                 self.event_queue.put(ErrorEvent(f"Tool call loop exceeded {_MAX_ITERATIONS} iterations — stopping"))
                 return "limit"
             iteration += 1
+            if self._story or self._writing:
+                self._story_tick(iteration)     # the plan view counts turns
+            elif executing and self.plan is not None and not self.plan.stories:
+                self._step_tick()
             # auto-compact if needed
             self._stream_chars = 0
             self._token_estimate = self._estimate(schemas=True)
             if self._estimate() > self.context_limit:
                 changed, notice = self._compact()
                 # A compaction that could not help is reported once, not every iteration.
+                if changed:
+                    guard.bump()       # what was read before may be gone: reading it again is fine
                 if changed or notice != compact_notice:
                     self.event_queue.put(ChatEvent("system", notice))
                     self.emit_status()
@@ -2115,17 +2230,19 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             # rewrote the same file in a loop and eventually copied the placeholder
             # itself, overwriting the file.  Ollama's Qwen3 template is protected
             # by the adapter's XML escaping instead.
-            self.messages.append({
+            batch_msg = {
                 "role": "assistant",
                 "content": _strip_text_tool_calls(content) or None,
                 "tool_calls": [
                     {"function": {"name": n, "arguments": a}}
                     for n, a in _calls
                 ],
-            })
+            }
+            self.messages.append(batch_msg)
 
             self._turn_stats["calls"] += len(_calls)
             loaded_before = set(self.loaded_tools)
+            hit: Hit | None = None    # the first loop the guard saw in this batch
             for name, args in _calls:
                 # complete_step ends the step: calls after it in the same batch are not
                 # run, but each still gets a result so the call/result pairing holds.
@@ -2180,6 +2297,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                     # and calls provide_user_input() when the user submits a response.
                     answer = self._ask_user(args.get("question", ""))
                     result = f"User answered: {answer}"
+                    guard.bump()
+                elif name == "ask_choice":
+                    result = self._ask_choice(args if isinstance(args, dict) else {})
+                    guard.bump()
                 elif name == "create_plan":
                     result = self._handle_create_plan(args)
                     if self.plan_phase == "executing":
@@ -2205,6 +2326,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                         result = "Step marked complete."
                     else:
                         result = "ERROR: complete_step is only available while executing an approved plan."
+                elif name == "write_stories":
+                    result = self._handle_write_stories(args if isinstance(args, dict) else {})
+                elif name == "complete_story":
+                    result = self._handle_complete_story(args if isinstance(args, dict) else {})
                 else:
                     # run_command confirmation: when enabled, block on a y/N prompt
                     # (reusing the ask_user input plumbing) before executing.
@@ -2277,6 +2402,14 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                 # results and templates can match responses to their calls.
                 self.messages.append({"role": "tool", "name": name, "content": result})
                 self._load_suggested(name, result)
+                if hit is None or hit.severity == "nudge":
+                    tool = registry.get(name)
+                    mutating = name in DIFF_TOOLS or (
+                        tool is not None and isinstance(args, dict) and bool(written_paths(tool, args)))
+                    found = guard.record(name, args, result, batch_msg, mutating,
+                                         self._last_run_exit if name == "run_command" else None)
+                    if found is not None and (hit is None or found.severity == "rewind"):
+                        hit = found
                 if executing and self.plan.tdd:
                     self._track_tdd_green(name, args)
 
@@ -2308,6 +2441,28 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                     self.event_queue.put(ChatEvent("assistant", self._step_summary))
                 return "done"
 
+            # About to loop: a note, the history kept.  The next hit rewinds.
+            if hit is not None and hit.severity == "nudge":
+                self._nudge_loop(hit)
+                continue
+            # The model is looping: rewind to before the loop and replace it with
+            # its own analysis of why it did not work, so it tries something else.
+            if hit is not None:
+                if loop_resets >= self.loop_resets:
+                    after = (f", after {loop_resets} loop reset{'s' if loop_resets != 1 else ''}"
+                             if loop_resets else "")
+                    self.event_queue.put(ErrorEvent(
+                        f"Stopped: the model kept repeating {hit.describe()} — {hit.count} "
+                        f"times{after}. /loop-guard changes when this happens."))
+                    return "loop"
+                if not self._break_loop(hit):
+                    self.event_queue.put(ChatEvent("system", "Interrupted."))
+                    return "cancelled"
+                loop_resets += 1
+                guard.reset()
+                tool_only_turns, last_tool, _nudged = 0, None, False
+                continue
+
             # Inject as role "user" — Ollama's tool-use turn format expects
             # assistant → tool(s) → user; a mid-conversation system message is
             # not supported and would break the alternating turn structure.
@@ -2335,6 +2490,13 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                     "Stop and summarise what you have found or done so far, "
                     "or describe your next step if you are not finished."
                 )
+                if self.story_role == "story-writer":
+                    nudge = ("You have been calling tools for several turns. Once you know the code "
+                             "this phase builds on, call write_stories with the complete set.")
+                elif self.story_role == "story-exec":
+                    nudge = ("You have been calling tools for several turns. Once the story is "
+                             "implemented and its acceptance checks pass, call complete_story with "
+                             "a short summary.")
                 self.messages.append({"role": "user", "content": nudge})
                 tool_only_turns = 0
 
@@ -2419,9 +2581,184 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._last_failed_call = key if failed else None
         if name == "run_command":
             return self._rerun_note(str(args.get("command") or ""), result)
-        if not keeps_green(name):
+        # A write ends "no files changed since"; scratch_write keeps a TDD run
+        # green but rewrites the probe a command runs (a 9B told its rewritten
+        # probe had not changed went looking for stale caches instead).
+        if not keeps_green(name) or name == "scratch_write":
             self._last_run = None
         return result
+
+    def _break_loop(self, hit: Hit) -> bool:
+        """Reset a loop: ask the model, with the loop still in view, why it is not
+        working and what to do instead, then cut the history back to before the
+        loop's first call and put that analysis in its place.  What is cut goes
+        to the compaction archive, so /export full still shows it.  Returns False
+        when the user cancelled (the history is then unchanged)."""
+        what = hit.describe()
+        self.event_queue.put(ChatEvent("system",
+            f"Loop detected: {what} — {hit.count} times. Rewinding and asking for a "
+            "different approach."))
+        analysis = self._loop_analysis(hit, what)
+        if self._cancel.is_set():
+            return False
+        analysed = bool(analysis)
+        if analysed:
+            self.event_queue.put(ChatEvent("assistant", analysis))
+        else:
+            # The model gave nothing usable: the facts still make the point.
+            last = hit.result.strip()
+            if len(last) > 400:
+                last = last[:400] + "…"
+            analysis = (f"I was stuck in a loop: {what}, {hit.count} times, and it did not "
+                        f"get me further. The last result was:\n{last}\n\nI need a different "
+                        "approach instead of repeating this.")
+            self.event_queue.put(ChatEvent("system", analysis))
+
+        msgs = self.messages
+        anchor = next((i for i, m in enumerate(msgs) if m is self._turn_user), 0)
+        # The loop's first call still in the history (compaction may have dropped
+        # older ones), with the reasoning stored just before it.
+        start = next((i for i, m in enumerate(msgs)
+                      if i > anchor and any(m is o for o in hit.msgs)), None)
+        removed = 0
+        changes = ""
+        if start is not None:
+            while start - 1 > anchor and msgs[start - 1].get("role") == "thinking":
+                start -= 1
+            drop = set(range(start, len(msgs)))
+            removed = len(drop)
+            changes = self._loop_changes(msgs[start:])
+            self.compacted = transcript_mod.archive_compaction(
+                self.compacted, msgs, drop, {}, list(range(start)),
+                max((r["n"] for r in self.compacted), default=0) + 1,
+                datetime.now().isoformat(timespec="seconds"), by="loop")
+            del msgs[start:]
+        msgs.append({"role": "assistant", "content": analysis})
+        msgs.append({"role": "user", "content": _LOOP_NUDGE.format(
+            what=what, changes=changes,
+            removed=("The steps that led to the loop were removed from the conversation "
+                     "and replaced by your analysis above. " if removed else ""))})
+        self._last_run = self._last_failed_call = None
+        self._token_estimate = self._estimate(schemas=True)
+        self._measured_tokens = None
+        self.emit_status()
+        self.logger.log_loop_reset(self.mode, self.client.model, hit.kind, hit.name,
+                                   hit.count, removed, analysed)
+        return True
+
+    def _nudge_loop(self, hit: Hit) -> None:
+        """Warn about a loop in the making (edit churn): a note to the model, with
+        the history kept and no loop reset counted."""
+        self.event_queue.put(ChatEvent("system",
+            f"Loop warning: {hit.describe()} — {hit.count} times. Nudging the model."))
+        self.messages.append({"role": "user", "content": _CHURN_NUDGE.format(
+            owner=hit.owner, count=hit.count, error=hit.error)})
+        self.logger.log_loop_reset(self.mode, self.client.model, hit.kind, hit.name,
+                                   hit.count, 0, False, severity="nudge")
+
+    def _loop_changes(self, removed: list[dict]) -> str:
+        """What the removed steps did to the workspace, for the nudge: the files
+        their successful writes changed, and whether they ran commands."""
+        files: list[str] = []
+        ran = False
+        for name, args, result in _paired_calls(removed):
+            if result is None or result.startswith("ERROR"):
+                continue
+            ran = ran or name == "run_command"
+            tool = registry.get(name)
+            paths = (tools_mod.edit_paths(args) if name == "edit_files"
+                     else written_paths(tool, args) if tool is not None else [])
+            files += [p for p in paths if p not in files]
+        text = (f"Those steps changed {', '.join(files)} — still changed on disk. " if files
+                else "Those steps changed no files. ")
+        if ran:
+            text += "They also ran commands, whose effects were not undone. "
+        return text
+
+    def _ask_choice(self, args: dict) -> str:
+        """ask_choice: ask until the user picks an option.  Anything else they type is
+        information: the model rewrites the question with it, up to _CHOICE_MAX_ROUNDS
+        times, after which (or when the rewrite fails) their words go back as-is."""
+        question = str(args.get("question") or "").strip()
+        options = _choice_options(args.get("options"))
+        if not question:
+            return "ERROR: ask_choice needs a question."
+        if options is None:
+            return "ERROR: ask_choice needs 'options': a list of 2-6 non-empty strings."
+        notes: list[str] = []
+        for rounds in range(_CHOICE_MAX_ROUNDS + 1):
+            answer = self._ask_user(question, options)
+            picked = _match_choice(answer, options)
+            if picked is not None:
+                result = f"User chose option {picked + 1}: {options[picked]}"
+                if notes:
+                    result += "\nContext the user gave while choosing:\n" + "\n".join(
+                        f"- {n}" for n in notes)
+                return result
+            if answer.strip():
+                notes.append(answer.strip())
+            if rounds == _CHOICE_MAX_ROUNDS or not notes:
+                break
+            self.event_queue.put(ChatEvent("system", "Refining the question with your input…"))
+            refined = self._refine_choice(question, options, notes)
+            if refined is None:
+                break
+            question, options = refined
+        return (f"User did not pick an option.\nQuestion: {question}\nOptions:\n"
+                f"{_numbered(options)}\nUser said:\n" + "\n".join(f"- {n}" for n in notes))
+
+    def _refine_choice(self, question: str, options: list[str],
+                       notes: list[str]) -> tuple[str, list[str]] | None:
+        """The model's rewrite of an ask_choice question given the user's notes, asked
+        with the conversation in context and no tools; None when the call fails or
+        the reply is not a usable question."""
+        msgs = self._api_messages()
+        if msgs and msgs[-1].get("role") == "tool":
+            msgs.append({"role": "assistant", "content": None})
+        msgs.append({"role": "user", "content": _CHOICE_REFINE_PROMPT.format(
+            question=question, options=_numbered(options), notes="\n".join(notes))})
+        try:
+            self.client.max_output_tokens = self.max_output_tokens or None
+            response = self.client.chat(msgs, [], think=False,
+                                        num_ctx=self.model_max_ctx or self.context_limit)
+        except Exception:
+            return None
+        self._turn_stats["eval"] += response.eval_tokens or 0
+        content, _ = _extract_and_strip_thinking(response.content or "")
+        text = _strip_text_tool_calls(content or "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        try:
+            data = json.loads(text[start:end + 1]) if 0 <= start < end else None
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        new_question = str(data.get("question") or "").strip()
+        new_options = _choice_options(data.get("options"))
+        if not new_question or new_options is None:
+            return None
+        return new_question, new_options
+
+    def _loop_analysis(self, hit: Hit, what: str) -> str:
+        """The model's analysis of the loop, asked with the loop in context and no
+        tools; "" when the call fails or the reply holds nothing usable."""
+        msgs = self._api_messages()
+        if msgs and msgs[-1].get("role") == "tool":
+            msgs.append({"role": "assistant", "content": None})
+        msgs.append({"role": "user",
+                     "content": _LOOP_ANALYSIS_PROMPT.format(
+                         what=what, count=hit.count,
+                         between=", with nothing changing in between" if hit.kind == "call" else "",
+                         repeated=_LOOP_REPEATED.get(hit.kind, _LOOP_REPEATED["call"]))})
+        try:
+            self.client.max_output_tokens = self.max_output_tokens or None
+            response = self.client.chat(msgs, [], think=False,
+                                        num_ctx=self.model_max_ctx or self.context_limit)
+        except Exception:
+            return ""
+        self._turn_stats["eval"] += response.eval_tokens or 0
+        content, _ = _extract_and_strip_thinking(response.content or "")
+        return _strip_text_tool_calls(content or "").strip()
 
     def _watch_syntax(self, name: str, args: dict, diff_old: str | None, diff_existed: bool,
                       multi_snaps: dict | None) -> str:
@@ -2486,6 +2823,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             run_output_limit=self.run_output_limit,
             max_output_tokens=self.max_output_tokens,
             undo_max=self.undo_max,
+            loop_guard=self.loop_guard,
+            loop_resets=self.loop_resets,
             **self.changes_summary(),
             net_access=self.net_access,
             net_confirm=self.net_confirm,
@@ -2699,7 +3038,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         saved_plan = data.get("plan")
         self.plan = Plan.from_dict(saved_plan) if saved_plan else None
         self.plan_phase = (data.get("plan_phase") or "investigating") if self.plan else "investigating"
-        self.plan_kind = "tdd" if data.get("plan_kind") == "tdd" else "normal"
+        self.plan_kind = data.get("plan_kind") if data.get("plan_kind") in ("tdd", "stories") else "normal"
         if self.plan_phase == "executing" and self.mode == "plan":
             self.mode = "coding"   # sessions from before plans ran in coding mode
         self.input_history.clear()

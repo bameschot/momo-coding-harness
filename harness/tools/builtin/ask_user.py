@@ -14,5 +14,5 @@ TOOL = Tool(
         "Ask one focused question per call and continue after receiving the answer.",
         {"question": {"type": "string"}},
         ["question"]),
-    harness=True, order=410, group="ask & plan", modes=ALL_ROLES, keeps_green=True,
+    harness=True, order=410, group="ask & plan", modes=ALL_ROLES - {"story-writer"}, keeps_green=True,
     example={"question": "Should I overwrite the existing file?"})

@@ -15,6 +15,7 @@ import textwrap
 from dataclasses import dataclass, field
 
 from . import md_render
+from .loop_guard import MAX_RESETS as _LOOP_RESETS, THRESHOLD as _LOOP_GUARD
 from .commands import help_commands
 from .diff import build_diff_body
 from .file_search import fuzzy_search, workspace_files_nowait
@@ -1297,7 +1298,12 @@ class TUI:
                     elif isinstance(ev, UserEvent):
                         self._add("chat", "user", ev.text)
                     elif isinstance(ev, AskUserEvent):
-                        self._add("chat", "ask", ev.question)
+                        text = ev.question
+                        if ev.options:
+                            text += "\n" + "\n".join(
+                                f"  {i}. {o}" for i, o in enumerate(ev.options, 1))
+                            text += f"\n(type 1-{len(ev.options)}, or add details to refine)"
+                        self._add("chat", "ask", text)
                     else:
                         self._add("chat", "system", f"ERROR: {ev.text}")
                 elif isinstance(ev, ResetEvent):
@@ -1379,10 +1385,14 @@ class TUI:
                          + ("" if eff == ev.think_level else f"→{eff}"))
         if ev.think_history != "turn":
             parts.append(f"THINK-HIST: {ev.think_history}")
-        if ev.think_keep != "lean":
+        if ev.think_keep != "off":
             parts.append(f"KEEP: {ev.think_keep}")
         if ev.cavecat != "off":
             parts.append(f"CAVECAT: {ev.cavecat}")
+        if not ev.loop_guard:
+            parts.append("LOOP: off")
+        elif (ev.loop_guard, ev.loop_resets) != (_LOOP_GUARD, _LOOP_RESETS):
+            parts.append(f"LOOP: {ev.loop_guard}×/{ev.loop_resets}")
         if ev.undo_count:
             parts.append(f"UNDO: {ev.undo_count}")
         self._st_extra = "".join(f" | {p}" for p in parts)

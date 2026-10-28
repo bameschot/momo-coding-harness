@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from ... import run_store as run_store_mod
-from ..registry import WRITE_ROLES, Tool, tool_schema
+from ..registry import INVESTIGATE_ROLES, WRITE_ROLES, Tool, tool_schema
 from ..shell import (DEFAULT_COMMAND_TIMEOUT, MAX_COMMAND_TIMEOUT, STOPPED_TAIL_CHARS,
                      clamp_timeout, command_env, exec_command, log_view, longer, new_run_mode,
                      output_tail, read_log, split_view_pipe, web_refusal)
@@ -226,7 +226,7 @@ TOOL = Tool(
     # Plan investigation may run commands (reproduce a bug, check the test
     # baseline) but not edit files until the plan is approved.
     suggests=("stop_command",),
-    run=run_command, order=500, group="edit & shell", modes=WRITE_ROLES | {"plan"},
+    run=run_command, order=500, group="edit & shell", modes=WRITE_ROLES | INVESTIGATE_ROLES,
     inject=("net_access", "cancel", "run_mode", "run_store", "run_output_limit", "run_exit",
             "run_compact"),
     windows_itself=new_run_mode, after=_after,

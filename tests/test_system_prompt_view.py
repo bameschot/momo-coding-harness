@@ -11,6 +11,7 @@ import harness.harness as hmod
 from harness import commands
 from harness.plan import Plan, Step
 from tests.test_tool_choices import Base
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 
 class _StubIndex:

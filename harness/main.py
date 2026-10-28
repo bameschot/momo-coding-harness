@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 
 from . import code_index
+from . import loop_guard as loop_guard_mod
+from . import story_runner as story_runner_mod
 from . import net as net_mod
 from . import run_store as run_store_mod
 from . import session as session_mod
@@ -70,6 +72,12 @@ def main():
     parser.add_argument("--max-output-tokens", type=int, default=None, metavar="N",
                         help="most tokens one model reply may take, 0 = no cap "
                              "(default: last /max-output-tokens setting, else 25000)")
+    parser.add_argument("--loop-guard", default=None, metavar="N|off",
+                        help="repeats of one tool call (or one error) that count as a loop, "
+                             "or off (default: last /loop-guard setting, else 3)")
+    parser.add_argument("--loop-resets", type=int, default=None, metavar="N",
+                        help="loop resets per turn before the turn stops, 0 = stop at the "
+                             "first loop (default: last /loop-guard resets setting, else 2)")
     parser.add_argument("--undo-max", type=int, default=None, metavar="N",
                         help="turns of file checkpoints /undo can go back, 0 = no cap "
                              "(default: last /undo-max setting, else 20)")
@@ -92,7 +100,7 @@ def main():
     parser.add_argument("--think-keep", choices=KEEP_LEVELS, default=None,
                         help="How much of its earlier reasoning the model gets back: lean "
                              "(small models), more (x2), most (x4), or off (all of it) "
-                             "(default: last /think-keep, else lean)")
+                             "(default: last /think-keep, else off)")
     parser.add_argument("--net", choices=("off", "on", "local"), default="off",
                         help="Let the model fetch URLs with fetch_url: 'on' reaches the "
                              "public internet, 'local' also allows localhost and the LAN "
@@ -221,7 +229,13 @@ def main():
     cavecat = CAVECAT_ALIASES.get(cavecat, cavecat)     # a level saved before there were two
     harness.cavecat = cavecat if cavecat in CAVECAT_LEVELS else "off"
     keep = args.think_keep or prefs.get("think_keep")
-    harness.think_keep = keep if keep in KEEP_LEVELS else "lean"
+    harness.think_keep = keep if keep in KEEP_LEVELS else "off"
+    if prefs.get("stories_approve") in story_runner_mod.APPROVE_MODES:
+        harness.stories_approve = prefs["stories_approve"]
+    cap = pref_int("stories_cap", lambda v: story_runner_mod.STORIES_CAP_RANGE[0] <= v
+                   <= story_runner_mod.STORIES_CAP_RANGE[1])
+    if cap:
+        harness.stories_cap = cap
     if args.no_stream:
         harness.stream = False
     harness.net_access = args.net
@@ -292,6 +306,27 @@ def main():
             parser.error("--undo-max: expected 0 (no cap) or a number of turns")
         undo_max = DEFAULT_UNDO_MAX
     harness.undo_max = undo_max
+    guard = args.loop_guard if args.loop_guard is not None else prefs.get("loop_guard")
+    if guard is not None:
+        if isinstance(guard, str) and guard.lower() in ("off", "0"):
+            guard = 0
+        elif isinstance(guard, str) and guard.isdigit():
+            guard = int(guard)
+        if (isinstance(guard, bool) or not isinstance(guard, int)
+                or (guard and not loop_guard_mod.MIN_THRESHOLD <= guard <= loop_guard_mod.MAX_THRESHOLD)):
+            if args.loop_guard is not None:
+                parser.error(f"--loop-guard: expected off or {loop_guard_mod.MIN_THRESHOLD}"
+                             f"-{loop_guard_mod.MAX_THRESHOLD}")
+        else:
+            harness.loop_guard = guard
+    resets = args.loop_resets if args.loop_resets is not None else prefs.get("loop_resets")
+    if resets is not None:
+        if (isinstance(resets, bool) or not isinstance(resets, int)
+                or not 0 <= resets <= loop_guard_mod.MAX_RESETS_LIMIT):
+            if args.loop_resets is not None:
+                parser.error(f"--loop-resets: expected 0-{loop_guard_mod.MAX_RESETS_LIMIT}")
+        else:
+            harness.loop_resets = resets
     harness.rebuild_system_prompt()     # the run_command schema depends on run_mode
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 

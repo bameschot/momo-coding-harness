@@ -55,9 +55,10 @@
     </label>
     <label class="mode-pick" id="plan-kind-pick" hidden>
       <span class="sr-only">Plan type</span>
-      <select id="plan-kind" title="Plan type (/plan normal, /plan tdd): a TDD plan writes the tests first and gates every step on them">
+      <select id="plan-kind" title="Plan type (/plan normal, /plan tdd, /plan stories): a TDD plan writes the tests first and gates every step on them; a stories plan breaks each phase into small, checked stories when it starts">
         <option value="normal">normal plan</option>
         <option value="tdd">TDD plan</option>
+        <option value="stories">stories plan</option>
       </select>
     </label>
     <button id="plan-progress" class="chip button" type="button" title="Show the plan" hidden></button>
@@ -81,6 +82,7 @@
     </button>
     <button id="think-badge" class="chip button" type="button" title="Thinking level (/think)" aria-haspopup="dialog" aria-expanded="false">THINK: on</button>
     <button id="cavecat-badge" class="chip button" type="button" title="Cavecat (/cavecat): compress plans, tool text and command output, and keep replies short" aria-haspopup="dialog" aria-expanded="false">CAVECAT: off</button>
+    <button id="loop-badge" class="chip button" type="button" title="Loop guard (/loop-guard)" aria-haspopup="dialog" aria-expanded="false">LOOP: 3×</button>
     <button id="tools-badge" class="chip button warn" type="button" title="Tool calls are off" aria-haspopup="dialog" aria-expanded="false" hidden>TOOLS: off</button>
     <button id="run-badge" class="chip button" type="button" title="Running commands" aria-haspopup="dialog" aria-expanded="false">RUN: auto</button>
     <button id="net-badge" class="chip button" type="button" title="Internet access" aria-haspopup="dialog" aria-expanded="false">NET: off</button>
@@ -133,6 +135,12 @@
     <label title="The model writes as usual"><input type="radio" name="cavecat" value="off"> off</label>
     <label title="Telegraphic plans and tool text, no narration between calls, compact command output, short replies"><input type="radio" name="cavecat" value="on"> on</label>
     <div class="muted menu-note">Saves tokens: plans, tool text and command output are compressed, and replies kept short. Thinking is left alone.</div>
+  </div>
+  <div id="loop-menu" class="menu think-menu" role="dialog" aria-label="Loop guard" hidden>
+    <div class="menu-title">Loop guard <kbd>/loop-guard</kbd></div>
+    <label class="menu-num" title="The same tool call this many times with nothing changed in between, or one error this many times from one tool, is a loop. 'off' = no loop guard.">Repeats <input type="text" id="loop-guard-n" data-cmd="/loop-guard" size="4" placeholder="3"></label>
+    <label class="menu-num" title="How many times per turn momo rewinds a loop and asks for another approach before it stops the turn. 0 = stop at the first loop.">Resets per turn <input type="text" id="loop-guard-resets" data-cmd="/loop-guard resets" size="4" placeholder="2"></label>
+    <div class="muted menu-note">A loop is cut out of the conversation and replaced by the model's own analysis of why it didn't work, so it tries something else. After the resets, the next loop stops the turn.</div>
   </div>
   <div id="run-menu" class="menu chip-menu" role="dialog" aria-label="Running commands" hidden></div>
   <div id="net-menu" class="menu chip-menu" role="dialog" aria-label="Internet access" hidden></div>
@@ -288,6 +296,8 @@
       <summary>Context</summary>
       <label><input type="checkbox" id="guides" data-cmd="/guides"> Load AGENTS.md / CLAUDE.md <kbd>/guides</kbd></label>
       <label class="menu-num" title="Most tokens one model reply may take, reasoning included — stops a model stuck in a loop. 'off' = no cap.">Reply cap <input type="text" id="max-output-tokens" data-cmd="/max-output-tokens" size="7" placeholder="25000"> tokens</label>
+      <label class="menu-num" title="The same tool call this many times with nothing changed in between, or one error this many times from one tool, is a loop. 'off' = no loop guard.">Loop after <input type="text" data-cmd="/loop-guard" size="4" placeholder="3"> repeats <kbd>/loop-guard</kbd></label>
+      <label class="menu-num" title="How many times per turn momo rewinds a loop and asks for another approach before it stops the turn. 0 = stop at the first loop.">Resets per turn <input type="text" data-cmd="/loop-guard resets" size="4" placeholder="2"></label>
       <div class="menu-sub">Cavecat <kbd>/cavecat</kbd></div>
       <div class="seg" role="radiogroup" aria-label="Cavecat">
         <label title="The model writes as usual"><input type="radio" name="cavecat-view" value="off"> off</label>

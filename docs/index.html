@@ -1038,7 +1038,7 @@ ollama serve</code></pre></div>
         <div class="side"><b>bad arguments</b> → an <code>ERROR:</code> saying how to fix the call</div>
         <div class="down" aria-hidden="true">↓</div>
         <div class="box harness"><div class="flow-who">harness</div>Return the result<small>capped to fit the context, with hints; edits are also shown to you as a diff</small></div>
-        <div class="side"><b>100 rounds</b> (40 in design mode) → stop</div>
+        <div class="side"><b>looping</b> → <a href="#loop-guard">rewind</a> and ask for another approach<br><b>100 rounds</b> (40 in design mode) → stop</div>
         <div class="back">↺ back to the model</div>
       </div>
       <div class="flow-legend"><span class="model">model</span><span class="harness">harness</span><span class="harness cond">only in some cases</span></div>
@@ -1053,6 +1053,52 @@ ollama serve</code></pre></div>
       <li><strong>Unsafe writes are refused,</strong> such as file content copied from a shortened tool result.</li>
       <li><strong>Repeated failures are flagged:</strong> making the exact same failing call again adds a note to change the arguments.</li>
       <li><strong>Silent loops get a nudge:</strong> after 10 rounds of tool calls without any text (20 with <a href="#cavecat">cavecat</a>), the model is asked for a short progress update.</li>
+      <li><strong>Loops are cut out:</strong> the same call made 3 times with nothing changed, or the same error 3 times, rewinds the conversation. See <a href="#loop-guard">Loop guard</a>.</li>
+    </ul>
+
+    <h3 id="loop-guard">Loop guard</h3>
+    <p>A small model can get stuck: it reads the same file again, reruns the same command, or sends edit after edit that fails the same way. Each repeat costs a round and context, and the repeats stay in the conversation, pulling the model back into the same pattern. momo watches every call and counts two things as a loop:</p>
+    <ul>
+      <li><strong>The same call 3 times with nothing changed in between:</strong> same tool, same arguments. A write not made before, a compaction or an answer from you counts as a change. Reading a file after each of three different edits is progress; reading it three times in a row is not. The same write made 3 times counts too.</li>
+      <li><strong>The same error 3 times from one tool,</strong> even with different arguments: three different <code>edit_file</code> calls that all return "old_string not found". Quoted text, paths and numbers are ignored when the errors are compared. A call of that tool that works clears the count.</li>
+    </ul>
+    <p><code>ask_user</code>, <code>complete_step</code>, the plan tools and calls you declined are never counted.</p>
+    <figure class="flow" aria-label="What happens when momo sees a loop">
+      <div class="flow-col">
+        <div class="box harness"><div class="flow-who">harness</div>Stop the loop<small>after the current batch of calls, so every call keeps its result</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">model</div>Write an analysis<small>with the loop still in view and no tools: what it tried, what it repeated, why that isn't working, what it knows now, and a different approach that stays within what you asked</small></div>
+        <div class="side"><b>no usable reply</b> → momo writes a short factual one</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Rewind<small>cut the conversation back to just before the loop's first call, and put the analysis in its place</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Add a note<small>which files the loop changed (they stay changed), and not to repeat the call</small></div>
+        <div class="side"><b>third loop in one turn</b> → stop with an error</div>
+        <div class="back">↺ back to the model</div>
+      </div>
+      <div class="flow-legend"><span class="model">model</span><span class="harness">harness</span></div>
+      <figcaption>A loop reset.</figcaption>
+    </figure>
+<div class="code-block"><div class="code-bar"><span class="code-lang">what the model sees after the rewind</span></div><pre><code>## What I repeated
+read_file {"path": "status.txt"}, three times. Each time it returned "PENDING".
+
+## Why it is not working
+read_file only reports what is on disk. Nothing in this project writes READY,
+so reading it again can't change the answer.
+
+## A different approach
+…
+
+[Note from the harness, not the user] The steps that led to the loop were removed
+from the conversation and replaced by your analysis above. Those steps changed no
+files. Do not repeat read_file {"path": "status.txt"}. Continue with the different
+approach from your analysis; if it found none that fits what the user asked, stop
+and tell the user what is blocking you.</code></pre></div>
+    <ul>
+      <li><strong>The note is precise on purpose.</strong> It names the files the loop changed, or says it changed none, and is marked as the harness's. An earlier, vaguer note ("files they changed are still changed") led a 9B to conclude that the file it was polling had changed.</li>
+      <li><strong>Twice per turn.</strong> After 2 resets, a third loop stops the turn with an error. In <a href="#plan">plan mode</a> that pauses the plan, and each step gets its own 2 resets.</li>
+      <li><strong>Both numbers are settings.</strong> <code>/loop-guard 4</code> makes it 4 repeats (2–20), <code>/loop-guard off</code> turns it off, and <code>/loop-guard resets 0</code> stops the turn at the first loop instead of rewinding (0–10). They're remembered, and <code>--loop-guard</code> / <code>--loop-resets</code> set them at startup. In the web UI, the <code>LOOP</code> badge opens them; it turns amber when the guard is off.</li>
+      <li><strong>Nothing is lost.</strong> The loop's messages are kept for <code>/export full</code> and the web UI's full log, marked <em>removed from context by loop reset</em>.</li>
     </ul>
 
     <h3 id="tool-schema">The tool schema</h3>
@@ -1657,11 +1703,11 @@ modified: shop/pricing.py
     <p><code>/think-history off|turn|all</code> decides whether the model sees its own earlier reasoning. <code>turn</code> (default) sends it back since your last message, <code>all</code> also for earlier turns, <code>off</code> never. Without it, the model tends to re-plan from scratch after every tool result. Sent reasoning does use context.</p>
 
     <h3 id="think-keep">Trimming what is sent back</h3>
-    <p><code>/think-keep off|lean|more|most</code> decides how much of that reasoning goes back. The model mainly needs to know where it got to, so <code>lean</code> sends just its plan steps and closing sentences. Code is never cut, and your transcript keeps everything.</p>
-<div class="code-block"><div class="code-bar"><span class="code-lang">commands</span></div><pre><code>/think-keep lean  <span class="com"># plan steps and closing sentences (the default)</span>
-/think-keep more  <span class="com"># twice as much; most: four times</span>
-/think-keep off   <span class="com"># send it back whole</span></code></pre></div>
-    <p><code>lean</code> suits small models; <code>more</code> or <code>most</code> give a larger model more of its own thinking.</p>
+    <p><code>/think-keep off|lean|more|most</code> decides how much of that reasoning goes back. By default (<code>off</code>) all of it goes back; <code>lean</code> sends just its plan steps and closing sentences. Code is never cut, and your transcript keeps everything.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">commands</span></div><pre><code>/think-keep off   <span class="com"># send it back whole (the default)</span>
+/think-keep lean  <span class="com"># plan steps and closing sentences</span>
+/think-keep more  <span class="com"># twice as much; most: four times</span></code></pre></div>
+    <p>A small model that loses its earlier conclusions can loop re-deriving them, so whole is the default; <code>lean</code> is faster, and <code>more</code> or <code>most</code> give a larger model more of its own thinking.</p>
 
     <h3 id="model-notes">Model notes</h3>
     <div class="table-scroll"><table>
@@ -1904,9 +1950,11 @@ modified: shop/pricing.py
       <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
       <tr><td><code>--think</code></td><td>last used / <code>on</code></td><td class="wrap">Thinking level. See <a href="#think-level">Thinking level</a>.</td></tr>
       <tr><td><code>--think-history</code></td><td>last used / <code>turn</code></td><td class="wrap"><code>off</code>, <code>turn</code> or <code>all</code>. See <a href="#think-history">Sending reasoning back</a>.</td></tr>
-      <tr><td><code>--think-keep</code></td><td>last used / <code>lean</code></td><td class="wrap"><code>lean</code>, <code>more</code>, <code>most</code> or <code>off</code>. See <a href="#think-keep">Trimming</a>.</td></tr>
+      <tr><td><code>--think-keep</code></td><td>last used / <code>off</code></td><td class="wrap"><code>off</code>, <code>lean</code>, <code>more</code> or <code>most</code>. See <a href="#think-keep">Trimming</a>.</td></tr>
       <tr><td><code>--cavecat</code></td><td>last used / <code>off</code></td><td class="wrap">See <a href="#cavecat">Cavecat mode</a></td></tr>
       <tr><td><code>--max-output-tokens</code></td><td>last used / <code>25000</code></td><td class="wrap">See <a href="#reply-cap">Reply cap</a>; <code>0</code> = no cap</td></tr>
+      <tr><td><code>--loop-guard</code></td><td>last used / <code>3</code></td><td class="wrap">Repeats that make a <a href="#loop-guard">loop</a>, or <code>off</code></td></tr>
+      <tr><td><code>--loop-resets</code></td><td>last used / <code>2</code></td><td class="wrap">Loop resets per turn before the turn stops; <code>0</code> = stop at the first loop</td></tr>
       <tr><td><code>--undo-max</code></td><td>last used / <code>20</code></td><td class="wrap">Turns of file checkpoints <code>/undo</code> can go back; <code>0</code> = no cap</td></tr>
       <tr><td><code>--no-stream</code></td><td>off</td><td class="wrap">Wait for whole replies instead of streaming them</td></tr>
       <tr><td><code>--web</code> / <code>--no-web</code></td><td>on</td><td class="wrap">Serve the browser UI alongside the TUI</td></tr>
@@ -2076,6 +2124,8 @@ python momo-coding-harness.py --web-host 0.0.0.0 --web-cert momo.pem --web-key m
       <tr><td><code>/run-mode new|classic</code></td><td class="wrap">How <a href="#run-output">command output</a> is returned</td></tr>
       <tr><td><code>/run-output-limit [n]</code></td><td class="wrap">Characters in <code>run_command</code>'s default view</td></tr>
       <tr><td><code>/max-output-tokens [n|off]</code></td><td class="wrap">The <a href="#reply-cap">reply cap</a> (remembered)</td></tr>
+      <tr><td><code>/loop-guard [n|off|on]</code></td><td class="wrap">Repeats that make a <a href="#loop-guard">loop</a> (default 3, remembered)</td></tr>
+      <tr><td><code>/loop-guard resets &lt;n&gt;</code></td><td class="wrap">Loop resets per turn before the turn stops (default 2; 0 = stop at the first loop)</td></tr>
       <tr><td><code>/cost</code></td><td class="wrap">Token usage by mode and model</td></tr>
     </table></div>
     <h3>Display</h3>
@@ -2105,7 +2155,7 @@ python momo-coding-harness.py --web-host 0.0.0.0 --web-cert momo.pem --web-key m
       <tr><td><code>/sessions</code></td><td class="wrap">Recent sessions with their mode and model</td></tr>
       <tr><td><code>/session [name]</code></td><td class="wrap">Show the current session, or load one by name or prefix</td></tr>
       <tr><td><code>/export [file]</code></td><td class="wrap">The conversation as Markdown, saved in the workspace</td></tr>
-      <tr><td><code>/export full [file]</code></td><td class="wrap">The full log, including thinking and tool results</td></tr>
+      <tr><td><code>/export full [file]</code></td><td class="wrap">The full log, including thinking, tool results, and what compaction or a <a href="#loop-guard">loop reset</a> removed</td></tr>
       <tr><td><code>/copy [all]</code></td><td class="wrap">Copy the last reply, or everything, to the clipboard</td></tr>
       <tr><td><code>/ls</code>, <code>/read</code>, <code>/grep</code></td><td class="wrap">Inspect files directly, with no model round-trip</td></tr>
       <tr><td><code>/exit</code>, <code>/quit</code></td><td class="wrap">Save and exit</td></tr>

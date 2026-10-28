@@ -218,10 +218,11 @@ class Categories(_Workspace):
             self.put(f"{name}.py", tool_file(name, category=cat))
         self.approve()
         self.assertEqual(self.roles("t_read"), set(registry.ROLES))
-        self.assertEqual(self.roles("t_write"), {"coding", "momo", "plan-exec"})
-        self.assertEqual(self.roles("t_run"), {"coding", "momo", "plan-exec", "plan"})
-        self.assertEqual(self.roles("t_none"), {"coding", "momo", "plan-exec"})
-        self.assertEqual(self.roles("t_nonsense"), {"coding", "momo", "plan-exec"})
+        self.assertEqual(self.roles("t_write"), {"coding", "momo", "plan-exec", "story-exec"})
+        self.assertEqual(self.roles("t_run"), {"coding", "momo", "plan-exec", "story-exec", "plan",
+                                                "story-writer"})
+        self.assertEqual(self.roles("t_none"), {"coding", "momo", "plan-exec", "story-exec"})
+        self.assertEqual(self.roles("t_nonsense"), {"coding", "momo", "plan-exec", "story-exec"})
         self.assertIn("treated as write", " ".join(self.status("t_nonsense").notes))
         self.assertEqual(self.roles("t_net"), set(registry.ROLES))
         self.assertNotIn("t_net", [t["function"]["name"] for t in offered("coding")])   # /net off

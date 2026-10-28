@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ... import run_store as run_store_mod
-from ..registry import WRITE_ROLES, Tool, tool_schema
+from ..registry import INVESTIGATE_ROLES, WRITE_ROLES, Tool, tool_schema
 from ..shell import log_view, new_run_mode, no_log, read_log
 
 
@@ -41,6 +41,6 @@ TOOL = Tool(
         ["path"]),
     # It follows run_command: wherever that is offered, in /run-mode new.
     suggests=("stop_command",),
-    run=command_output, order=510, group="edit & shell", modes=WRITE_ROLES | {"plan"},
+    run=command_output, order=510, group="edit & shell", modes=WRITE_ROLES | INVESTIGATE_ROLES,
     needs_run_mode="new", inject=("run_store", "run_output_limit"), keeps_green=True,
     windows_itself=new_run_mode, example={"path": "r1", "grep": "FAILED|Error"})

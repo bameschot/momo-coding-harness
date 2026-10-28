@@ -9,7 +9,7 @@ from . import session as session_mod
 class Logger:
     def __init__(self, session_ts: str):
         # Next to the session file it belongs to (delete_sessions removes both).
-        log_dir = session_mod.SESSION_DIR
+        log_dir = session_mod.session_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         self._path = log_dir / f"{session_ts}.log"
         # 0600 like the session file: the log holds tool arguments and results.
@@ -50,6 +50,20 @@ class Logger:
 
     def log_tool_result(self, mode: str, model: str, tool: str, result_length: int):
         self._write({"type": "tool_result", "mode": mode, "model": model, "tool": tool, "result_length": result_length})
+
+    def log_loop_reset(self, mode: str, model: str, kind: str, tool: str, count: int,
+                       removed: int, analysed: bool, severity: str = "rewind"):
+        self._write({
+            "type": "loop_reset",
+            "severity": severity,
+            "mode": mode,
+            "model": model,
+            "kind": kind,
+            "tool": tool,
+            "count": count,
+            "removed_messages": removed,
+            "analysed": analysed,
+        })
 
     def log_compact(self, mode: str, model: str, removed: int, tokens_before: int, tokens_after: int):
         self._write({

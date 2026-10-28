@@ -17,6 +17,7 @@ from harness.commands import handle as handle_command
 from harness.events import ChatEvent, DiffEvent, ToolCallEvent, ToolResultEvent
 from harness.llm.base import ChatResponse, LLMClient, ToolCall
 from harness.plan import LEGACY_PLAN_FILENAME, PLAN_FILENAME, Plan, Step
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 PY = shlex.quote(sys.executable)
 TEST_CMD = f"{PY} -m unittest discover -q -s tests -t ."

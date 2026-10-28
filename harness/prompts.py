@@ -62,6 +62,18 @@ def _planner_prompt(workdir: str) -> str:
         f"Working directory: {workdir}"
     )
 
+def _story_writer_prompt(workdir: str) -> str:
+    raw = _load_role("story-writer")
+    if raw:
+        return raw.replace("{workdir}", workdir)
+    return (
+        "You are the story writer of a phased plan. Investigate the code the current phase "
+        "builds on with the read tools, then call write_stories with small, dependency-ordered "
+        "stories, each with exact technical details and acceptance criteria with check commands. "
+        f"Do not edit files. Working directory: {workdir}"
+    )
+
+
 # The planner role's closing-verification rule, which a TDD plan replaces: its
 # acceptance stage runs the suite, and with the rule in place the 9B added a
 # "run the full test suite" step in 3 of 3 runs.
@@ -94,6 +106,11 @@ _NAV_FIRST = {
                  "thing with find_symbol; before changing a definition, find_references.",
     "plan-exec": "Start each step with code_outline / read_symbol of what it touches; before "
                  "changing a definition, find_references.",
+    "story-writer": "Trace what the phase builds on by structure: code_outline the files it "
+                    "touches, read_symbol the definitions stories will call, find_references "
+                    "for anything a story changes.",
+    "story-exec": "Start with read_symbol of the definitions the story names; before changing "
+                  "a definition, find_references.",
     "plan":      "Trace the code path the change touches by structure. For a rename, signature "
                  "change or removal, find_references lists every place your steps must cover.",
     "momo":      "Map an unfamiliar tree with code_outline on a directory; jump to a named "
@@ -111,6 +128,10 @@ _INDEX_FIRST = {
                  "before running tests, index_changes.",
     "plan-exec": "Start each step with index_search / index_file for what it touches; before "
                  "changing a definition, index_callers; before running tests, index_changes.",
+    "story-writer": "Investigate with index_map, index_search, index_file and index_callers — "
+                    "not list_directory + read_file or grep; read_symbol reads one definition.",
+    "story-exec": "Start with index_search / read_symbol for the definitions the story names; "
+                  "before changing a definition, index_callers.",
     "plan":      "Investigate with index_map, index_search, index_file and index_callers — not "
                  "list_directory + read_file or grep; read_symbol reads one definition.",
     "momo":      "Start with index_map (unfamiliar code) or index_search (a named thing), not "
@@ -273,6 +294,7 @@ _CAVECAT_TEXT = {
     "coding":    "ask_user questions and commit messages",
     "plan-exec": "complete_step summaries, revise_plan steps, ask_user questions and commit "
                  "messages",
+    "story-exec": "complete_story summaries, ask_user questions and commit messages",
 }
 
 
@@ -374,10 +396,52 @@ These rules replace "To finish" in "How the loop works" above: a step ends with 
 - Apply the Workflow above to the step: read the files it touches, make the change, verify it.
 - When the step is complete and verified, call complete_step with a short summary. That ends the
   step; do not put other tool calls after it.
-- If you need the user's input, use ask_user. A plain-text reply without a tool call also ends the step.
+- If you need the user's input, use ask_user (or ask_choice for a few distinct options). A plain-text reply without a tool call also ends the step.
 - If you discover the remaining plan is wrong or incomplete, call revise_plan with the complete
   corrected list of remaining steps (every step you omit is dropped). Never deviate silently.
 - If the step turns out to be done already, verify that and call complete_step."""
+
+# ── stories plans ────────────────────────────────────────────────────────────
+# _PLAN_STORIES_RULES is appended to the planner role while the next plan is a
+# stories plan; _STORY_EXECUTION_RULES follows the coder role while one story
+# runs, with the story itself in the first user message (a fresh context).
+
+_PLAN_STORIES_RULES = """## This plan is phased (stories)
+
+The user chose a stories plan. After approval the harness runs it one phase at a time: when a
+phase starts, a story writer looks at the code as it is then and breaks the phase into small
+stories, a model implements them one by one, and the harness runs the phase's checks before the
+next phase begins. Later phases are broken down only after earlier ones are built, so they can
+build on what was actually delivered.
+
+For this plan, these replace rules 1, 3 and 6 of "What makes a good plan" above:
+- **Each step is a phase**: a coherent milestone (a module, a feature, a layer), usually 2-7 of
+  them. Name the files and components it covers and the design decisions it carries out, but
+  leave the step-by-step detail to the stories.
+- **Each phase has an `outcome`**: what exists and works when it is done, seen from outside.
+- **Each phase has `checks`**: commands that prove the outcome and exit non-zero otherwise (a test
+  module, a smoke script). The harness runs them, so a phase that creates tests should check them.
+  Do not add a phase that only runs the tests."""
+
+_STORY_EXECUTION_RULES = """## Implementing one story
+
+You are implementing one story of a phased plan the user approved. The story is in the first
+message: what to build, its technical details, hints, pitfalls and acceptance criteria, and what
+the stories it depends on delivered. That is everything you get — earlier work on the plan is not
+in this conversation, but it is in the code.
+
+These rules replace "To finish" in "How the loop works" above: a story ends with complete_story.
+
+- Implement only this story. Other stories of the phase come later, each in its own conversation.
+- Build on what the dependencies delivered, with exactly the signatures they list; read their
+  code when you need more. Change files outside the story's files only when the story cannot be
+  done otherwise, and say why in your summary.
+- What the story **provides** is a contract later stories are written against: match it exactly,
+  or say in the summary how and why you differ.
+- Run the acceptance checks yourself before calling complete_story. The harness runs them again
+  and refuses the story while one fails.
+- If you need the user's input, use ask_user. A plain-text reply without a tool call also ends
+  the story, as not done."""
 
 # ── TDD plans ────────────────────────────────────────────────────────────────
 # Appended to the planner role while the next plan is test-driven, and after

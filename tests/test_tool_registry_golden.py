@@ -27,7 +27,8 @@ from harness.plan import Plan, Step
 from test_run_output import _Scripted
 
 FIXTURE = Path(__file__).parent / "golden" / "tool_golden.json"
-ROLES = ("design", "chat", "plan", "plan-tdd", "coding", "momo", "plan-exec", "plan-exec-tdd")
+ROLES = ("design", "chat", "plan", "plan-tdd", "coding", "momo", "plan-exec", "plan-exec-tdd",
+         "plan-stories", "story-writer", "story-exec")
 RUN_MODES = ("new", "classic")
 EDIT_SETS = {"default": EDIT_FEATURES, "none": frozenset(), "match-only": frozenset({"match"})}
 # Prompts that are stored whole (the rest by hash), so a mismatch can be read.
@@ -66,7 +67,17 @@ class _Golden:
     def configure(self, role, run_mode, edits, index, net):
         h = self.h
         h.plan, h.plan_phase, h.plan_kind = None, "investigating", "normal"
-        if role.startswith("plan-exec"):
+        h.story_role = None
+        if role.startswith("story-"):
+            h.mode = "coding"
+            h.plan = Plan(title="P", steps=[Step(title="s", outcome="o", checks=["true"])],
+                          kind="stories")
+            h.plan_phase = "executing"
+            h.story_role = role
+        elif role == "plan-stories":
+            h.mode = "plan"
+            h.plan_kind = "stories"
+        elif role.startswith("plan-exec"):
             h.mode = "coding"
             h.plan = Plan(title="P", steps=[Step(title="s")],
                           kind="tdd" if role.endswith("tdd") else "normal")

@@ -12,6 +12,7 @@ import harness.harness as hmod
 from harness.commands import _format_context
 from harness.events import DeltaEvent, StreamEndEvent
 from harness.llm.base import ChatResponse, LLMClient
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 
 class FakeClient(LLMClient):

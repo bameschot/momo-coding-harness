@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ... import run_store as run_store_mod
-from ..registry import WRITE_ROLES, Tool, tool_schema
+from ..registry import INVESTIGATE_ROLES, WRITE_ROLES, Tool, tool_schema
 from ..shell import new_run_mode, no_log, read_log
 
 
@@ -32,6 +32,6 @@ TOOL = Tool(
         {"path": {"type": "string", "description": "Log path or id (e.g. r3)"}},
         ["path"]),
     discoverable=True,
-    run=stop_command, order=520, group="edit & shell", modes=WRITE_ROLES | {"plan"},
+    run=stop_command, order=520, group="edit & shell", modes=WRITE_ROLES | INVESTIGATE_ROLES,
     needs_run_mode="new", inject=("run_store", "run_output_limit"), keeps_green=True,
     windows_itself=new_run_mode, example={"path": "r2"})

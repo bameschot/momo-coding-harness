@@ -19,6 +19,7 @@ from . import search as search_mod
 from . import session as session_mod
 from . import tools as tools_mod
 from . import transcript as transcript_mod
+from . import loop_guard as loop_guard_mod
 from .compaction import content_text
 from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS
 from .think_trim import KEEP_LEVELS
@@ -183,6 +184,87 @@ def _undo_file(harness: Harness, arg: str) -> CommandResult:
                          confirm_prompt=(f"Put {rel} back as it was at the last /keep"
                                          + (", overwriting your own changes to it?" if force else "?")),
                          confirm_action=lambda: harness.revert_file(path, force))
+
+
+def _plan_stories_setting(harness: Harness, words: list[str]) -> str:
+    """/plan stories approve each|once · /plan stories cap N"""
+    from .story_runner import APPROVE_MODES, STORIES_CAP_RANGE
+    lo, hi = STORIES_CAP_RANGE
+    if words[0] == "approve" and len(words) == 2 and words[1] in APPROVE_MODES:
+        harness.stories_approve = words[1]
+        session_mod.save_prefs(stories_approve=words[1])
+        return ("Stories: you approve every phase's stories before they run." if words[1] == "each"
+                else "Stories: each phase's stories run without asking (changes to later phases "
+                     "still ask).")
+    if words[0] == "cap" and len(words) == 2 and words[1].isdigit() and lo <= int(words[1]) <= hi:
+        harness.stories_cap = int(words[1])
+        session_mod.save_prefs(stories_cap=harness.stories_cap)
+        return f"Stories: at most {harness.stories_cap} turns per story before it counts as stuck."
+    return (f"ERROR: usage: /plan stories approve each|once · /plan stories cap N ({lo}-{hi}) "
+            f"— now approve {harness.stories_approve}, cap {harness.stories_cap}")
+
+
+def _show_stories(harness: Harness, words: list[str]) -> str:
+    """/plan show stories [N]: a phase's stories (the current phase by default)."""
+    plan = harness.plan
+    if plan is None or not plan.stories:
+        return "No stories plan."
+    if words and not words[0].isdigit():
+        return "ERROR: usage: /plan show stories [phase number]"
+    idx = plan.current_index()
+    n = int(words[0]) if words else (idx + 1 if idx is not None else len(plan.steps))
+    sset = plan.story_sets.get(n)
+    if sset is None:
+        return f"Phase {n} has no stories yet: they are written when it starts."
+    return sset.to_markdown()
+
+
+def _loop_guard(harness: Harness, arg: str) -> CommandResult:
+    """/loop-guard [n|off|on] · /loop-guard resets <n>"""
+    def _state() -> str:
+        n, r = harness.loop_guard, harness.loop_resets
+        if not n:
+            return "loop guard: off (a repeating model runs until the iteration cap)"
+        then = (f"up to {r} reset{'s' if r != 1 else ''} per turn, then the turn stops" if r
+                else "no reset: the first loop stops the turn")
+        return (f"loop guard: the same call {n} times with nothing changed, one error "
+                f"{n} times (a failing command's too), or {n + 1} edits to one definition "
+                f"with its check still failing (a warning at {n}), is a loop · {then}")
+    words = arg.lower().split()
+    if not words:
+        return CommandResult(handled=True, output=_state())
+    if words[0] == "resets":
+        try:
+            r = int(words[1]) if len(words) == 2 else -1
+        except ValueError:
+            r = -1
+        if not 0 <= r <= loop_guard_mod.MAX_RESETS_LIMIT:
+            return CommandResult(handled=True, output=(
+                f"ERROR: /loop-guard resets takes 0 (stop at the first loop) to "
+                f"{loop_guard_mod.MAX_RESETS_LIMIT}"))
+        harness.loop_resets = r
+        session_mod.save_prefs(loop_resets=r)
+    else:
+        if len(words) > 1:
+            return CommandResult(handled=True, output="ERROR: usage: /loop-guard [n|off|on] "
+                                                      "or /loop-guard resets <n>")
+        if words[0] in ("off", "0", "none"):
+            n = 0
+        elif words[0] == "on":
+            n = harness.loop_guard or loop_guard_mod.THRESHOLD
+        else:
+            try:
+                n = int(words[0])
+            except ValueError:
+                n = -1
+            if not loop_guard_mod.MIN_THRESHOLD <= n <= loop_guard_mod.MAX_THRESHOLD:
+                return CommandResult(handled=True, output=(
+                    f"ERROR: /loop-guard takes {loop_guard_mod.MIN_THRESHOLD} to "
+                    f"{loop_guard_mod.MAX_THRESHOLD} repeats, off or on"))
+        harness.loop_guard = n
+        session_mod.save_prefs(loop_guard=n)
+    harness.emit_status()
+    return CommandResult(handled=True, output=_state())
 
 
 def _undo_max(harness: Harness, arg: str) -> CommandResult:
@@ -631,14 +713,24 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/plan":
         sub = arg.lower()
-        if sub in ("tdd", "normal"):
+        words = sub.split()
+        if words[:1] == ["stories"] and len(words) > 1:
+            return CommandResult(handled=True, output=_plan_stories_setting(harness, words[1:]))
+        if words[:2] == ["show", "stories"]:
+            return CommandResult(handled=True, output=_show_stories(harness, words[2:]))
+        if sub in ("tdd", "normal", "stories"):
             err = harness.set_plan_kind(sub)
             if err:
                 return CommandResult(handled=True, output=f"ERROR: {err}")
             harness.set_mode("plan")
             what = ("test-driven: the plan lists each step's expected outcomes, the tests are "
                     "written first (skipped), and every step must pass them before the next"
-                    if sub == "tdd" else "normal")
+                    if sub == "tdd" else
+                    "stories: the plan's steps are phases; when a phase starts, its stories are "
+                    "written against the code as it is then and run one at a time, each checked "
+                    f"by the harness (stories approve: {harness.stories_approve}, cap: "
+                    f"{harness.stories_cap} turns per story)"
+                    if sub == "stories" else "normal")
             note = ""
             if harness.plan is not None and harness.plan.kind != sub:
                 note = (f" The current draft stays {harness.plan.kind} until the plan is "
@@ -652,7 +744,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 if harness.plan_phase == "executing":
                     state += ", /plan resume to continue it in coding mode"
             kind = (" Plan type: TDD (/plan normal to switch)." if harness.plan_kind == "tdd"
-                    else " Plan type: normal (/plan tdd for test-driven).")
+                    else " Plan type: stories (/plan normal to switch)." if harness.plan_kind == "stories"
+                    else " Plan type: normal (/plan tdd for test-driven, /plan stories for phases "
+                         "broken into stories).")
             return CommandResult(handled=True, output=(
                 "Switched to plan mode: describe a feature or bug; I'll investigate, ask "
                 "questions, and propose a plan to approve before executing it" + state + "." + kind))
@@ -1010,6 +1104,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
         harness.rebuild_system_prompt()
         harness.refresh_status()
         return CommandResult(handled=True, output=_ref_state())
+
+    if cmd == "/loop-guard":
+        return _loop_guard(harness, arg)
 
     if cmd == "/max-output-tokens":
         def _cap() -> str:
@@ -1730,7 +1827,13 @@ Available commands:
   /plan               Switch to plan mode (investigate → plan → approve → execute)
   /plan tdd           Plan mode with a test-driven plan: tests first, each step gated on them
   /plan normal        Plan mode with a normal plan (the default)
+  /plan stories       Plan mode with a phased plan: each phase is broken into small, checked
+                      stories when it starts, written against the code as it is then
+  /plan stories approve each|once  Review every phase's stories before they run (default
+                      each), or let them run (saved)
+  /plan stories cap N  Turns one story may take before it counts as stuck (default 30, saved)
   /plan show          Show the current plan and its progress
+  /plan show stories [N]  Show a phase's stories (the current phase by default)
   /plan run           Approve and execute the plan in coding mode (re-reads .momo/plan.md edits)
   /plan resume        Continue a paused plan from its current step (in coding mode)
   /plan cancel        Discard the plan and delete .momo/plan.md
@@ -1775,9 +1878,9 @@ Available commands:
   /think-history off|turn|all  Send the model's own reasoning back to it: none,
                       since your last message (default), or every turn (saved)
   /think-keep [off|lean|more|most]  How much of the reasoning sent back is kept:
-                      its plan steps and closing sentences; lean (default)
-                      suits small models, more (x2) or most (x4) larger ones,
-                      off sends it whole (saved)
+                      off (default) sends it whole; lean keeps its plan
+                      steps and closing sentences, more (x2) or most (x4)
+                      a larger share (saved)
   /cavecat [off|on]   Compress plans, tool text and command output, and keep
                       replies short, to save tokens (saved)
   /run-confirm        Show run_command confirmation state (on/off)
@@ -1787,6 +1890,12 @@ Available commands:
   /run-output-limit [n|off]  Chars in run_command's default view (default off)
   /max-output-tokens [n|off]  Most tokens one model reply may take, reasoning
                       included (default 25000; stops a model stuck in a loop)
+  /loop-guard [n|off|on]  Repeats that make a tool-call loop: the same call n times with
+                      nothing changed, one error n times (failing commands too),
+                      or n+1 edit/fail cycles on one definition, with a warning
+                      at n (default 3, saved)
+  /loop-guard resets <n>  Loop resets per turn before the turn stops (default 2;
+                      0 = stop at the first loop)
   /tool-ref [full|compact|minimal]  How the system prompt describes the tools: full,
                       one line per tool, or only the call format (the tool schemas carry the rest)
   /system-prompt      Show the composed system prompt: role, tools, guides, skills (alias: /prompt)

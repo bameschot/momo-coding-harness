@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..registry import Tool, tool_schema
-from ._plan_schema import STEP, STEP_TDD, tdd_variant
+from ._plan_schema import PHASE, STEP, STEP_TDD, plan_variant
 
 _TDD = tool_schema("create_plan",
     "Submit the test-driven implementation plan once investigation is complete. The harness "
@@ -28,6 +28,35 @@ _TDD = tool_schema("create_plan",
                       "description": "Expected outcomes of the whole change, checked by end-to-end tests after the last step"},
      "steps":        {"type": "array", "items": STEP_TDD, "description": "Ordered implementation steps"}},
     ["title", "goal", "test_command", "acceptance", "steps"])
+
+_STORIES = tool_schema("create_plan",
+    "Submit the phased plan once investigation is complete. The harness writes it to a Markdown "
+    "file and asks the user to approve it. On approval the phases run in order: when a phase "
+    "starts, a story writer looks at the code as it is then and breaks the phase into small "
+    "stories, which are implemented one at a time; the harness runs the phase's checks before "
+    "the next phase starts. So each phase is a coherent milestone (a module, a feature, a layer), "
+    "not a single edit: give its outcome and the commands that prove it, and leave the "
+    "step-by-step detail to the stories. If the user asks for changes, call create_plan again "
+    "with the complete new plan.",
+    {"title": {"type": "string", "description": "Short name for the feature or project"},
+     "goal":  {"type": "string", "description": "What the change achieves and why, including key findings, decisions and the user's answers"},
+     "steps": {"type": "array", "items": PHASE, "description": "The phases, in order (usually 2-7)"}},
+    ["title", "goal", "steps"])
+
+_EXAMPLE_STORIES = {
+    "title": "Paginated search API",
+    "goal": "Add /search with paging; results come from the existing index in src/index.py.",
+    "steps": [
+        {"title": "Paging helper",
+         "details": "src/pager.py: a paginate() that splits any sequence into pages, with tests.",
+         "outcome": "paginate(range(11), size=5) gives pages of 5, 5 and 1",
+         "checks": ["python -m pytest -q tests/test_pager.py"],
+         "files": ["src/pager.py", "tests/test_pager.py"]},
+        {"title": "Search endpoint",
+         "details": "src/api.py: GET /search?q=&page= using paginate() and Index.query().",
+         "outcome": "GET /search?q=a&page=2 returns the second page as JSON",
+         "checks": ["python -m pytest -q tests/test_api.py"],
+         "files": ["src/api.py", "tests/test_api.py"]}]}
 
 _EXAMPLE = {"title": "Fix off-by-one in paginate()",
             "goal": "Last page is dropped because paginate() uses < instead of <=.",
@@ -63,6 +92,7 @@ TOOL = Tool(
          "goal":  {"type": "string", "description": "What the change achieves and why, including key findings from the investigation"},
          "steps": {"type": "array", "items": STEP, "description": "Ordered implementation steps"}},
         ["title", "goal", "steps"]),
-    variants={"tdd": _TDD}, examples={"tdd": _EXAMPLE_TDD}, select=tdd_variant,
+    variants={"tdd": _TDD, "stories": _STORIES},
+    examples={"tdd": _EXAMPLE_TDD, "stories": _EXAMPLE_STORIES}, select=plan_variant,
     harness=True, locked=True, order=600, group="ask & plan", modes=frozenset({"plan"}),
     example=_EXAMPLE)

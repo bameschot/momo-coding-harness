@@ -11,6 +11,7 @@ from pathlib import Path
 
 import harness.harness as hmod
 from harness.llm.base import ChatResponse, LLMClient, ToolCall
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 SUITE = "printf 'FAIL: a\\nok\\n'; exit 1"
 REPEAT = "You made this exact call just before"
@@ -87,6 +88,16 @@ class RerunHint(Base):
             _call("run_command", command=SUITE),
         ])
         self.assertFalse(results[2].startswith("[same command"), results[2])
+
+    def test_a_scratch_write_in_between_ends_it(self):
+        results = self.run_script([
+            _call("scratch_write", path="dbg.py", content="print('one')\n"),
+            _call("run_command", command="python3 .momo/scratch/dbg.py | tail -30"),
+            _call("scratch_write", path="dbg.py", content="print('two')\n"),
+            _call("run_command", command="python3 .momo/scratch/dbg.py | tail -20"),
+        ])
+        self.assertIn("two", results[3])
+        self.assertFalse(results[3].startswith("[same command"), results[3])
 
     def test_another_command_in_between_ends_it(self):
         results = self.run_script([

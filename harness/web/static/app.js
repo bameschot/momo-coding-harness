@@ -17,6 +17,7 @@ import { addCopyButtons, renderMarkdown } from "./markdown.js";
 import { initNotify, noteActivity, notify, signal, syncNotifyControls } from "./notify.js";
 import { initPalette, openPalette } from "./palette.js";
 import { initSessions, openSessions } from "./sessions.js";
+import { focusNode, isWide, lineKeyOf, renderPlanView, setWide, stopPlanTimer } from "./planview.js";
 
 const transcript = $("#transcript");
 const input = $("#input");
@@ -187,7 +188,7 @@ function renderKind(ev) {
     case "tool_call": return renderToolCall(ev.name, ev.args);
     case "tool_result": return renderToolResult(ev.name, ev.result);
     case "diff": return renderDiff(ev);
-    case "ask_user": return renderAsk(ev.question);
+    case "ask_user": return renderAsk(ev.question, ev.options);
     case "done": return renderTurnMeta(ev);
   }
   return null;
@@ -256,6 +257,13 @@ function renderChat(role, text, extra = "") {
   }
   wrap.textContent = text;
   if (role === "system" && text.startsWith("ERROR")) wrap.classList.add("error");
+  const node = role === "system" ? lineKeyOf(text) : null;
+  if (node) {
+    wrap.classList.add("story-start");
+    wrap.dataset.story = node;
+    wrap.title = "Show this in the plan";
+    wrap.onclick = () => openPlanNode(node);
+  }
   // `[y/N]` confirmation prompts from /commands get quick-answer buttons.
   if (isConfirmPrompt(role, text)) return askCard(text, true, "Confirm", false);
   return wrap;
@@ -403,22 +411,34 @@ function renderTurnMeta(ev) {
   return meta;
 }
 
-function renderAsk(question) {
-  const yn = /Reply 'y'|y = run it|\[y\/N\]/.test(question);
-  return askCard(question, yn, "momo asks", true, /'a' to always allow/.test(question));
+function renderAsk(question, options = []) {
+  const yn = !options.length && /Reply 'y'|y = run it|\[y\/N\]/.test(question);
+  return askCard(question, yn, "momo asks", true, /'a' to always allow/.test(question), options);
 }
 
 // A question card.  yn: Yes/No buttons; answerable: a field for a typed answer
-// (ask_user can take any text — guidance, a choice, plan feedback).
-function askCard(question, yn, title, answerable, always = false) {
+// (ask_user can take any text — guidance, a choice, plan feedback); options:
+// ask_choice's answers, each sent as its number.
+function askCard(question, yn, title, answerable, always = false, options = []) {
   const card = el("div", "ask");
   card.append(el("div", "ask-title", `? ${title}`), el("div", "ask-q", question));
   const controls = el("div", "ask-controls");
+  if (options.length) {
+    const list = el("div", "ask-options");
+    options.forEach((opt, i) => {
+      const b = el("button", "btn", `${i + 1}. ${opt}`);
+      b.type = "button";
+      b.onclick = () => send(String(i + 1));
+      list.append(b);
+    });
+    controls.append(list);
+  }
   if (answerable) {
     const form = el("div", "ask-answer");
     const field = el("input");
     field.type = "text";
-    field.placeholder = yn ? "…or type an answer" : "Type your answer";
+    field.placeholder = options.length ? "…or add details to refine the question"
+      : yn ? "…or type an answer" : "Type your answer";
     field.setAttribute("aria-label", "Your answer");
     const go = el("button", "btn small primary", "Answer");
     go.type = "button";
@@ -662,6 +682,7 @@ function applyStatus(s) {
   applyIndexStatus(s);
   applyThinkStatus(s);
   applyCavecatStatus(s);
+  applyLoopStatus(s);
   applyMcpStatus(s);
   applySkillsStatus(s);
   refreshChipMenus();
@@ -694,7 +715,7 @@ function applyThinkStatus(s) {
     r.checked = r.value === (s.think_history || "turn");
   }
   for (const r of document.querySelectorAll("input[name=think-keep]")) {
-    r.checked = r.value === (s.think_keep || "lean");
+    r.checked = r.value === (s.think_keep || "off");
   }
   for (const r of document.querySelectorAll("input[name=tool-ref]")) {
     r.checked = r.value === (s.tool_ref || "minimal");
@@ -721,6 +742,25 @@ function applyCavecatStatus(s) {
   chip.classList.toggle("active", level !== "off");
   for (const r of document.querySelectorAll("input[name=cavecat], input[name=cavecat-view]")) {
     r.checked = r.value === level;
+  }
+}
+
+// The LOOP chip, its menu and the Settings → Context fields: /loop-guard and
+// /loop-guard resets.  Off is the less safe setting, so it warns.
+function applyLoopStatus(s) {
+  const n = s.loop_guard ?? 3, r = s.loop_resets ?? 2;
+  const chip = $("#loop-badge");
+  chip.textContent = n ? `LOOP: ${n}×` : "LOOP: off";
+  chip.classList.toggle("warn", !n);
+  chip.title = !n ? "Loop guard (/loop-guard): off — a repeating model runs until the iteration cap"
+    : `Loop guard (/loop-guard): the same call ${n} times, or one error ${n} times, is a loop · `
+      + (r ? `${r} reset${r === 1 ? "" : "s"} per turn, then the turn stops` : "the first loop stops the turn");
+  for (const f of document.querySelectorAll('input[data-cmd="/loop-guard"]')) {
+    if (document.activeElement !== f) f.value = n ? String(n) : "off";
+  }
+  for (const f of document.querySelectorAll('input[data-cmd="/loop-guard resets"]')) {
+    if (document.activeElement !== f) f.value = String(r);
+    f.disabled = !n;
   }
 }
 
@@ -1054,18 +1094,66 @@ async function refreshState() {
   restoreDraft();
 }
 
-// The plan drawer: the plan, and the actions its phase allows.
+// The plan drawer: the plan as a timeline (planview.js), or its markdown file
+// on request, and the actions its phase allows.
+let planFileView = false;
+let shownPlanFile = null;   // the markdown the plan-file view shows, to skip unchanged refreshes
 function renderPlan() {
   $("#plan-btn").hidden = !state.plan;
-  $("#plan-body").innerHTML = state.plan ? renderMarkdown(state.plan) : "<p class='muted'>No active plan.</p>";
-  addCopyButtons($("#plan-body"));
+  const body = $("#plan-body");
+  if (state.plan_view && !planFileView) {
+    shownPlanFile = null;
+    renderPlanView(state.plan_view, body, { onJump: jumpToStory,
+                                           onPlanFile: () => { planFileView = true; renderPlan(); } });
+  } else if (shownPlanFile !== (state.plan || "")) {
+    // Only when the markdown changed: the drawer refreshes while a plan runs.
+    shownPlanFile = state.plan || "";
+    stopPlanTimer();
+    $("#plan-drawer").classList.remove("plan-wide");
+    body.innerHTML = state.plan ? renderMarkdown(state.plan) : "<p class='muted'>No active plan.</p>";
+    addCopyButtons(body);
+    if (state.plan_view) body.prepend(planViewToggle());
+  }
   const phase = state.plan_phase || "";
   $("#plan-phase").textContent = phase;
   const executing = phase === "executing";
   $("#plan-run").hidden = !state.plan || executing;
   $("#plan-resume").hidden = !executing;
   $("#plan-cancel").hidden = !state.plan;
-  if (!$("#plan-drawer").hidden) $("#plan-body .task-current")?.scrollIntoView({ block: "nearest" });
+  if (!$("#plan-drawer").hidden && planFileView)
+    $("#plan-body .task-current")?.scrollIntoView({ block: "nearest" });
+}
+
+function planViewToggle() {
+  const bar = el("div", "plan-view-toggle");
+  for (const [label, file] of [["Timeline", false], ["Plan file", true]]) {
+    const b = el("button", `chip button${planFileView === file ? " active" : ""}`, label);
+    b.type = "button";
+    b.onclick = () => { planFileView = file; shownPlanFile = null; renderPlan(); };
+    bar.append(b);
+  }
+  return bar;
+}
+
+// A story's row ↧: the transcript line its latest run started with, flashed.
+function jumpToStory(key) {
+  const lines = transcript.querySelectorAll(`.msg.story-start[data-story="${key}"]`);
+  const line = lines[lines.length - 1];
+  if (!line) return toast(`${key} has no run in this transcript.`);
+  for (let d = line.closest("details"); d; d = d.parentElement?.closest("details")) d.open = true;
+  line.scrollIntoView({ block: "center" });
+  // A steady marker (no animation) on the line, until the next jump.
+  for (const m of transcript.querySelectorAll(".msg.jump-target")) m.classList.remove("jump-target");
+  line.classList.add("jump-target");
+}
+
+// A transcript line that starts a step or story ("▶ P1.S3 — …", "▶ Plan step 2/5:
+// …"): open the plan drawer at that node.
+function openPlanNode(key) {
+  focusNode(key);
+  planFileView = false;
+  refreshState();
+  openLayer($("#plan-drawer"), document.activeElement);
 }
 
 function renderSkills() {
@@ -1560,7 +1648,7 @@ function updatePlanKind() {
   const sel = $("#plan-kind");
   $("#plan-kind-pick").hidden = status.mode !== "plan";
   if (sel.value !== (status.plan_kind || "normal")) sel.value = status.plan_kind || "normal";
-  sel.disabled = busy || (status.plan_progress || "").startsWith("exec");
+  sel.disabled = busy || /^(exec|phase)/.test(status.plan_progress || "");
 }
 $("#plan-kind").onchange = (e) => send(`/plan ${e.target.value}`);
 // Every chip opens its popover (chips.js; THINK and INDEX here) — none toggles
@@ -1576,6 +1664,7 @@ for (const r of document.querySelectorAll("input[name=think-history]")) {
   r.onchange = () => send(`/think-history ${r.value}`);
 }
 $("#cavecat-badge").onclick = (e) => toggleMenu(e, "#cavecat-menu");
+$("#loop-badge").onclick = (e) => toggleMenu(e, "#loop-menu");
 for (const r of document.querySelectorAll("input[name=cavecat], input[name=cavecat-view]")) {
   r.onchange = () => send(`/cavecat ${r.value}`);
 }
@@ -1753,7 +1842,7 @@ function syncViewMenu() {
 const MENUS = [["#view-btn", "#view-menu"], ["#model-btn", "#model-menu"],
                ["#ctx-btn", "#ctx-menu"], ["#index-badge", "#index-menu"],
                ["#tools-btn", "#tools-menu"], ["#think-badge", "#think-menu"],
-               ["#cavecat-badge", "#cavecat-menu"],
+               ["#cavecat-badge", "#cavecat-menu"], ["#loop-badge", "#loop-menu"],
                ["#run-badge", "#run-menu"], ["#net-badge", "#net-menu"],
                ["#tools-badge", "#tools-off-menu"], ["#mcp-btn", "#mcp-menu"], ["#skills-btn", "#skills-menu"]];
 function closeMenu() {
@@ -1797,14 +1886,15 @@ $("#idle-recap-secs").onchange = (e) => {
 // ── plan drawer ───────────────────────────────────────────────────────────────
 $("#plan-btn").onclick = (e) => { refreshState(); openLayer($("#plan-drawer"), e.currentTarget); };
 $("#plan-progress").onclick = $("#plan-btn").onclick;
-$("#plan-close").onclick = () => DRAWERS["#plan-drawer"]();
+const closePlan = () => { stopPlanTimer(); closeLayer($("#plan-drawer")); };
+$("#plan-close").onclick = closePlan;
 for (const b of document.querySelectorAll("#plan-drawer [data-cmd]")) {
   b.onclick = async () => {
     // Like deleting a session, discarding a plan asks first: it deletes .momo/plan.md.
     const bar = $("#plan-drawer .drawer-actions");
     if (b.id === "plan-cancel" && !(await confirmInline(bar, "Discard this plan and .momo/plan.md?", "Discard"))) return;
     send(b.dataset.cmd);
-    DRAWERS["#plan-drawer"]();
+    closePlan();
   };
 }
 // While the drawer is open every status event may carry a plan change (a revised
@@ -2279,7 +2369,11 @@ const DRAWERS = {
   "#filter-drawer": closeFilter,
   "#settings-drawer": hideDrawer("#settings-drawer"),
   "#prompt-drawer": hideDrawer("#prompt-drawer"),
-  "#plan-drawer": hideDrawer("#plan-drawer"),
+  // Esc from the wide view goes back to the drawer first.
+  "#plan-drawer": () => {
+    if (isWide() && !$("#plan-drawer").hidden && !planFileView) { setWide(false); renderPlan(); return; }
+    closePlan();
+  },
   "#sessions-drawer": hideDrawer("#sessions-drawer"),
   "#files-drawer": hideDrawer("#files-drawer"),
   "#changes-drawer": hideDrawer("#changes-drawer"),

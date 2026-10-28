@@ -7,10 +7,19 @@ from pathlib import Path
 
 from .paths import momo_home
 
-# Module attributes (tests patch them); the Logger reads SESSION_DIR at use too.
-SESSION_DIR = momo_home() / "sessions"
-_PREFS_PATH = momo_home() / "prefs.json"
+# Overrides (tests patch them); None: under momo_home(), resolved per call so a
+# HOME changed after import (tests) keeps sessions out of the real folder.
+SESSION_DIR: Path | None = None
+_PREFS_PATH: Path | None = None
 _prefs_lock = threading.Lock()     # save_prefs is called from the TUI, web and worker threads
+
+
+def session_dir() -> Path:
+    return SESSION_DIR or momo_home() / "sessions"
+
+
+def prefs_path() -> Path:
+    return _PREFS_PATH or momo_home() / "prefs.json"
 
 
 def atomic_write(path: Path, *chunks: str | bytes, private_dir: bool = False) -> None:
@@ -34,7 +43,7 @@ def atomic_write(path: Path, *chunks: str | bytes, private_dir: bool = False) ->
 
 def load_prefs() -> dict:
     try:
-        return json.loads(_PREFS_PATH.read_text(encoding="utf-8"))
+        return json.loads(prefs_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -43,7 +52,7 @@ def save_prefs(**kwargs) -> None:
     with _prefs_lock:
         prefs = load_prefs()
         prefs.update(kwargs)
-        atomic_write(_PREFS_PATH, json.dumps(prefs, indent=2))
+        atomic_write(prefs_path(), json.dumps(prefs, indent=2))
 
 
 def new_timestamp() -> str:
@@ -51,8 +60,9 @@ def new_timestamp() -> str:
 
 
 def session_path(ts: str) -> Path:
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    return SESSION_DIR / f"{ts}.json"
+    folder = session_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{ts}.json"
 
 
 def save(ts: str, model: str, mode: str, workdir: Path,
@@ -111,8 +121,9 @@ def load(path: Path) -> dict:
 
 
 def list_sessions() -> list[Path]:
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted(SESSION_DIR.glob("*.json"), reverse=True)
+    folder = session_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    return sorted(folder.glob("*.json"), reverse=True)
 
 
 def latest_session() -> Path | None:
@@ -135,7 +146,7 @@ def find_session(name: str) -> Path | None:
     return exact or next((p for p in sessions if p.stem.startswith(name)), None)
 
 
-# A session name is a file stem in SESSION_DIR: no separators, no leading dot,
+# A session name is a file stem in session_dir(): no separators, no leading dot,
 # so a name can never point outside the folder.
 _NAME_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]*$")
 
@@ -153,7 +164,7 @@ def delete_sessions(names: list[str], current: str | None) -> tuple[list[str], l
         if name == current:
             skipped.append({"name": name, "reason": "it is the current session"})
             continue
-        path = SESSION_DIR / f"{name}.json"
+        path = session_dir() / f"{name}.json"
         if not path.is_file():
             skipped.append({"name": name, "reason": "not found"})
             continue
@@ -162,6 +173,6 @@ def delete_sessions(names: list[str], current: str | None) -> tuple[list[str], l
         except OSError as e:
             skipped.append({"name": name, "reason": str(e)})
             continue
-        (SESSION_DIR / f"{name}.log").unlink(missing_ok=True)
+        (session_dir() / f"{name}.log").unlink(missing_ok=True)
         deleted.append(name)
     return deleted, skipped

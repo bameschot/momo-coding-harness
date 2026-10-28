@@ -53,9 +53,11 @@ Options:
 | `--think` | last used / `on` | Thinking level: `off`, `on`, or an effort level (`low`, `medium`, `high`, `xhigh`, …) for models that take one. See [Thinking level](#thinking-level) |
 | `--no-think` | off | Same as `--think off` |
 | `--think-history` | last used / `turn` | Send the model's own reasoning back to it: `off`, `turn` (since your last message) or `all`. See [Sending reasoning back](#sending-reasoning-back) |
-| `--think-keep` | last `/think-keep`, else `lean` | How much of its earlier reasoning the model gets back: `lean`, `more` (×2), `most` (×4), or `off` (all of it). See [Trimming the reasoning sent back](#trimming-the-reasoning-sent-back) |
+| `--think-keep` | last `/think-keep`, else `off` | How much of its earlier reasoning the model gets back: `lean`, `more` (×2), `most` (×4), or `off` (all of it). See [Trimming the reasoning sent back](#trimming-the-reasoning-sent-back) |
 | `--cavecat` | last `/cavecat`, else `off` | `on`: compress plans, tool text and command output, and keep replies short, to save tokens; `off`. See [Cavecat mode](#cavecat-mode) |
 | `--max-output-tokens` | last setting, else `25000` | Most tokens one model reply may take, reasoning included; `0` = no cap. See `/max-output-tokens` |
+| `--loop-guard` | last `/loop-guard`, else `3` | Repeats of one tool call (or one error) that count as a loop, or `off`. See [Loop guard](#loop-guard) |
+| `--loop-resets` | last `/loop-guard resets`, else `2` | Loop resets per turn before the turn stops; `0` = stop at the first loop |
 | `--undo-max` | last `/undo-max`, else `20` | Turns of file checkpoints `/undo` can go back before the oldest is dropped; `0` = no cap (back to the last `/keep`). See [Undoing file changes](#undoing-file-changes) |
 | `--no-stream` | off | Wait for complete replies instead of streaming them as they are generated (streaming is on by default, in the TUI and the web UI) |
 | `--web` / `--no-web` | on | Serve the browser chat UI alongside the TUI |
@@ -311,13 +313,14 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
 | Command output | `/run-mode`, `/run-output-limit` | View → Context: save command output to a log and return a view, and the view's size in characters. Shared with the TUI |
 | Reply cap | `/max-output-tokens` | View → Context → Reply cap: the most tokens one model reply may take (default 25000, `off` for none). Shared with the TUI |
+| Loop guard | `/loop-guard [n\|off]`, `/loop-guard resets <n>` | The `LOOP` badge in the status bar (it turns amber when off), and View → All settings… → Context: how many repeats make a [loop](#loop-guard), and how many resets per turn before the turn stops. Shared with the TUI |
 | Tool reference | `/tool-ref minimal\|compact\|full` | View → All settings… → Context: how the system prompt describes the tools. `minimal` (default) only says how to write a call, `compact` adds a line and example per tool, `full` every description. Shared with the TUI |
 | Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index-max-files`, `/index-workers`, `/index-filter`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, the file limit, build workers, Save now / Load, and Filter… (edit which files are indexed). Shared with the TUI |
 | Play a sound | — | An audible cue (a synthesised kitten mew), focused or not, see [Notifications](#notifications) |
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
 | System prompt… | `/system-prompt` | View → Other: a side panel with the [composed system prompt](#seeing-the-system-prompt), part by part. The CTX popover links to it too |
 | Download conversation | `/export` | Downloads the conversation as a Markdown file to your browser. `/export` writes into the workspace instead |
-| Download full log | `/export full` | Downloads everything momo holds for the session: the system prompt, thinking, every tool call with its arguments, full tool results, and the messages context compaction removed (marked as such) |
+| Download full log | `/export full` | Downloads everything momo holds for the session: the system prompt, thinking, every tool call with its arguments, full tool results, and the messages context compaction or a [loop reset](#loop-guard) removed (marked as such) |
 
 Typing the TUI command in the browser (e.g. `/think-output off`) has the same effect as the menu.
 
@@ -483,6 +486,7 @@ curl -sN localhost:8765/api/events          # watch the live event stream
 - **Status bar** — current mode, model, Ollama host, context usage %, and working directory. When the line is too narrow to fit, the working directory is shortened from the front (`…/tail`) so its most specific part stays visible.
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
   - Shows `THINK: <level>` when the [thinking level](#thinking-level) isn't the default `on`, or `THINK: high→on` when the model gets something other than your choice.
+  - Shows `LOOP: off` when the [loop guard](#loop-guard) is off, or `LOOP: 4×/1` (repeats/resets) when it isn't at the default 3 and 2.
   - Shows `⠋ thinking` (spinner) while the model is working.
   - Shows `? waiting for input` when the model has called `ask_user` and is waiting for your reply. Type your answer and press Enter — the model resumes from where it paused.
   - Top rule turns green when the chat pane has focus; bottom rule turns green when the input pane has focus.
@@ -528,6 +532,27 @@ Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
 Available tools: all design tools + `edit_file`, `edit_files`, `replace_symbol`, `delete_file`, `move_file`, `append_to_file`, `run_command`, and the code-navigation tools (`code_outline`, `find_symbol`, `read_symbol`, `find_references`)
+
+#### Loop guard
+
+A small model can get stuck repeating itself: reading the same file again, re-running the same command, or sending edit after edit that fails the same way. In every mode, the harness watches each tool call and treats any of these as a loop:
+
+- **The same call 3 times with nothing changed in between.** "Changed" means a write not made before, a context compaction, or an answer from you. Reading a file after each of three different edits is progress. Reading it three times in a row is not. The same write repeated 3 times also counts.
+- **The same error 3 times from one tool,** even with different arguments, for example three different `edit_file` calls that all return "old_string not found". A successful call of that tool clears the count. A `run_command` that exits non-zero counts too, keyed on the last line of its output that names an error (`ValueError: …`, `FAILED …`, `error: …`), so three different probe scripts dying with the same exception are a loop. A non-zero exit that names no error (`grep` finding nothing) is not counted, and a command clears only the errors of commands like it (token overlap of 80% or more): a probe that runs fine says nothing about the test that failed. An exit code of 0 proves nothing when a pipe stage the harness doesn't strip may have replaced the command's own (`check.py | sed -n 40,60p` exits with sed's 0): such a run counts as failed if its output names an error and clears nothing if not, and neither does an exit 0 whose output names an error.
+- **Edit churn: one definition edited while its check keeps failing.** An edit to a function followed by a failing command is one cycle; every new write counts as progress for the first rule, so edit, run, fail, edit again never repeats a call. After 3 cycles on one definition (named from the edit result's "inside function …") the model gets a warning, with the history kept and no reset counted: stop patching, write down the exact output the code should produce from the spec or a known example, and compare. A 4th cycle is a loop. A command like the failing one succeeding ends the churn.
+
+When it sees a loop, the harness stops the tool loop and asks the model, with no tools and the loop still in view, to write an analysis. The analysis covers what it was trying to do, what it repeated, why that isn't working, what it knows now, and a different approach. The history is then cut back to just before the loop's first call, and the analysis takes its place, followed by a note not to repeat the call. The loop's messages are kept for `/export full`, marked *removed from context by loop reset*. Files changed during the loop stay changed. If the model gives no usable analysis, a short factual one from the harness takes its place.
+
+After 2 resets in one turn (or one plan step), a third loop stops the turn with an error. In plan execution this pauses the plan as usual.
+
+Both numbers are settings, saved like the others:
+
+| Command | Flag | Default | Range |
+|---|---|---|---|
+| `/loop-guard [n\|off\|on]` | `--loop-guard N\|off` | `3` repeats | `2`–`20`, or `off` (`on` restores the last number) |
+| `/loop-guard resets <n>` | `--loop-resets N` | `2` resets per turn | `0`–`10`; `0` stops the turn at the first loop, without a reset |
+
+`/loop-guard` alone shows both. In the web UI, the `LOOP` badge in the status bar opens them; View → All settings… → Context has them too.
 
 ### Plan mode
 
@@ -628,6 +653,21 @@ A TDD plan states what each step and the whole change must achieve, and the test
 
 Tests for later steps stay skipped, so they never break the build. They count from the moment their step is implemented. Approving a TDD plan also approves running its `test_command` after every step, without a `run_command` confirmation.
 
+#### Story plans
+
+`/plan stories` plans in two layers, for work a small model would get lost in as one step (the tiny-mud runs spent 60–90 calls on "Implement the WebSocket module"):
+
+1. **Phases.** The planner investigates as usual, but each step of its plan is a *phase*: a milestone (a module, a feature, a layer) with an `outcome` and `checks`, commands that prove it. You approve the plan as usual.
+2. **Stories, written when a phase starts.** A *story writer* (its own role: read-only tools, `run_command`, no `ask_user`) looks at the code **as it is then**, plus each earlier phase's report and what its stories delivered, and breaks the phase into at most 12 stories with `write_stories`. A story is about one function or class with its tests, and has a description, technical details, hints, pitfalls, the interfaces it `provides` to later stories, `depends_on`, and acceptance criteria, each with a `check` command where running something can show it. The harness validates the set (ids, missing or cyclic dependencies, dependencies on stories not delivered, missing checks) and sends problems back to the writer.
+3. **Approval.** By default you approve each phase's stories before they run: answer `y`, edit the file first, or give feedback that goes back to the writer. `/plan stories approve once` runs them without asking. A proposed change to *later* phases (`phase_revision`) always asks.
+4. **One story at a time, each in a fresh context.** The harness runs the next story whose dependencies are done. The model sees the coding prompt, the story, and for each dependency what it provides and delivered plus the current outline of the files it changed — not the earlier conversation, which goes to the archive (`/export full` shows it, marked *story*). `complete_story` runs every check and refuses the story while one fails; a criterion without a check needs evidence. On success the harness records the model's summary and the facts it knows: files and definitions changed, checks passed.
+5. **Failure.** A story fails when it is refused 3 times, ends without `complete_story`, runs out of turns (`/plan stories cap N`, default 30), or the [loop guard](#loop-guard) stops it. The writer then re-splits it, replacing it and its pending dependents with new stories using the failure. A replacement that fails too pauses the plan: edit the story in its file (mark it `[ ]` to retry) and `/plan resume`.
+6. **Phase gate and report.** When all stories are done the harness runs the phase's checks; if they fail, the writer adds fix stories once, then the plan pauses. When they pass, a short no-tools call writes the phase report (what exists, interfaces, deviations, gaps) that the next phase's writer starts from.
+
+Stories live in `.momo/stories/<plan-name>-<YYYYMMDD-HHMM>/phase-N.md`, one folder per plan so a new plan never reads an old one's stories. You can edit them before approving or while the plan is paused; delivered stories keep what the harness recorded. The folder is kept when the plan completes, with a copy of the final plan. The status bar shows `phase 2/5 · S3 (2/6) · turn 7/30`.
+
+In the web UI, the plan drawer (the status-bar chip or the plan button) shows every plan as a **timeline**: a rail with a node per step, solid up to the step being worked on (marked with a steady accent bar) and dashed after it. A stories plan's phases have their stories on a branch, in run order, each with its status, `← S2` dependencies, turn, attempt, refusals, check results (`✓2 ✗1`) and time; a TDD step's branch lists its expected outcomes. Every node folds; its details are foldable sections (a story: acceptance with ✓/✗ and the failing output, description, technical details, hints · pitfalls · provides, delivered; a step: details, outcome, checks, report). *Follow* keeps the current node in view until you scroll; *Expand all* / *Collapse all*; *⤢ Wide* turns the drawer into a wide view with the selected node's details in a pane beside the rail (Esc goes back). Hovering a story highlights what it needs (green) and what waits on it (amber). `↧` jumps to where a story's run starts in the transcript, and clicking a `▶ P1.S3 — …` or `▶ Plan step 2/5: …` line there opens that node. *Plan file* shows the plan's markdown instead. The drawer refreshes while the plan runs.
+
 #### Plan commands
 
 | Command | Description |
@@ -635,7 +675,11 @@ Tests for later steps stay skipped, so they never break the build. They count fr
 | `/plan` | Switch to plan mode (shows the current plan's state if there is one) |
 | `/plan tdd` | Plan mode with a test-driven plan: tests first, every step gated on them |
 | `/plan normal` | Plan mode with a normal plan (the default) |
+| `/plan stories` | Plan mode with a [story plan](#story-plans): phases broken into small, checked stories when each starts |
+| `/plan stories approve each\|once` | Review every phase's stories before they run (default `each`), or let them run (saved) |
+| `/plan stories cap N` | Turns one story may take before it counts as stuck (default 30, 5–100, saved) |
 | `/plan show` | Show the current plan with step statuses |
+| `/plan show stories [N]` | Show a phase's stories (the current phase by default) |
 | `/plan run` | Approve a plan kept for later and execute it (re-reads `.momo/plan.md`) |
 | `/plan resume` | Continue a paused plan from its current step (switches to coding mode) |
 | `/plan cancel` | Discard the plan and delete `.momo/plan.md` |
@@ -1540,7 +1584,7 @@ Type any command in the input bar:
 | `/think` | Show the thinking level and what the current model takes |
 | `/think off\|on\|low\|medium\|high\|xhigh` | Set the model's thinking/reasoning level (saved). See [Thinking level](#thinking-level) |
 | `/think-history off\|turn\|all` | Send the model's own reasoning back to it: none, since your last message (default), or every turn (saved). See [Sending reasoning back](#sending-reasoning-back) |
-| `/think-keep [off\|lean\|more\|most]` | How much of its earlier reasoning the model gets back: `lean` (default) suits small models, `more` (×2) or `most` (×4) larger ones, `off` all of it (saved). See [Trimming the reasoning sent back](#trimming-the-reasoning-sent-back) |
+| `/think-keep [off\|lean\|more\|most]` | How much of its earlier reasoning the model gets back: `off` (default) all of it, `lean` its plan steps and closing sentences, `more` (×2) or `most` (×4) a larger share (saved). See [Trimming the reasoning sent back](#trimming-the-reasoning-sent-back) |
 | `/cavecat [off\|on]` | Compress plans, tool text and command output, and keep replies short, to save tokens (saved). See [Cavecat mode](#cavecat-mode) |
 | `/companion-idle-recap on\|off` | When you've been idle, momo recaps the last turns in its speech bubble (at most once per turn, 5-minute cooldown; lines are kept in the session). Off by default; also `--companion-idle-recap` |
 | `/companion-idle-recap <secs>` | How long you must be idle before momo recaps (default 90, also `--companion-idle-recap-secs`) |
@@ -1608,13 +1652,15 @@ Type any command in the input bar:
 | `/undo file [force] <path>` | Put one file back as it was at the last `/keep` |
 | `/keep` | Accept every file change: undo can't go back past this point |
 | `/undo-max [n\|off]` | How many turns of file checkpoints are kept (default 20, saved; `off` = no cap) |
+| `/loop-guard [n\|off\|on]` | Repeats of one tool call (or one error) that make a [loop](#loop-guard) (default 3, saved; `--loop-guard`) |
+| `/loop-guard resets <n>` | Loop resets per turn before the turn stops (default 2, saved; `0` = stop at the first loop; `--loop-resets`) |
 | `/cost` | Show token usage for this session, aggregated by mode and model (in/out/total tokens per combination) |
 | `/sessions` | List up to 20 recent sessions with mode and model |
 | `/session` | Show the current session file path |
 | `/session <name>` | Load a saved session by exact name or partial prefix (e.g. `2026-06-22` matches the first session from that date) |
 | `/export` | Export the conversation to a Markdown file in the working directory (filename: `conversation-<timestamp>.md`) |
 | `/export <filename>` | Export to a specific filename |
-| `/export full [filename]` | Export the full log: system prompt, thinking, tool calls with arguments, complete tool results, and the history compaction removed (default filename: `conversation-full-<timestamp>.md`). Secret request headers are masked. Compacted messages are kept in the session file for this, from compactions made after this feature landed |
+| `/export full [filename]` | Export the full log: system prompt, thinking, tool calls with arguments, complete tool results, and the history compaction or a loop reset removed (default filename: `conversation-full-<timestamp>.md`). Secret request headers are masked. Compacted messages are kept in the session file for this, from compactions made after this feature landed |
 | `/copy` | Copy the last assistant message to the clipboard (tries `pbcopy`, then `xclip`, then `xsel`) |
 | `/copy all` | Copy the full conversation to the clipboard |
 | `/ls [path]` | List directory contents directly (no model round-trip) |
@@ -1667,7 +1713,7 @@ Compaction summaries and the companion's recaps always ask for no reasoning, wha
 /think-history off      # the model never sees its earlier reasoning
 ```
 
-Saved in `prefs.json`; `--think-history` sets it at startup. In the web UI it is in the `THINK` menu. By default only the decision of earlier reasoning is sent back (its plan steps and closing sentences, more of a longer thought); [`/think-keep`](#trimming-the-reasoning-sent-back) sets how much, or `off` for all of it. The transcript keeps it all.
+Saved in `prefs.json`; `--think-history` sets it at startup. In the web UI it is in the `THINK` menu. By default all of it is sent back; [`/think-keep`](#trimming-the-reasoning-sent-back) can send only its decision (its plan steps and closing sentences, more of a longer thought). The transcript keeps it all.
 
 During a tool loop the model reasons, calls a tool, gets the result, and reasons again. Chat templates are written for the model to see its reasoning from the earlier steps of that loop. The templates of the local models show what each expects:
 
@@ -1701,15 +1747,15 @@ Accuracy was unchanged, within the noise of 3 runs per task. The gain is efficie
 
 ```
 /think-keep             # the current level
-/think-keep lean        # the plan steps and closing sentences (default)
+/think-keep off         # send it back whole (default)
+/think-keep lean        # the plan steps and closing sentences
 /think-keep more        # twice as much
 /think-keep most        # four times as much
-/think-keep off         # send it back whole
 ```
 
 With `/think-history` `turn` or `all`, the model re-reads its earlier reasoning on every later request. `/think-keep` sends only where it got to: the plan steps it listed and its closing sentences, with code the tool call repeats replaced by a pointer to the call, and a note saying how much was left out (`harness/think_trim.py`). How much is kept grows with the square root of the thought's length, with a floor: `max(300, 12·√chars)` at `lean`, so 1k chars keep ~380, 10k ~1,200 and 30k ~2,100. A long thought keeps more, but a smaller share, since deliberation grows faster than decisions. Prose is cut only at sentence boundaries, code never; a thought under ~400 chars goes as it is. On recorded sessions `lean` sends a fifth of the reasoning (`more` a third, `most` three fifths), from 93% of thoughts under 500 chars to 9% of those over 8,000. The transcript keeps all of it. The trim is a pure function of the history, so a step's trimmed reasoning is identical on every later request and llama.cpp's prompt cache misses only once per step. A lossless trim (only what the context already holds, and "Let me…" narration) was tried first and took 1–9% off: most reasoning is deliberation full of names and numbers. On Ornith-9B, sending reasoning back made the model reason more (it copies what it sees); the trim made runs 9–22% faster than sending it all, and sending none (`/think-history off`) was faster still. A Qwen3.5 eval favoured sending it back, so measure your own model ([`evals/README.md`](evals/README.md#round-6-a-budget-that-grows-with-the-reasoning-and-think-keep-same-model---suite-cavecat---runs-2-2026-10-26)).
 
-`lean` suits small models and is what was measured on Ornith-9B; `more` (×2) or `most` (×4) leaves a larger model more of its own thinking, and `off` sends all of it. It works with or without [cavecat](#cavecat-mode). Saved in `prefs.json`; `--think-keep` sets it at startup. In the web UI it is in the `THINK` menu, under Send reasoning back; the TUI status bar shows `KEEP: <level>` when it isn't `lean`.
+`off` is the default: a small model that loses its earlier conclusions re-derives them each turn, and on Ornith-9B that let it loop on one bug for a whole plan step, reaching opposite verdicts from the same bytes. `lean` was faster on Ornith-9B; `more` (×2) or `most` (×4) leaves a larger model more of its own thinking. It works with or without [cavecat](#cavecat-mode). Saved in `prefs.json`; `--think-keep` sets it at startup. In the web UI it is in the `THINK` menu, under Send reasoning back; the TUI status bar shows `KEEP: <level>` when it isn't `off`.
 
 ## Cavecat mode
 
@@ -1827,7 +1873,7 @@ Everything momo keeps between runs lives in `~/.momo-harness/`, except what belo
 
 | Path | What | Notes |
 |---|---|---|
-| `prefs.json` | Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode and output view, reply cap (`/max-output-tokens`), undo history (`/undo-max`) | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
+| `prefs.json` | Provider, model, thinking level and history, code index settings, guides, companion idle recap, run mode and output view, reply cap (`/max-output-tokens`), undo history (`/undo-max`), loop guard (`/loop-guard`) | Security switches (`/net`, `/net-confirm`, `/tools on\|off`, `/run-confirm`) are never saved. Per-mode tool choices live in the session, not here |
 | `sessions/*.json` | Messages, mode, model, host, workdir, context settings, active skills, per-mode tool choices, plan, input history | Saved after every reply; the auth token is never stored. Delete them from the web UI's session drawer |
 | `sessions/*.log` | Every request, response, tool call and token count | Secret request headers are masked |
 | `index/*.pickle` | The code index, named by a hash of the workdir | Mode `0600`; only loaded if it is yours and not writable by others |

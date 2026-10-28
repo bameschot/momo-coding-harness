@@ -13,6 +13,7 @@ import harness.harness as hmod
 from harness import session as session_mod
 from harness.commands import handle as handle_command
 from harness.llm.base import ChatResponse, LLMClient
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 
 class FakeClient(LLMClient):

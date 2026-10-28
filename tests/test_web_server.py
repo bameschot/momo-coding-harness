@@ -119,6 +119,29 @@ class WebServer(unittest.TestCase):
         _, body = self.request("GET", "/api/state")
         self.assertGreater(json.loads(body)["max_upload"], 0)
 
+    def test_every_module_app_js_imports_is_served(self):
+        import re
+        from harness.web import server as server_mod
+        app = (server_mod._STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        for name in re.findall(r'from "\./([\w-]+\.js)"', app):
+            r, _ = self.request("GET", f"/{name}")
+            self.assertEqual(r.status, 200, name)
+
+    def test_state_carries_a_stories_plan(self):
+        from harness.plan import Plan, Step
+        from harness.stories import Criterion, Story, StorySet
+        _, body = self.request("GET", "/api/state")
+        self.assertIsNone(json.loads(body)["plan_view"])
+        self.h.plan = Plan(title="P", kind="stories", steps=[Step(title="A", outcome="o", checks=["true"])])
+        self.h.plan.story_sets[1] = StorySet(phase=1, approved=True, stories=[
+            Story(id="S1", title="T", acceptance=[Criterion("ok", "true")])])
+        try:
+            _, body = self.request("GET", "/api/state")
+            view = json.loads(body)["plan_view"]
+            self.assertEqual(view["steps"][0]["stories"][0]["criteria"][0]["check"], "true")
+        finally:
+            self.h.plan = None
+
     def test_changes_drawer_api(self):
         from harness.tools import dispatch
         (self.home / "a.py").write_text("x = 1\n")

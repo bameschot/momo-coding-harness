@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 
 from . import tdd as tdd_mod
 from . import tools as tools_mod
@@ -12,6 +13,10 @@ from .tools import registry
 from .events import ChatEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
 from .plan import (ACCEPTANCE_TAG, PLAN_FILENAME, Plan, Step, delete_plan_file, read_plan_file,
                    str_list, write_plan_file)
+
+
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
 # A TDD step that ends with a text reply gets its gate failure back this often
@@ -72,9 +77,9 @@ class PlanRunnerMixin:
         return self.plan_kind
 
     def set_plan_kind(self, kind: str) -> str:
-        """Choose the type of the next plan ("normal" | "tdd"); '' or an error."""
-        if kind not in ("normal", "tdd"):
-            return f"unknown plan type: {kind} (use normal or tdd)"
+        """Choose the type of the next plan ("normal" | "tdd" | "stories"); '' or an error."""
+        if kind not in ("normal", "tdd", "stories"):
+            return f"unknown plan type: {kind} (use normal, tdd or stories)"
         if self.plan is not None and self.plan_phase == "executing":
             return "a plan is executing — its type cannot change. /plan cancel first."
         if kind != self.plan_kind:
@@ -117,6 +122,13 @@ class PlanRunnerMixin:
             return "No plan to run. Switch to /plan and describe a feature or bug first."
         edited = read_plan_file(self.workdir)
         if edited is not None:
+            if self.plan.stories and edited.stories:
+                # The file holds the phases, not their stories or reports.
+                edited.story_sets = self.plan.story_sets
+                edited.stories_dir = edited.stories_dir or self.plan.stories_dir
+                reports = {s.title: s.report for s in self.plan.steps if s.report}
+                for s in edited.steps:
+                    s.report = s.report or reports.get(s.title, "")
             self.plan = edited
         if not self.plan.steps:
             return "The plan has no steps."
@@ -150,6 +162,16 @@ class PlanRunnerMixin:
             if err:
                 return err
             approve_note = f" Approving also lets the harness run `{plan.test_command}` after every step."
+        if self.plan_kind == "stories":
+            incomplete = [s.title for s in steps if not s.outcome or not s.checks]
+            if incomplete:
+                return ("ERROR: every phase needs an 'outcome' and at least one command in "
+                        f"'checks'; missing in: {', '.join(incomplete)}. Call create_plan again "
+                        "with the complete plan.")
+            plan.kind = "stories"
+            approve_note = (" On approval each phase is broken into stories when it starts"
+                            + (", which you approve before they run." if self.stories_approve == "each"
+                               else ", which run without asking (/plan stories approve each to review them)."))
         self.plan = plan
         self._sync_plan_file()
         self.event_queue.put(ChatEvent("assistant", self.plan.to_markdown()))
@@ -409,10 +431,15 @@ class PlanRunnerMixin:
         self.plan_phase = "executing"
         if self.mode != "coding":
             self.set_mode("coding")
+        if plan.stories:
+            self._execute_stories_plan()
+            return
         while (idx := plan.current_index()) is not None:
             step = plan.steps[idx]
             first_start = step.status == "pending"
             step.status = "in_progress"
+            if first_start or not step.started_at:
+                step.started_at, step.finished_at, step.turns = _now(), "", 0
             self._sync_plan_file()
             self.rebuild_system_prompt()
             self.emit_status()
@@ -474,6 +501,7 @@ class PlanRunnerMixin:
                     note = (last.get("content") or "") if last.get("role") == "assistant" else ""
                 note = " ".join(note.split())
                 plan.steps[cur].status = "done"
+                plan.steps[cur].finished_at = _now()
                 plan.steps[cur].note = note[:200] + ("…" if len(note) > 200 else "")
             self._sync_plan_file()
             self._autosave()
@@ -498,12 +526,30 @@ class PlanRunnerMixin:
             self._autosave()
             self.event_queue.put(self._done_event())
 
+    def _step_tick(self) -> None:
+        """One _run_loop turn of a plan step: count it for the plan view."""
+        idx = self.plan.current_index()
+        if idx is not None:
+            self.plan.steps[idx].turns += 1
+            self.emit_status()
+
     def _plan_progress(self) -> str:
         # A running plan shows in every mode (it runs in coding mode); a draft only in plan mode.
         if self.plan is None or (self.mode != "plan" and self.plan_phase != "executing"):
             return ""
+        if self.plan_phase == "executing" and self.plan.stories:
+            idx = self.plan.current_index()
+            sset = self.plan.story_sets.get(idx + 1) if idx is not None else None
+            story = getattr(self, "_story", None)
+            where = (f" · {story['id']} ({sset.progress()}) · turn {story.get('turns', 0)}"
+                     f"/{self.stories_cap}" if story and sset
+                     else f" · stories {sset.progress()}" if sset and sset.approved
+                     else " · writing stories" if getattr(self, "_writing", None) else "")
+            return f"phase {self.plan.progress()}{where}"
         if self.plan_phase == "executing":
-            return f"exec {self.plan.progress()}"
+            idx = self.plan.current_index()
+            turns = self.plan.steps[idx].turns if idx is not None else 0
+            return f"exec {self.plan.progress()}" + (f" · turn {turns}" if turns else "")
         if self.plan_phase == "awaiting_approval":
             return "awaiting approval"
         return "draft"

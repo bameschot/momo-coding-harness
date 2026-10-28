@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import momo_dir
+from .stories import StorySet
 
 # The plan is mirrored to this file in the working directory while it exists.
 # It is re-parsed when the user approves the plan (so hand edits are honoured)
@@ -49,6 +50,15 @@ class Step:
     tests: list[str] = field(default_factory=list)
     tag: str = ""
     stage: str = "impl"
+    # Stories plans only: a step is a phase, with what exists when it is done,
+    # the commands that close it, and the report written when they pass.
+    outcome: str = ""
+    checks: list[str] = field(default_factory=list)
+    report: str = ""
+    # How its run went, for the plan view (session only, not the plan file).
+    started_at: str = ""
+    finished_at: str = ""
+    turns: int = 0
 
     @property
     def finished(self) -> bool:
@@ -70,6 +80,12 @@ class Step:
             tests=str_list(d.get("tests")),
             tag=str(d.get("tag", "") or "").strip(),
             stage=stage if stage in STAGES else "impl",
+            outcome=str(d.get("outcome", "") or "").strip(),
+            checks=str_list(d.get("checks")),
+            report=str(d.get("report", "") or "").strip(),
+            started_at=str(d.get("started_at", "") or ""),
+            finished_at=str(d.get("finished_at", "") or ""),
+            turns=int(d.get("turns") or 0) if str(d.get("turns") or 0).isdigit() else 0,
         )
 
     def to_dict(self) -> dict:
@@ -77,6 +93,10 @@ class Step:
              "status": self.status, "note": self.note}
         if self.tests or self.tag or self.stage != "impl":
             d.update(tests=self.tests, tag=self.tag, stage=self.stage)
+        if self.outcome or self.checks or self.report:
+            d.update(outcome=self.outcome, checks=self.checks, report=self.report)
+        if self.started_at or self.finished_at or self.turns:
+            d.update(started_at=self.started_at, finished_at=self.finished_at, turns=self.turns)
         return d
 
 
@@ -85,17 +105,30 @@ class Plan:
     title: str
     goal: str = ""
     steps: list[Step] = field(default_factory=list)
-    kind: str = "normal"      # "normal" | "tdd"
+    kind: str = "normal"      # "normal" | "tdd" | "stories"
     test_command: str = ""    # tdd: the full suite the harness runs at every gate
     # tdd, optional: a template that runs only some test files ({files}, {dirs},
     # {stems}), for the red check and the model's own runs (tdd.step_command)
     step_test_command: str = ""
     # tdd: {path: {test key: tag}}, recorded when the tests are written (tdd.test_owners)
     test_owners: dict[str, dict[str, str]] = field(default_factory=dict)
+    # stories: where the phases' story files live (workdir-relative), and each
+    # phase's stories by phase number (1-based), once written
+    stories_dir: str = ""
+    story_sets: dict[int, StorySet] = field(default_factory=dict)
 
     @property
     def tdd(self) -> bool:
         return self.kind == "tdd"
+
+    @property
+    def stories(self) -> bool:
+        return self.kind == "stories"
+
+    def earlier_stories(self, phase: int) -> dict:
+        """The stories of phases before `phase`, by "P<n>.S<m>"."""
+        return {f"P{n}.{s.id}": s for n, sset in self.story_sets.items() if n < phase
+                for s in sset.stories}
 
     # ── serialisation ─────────────────────────────────────────────────────────
 
@@ -105,11 +138,15 @@ class Plan:
             title=str(d.get("title", "")).strip() or "Implementation plan",
             goal=str(d.get("goal", "") or "").strip(),
             steps=[Step.from_dict(s) for s in (d.get("steps") or []) if isinstance(s, dict)],
-            kind="tdd" if d.get("kind") == "tdd" else "normal",
+            kind=d.get("kind") if d.get("kind") in ("tdd", "stories") else "normal",
             test_command=str(d.get("test_command", "") or "").strip(),
             step_test_command=str(d.get("step_test_command", "") or "").strip(),
             test_owners={str(k): {str(t): str(g) for t, g in v.items()}
                          for k, v in (d.get("test_owners") or {}).items() if isinstance(v, dict)},
+            stories_dir=str(d.get("stories_dir", "") or ""),
+            story_sets={int(k): StorySet.from_dict(v)
+                        for k, v in (d.get("story_sets") or {}).items()
+                        if str(k).isdigit() and isinstance(v, dict)},
         )
 
     def to_dict(self) -> dict:
@@ -118,12 +155,18 @@ class Plan:
         if self.tdd:
             d.update(kind=self.kind, test_command=self.test_command,
                      step_test_command=self.step_test_command, test_owners=self.test_owners)
+        if self.stories:
+            d.update(kind=self.kind, stories_dir=self.stories_dir,
+                     story_sets={str(n): s.to_dict() for n, s in self.story_sets.items()})
         return d
 
     def to_markdown(self) -> str:
         lines = [f"# Plan: {self.title}", ""]
         if self.tdd:
             lines += ["Type: TDD", ""]
+        if self.stories:
+            lines += ["Type: stories"] + ([f"Stories: {self.stories_dir}"] if self.stories_dir
+                                          else []) + [""]
         if self.goal:
             lines += ["## Goal", "", self.goal, ""]
         if self.tdd:
@@ -143,6 +186,13 @@ class Plan:
                 lines.append(f"  Tag: {s.tag}")
             if s.stage != "impl":
                 lines.append(f"  Stage: {s.stage}")
+            if s.outcome:
+                lines.append(f"  Outcome: {s.outcome}")
+            for c in s.checks:
+                lines.append(f"  Check: `{c}`")
+            sset = self.story_sets.get(i) if self.stories else None
+            if sset is not None:
+                lines.append(f"  Stories: {sset.progress()} done (phase-{i}.md)")
             if s.note:
                 lines.append(f"  Note: {s.note}")
         lines += ["", "<!-- Legend: [ ] pending · [~] in progress · [x] done · [-] skipped. "
@@ -157,6 +207,7 @@ class Plan:
         lines split out."""
         title, goal_lines, steps = "", [], []
         kind, command_lines, step_command_lines = "normal", [], []
+        stories_dir = ""
         section = ""
         cur: Step | None = None
         detail_lines: list[str] = []
@@ -178,8 +229,11 @@ class Plan:
                 cur, detail_lines = None, []
                 section = line[3:].strip().lower()
                 continue
-            if not section and line.strip().lower() == "type: tdd":
-                kind = "tdd"
+            if not section and line.strip().lower() in ("type: tdd", "type: stories"):
+                kind = line.strip().lower()[6:]
+                continue
+            if not section and line.strip().lower().startswith("stories:"):
+                stories_dir = line.split(":", 1)[1].strip().strip("`")
                 continue
             if section in ("test command", "step test command"):
                 if line.strip():
@@ -209,6 +263,13 @@ class Plan:
                     cur.tag = s[4:].strip().strip("`")
                 elif s.lower().startswith("stage:") and s[6:].strip().lower() in STAGES:
                     cur.stage = s[6:].strip().lower()
+                elif s.lower().startswith("outcome:"):
+                    cur.outcome = s[8:].strip()
+                elif s.lower().startswith("check:"):
+                    if s[6:].strip().strip("`").strip():
+                        cur.checks.append(s[6:].strip().strip("`").strip())
+                elif s.lower().startswith("stories:") and kind == "stories":
+                    pass                # progress the harness writes, not an edit
                 else:
                     detail_lines.append(line[2:] if line.startswith("  ") else line)
             elif section == "goal":
@@ -217,7 +278,8 @@ class Plan:
         return cls(title=title or "Implementation plan",
                    goal="\n".join(goal_lines).strip(), steps=steps, kind=kind,
                    test_command=" ".join(command_lines),
-                   step_test_command=" ".join(step_command_lines))
+                   step_test_command=" ".join(step_command_lines),
+                   stories_dir=stories_dir)
 
     # ── progress ──────────────────────────────────────────────────────────────
 

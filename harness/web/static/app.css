@@ -322,6 +322,8 @@ details.think .think-body { white-space: pre-wrap; opacity: .8; border-left: 2px
 .ask .ask-title { font: 600 var(--fs-sm) var(--mono); color: var(--warn); margin-bottom: 4px; }
 .ask .ask-q { white-space: pre-wrap; }
 .ask .ask-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+.ask .ask-options { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.ask .ask-options .btn { justify-content: flex-start; white-space: normal; text-align: left; }
 .ask.answered { border-color: var(--border); background: var(--surface); }
 .ask.answered .ask-title { color: var(--muted); }
 
@@ -733,6 +735,86 @@ details.tool-group.single > .tool-group-body { margin-left: 0; padding-left: 0; 
 .md li.task-current { font-weight: 600; color: var(--focus); }
 .md li.task-skipped { color: var(--muted); text-decoration: line-through; }
 .md li.task-done { color: var(--muted); }
+
+/* ── the plan timeline (planview.js) ── */
+.plan-view-toggle, .tl-toolbar { display: flex; gap: 6px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.tl-spacer { flex: 1; }
+.tl, .tl-branch { list-style: none; margin: 0; padding: 0; }
+.tl { position: relative; }
+.tl-node { position: relative; padding: 0 0 10px 26px; }
+/* the rail: solid up to the step being worked on, dashed after it */
+.tl-node::before { content: ""; position: absolute; left: 8px; top: 18px; bottom: -2px; border-left: 2px solid var(--border); }
+.tl-node:last-child::before { display: none; }
+.tl-node.s-done::before, .tl-node.is-current::before { border-left-color: color-mix(in srgb, var(--ok) 55%, var(--border)); }
+.tl-node.after-current::before, .tl-node.s-pending:not(.is-current)::before { border-left-style: dashed; }
+.tl-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 6px; margin-left: -6px;
+  background: none; border: 0; border-radius: 6px; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.tl-head:hover { background: var(--surface-2); }
+.tl-node > .tl-head { font-weight: 600; }
+.tl-dot { position: absolute; left: 0; width: 18px; text-align: center; line-height: 1; color: var(--muted); background: var(--surface); }
+.tl-node > .tl-head > .tl-dot { top: 7px; font-size: 1.05em; }
+.s-done > .tl-head > .tl-dot, .tl-dot.s-done { color: var(--ok); }
+.s-failed > .tl-head > .tl-dot, .tl-dot.s-failed { color: var(--danger); }
+/* the node being worked on: a steady accent, no animation (the drawer re-renders while a plan runs) */
+.is-current > .tl-head > .tl-dot { color: var(--focus); }
+.tl-node.is-current > .tl-head { box-shadow: inset 2px 0 0 var(--focus); }
+.tl-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.s-replaced > .tl-head .tl-title, .s-skipped > .tl-head .tl-title { text-decoration: line-through; color: var(--muted); }
+.s-done > .tl-head .tl-title { color: var(--muted); }
+.is-current > .tl-head .tl-title { color: var(--text); }
+.tl-tag { font-size: var(--fs-xs); padding: 0 6px; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); font-weight: 400; }
+.tl-meta { display: inline-flex; gap: 8px; align-items: center; margin-left: auto; color: var(--muted);
+  font-size: var(--fs-sm); font-weight: 400; white-space: nowrap; }
+.tl-live { color: var(--focus); }
+.tl-time { font-variant-numeric: tabular-nums; }
+.tl-bar { display: inline-block; width: 56px; height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.tl-fill { display: block; height: 100%; background: var(--ok); }
+.tl-caret { width: 1em; color: var(--muted); }
+.tl-jump { color: var(--muted); padding: 0 2px; }
+.tl-jump:hover { color: var(--focus); }
+/* stories (and a TDD step's expectations) branch off their step */
+.tl-branch { margin: 2px 0 0 4px; border-left: 1px solid var(--border); }
+.tl-sub { position: relative; padding-left: 26px; }
+.tl-sub::before { content: ""; position: absolute; left: 0; top: 14px; width: 14px; border-top: 1px solid var(--border); }
+.tl-sub:last-child { border-left: 1px solid var(--surface); margin-left: -1px; }
+.tl-sub > .tl-head { font-size: var(--fs-md); }
+.tl-sub > .tl-head > .tl-dot { position: static; width: auto; background: none; }
+.tl-sub.is-current { background: color-mix(in srgb, var(--focus) 7%, transparent); border-radius: 6px; }
+.tl-id { color: var(--muted); font-family: var(--mono); font-size: var(--fs-sm); }
+.tl-deps { color: var(--muted); font-size: var(--fs-xs); font-family: var(--mono); }
+.tl-expect { padding: 3px 0 3px 26px; color: var(--muted); font-size: var(--fs-sm); }
+.tl-sub.dep-self > .tl-head { outline: 1px solid var(--focus); }
+.tl-sub.dep-of > .tl-head { background: color-mix(in srgb, var(--ok) 13%, transparent); }
+.tl-sub.dep-by > .tl-head { background: color-mix(in srgb, var(--warn) 13%, transparent); }
+/* a node's details: foldable sections */
+.tl-section { margin: 2px 0 4px 2px; font-size: var(--fs-sm); }
+.tl-section > summary { cursor: pointer; color: var(--muted); padding: 2px 0; }
+.tl-section > summary:hover { color: var(--text); }
+.tl-section[open] > summary { color: var(--text); }
+.tl-section > :not(summary) { margin-left: 14px; }
+.tl-criteria { list-style: none; padding: 0; margin: 2px 0; }
+.tl-criteria > li { margin: 3px 0; }
+.tl-mark { display: inline-block; width: 1.3em; }
+.tl-criteria .ok .tl-mark { color: var(--ok); }
+.tl-criteria .bad .tl-mark { color: var(--danger); }
+.tl-cmd { margin: 2px 0 0 1.3em; }
+.tl-output { max-height: 14em; overflow: auto; margin: 4px 0 0 1.3em; padding: 6px 8px; background: var(--code-bg);
+  border-radius: 6px; font-family: var(--mono); font-size: var(--fs-xs); white-space: pre-wrap; }
+.tl-list { margin: 2px 0 6px; padding-left: 18px; }
+.tl-label { color: var(--muted); margin-top: 4px; }
+.tl-note, .tl-files { color: var(--muted); font-size: var(--fs-sm); margin: 2px 0 4px 2px; }
+/* the wide view: the rail on the left, the selected node's details on the right */
+#plan-drawer.plan-wide { width: min(1180px, 94vw); }
+.tl-grid { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(320px, 1.1fr); gap: 18px; align-items: start; }
+.tl-pane { position: sticky; top: 0; border-left: 1px solid var(--border); padding-left: 16px; }
+.tl-pane-head { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.tl-pane-head .tl-dot { position: static; width: auto; }
+.plan-wide .tl-node.selected > .tl-head, .plan-wide .tl-sub.selected > .tl-head { background: var(--surface-2); }
+@media (max-width: 760px) { .tl-grid { grid-template-columns: 1fr; } .tl-pane { position: static; border-left: 0; padding-left: 0; } }
+/* the transcript lines that start a step or story link here */
+.msg.story-start { cursor: pointer; }
+.msg.story-start:hover { text-decoration: underline; }
+.msg.jump-target { box-shadow: inset 3px 0 0 var(--focus); background: color-mix(in srgb, var(--focus) 8%, transparent); }
 /* Long code blocks fold to about 30 lines, fading out. */
 .code-block.folded pre { max-height: calc(30 * var(--fs) * 1.55 + 38px); overflow: hidden; }   /* 30 lines + padding */
 .code-block.folded::after {

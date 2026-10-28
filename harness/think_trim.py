@@ -9,10 +9,11 @@ deliberation before that is dropped, and a note says how much.
 How much is kept grows with the square root of the reasoning's length, with a
 floor: budget() = max(FLOOR, SCALE·√chars) × the /think-keep level's factor.
 At lean, 1k chars keep ~380, 10k ~1,200, 30k ~2,100: a long thought keeps
-more, but a smaller share, as deliberation grows faster than decisions.  Lean
-suits small models (on Ornith-9B, reasoning sent back made it reason more);
-more and most leave a larger model more of its own thinking; off sends it
-back whole.
+more, but a smaller share, as deliberation grows faster than decisions.  Off
+(the default) sends it back whole: a small model that loses its earlier
+conclusions re-derives them, and can loop on reaching opposite ones.  Lean
+was faster on Ornith-9B (reasoning sent back made it reason more); more and
+most leave a larger model more of its own thinking.
 
 The budget is filled with the plan steps first (up to half of it, whole
 lines), then backwards from the end: whole paragraphs, the one where it runs

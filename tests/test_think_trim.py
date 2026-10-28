@@ -11,6 +11,7 @@ from harness import think_trim
 from harness.commands import handle as handle_command
 from harness.llm.base import ChatResponse, ToolCall
 from test_review_fixes import HarnessCase
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 DELIBERATION = ("The parser lives in shop/util.py. It splits on letters, but the tests in "
                 "tests/test_shop.py also pass '1h-5m', which must fail. ") * 6
@@ -132,9 +133,12 @@ class Harness(HarnessCase):
         sent = [m.get("reasoning") for m in self.client.calls[1] if m.get("role") == "assistant"]
         return sent[-1]
 
-    def test_sends_the_trim_by_default_and_keeps_the_transcript(self):
-        self.assertEqual(self.h.think_keep, "lean")
-        sent = self.second_request_reasoning()
+    def test_sends_it_whole_by_default(self):
+        self.assertEqual(self.h.think_keep, "off")
+        self.assertEqual(self.second_request_reasoning(), self.LONG)
+
+    def test_lean_sends_the_trim_and_keeps_the_transcript(self):
+        sent = self.second_request_reasoning(think_keep="lean")
         self.assertTrue(sent.startswith("[earlier reasoning not sent"), sent)
         self.assertTrue(sent.endswith("List the directory next."))
         stored = [m["content"] for m in self.h.messages if m["role"] == "thinking"]
@@ -152,13 +156,13 @@ class Harness(HarnessCase):
         self.assertIsNone(self.second_request_reasoning(think_history="off"))
 
     def test_think_keep_most_sends_more_and_is_not_served_from_a_lean_trim(self):
-        lean = self.second_request_reasoning()
+        lean = self.second_request_reasoning(think_keep="lean")
         self.h.think_keep = "most"
         most = self.h._sent_reasoning()
         self.assertGreater(len(next(iter(most.values()))), len(lean))
 
     def test_command_saves_prefs_and_status(self):
-        self.assertIn("lean", handle_command("/think-keep", self.h).output)
+        self.assertIn("sent back whole", handle_command("/think-keep", self.h).output)
         self.assertIn("re-reads", handle_command("/think-keep more", self.h).output)
         self.assertEqual(self.h.think_keep, "more")
         self.assertEqual(session_mod.load_prefs()["think_keep"], "more")
@@ -171,7 +175,7 @@ class Harness(HarnessCase):
         self.assertIn("applies with /think-history", handle_command("/think-keep", self.h).output)
 
     def test_the_context_meter_counts_what_is_sent(self):
-        self.second_request_reasoning()
+        self.second_request_reasoning(think_keep="lean")
         cats = self.h._context_categories()
         self.assertLess(cats["reasoning"], cats["thinking"])
 

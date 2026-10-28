@@ -78,8 +78,11 @@ class Nudge(HarnessCase):
     def nudges(self, level):
         self.h.set_mode("coding")
         self.h.cavecat = level
-        self.client.replies = [ChatResponse(tool_calls=[ToolCall("list_directory", {})])
-                               for _ in range(12)] + [ChatResponse(content="done")]
+        # A different folder each turn: the same call made again would be a loop.
+        for n in range(12):
+            (self.h.workdir / f"d{n}").mkdir()
+        self.client.replies = [ChatResponse(tool_calls=[ToolCall("list_directory", {"path": f"d{n}"})])
+                               for n in range(12)] + [ChatResponse(content="done")]
         self.h.send("look around")
         return [m for m in self.h.messages if m["role"] == "user"
                 and "without a text response" in (m.get("content") or "")]

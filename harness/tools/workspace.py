@@ -48,7 +48,7 @@ CATEGORIES = ("read", "write", "run", "net")
 CATEGORY_ROLES = {
     "read":  registry.ALL_ROLES,
     "write": registry.WRITE_ROLES,
-    "run":   registry.WRITE_ROLES | {"plan"},
+    "run":   registry.WRITE_ROLES | registry.INVESTIGATE_ROLES,
     "net":   registry.ALL_ROLES,
 }
 # The keys a TOOL literal may have (skills/workspace-tools.md lists exactly these).

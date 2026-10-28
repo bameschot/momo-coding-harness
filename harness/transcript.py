@@ -2,7 +2,8 @@
 so the full export (/export full, web "Download full log") can show it in place.
 
 Each record is
-    {"pos": int, "kind": "removed" | "trimmed", "n": int, "time": iso, "message": {...}}
+    {"pos": int, "kind": "removed" | "trimmed", "n": int, "time": iso, "message": {...},
+     "by": "loop" (only on what a loop reset removed)}
 in the coordinates of the current history:
   removed  the message stood just before messages[pos]
   trimmed  message is the untrimmed original of messages[pos]
@@ -19,10 +20,12 @@ TRIM_MARKER = "removed by context compaction"
 
 def archive_compaction(archive: list[dict], msgs: list[dict], drop: set[int],
                        trims: dict[int, str], keep_idx: list[int],
-                       n: int, time: str) -> list[dict]:
+                       n: int, time: str, by: str = "") -> list[dict]:
     """The archive after a compaction of `msgs` that drops `drop`, trims `trims`
     and keeps `keep_idx` (ascending).  Call it before the trims are written into
-    `msgs`: a trimmed record copies the message as it is now."""
+    `msgs`: a trimmed record copies the message as it is now.  `by` marks the
+    new records' cause when it is not compaction ("loop": a loop reset)."""
+    extra = {"by": by} if by else {}
     trimmed_at = {r["pos"]: r for r in archive if r["kind"] == "trimmed"}
     items: list[tuple[tuple, dict]] = []
     for seq, r in enumerate(archive):
@@ -30,13 +33,14 @@ def archive_compaction(archive: list[dict], msgs: list[dict], drop: set[int],
             items.append(((r["pos"], 0, seq), dict(r)))
         elif r["pos"] in drop:
             # Trimmed earlier, dropped now: the record already holds the original.
-            items.append(((r["pos"], 1), {**r, "kind": "removed", "n": n, "time": time}))
+            items.append(((r["pos"], 1), {**r, "kind": "removed", "n": n, "time": time,
+                                          **extra}))
         else:
             items.append(((r["pos"], 1), dict(r)))
     for k in sorted(drop):
         if k not in trimmed_at:
             items.append(((k, 1), {"pos": k, "kind": "removed", "n": n, "time": time,
-                                   "message": msgs[k]}))
+                                   "message": msgs[k], **extra}))
     for k in sorted(trims):
         if k not in trimmed_at:   # trimmed again: keep the first, full original
             items.append(((k, 1), {"pos": k, "kind": "trimmed", "n": n, "time": time,
@@ -54,6 +58,8 @@ def _note(r: dict) -> str:
     when = f" ({when})" if when else ""
     if r["kind"] == "trimmed":
         return f"full original; trimmed in context by compaction #{r['n']}{when}"
+    if r.get("by") == "loop":
+        return f"removed from context by loop reset #{r['n']}{when}"
     return f"removed from context by compaction #{r['n']}{when}"
 
 

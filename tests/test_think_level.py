@@ -10,6 +10,7 @@ import harness.harness as hmod
 from harness import session as session_mod
 from harness.commands import handle as handle_command
 from harness.llm.base import ChatResponse, LLMClient, ThinkingCaps
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 ON_OFF = ThinkingCaps(toggle=True, known=True)
 GRADED = ThinkingCaps(toggle=True, levels=("low", "medium", "high"), can_disable=False, known=True)

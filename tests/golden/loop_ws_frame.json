@@ -1,0 +1,627 @@
+{
+ "source": "momo-2026-10-26T19-25-35, plan step 1 (Ornith-9B, mud/ws.py)",
+ "calls": [
+  {
+   "name": "list_directory",
+   "args": {
+    "path": ".",
+    "show_hidden": true
+   },
+   "result": "[D] .momo/",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "write_file",
+   "args": {
+    "content": "\"\"\"RFC 6455 WebSocket protocol implementation on top of the stdlib ``socket``.\n\nThis module is dependency-free and implements just enough of the WebSocket\nprotocol for the tiny MUD server and its test\u2026",
+    "path": "mud/ws.py"
+   },
+   "result": "Written: mud/ws.py (461 lines, 15736 bytes)",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "cd /work/tiny-mud-typo && python3 -c \"\nimport mud.ws as ws\n# Round-trip small, medium, and large text payloads (tests 7/8-byte length encodings).\nfor n in (0, 1, 125, 126, 127, 20000):\n    frame, off = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'x'*n))\n    assert frame.opcode == ws.OP_TEXT and frame.fin and frame.payload == b'x'*n, n\n    assert off == len(ws.encode_frame(ws.OP_TEXT, 'x'*n))\nprint('framing ok (small/medium/large):', ws.encode_frame(ws.OP_TEXT, 'z'*65536).hex()[:4], '...')\n\"\n",
+    "tail": 20
+   },
+   "result": "[last 1 of 1 lines, from line 1]\n/bin/sh: line 0: cd: /work/tiny-mud-typo: No such file or directory\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r1.log \u2014 1 lines, 84 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "list_directory",
+   "args": {
+    "path": "."
+   },
+   "result": "[D] mud/\n(code index: index_map() lists these files ranked by how much the project uses them, with their main definitions)",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\n# Round-trip small, medium, and large text payloads (exercises 7/8-byte length encodings).\nfor n in (0, 1, 125, 126, 127, 20000):\n    frame, off = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'x'*n))\n    assert frame.opcode == ws.OP_TEXT and frame.fin and frame.payload == b'x'*n, n\n    assert off == len(ws.encode_frame(ws.OP_TEXT, 'x'*n))\nprint('framing ok (small/medium/large):', ws.encode_frame(ws.OP_TEXT, 'z'*65536).hex()[:4], '...')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 8 of 8 lines, from line 1]\nTraceback (most recent call last):\n  File \"<string>\", line 5, in <module>\n    frame, off = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'x'*n))\n                                 ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/work/tiny-mud/mud/ws.py\", line 117, in encode_frame\n    data = bytes(payload) if not isinstance(payload, (bytes, bytearray)) else bytes(payload)\n           ~~~~~^^^^^^^^^\nTypeError: string argument without an encoding\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r2.log \u2014 8 lines, 459 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "path": "mud/ws.py",
+    "old_string": "    data = bytes(payload) if not isinstance(payload, (bytes, bytearray)) else bytes(payload)\n    header = bytearray()",
+    "new_string": "    if isinstance(payload, str):\n        data = payload.encode(\"utf-8\")\n    else:\n        data = bytes(payload)\n    header = bytearray()"
+   },
+   "result": "OK \u2014 1 change applied \u2014 lines 117-120 now read (inside function encode_frame, L97-141):\n 114:     bytes\n 115:         The encoded frame.\n 116:     \"\"\"\n 117:     if isinstance(payload, str):\n 118:         data = payload.encode(\"utf-8\")\n 119:     else:\n 120:         data = bytes(payload)\n 121:     header = bytearray()\n 122:     header.append(0x80 | opcode)  # FIN set + opcode\n 123:     if mask_key is not None:",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\nfor n in (0, 1, 125, 126, 127, 20000):\n    frame, off = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'x'*n))\n    assert frame.opcode == ws.OP_TEXT and frame.fin and frame.payload == b'x'*n, n\n    assert off == len(ws.encode_frame(ws.OP_TEXT, 'x'*n))\nprint('framing ok (small/medium/large):', ws.encode_frame(ws.OP_TEXT, 'z'*65536).hex()[:4], '...')\n# Masked round-trip\nf = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04'))\nassert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\nprint('masked round-trip ok:', f.payload)\n# Long payload length extension\nbig = ws.encode_frame(ws.OP_TEXT, 'a'*20000)\nassert big[2] == 126 and big[3:5] == struct.pack('>H', 20000)\nbig2 = ws.encode_frame(ws.OP_TEXT, 'b'*65536)\nassert big2[2] == 127\nprint('16/64-bit length extensions ok')\nimport struct\nprint('smoke test passed')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 5 of 5 lines, from line 1]\nTraceback (most recent call last):\n  File \"<string>\", line 5, in <module>\n    assert frame.opcode == ws.OP_TEXT and frame.fin and frame.payload == b'x'*n, n\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 0\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r3.log \u2014 5 lines, 255 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nenc = ws.encode_frame(ws.OP_TEXT, 'x'*0)\nprint('encoded bytes:', enc.hex(), 'len', len(enc))\nprint('b0=0x%02x b1=0x%02x' % (enc[0], enc[1]))\nframe, off = ws.decode_frame(enc)\nprint('decoded:', frame.opcode, frame.fin, frame.payload, 'off', off)\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 3 of 3 lines, from line 1]\nencoded bytes: 810100 len 3\nb0=0x81 b1=0x01\ndecoded: 1 True b'\\x00' off 3\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r4.log \u2014 3 lines, 74 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "path": "mud/ws.py",
+    "new_string": "        header.extend(masked)\n    else:\n        header.append(length)  # FIN already set in b0; b1 is just the length",
+    "old_string": "        header.extend(masked)\n    else:\n        header.append(opcode)"
+   },
+   "result": "OK \u2014 1 change applied \u2014 line 129 now reads (inside function encode_frame, L97-141):\n 126:         masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n 127:         header.extend(masked)\n 128:     else:\n 129:         header.append(length)  # FIN already set in b0; b1 is just the length\n 130:         header.extend(data)\n 131: \n 132:     length = len(data)",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nok = True\nfor n in (0, 1, 125, 126, 127, 20000, 65536):\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n    frame, off = ws.decode_frame(enc)\n    if frame.opcode != ws.OP_TEXT or frame.fin != True or frame.payload != b'x'*n or off != len(enc):\n        ok = False; print('FAIL', n, frame.opcode, frame.fin, frame.payload==b'x'*n)\nprint('framing (small/medium/large):', 'OK' if ok else 'FAIL')\n# masked round-trip\nf = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04'))\nassert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\nprint('masked round-trip:', f.payload)\n# 16/64-bit length extensions\nassert ws.encode_frame(ws.OP_TEXT, 'a'*20000)[2:4] == struct.pack('>H', 20000)\nassert ws.encode_frame(ws.OP_TEXT, 'b'*65536)[2] == 127\nprint('16/64-bit length extensions: OK')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 7 of 7 lines, from line 1]\nTraceback (most recent call last):\n  File \"<string>\", line 5, in <module>\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n  File \"/work/tiny-mud/mud/ws.py\", line 129, in encode_frame\n    header.append(length)  # FIN already set in b0; b1 is just the length\n                  ^^^^^^\nUnboundLocalError: cannot access local variable 'length' where it is not associated with a value\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r5.log \u2014 7 lines, 397 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "new_string": "    if length == 126:\n        length = struct.unpack(\">H\", data[offset:offset + 2])[0]\n        offset += 2\n    elif length == 127:\n        length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n        offset += 8",
+    "old_string": "    if length == 126:\n        length = struct.unpack(\">H\", data[offset:offset + 2])[0]\n        offset += 2\n    elif length == 127:\n        length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n        offset += 8\n\n    payload = data[offset:offset + length]",
+    "path": "mud/ws.py"
+   },
+   "result": "OK \u2014 1 change applied \u2014 lines removed; lines 170-175 around the cut now read (inside function decode_frame, L144-180):\n 170:     elif length == 127:\n 171:         length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n 172:         offset += 8\n 173:     if mask_key is not None:\n 174:         k0, k1, k2, k3 = mask_key\n 175:         payload = bytes(payload[i] ^ k0 ^ k1 ^ k2 ^ k3 for i in range(length))",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 155,
+    "end_line": 180
+   },
+   "result": " 155:     opcode = b0 & 0x0F\n 156: \n 157:     b1 = data[offset]\n 158:     offset += 1\n 159:     masked = (b1 & 0x80) != 0\n 160:     length = b1 & 0x7F\n 161: \n 162:     mask_key = None\n 163:     if masked:\n 164:         mask_key = bytes(data[offset:offset + 4])\n 165:         offset += 4\n 166: \n 167:     if length == 126:\n 168:         length = struct.unpack(\">H\", data[offset:offset + 2])[0]\n 169:         offset += 2\n 170:     elif length == 127:\n 171:         length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n 172:         offset += 8\n 173:     if mask_key is not None:\n 174:         k0, k1, k2, k3 = mask_key\n 175:         payload = bytes(payload[i] ^ k0 ^ k1 ^ k2 ^ k3 for i in range(length))\n 176:         offset += length\n 177:     else:\n 178:         offset += length\n 179: \n 180:     return Frame(fin=fin, opcode=opcode, payload=payload, mask_key=mask_key), offset\n\n[showing lines 155-180 of 462 \u2014 line 155 is inside function decode_frame (L144-180); read_symbol(\"mud/ws.py\", \"decode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "new_string": "        length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n        offset += 8\n\n    payload = data[offset:offset + length]\n    if mask_key is not None:",
+    "old_string": "        length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n        offset += 8\n    if mask_key is not None:",
+    "path": "mud/ws.py"
+   },
+   "result": "OK \u2014 1 change applied \u2014 lines 173-174 now read (inside function decode_frame, L144-182):\n 170:     elif length == 127:\n 171:         length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n 172:         offset += 8\n 173: \n 174:     payload = data[offset:offset + length]\n 175:     if mask_key is not None:\n 176:         k0, k1, k2, k3 = mask_key\n 177:         payload = bytes(payload[i] ^ k0 ^ k1 ^ k2 ^ k3 for i in range(length))",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nok = True\nfor n in (0, 1, 125, 126, 127, 20000, 65536):\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n    frame, off = ws.decode_frame(enc)\n    if frame.opcode != ws.OP_TEXT or frame.fin != True or frame.payload != b'x'*n or off != len(enc):\n        ok = False; print('FAIL', n)\nprint('framing (small/medium/large):', 'OK' if ok else 'FAIL')\nf = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04'))\nassert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\nprint('masked round-trip:', f.payload)\nassert ws.encode_frame(ws.OP_TEXT, 'a'*20000)[2:4] == struct.pack('>H', 20000)\nassert ws.encode_frame(ws.OP_TEXT, 'b'*65536)[2] == 127\nprint('16/64-bit length extensions: OK')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 7 of 7 lines, from line 1]\nTraceback (most recent call last):\n  File \"<string>\", line 5, in <module>\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n  File \"/work/tiny-mud/mud/ws.py\", line 129, in encode_frame\n    header.append(length)  # FIN already set in b0; b1 is just the length\n                  ^^^^^^\nUnboundLocalError: cannot access local variable 'length' where it is not associated with a value\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r6.log \u2014 7 lines, 397 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 117,
+    "end_line": 141
+   },
+   "result": " 117:     if isinstance(payload, str):\n 118:         data = payload.encode(\"utf-8\")\n 119:     else:\n 120:         data = bytes(payload)\n 121:     header = bytearray()\n 122:     header.append(0x80 | opcode)  # FIN set + opcode\n 123:     if mask_key is not None:\n 124:         header.append(0x80 | 0x01)  # FIN set + MASK set\n 125:         header.extend(mask_key)\n 126:         masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n 127:         header.extend(masked)\n 128:     else:\n 129:         header.append(length)  # FIN already set in b0; b1 is just the length\n 130:         header.extend(data)\n 131: \n 132:     length = len(data)\n 133:     if length < 126:\n 134:         header.append(length)\n 135:     elif length <= 0xFFFF:\n 136:         header.append(126)\n 137:         header.extend(struct.pack(\">H\", length))\n 138:     else:\n 139:         header.append(127)\n 140:         header.extend(struct.pack(\">Q\", length))\n 141:     return bytes(header)\n\n[showing lines 117-141 of 464 \u2014 line 117 is inside function encode_frame (L97-141); read_symbol(\"mud/ws.py\", \"encode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "new_string": "    if isinstance(payload, str):\n        data = payload.encode(\"utf-8\")\n    else:\n        data = bytes(payload)\n    length = len(data)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is not None:\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n        header.extend(masked)\n    else:\n        header.append(length)  # FIN already set in b0; b1 is just the length\n        header.extend(data)\n    if length < 126:\n        header.append(length)\n    elif length <= 0xFFFF:\n        header.append(126)\n        header.extend(struct.pack(\">H\", length))\n    else:\n        header.append(127)\n        header.extend(struct.pack(\">Q\", length))\n    return bytes(header)",
+    "old_string": "    if isinstance(payload, str):\n        data = payload.encode(\"utf-8\")\n    else:\n        data = bytes(payload)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is not None:\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n        header.extend(masked)\n    else:\n        header.append(length)  # FIN already set in b0; b1 is just the length\n        header.extend(data)\n\n    length = len(data)\n    if length < 126:\n        header.append(length)\n    elif length <= 0xFFFF:\n        header.append(126)\n        header.extend(struct.pack(\">H\", length))\n    else:\n        header.append(127)\n        header.extend(struct.pack(\">Q\", length))\n    return bytes(header)",
+    "path": "mud/ws.py"
+   },
+   "result": "OK \u2014 1 change applied \u2014 lines 121-131 now read (inside function encode_frame, L97-140):\n 118:         data = payload.encode(\"utf-8\")\n 119:     else:\n 120:         data = bytes(payload)\n 121:     length = len(data)\n 122:     header = bytearray()\n 123:     header.append(0x80 | opcode)  # FIN set + opcode\n 124:     if mask_key is not None:\n 125:         header.append(0x80 | 0x01)  # FIN set + MASK set\n 126:         header.extend(mask_key)\n 127:         masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n 128:         header.extend(masked)\n 129:     else:\n 130:         header.append(length)  # FIN already set in b0; b1 is just the length\n 131:         header.extend(data)\n 132:     if length < 126:\n 133:         header.append(length)\n 134:     elif length <= 0xFFFF:",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nok = True\nfor n in (0, 1, 125, 126, 127, 20000, 65536):\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n    frame, off = ws.decode_frame(enc)\n    if frame.opcode != ws.OP_TEXT or frame.fin != True or frame.payload != b'x'*n or off != len(enc):\n        ok = False; print('FAIL', n)\nprint('framing (small/medium/large):', 'OK' if ok else 'FAIL')\nf = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04'))\nassert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\nprint('masked round-trip:', f.payload)\nassert ws.encode_frame(ws.OP_TEXT, 'a'*20000)[2:4] == struct.pack('>H', 20000)\nassert ws.encode_frame(ws.OP_TEXT, 'b'*65536)[2] == 127\nprint('16/64-bit length extensions: OK')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 10 of 12 lines, from line 3]\nFAIL 125\nFAIL 126\nFAIL 127\nTraceback (most recent call last):\n  File \"<string>\", line 5, in <module>\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n  File \"/work/tiny-mud/mud/ws.py\", line 130, in encode_frame\n    header.append(length)  # FIN already set in b0; b1 is just the length\n    ~~~~~~~~~~~~~^^^^^^^^\nValueError: byte must be in range(0, 256)\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r7.log \u2014 12 lines, 384 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nfor n in (0,1,125,126,127,20000,65536):\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n    frame, off = ws.decode_frame(enc)\n    print(n, 'enc_len', len(enc), 'off', off, 'fin', frame.fin, 'match', frame.payload==b'x'*n)\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 10 of 12 lines, from line 3]\n125 enc_len 128 off 127 fin True match True\n126 enc_len 131 off 30844 fin True match False\n127 enc_len 132 off 8680820740569200770 fin True match False\nTraceback (most recent call last):\n  File \"<string>\", line 4, in <module>\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n  File \"/work/tiny-mud/mud/ws.py\", line 130, in encode_frame\n    header.append(length)  # FIN already set in b0; b1 is just the length\n    ~~~~~~~~~~~~~^^^^^^^^\nValueError: byte must be in range(0, 256)\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r8.log \u2014 12 lines, 571 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 121,
+    "end_line": 141
+   },
+   "result": " 121:     length = len(data)\n 122:     header = bytearray()\n 123:     header.append(0x80 | opcode)  # FIN set + opcode\n 124:     if mask_key is not None:\n 125:         header.append(0x80 | 0x01)  # FIN set + MASK set\n 126:         header.extend(mask_key)\n 127:         masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n 128:         header.extend(masked)\n 129:     else:\n 130:         header.append(length)  # FIN already set in b0; b1 is just the length\n 131:         header.extend(data)\n 132:     if length < 126:\n 133:         header.append(length)\n 134:     elif length <= 0xFFFF:\n 135:         header.append(126)\n 136:         header.extend(struct.pack(\">H\", length))\n 137:     else:\n 138:         header.append(127)\n 139:         header.extend(struct.pack(\">Q\", length))\n 140:     return bytes(header)\n 141: \n\n[showing lines 121-141 of 463 \u2014 line 121 is inside function encode_frame (L97-140); read_symbol(\"mud/ws.py\", \"encode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "new_string": "    length = len(data)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is not None:\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n        header.extend(masked)\n        if length < 126:\n            header.append(length)\n        elif length <= 0xFFFF:\n            header.append(126)\n            header.extend(struct.pack(\">H\", length))\n        else:\n            header.append(127)\n            header.extend(struct.pack(\">Q\", length))\n    else:\n        header.append(length)  # FIN already set in b0; b1 is just the length\n        header.extend(data)\n    return bytes(header)",
+    "old_string": "    length = len(data)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is not None:\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n        header.extend(masked)\n    else:\n        header.append(length)  # FIN already set in b0; b1 is just the length\n        header.extend(data)\n    if length < 126:\n        header.append(length)\n    elif length <= 0xFFFF:\n        header.append(126)\n        header.extend(struct.pack(\">H\", length))\n    else:\n        header.append(127)\n        header.extend(struct.pack(\">Q\", length))\n    return bytes(header)",
+    "path": "mud/ws.py"
+   },
+   "result": "OK \u2014 1 change applied \u2014 lines 129-139 now read (inside function encode_frame, L97-140):\n 126:         header.extend(mask_key)\n 127:         masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n 128:         header.extend(masked)\n 129:         if length < 126:\n 130:             header.append(length)\n 131:         elif length <= 0xFFFF:\n 132:             header.append(126)\n 133:             header.extend(struct.pack(\">H\", length))\n 134:         else:\n 135:             header.append(127)\n 136:             header.extend(struct.pack(\">Q\", length))\n 137:     else:\n 138:         header.append(length)  # FIN already set in b0; b1 is just the length\n 139:         header.extend(data)\n 140:     return bytes(header)\n 141: \n 142: ",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nok = True\nfor n in (0,1,125,126,127,20000,65536):\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n    frame, off = ws.decode_frame(enc)\n    if frame.opcode != ws.OP_TEXT or frame.fin != True or frame.payload != b'x'*n or off != len(enc):\n        ok = False; print('FAIL', n, 'off', off, 'len', len(enc))\nprint('framing (small/medium/large):', 'OK' if ok else 'FAIL')\nf = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04'))\nassert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\nprint('masked round-trip:', f.payload)\nassert ws.encode_frame(ws.OP_TEXT, 'a'*20000)[2:4] == struct.pack('>H', 20000)\nassert ws.encode_frame(ws.OP_TEXT, 'b'*65536)[2] == 127\nprint('16/64-bit length extensions: OK')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 9 of 9 lines, from line 1]\nFAIL 126 off 30844 len 128\nFAIL 127 off 8680820740569200770 len 129\nTraceback (most recent call last):\n  File \"<string>\", line 5, in <module>\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n  File \"/work/tiny-mud/mud/ws.py\", line 138, in encode_frame\n    header.append(length)  # FIN already set in b0; b1 is just the length\n    ~~~~~~~~~~~~~^^^^^^^^\nValueError: byte must be in range(0, 256)\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r9.log \u2014 9 lines, 411 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nfor n in (126,127):\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n    print(n, 'hex:', enc.hex(), 'len:', len(enc), 'b1:', hex(enc[1]))\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 2 of 2 lines, from line 1]\n126 hex: 817e787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878 len: 128 b1: 0x7e\n127 hex: 817f78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878 len: 129 b1: 0x7f\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r10.log \u2014 2 lines, 570 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 144,
+    "end_line": 182
+   },
+   "result": " 144:     \"\"\"Decode one frame from ``data`` starting at ``offset``.\n 145: \n 146:     Returns\n 147:     -------\n 148:     (Frame, int)\n 149:         The decoded frame and the index of the first byte *after* the frame.\n 150:     \"\"\"\n 151:     b0 = data[offset]\n 152:     offset += 1\n 153:     fin = (b0 & 0x80) != 0\n 154:     opcode = b0 & 0x0F\n 155: \n 156:     b1 = data[offset]\n 157:     offset += 1\n 158:     masked = (b1 & 0x80) != 0\n 159:     length = b1 & 0x7F\n 160: \n 161:     mask_key = None\n 162:     if masked:\n 163:         mask_key = bytes(data[offset:offset + 4])\n 164:         offset += 4\n 165: \n 166:     if length == 126:\n 167:         length = struct.unpack(\">H\", data[offset:offset + 2])[0]\n 168:         offset += 2\n 169:     elif length == 127:\n 170:         length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n 171:         offset += 8\n 172: \n 173:     payload = data[offset:offset + length]\n 174:     if mask_key is not None:\n 175:         k0, k1, k2, k3 = mask_key\n 176:         payload = bytes(payload[i] ^ k0 ^ k1 ^ k2 ^ k3 for i in range(length))\n 177:         offset += length\n 178:     else:\n 179:         offset += length\n 180: \n 181:     return Frame(fin=fin, opcode=opcode, payload=payload, mask_key=mask_key), offset\n 182: \n\n[showing lines 144-182 of 463 \u2014 line 144 is inside function decode_frame (L143-181); read_symbol(\"mud/ws.py\", \"decode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nok = True\nfor n in (0,1,125,126,127,20000,65536):\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n    frame, off = ws.decode_frame(enc)\n    if frame.opcode != ws.OP_TEXT or frame.fin != True or frame.payload != b'x'*n or off != len(enc):\n        ok = False; print('FAIL', n, 'off', off, 'len', len(enc))\nprint('framing (small/medium/large):', 'OK' if ok else 'FAIL')\nf = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04'))\nassert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\nprint('masked round-trip:', f.payload)\nassert ws.encode_frame(ws.OP_TEXT, 'a'*20000)[2:4] == struct.pack('>H', 20000)\nassert ws.encode_frame(ws.OP_TEXT, 'b'*65536)[2] == 127\nprint('16/64-bit length extensions: OK')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 9 of 9 lines, from line 1]\nFAIL 126 off 30844 len 128\nFAIL 127 off 8680820740569200770 len 129\nTraceback (most recent call last):\n  File \"<string>\", line 5, in <module>\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n  File \"/work/tiny-mud/mud/ws.py\", line 138, in encode_frame\n    header.append(length)  # FIN already set in b0; b1 is just the length\n    ~~~~~~~~~~~~~^^^^^^^^\nValueError: byte must be in range(0, 256)\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r11.log \u2014 9 lines, 411 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 117,
+    "end_line": 141
+   },
+   "result": " 117:     if isinstance(payload, str):\n 118:         data = payload.encode(\"utf-8\")\n 119:     else:\n 120:         data = bytes(payload)\n 121:     length = len(data)\n 122:     header = bytearray()\n 123:     header.append(0x80 | opcode)  # FIN set + opcode\n 124:     if mask_key is not None:\n 125:         header.append(0x80 | 0x01)  # FIN set + MASK set\n 126:         header.extend(mask_key)\n 127:         masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n 128:         header.extend(masked)\n 129:         if length < 126:\n 130:             header.append(length)\n 131:         elif length <= 0xFFFF:\n 132:             header.append(126)\n 133:             header.extend(struct.pack(\">H\", length))\n 134:         else:\n 135:             header.append(127)\n 136:             header.extend(struct.pack(\">Q\", length))\n 137:     else:\n 138:         header.append(length)  # FIN already set in b0; b1 is just the length\n 139:         header.extend(data)\n 140:     return bytes(header)\n 141: \n\n[showing lines 117-141 of 463 \u2014 line 117 is inside function encode_frame (L97-140); read_symbol(\"mud/ws.py\", \"encode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; python3 -c \"\nimport mud.ws as ws, struct\nenc = ws.encode_frame(ws.OP_TEXT, 'x'*126)\nprint('126 hex:', enc.hex())\nprint('len:', len(enc))\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 2 of 2 lines, from line 1]\n126 hex: 817e787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878\nlen: 128\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r12.log \u2014 2 lines, 275 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"import mud.ws as ws; print(ws.__file__)\"; echo '---'; ls -la mud/ws.py; echo '---'; python3 -c \"import sys; print([p for p in sys.path if 'project' in p or 'tiny' in p or 'mud' in p])\"\n",
+    "tail": 10
+   },
+   "result": "[last 5 of 5 lines, from line 1]\n/work/tiny-mud/mud/ws.py\n---\n-rw-r--r--@ 1 basameschot  staff  15834 Oct 26 20:43 mud/ws.py\n---\n['/Users/basameschot/projects/momo-coding-harness/.venv/lib/python3.14/site-packages']\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r13.log \u2014 5 lines, 204 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, inspect\nprint(inspect.getsource(ws.encode_frame))\n\"\n",
+    "tail": 30
+   },
+   "result": "[last 30 of 44 lines, from line 15]\n\n    Returns\n    -------\n    bytes\n        The encoded frame.\n    \"\"\"\n    if isinstance(payload, str):\n        data = payload.encode(\"utf-8\")\n    else:\n        data = bytes(payload)\n    length = len(data)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is not None:\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n        header.extend(masked)\n        if length < 126:\n            header.append(length)\n        elif length <= 0xFFFF:\n            header.append(126)\n            header.extend(struct.pack(\">H\", length))\n        else:\n            header.append(127)\n            header.extend(struct.pack(\">Q\", length))\n    else:\n        header.append(length)  # FIN already set in b0; b1 is just the length\n        header.extend(data)\n    return bytes(header)\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r14.log \u2014 44 lines, 1 KB, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\nb = ws.encode_frame(ws.OP_TEXT, 'x'*126)\nprint('len', len(b))\nprint('b0', hex(b[0]), 'b1', hex(b[1]), 'b2', hex(b[2]) if len(b)>2 else None)\nprint('payload_len', len(b)-3)\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 3 of 3 lines, from line 1]\nlen 128\nb0 0x81 b1 0x7e b2 0x78\npayload_len 125\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r15.log \u2014 3 lines, 48 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 << 'EOF'\nimport mud.ws as ws\nb = ws.encode_frame(ws.OP_TEXT, 'x'*126)\nprint(\"repr:\", b[:6].hex(), \"...\")\nprint(\"full:\", b.hex())\nprint(\"count_x:\", b.count(b'x'))\nprint(\"has_00_after_b1:\", b[2] == 0)\nEOF\n",
+    "tail": 10
+   },
+   "result": "[last 4 of 4 lines, from line 1]\nrepr: 817e78787878 ...\nfull: 817e787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878\ncount_x: 126\nhas_00_after_b1: False\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r16.log \u2014 4 lines, 322 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nprint('py', __import__('sys').version)\nprint('len str x*126:', len('x'*126))\nprint('len bytes:', len(b'x'*126))\nprint('encode len:', len(('x'*126).encode('utf-8')))\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 4 of 4 lines, from line 1]\npy 3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]\nlen str x*126: 126\nlen bytes: 126\nencode len: 126\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r17.log \u2014 4 lines, 126 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "grep_file",
+   "args": {
+    "pattern": "if length < 126|header.append\\(length\\)|header.extend\\(data\\)",
+    "path": "mud/ws.py"
+   },
+   "result": " 129:         if length < 126:\n 130:             header.append(length)\n 138:         header.append(length)  # FIN already set in b0; b1 is just the length\n 139:         header.extend(data)\n(code index: index_text(\"<text>\", path=\"mud/ws.py\") names the definition each hit is in; index_file(\"mud/ws.py\") shows its outline and users)",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "ls -la mud/ws.py; file mud/ws.py; echo '---compile---'; python3 -m py_compile mud/ws.py && echo compiled_ok; echo '---other mud---'; find / -name \"ws.py\" -path \"*mud*\" 2>/dev/null",
+    "tail": 15
+   },
+   "result": "[last 7 of 7 lines, from line 1]\n-rw-r--r--@ 1 basameschot  staff  15834 Oct 26 20:43 mud/ws.py\nmud/ws.py: Python script text executable, ASCII text\n---compile---\ncompiled_ok\n---other mud---\n/System/Volumes/Data/work/tiny-mud/mud/ws.py\n/work/tiny-mud/mud/ws.py\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r18.log \u2014 7 lines, 270 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 << 'EOF'\npath = \"mud/ws.py\"\nsrc = open(path, \"r\").read()\n# find encode_frame body in the raw source\nidx = src.index(\"def encode_frame\")\nprint(\"RAW SOURCE lines 128-140:\")\nprint(src[src.index(\"length = len(data)\"):src.index(\"return bytes(header)\")+30])\nEOF\n",
+    "tail": 25
+   },
+   "result": "[last 24 of 24 lines, from line 1]\nRAW SOURCE lines 128-140:\nlength = len(data)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is not None:\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n        header.extend(masked)\n        if length < 126:\n            header.append(length)\n        elif length <= 0xFFFF:\n            header.append(126)\n            header.extend(struct.pack(\">H\", length))\n        else:\n            header.append(127)\n            header.extend(struct.pack(\">Q\", length))\n    else:\n        header.append(length)  # FIN already set in b0; b1 is just the length\n        header.extend(data)\n    return bytes(header)\n\n\ndef dec\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r19.log \u2014 24 lines, 766 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "grep -n \"def encode_frame\\|def decode_frame\" mud/ws.py; echo '--- total lines ---'; wc -l mud/ws.py",
+    "tail": 10
+   },
+   "result": "[last 4 of 4 lines, from line 1]\n97:def encode_frame(opcode: int, payload, mask_key: Optional[bytes] = None) -> bytes:\n143:def decode_frame(data: bytes, offset: int = 0) -> \"tuple[Frame, int]\":\n--- total lines ---\n     463 mud/ws.py\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r20.log \u2014 4 lines, 200 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 << 'EOF'\nsrc = open(\"mud/ws.py\").read()\nns = {}\nexec(compile(src, \"mud/ws.py\", \"exec\"), ns)\nenc = ns[\"encode_frame\"](ns[\"OP_TEXT\"], b\"x\"*126)\nprint(\"exec'd encode len:\", len(enc), \"b1:\", hex(enc[1]), \"b2:\", hex(enc[2]))\nframe, off = ns[\"decode_frame\"](enc)\nprint(\"decoded:\", frame.opcode, frame.fin, frame.payload == b\"x\"*126, \"off\", off, \"len\", len(enc))\nEOF\n",
+    "tail": 10
+   },
+   "result": "[last 2 of 2 lines, from line 1]\nexec'd encode len: 128 b1: 0x7e b2: 0x78\ndecoded: 1 True False off 30844 len 128\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r21.log \u2014 2 lines, 81 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 << 'EOF'\nsrc = open(\"mud/ws.py\").read()\nns = {}\nexec(compile(src, \"mud/ws.py\", \"exec\"), ns)\n# Monkey-patch to print internals\norig = ns[\"encode_frame\"]\ndef traced(opcode, payload, mask_key=None):\n    data = payload.encode(\"utf-8\") if isinstance(payload, str) else bytes(payload)\n    length = len(data)\n    print(\"TRACED opcode=\",opcode,\"payload_len=\",length,\"mask_key=\",mask_key)\n    return orig(opcode, payload, mask_key)\nns[\"encode_frame\"] = traced\nenc = traced(ns[\"OP_TEXT\"], b\"x\"*126)\nprint(\"result len\", len(enc), \"b1\", hex(enc[1]), \"b2\", hex(enc[2]))\nEOF\n",
+    "tail": 10
+   },
+   "result": "[last 2 of 2 lines, from line 1]\nTRACED opcode= 1 payload_len= 126 mask_key= None\nresult len 128 b1 0x7e b2 0x78\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r22.log \u2014 2 lines, 80 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "new_string": "    length = len(data)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is not None:\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n        header.extend(masked)\n        if length < 126:\n            header.append(length)\n        elif length <= 0xFFFF:\n            header.append(126)  # 16-bit length extension\n            header.extend(struct.pack(\">H\", length))\n        else:\n            header.append(127)  # 64-bit length extension\n            header.extend(struct.pack(\">Q\", length))\n    else:\n        if length < 126:\n            header.append(length)\n        elif length <= 0xFFFF:\n            header.append(126)  # 16-bit length extension\n            header.extend(struct.pack(\">H\", length))\n        else:\n            header.append(127)  # 64-bit length extension\n            header.extend(struct.pack(\">Q\", length))\n        header.extend(data)\n    return bytes(header)",
+    "old_string": "    length = len(data)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is not None:\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n        header.extend(masked)\n        if length < 126:\n            header.append(length)\n        elif length <= 0xFFFF:\n            header.append(126)\n            header.extend(struct.pack(\">H\", length))\n        else:\n            header.append(127)\n            header.extend(struct.pack(\">Q\", length))\n    else:\n        header.append(length)  # FIN already set in b0; b1 is just the length\n        header.extend(data)\n    return bytes(header)",
+    "path": "mud/ws.py"
+   },
+   "result": "OK \u2014 1 change applied \u2014 lines 132-145 now read (inside function encode_frame, L97-147):\n 129:         if length < 126:\n 130:             header.append(length)\n 131:         elif length <= 0xFFFF:\n 132:             header.append(126)  # 16-bit length extension\n 133:             header.extend(struct.pack(\">H\", length))\n 134:         else:\n 135:             header.append(127)  # 64-bit length extension\n 136:             header.extend(struct.pack(\">Q\", length))\n 137:     else:\n 138:         if length < 126:\n 139:             header.append(length)\n 140:         elif length <= 0xFFFF:\n 141:             header.append(126)  # 16-bit length extension\n 142:             header.extend(struct.pack(\">H\", length))\n 143:         else:\n 144:             header.append(127)  # 64-bit length extension\n 145:             header.extend(struct.pack(\">Q\", length))\n 146:         header.extend(data)\n 147:     return bytes(header)\n 148: ",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nok = True\nfor n in (0,1,125,126,127,20000,65536):\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n    frame, off = ws.decode_frame(enc)\n    if frame.opcode != ws.OP_TEXT or frame.fin != True or frame.payload != b'x'*n or off != len(enc):\n        ok = False; print('FAIL', n, 'b1', hex(enc[1]), 'off', off, 'len', len(enc))\nprint('framing round-trip (small/medium/large):', 'OK' if ok else 'FAIL')\nf = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04'))\nassert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\nprint('masked round-trip:', f.payload, 'mask_key', f.mask_key)\nassert ws.encode_frame(ws.OP_TEXT, 'a'*20000)[2:4] == struct.pack('>H', 20000)\nassert ws.encode_frame(ws.OP_TEXT, 'b'*65536)[2] == 127\nprint('16/64-bit length extensions: OK')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 6 of 6 lines, from line 1]\nframing round-trip (small/medium/large): OK\nTraceback (most recent call last):\n  File \"<string>\", line 11, in <module>\n    assert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\n           ^^^^^^^^\nAttributeError: 'tuple' object has no attribute 'opcode'\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r23.log \u2014 6 lines, 294 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nf, off = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04'))\nassert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\nprint('masked round-trip:', f.payload, 'mask_key', f.mask_key)\nassert ws.encode_frame(ws.OP_TEXT, 'a'*20000)[2:4] == struct.pack('>H', 20000)\nassert ws.encode_frame(ws.OP_TEXT, 'b'*65536)[2] == 127\nprint('16/64-bit length extensions: OK')\n# binary + ping opcodes encode/decode\nf2, _ = ws.decode_frame(ws.encode_frame(ws.OP_BINARY, b'\\x00\\xff'))\nassert f2.opcode == ws.OP_BINARY and f2.payload == b'\\x00\\xff'\nprint('binary opcode round-trip: OK')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 5 of 5 lines, from line 1]\nTraceback (most recent call last):\n  File \"<string>\", line 4, in <module>\n    assert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r24.log \u2014 5 lines, 285 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\nenc = ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04')\nprint('enc:', enc.hex())\nf, off = ws.decode_frame(enc)\nprint('opcode', f.opcode, 'mask_key', f.mask_key, 'payload', f.payload)\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 2 of 2 lines, from line 1]\nenc: 81810102030469676f686e05\nopcode 1 mask_key b'\\x01\\x02\\x03\\x04' payload b'm'\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r25.log \u2014 2 lines, 81 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 97,
+    "end_line": 148
+   },
+   "result": "  97: def encode_frame(opcode: int, payload, mask_key: Optional[bytes] = None) -> bytes:\n  98:     \"\"\"Encode a single WebSocket frame and return the raw bytes.\n  99: \n 100:     Parameters\n 101:     ----------\n 102:     opcode:\n 103:         The frame opcode (see module constants).\n 104:     payload:\n 105:         The frame payload (``str`` or ``bytes``).\n 106:     mask_key:\n 107:         A 4-byte masking key.  When ``None`` the frame is sent unmasked\n 108:         (the convention for server -> client frames); otherwise the payload is\n 109:         masked and the key is placed in the header (the convention for\n 110:         client -> server frames).\n 111: \n 112:     Returns\n 113:     -------\n 114:     bytes\n 115:         The encoded frame.\n 116:     \"\"\"\n 117:     if isinstance(payload, str):\n 118:         data = payload.encode(\"utf-8\")\n 119:     else:\n 120:         data = bytes(payload)\n 121:     length = len(data)\n 122:     header = bytearray()\n 123:     header.append(0x80 | opcode)  # FIN set + opcode\n 124:     if mask_key is not None:\n 125:         header.append(0x80 | 0x01)  # FIN set + MASK set\n 126:         header.extend(mask_key)\n 127:         masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n 128:         header.extend(masked)\n 129:         if length < 126:\n 130:             header.append(length)\n 131:         elif length <= 0xFFFF:\n 132:             header.append(126)  # 16-bit length extension\n 133:             header.extend(struct.pack(\">H\", length))\n 134:         else:\n 135:             header.append(127)  # 64-bit length extension\n 136:             header.extend(struct.pack(\">Q\", length))\n 137:     else:\n 138:         if length < 126:\n 139:             header.append(length)\n 140:         elif length <= 0xFFFF:\n 141:             header.append(126)  # 16-bit length extension\n 142:             header.extend(struct.pack(\">H\", length))\n 143:         else:\n 144:             header.append(127)  # 64-bit length extension\n 145:             header.extend(struct.pack(\">Q\", length))\n 146:         header.extend(data)\n 147:     return bytes(header)\n 148: \n\n[showing lines 97-148 of 470 \u2014 line 97 is inside function encode_frame (L97-147); read_symbol(\"mud/ws.py\", \"encode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "new_string": "    if isinstance(payload, str):\n        data = payload.encode(\"utf-8\")\n    else:\n        data = bytes(payload)\n    length = len(data)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is None:\n        # Unmasked frame: b1 is just the length.\n        _append_length(header, length)\n        header.extend(data)\n    else:\n        # Masked frame: b1 carries MASK + length, then the mask key.\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        _append_length(header, length)  # length follows the mask key\n        header.extend(bytes(b ^ mask_key[i % 4] for i, b in enumerate(data)))\n    return bytes(header)",
+    "old_string": "    if isinstance(payload, str):\n        data = payload.encode(\"utf-8\")\n    else:\n        data = bytes(payload)\n    length = len(data)\n    header = bytearray()\n    header.append(0x80 | opcode)  # FIN set + opcode\n    if mask_key is not None:\n        header.append(0x80 | 0x01)  # FIN set + MASK set\n        header.extend(mask_key)\n        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))\n        header.extend(masked)\n        if length < 126:\n            header.append(length)\n        elif length <= 0xFFFF:\n            header.append(126)  # 16-bit length extension\n            header.extend(struct.pack(\">H\", length))\n        else:\n            header.append(127)  # 64-bit length extension\n            header.extend(struct.pack(\">Q\", length))\n    else:\n        if length < 126:\n            header.append(length)\n        elif length <= 0xFFFF:\n            header.append(126)  # 16-bit length extension\n            header.extend(struct.pack(\">H\", length))\n        else:\n            header.append(127)  # 64-bit length extension\n            header.extend(struct.pack(\">Q\", length))\n        header.extend(data)\n    return bytes(header)",
+    "path": "mud/ws.py"
+   },
+   "result": "OK \u2014 1 change applied \u2014 lines 124-133 now read (inside function encode_frame, L97-134):\n 121:     length = len(data)\n 122:     header = bytearray()\n 123:     header.append(0x80 | opcode)  # FIN set + opcode\n 124:     if mask_key is None:\n 125:         # Unmasked frame: b1 is just the length.\n 126:         _append_length(header, length)\n 127:         header.extend(data)\n 128:     else:\n 129:         # Masked frame: b1 carries MASK + length, then the mask key.\n 130:         header.append(0x80 | 0x01)  # FIN set + MASK set\n 131:         header.extend(mask_key)\n 132:         _append_length(header, length)  # length follows the mask key\n 133:         header.extend(bytes(b ^ mask_key[i % 4] for i, b in enumerate(data)))\n 134:     return bytes(header)\n 135: \n 136: ",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "new_string": "def _append_length(header, length) -> None:\n    \"\"\"Append the length field to a frame header.\n\n    Writes the single length byte in ``b1`` when it fits (0-125), otherwise\n    the 16-bit (126) or 64-bit (127) extension plus its value.  This is called\n    once, right after the mask key, for masked frames.\n    \"\"\"\n    if length < 126:\n        header.append(length)\n    elif length <= 0xFFFF:\n        header.append(126)\n        header.extend(struct.pack(\">H\", length))\n    else:\n        header.append(127)\n        header.extend(struct.pack(\">Q\", length))",
+    "old_string": "def encode_frame(opcode: int, payload, mask_key: Optional[bytes] = None) -> bytes:",
+    "path": "mud/ws.py"
+   },
+   "result": "OK \u2014 1 change applied \u2014 lines 97-111 now read (inside function _append_length, L97-148):\n  94:         object.__setattr__(self, \"payload\", bytes(self.payload))\n  95: \n  96: \n  97: def _append_length(header, length) -> None:\n  98:     \"\"\"Append the length field to a frame header.\n  99: \n 100:     Writes the single length byte in ``b1`` when it fits (0-125), otherwise\n 101:     the 16-bit (126) or 64-bit (127) extension plus its value.  This is called\n 102:     once, right after the mask key, for masked frames.\n 103:     \"\"\"\n 104:     if length < 126:\n 105:         header.append(length)\n 106:     elif length <= 0xFFFF:\n 107:         header.append(126)\n 108:         header.extend(struct.pack(\">H\", length))\n 109:     else:\n 110:         header.append(127)\n 111:         header.extend(struct.pack(\">Q\", length))\n 112:     \"\"\"Encode a single WebSocket frame and return the raw bytes.\n 113: \n 114:     Parameters\nWARNING: `encode_frame` is no longer defined in mud/ws.py, but these places still use it \u2014 update them as well:\n  mud/ws.py:307 (in WebSocketServer.send): self.stream.send(encode_frame(OP_TEXT, message))\n  mud/ws.py:311 (in WebSocketServer.send_bytes): self.stream.send(encode_frame(OP_BINARY, data))\n  mud/ws.py:315 (in WebSocketServer.ping): self.stream.send(encode_frame(OP_PING, message))\n  mud/ws.py:324 (in WebSocketServer.close): self.stream.send(encode_frame(OP_CLOSE, reason, mask_key=code.to_bytes(2, \"big\")))\n  mud/ws.py:401 (in WebSocketClient.send): self.stream.send(encode_frame(OP_TEXT, message, mask_key=os.urandom(4)))\n  mud/ws.py:405 (in WebSocketClient.send_bytes): self.stream.send(encode_frame(OP_BINARY, data, mask_key=key))\n  mud/ws.py:408 (in WebSocketClient.ping): self.stream.send(encode_frame(OP_PING, message, mask_key=os.urandom(4)))\n  mud/ws.py:419 (in WebSocketClient.recv): self.stream.send(encode_frame(OP_PONG, frame.payload, mask_key=os.urandom(4)))\n  \u2026 and 1 more\n(edit_files changes all of these in ONE call: one edit per place, any files.)",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 96,
+    "end_line": 116
+   },
+   "result": "  96: \n  97: def _append_length(header, length) -> None:\n  98:     \"\"\"Append the length field to a frame header.\n  99: \n 100:     Writes the single length byte in ``b1`` when it fits (0-125), otherwise\n 101:     the 16-bit (126) or 64-bit (127) extension plus its value.  This is called\n 102:     once, right after the mask key, for masked frames.\n 103:     \"\"\"\n 104:     if length < 126:\n 105:         header.append(length)\n 106:     elif length <= 0xFFFF:\n 107:         header.append(126)\n 108:         header.extend(struct.pack(\">H\", length))\n 109:     else:\n 110:         header.append(127)\n 111:         header.extend(struct.pack(\">Q\", length))\n 112:     \"\"\"Encode a single WebSocket frame and return the raw bytes.\n 113: \n 114:     Parameters\n 115:     ----------\n 116:     opcode:\n\n[showing lines 96-116 of 471]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "edit_file",
+   "args": {
+    "new_string": "        header.append(127)\n        header.extend(struct.pack(\">Q\", length))\n\n\ndef encode_frame(opcode: int, payload, mask_key: Optional[bytes] = None) -> bytes:\n    \"\"\"Encode a single WebSocket frame and return the raw bytes.\n\n    Parameters\n    ----------\n    opcode:",
+    "old_string": "        header.append(127)\n        header.extend(struct.pack(\">Q\", length))\n    \"\"\"Encode a single WebSocket frame and return the raw bytes.\n\n    Parameters\n    ----------\n    opcode:",
+    "path": "mud/ws.py"
+   },
+   "result": "OK \u2014 1 change applied \u2014 lines 112-114 now read:\n 109:     else:\n 110:         header.append(127)\n 111:         header.extend(struct.pack(\">Q\", length))\n 112: \n 113: \n 114: def encode_frame(opcode: int, payload, mask_key: Optional[bytes] = None) -> bytes:\n 115:     \"\"\"Encode a single WebSocket frame and return the raw bytes.\n 116: \n 117:     Parameters",
+   "mutating": true,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws, struct\nok = True\nfor n in (0,1,125,126,127,20000,65536):\n    enc = ws.encode_frame(ws.OP_TEXT, 'x'*n)\n    frame, off = ws.decode_frame(enc)\n    if frame.opcode != ws.OP_TEXT or frame.fin != True or frame.payload != b'x'*n or off != len(enc):\n        ok = False; print('FAIL', n, 'b1', hex(enc[1]), 'off', off, 'len', len(enc))\nprint('framing round-trip (small/medium/large):', 'OK' if ok else 'FAIL')\nf, off = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04'))\nassert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\nprint('masked round-trip:', f.payload, 'mask', f.mask_key)\nassert ws.encode_frame(ws.OP_TEXT, 'a'*20000)[2:4] == struct.pack('>H', 20000)\nassert ws.encode_frame(ws.OP_TEXT, 'b'*65536)[2] == 127\nprint('16/64-bit length extensions: OK')\n# masked + length extension combined\nf2, _ = ws.decode_frame(ws.encode_frame(ws.OP_TEXT, 'c'*1000, mask_key=b'\\xaa\\xbb\\xcc\\xdd'))\nassert f2.opcode == ws.OP_TEXT and f2.mask_key == b'\\xaa\\xbb\\xcc\\xdd' and f2.payload == b'c'*1000\nprint('masked + 16-bit extension round-trip: OK')\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 6 of 6 lines, from line 1]\nframing round-trip (small/medium/large): OK\nTraceback (most recent call last):\n  File \"<string>\", line 11, in <module>\n    assert f.opcode == ws.OP_TEXT and f.mask_key == b'\\x01\\x02\\x03\\x04' and f.payload == b'hello'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r26.log \u2014 6 lines, 330 bytes, exit code 1]",
+   "mutating": false,
+   "exit_code": 1
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\nenc = ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04')\nprint('enc:', enc.hex(), 'len', len(enc))\nf, off = ws.decode_frame(enc)\nprint('opcode', f.opcode, 'mask_key', f.mask_key, 'payload', f.payload, 'off', off)\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 2 of 2 lines, from line 1]\nenc: 8181010203040569676f686e len 12\nopcode 1 mask_key b'\\x01\\x02\\x03\\x04' payload b'\\x01' off 7\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r27.log \u2014 2 lines, 97 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 114,
+    "end_line": 135
+   },
+   "result": " 114: def encode_frame(opcode: int, payload, mask_key: Optional[bytes] = None) -> bytes:\n 115:     \"\"\"Encode a single WebSocket frame and return the raw bytes.\n 116: \n 117:     Parameters\n 118:     ----------\n 119:     opcode:\n 120:         The frame opcode (see module constants).\n 121:     payload:\n 122:         The frame payload (``str`` or ``bytes``).\n 123:     mask_key:\n 124:         A 4-byte masking key.  When ``None`` the frame is sent unmasked\n 125:         (the convention for server -> client frames); otherwise the payload is\n 126:         masked and the key is placed in the header (the convention for\n 127:         client -> server frames).\n 128: \n 129:     Returns\n 130:     -------\n 131:     bytes\n 132:         The encoded frame.\n 133:     \"\"\"\n 134:     if isinstance(payload, str):\n 135:         data = payload.encode(\"utf-8\")\n\n[showing lines 114-135 of 474 \u2014 line 114 is inside function encode_frame (L114-151); read_symbol(\"mud/ws.py\", \"encode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 134,
+    "end_line": 152
+   },
+   "result": " 134:     if isinstance(payload, str):\n 135:         data = payload.encode(\"utf-8\")\n 136:     else:\n 137:         data = bytes(payload)\n 138:     length = len(data)\n 139:     header = bytearray()\n 140:     header.append(0x80 | opcode)  # FIN set + opcode\n 141:     if mask_key is None:\n 142:         # Unmasked frame: b1 is just the length.\n 143:         _append_length(header, length)\n 144:         header.extend(data)\n 145:     else:\n 146:         # Masked frame: b1 carries MASK + length, then the mask key.\n 147:         header.append(0x80 | 0x01)  # FIN set + MASK set\n 148:         header.extend(mask_key)\n 149:         _append_length(header, length)  # length follows the mask key\n 150:         header.extend(bytes(b ^ mask_key[i % 4] for i, b in enumerate(data)))\n 151:     return bytes(header)\n 152: \n\n[showing lines 134-152 of 474 \u2014 line 134 is inside function encode_frame (L114-151); read_symbol(\"mud/ws.py\", \"encode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 156,
+    "end_line": 210
+   },
+   "result": " 156: \n 157:     Returns\n 158:     -------\n 159:     (Frame, int)\n 160:         The decoded frame and the index of the first byte *after* the frame.\n 161:     \"\"\"\n 162:     b0 = data[offset]\n 163:     offset += 1\n 164:     fin = (b0 & 0x80) != 0\n 165:     opcode = b0 & 0x0F\n 166: \n 167:     b1 = data[offset]\n 168:     offset += 1\n 169:     masked = (b1 & 0x80) != 0\n 170:     length = b1 & 0x7F\n 171: \n 172:     mask_key = None\n 173:     if masked:\n 174:         mask_key = bytes(data[offset:offset + 4])\n 175:         offset += 4\n 176: \n 177:     if length == 126:\n 178:         length = struct.unpack(\">H\", data[offset:offset + 2])[0]\n 179:         offset += 2\n 180:     elif length == 127:\n 181:         length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n 182:         offset += 8\n 183: \n 184:     payload = data[offset:offset + length]\n 185:     if mask_key is not None:\n 186:         k0, k1, k2, k3 = mask_key\n 187:         payload = bytes(payload[i] ^ k0 ^ k1 ^ k2 ^ k3 for i in range(length))\n 188:         offset += length\n 189:     else:\n 190:         offset += length\n 191: \n 192:     return Frame(fin=fin, opcode=opcode, payload=payload, mask_key=mask_key), offset\n 193: \n 194: \n 195: class _SocketStream:\n 196:     \"\"\"A thin buffering wrapper around a blocking ``socket.socket``.\n 197: \n 198:     ``recv`` returns whatever bytes are currently buffered or available (which\n 199:     may be fewer than requested, as ``recv`` is allowed to do), and buffers the\n 200:     rest internally until the caller reads it back out.\n 201:     \"\"\"\n 202: \n 203:     def __init__(self, sock: socket.socket) -> None:\n 204:         self.sock = sock\n 205:         self._buffer = bytearray()\n 206: \n 207:     def recv(self, n: int) -> bytes:\n 208:         while len(self._buffer) < n:\n 209:             chunk = self.sock.recv(4096)\n 210:             if not chunk:\n\n[showing lines 156-210 of 474 \u2014 line 156 is inside function decode_frame (L154-192); read_symbol(\"mud/ws.py\", \"decode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\nenc = ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04')\ndata = enc\nprint('bytes:', list(data))\n# Manual trace of decode_frame\noffset = 0\nb0 = data[offset]; offset += 1\nprint('b0', hex(b0), 'fin', b0&0x80, 'opcode', b0&0x0F)\nb1 = data[offset]; offset += 1\nprint('b1', hex(b1), 'masked', bool(b1&0x80), 'length', b1&0x7F)\nmask_key = bytes(data[offset:offset+4]); offset += 4\nprint('mask_key', list(mask_key))\npayload = data[offset:offset+1]\nprint('payload', list(payload))\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 5 of 5 lines, from line 1]\nbytes: [129, 129, 1, 2, 3, 4, 5, 105, 103, 111, 104, 110]\nb0 0x81 fin 128 opcode 1\nb1 0x81 masked True length 1\nmask_key [1, 2, 3, 4]\npayload [5]\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r28.log \u2014 5 lines, 146 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 134,
+    "end_line": 152
+   },
+   "result": " 134:     if isinstance(payload, str):\n 135:         data = payload.encode(\"utf-8\")\n 136:     else:\n 137:         data = bytes(payload)\n 138:     length = len(data)\n 139:     header = bytearray()\n 140:     header.append(0x80 | opcode)  # FIN set + opcode\n 141:     if mask_key is None:\n 142:         # Unmasked frame: b1 is just the length.\n 143:         _append_length(header, length)\n 144:         header.extend(data)\n 145:     else:\n 146:         # Masked frame: b1 carries MASK + length, then the mask key.\n 147:         header.append(0x80 | 0x01)  # FIN set + MASK set\n 148:         header.extend(mask_key)\n 149:         _append_length(header, length)  # length follows the mask key\n 150:         header.extend(bytes(b ^ mask_key[i % 4] for i, b in enumerate(data)))\n 151:     return bytes(header)\n 152: \n\n[showing lines 134-152 of 474 \u2014 line 134 is inside function encode_frame (L114-151); read_symbol(\"mud/ws.py\", \"encode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\ndata = b'hello'\nlength = len(data)\nprint('length', length)\nheader = bytearray()\nheader.append(0x80 | ws.OP_TEXT)\nheader.append(0x80 | 0x01)  # MASK set\nheader.extend(b'\\x01\\x02\\x03\\x04')\nws._append_length(header, length)\nprint('header before extend:', list(header))\nmasked = bytes(b ^ b'\\x01\\x02\\x03\\x04'[i%4] for i,b in enumerate(data))\nprint('masked:', list(masked))\nheader.extend(masked)\nprint('header after extend:', list(header))\nprint('full:', list(header.encode() if isinstance(header, str) else header))\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 5 of 5 lines, from line 1]\nlength 5\nheader before extend: [129, 129, 1, 2, 3, 4, 5]\nmasked: [105, 103, 111, 104, 110]\nheader after extend: [129, 129, 1, 2, 3, 4, 5, 105, 103, 111, 104, 110]\nfull: [129, 129, 1, 2, 3, 4, 5, 105, 103, 111, 104, 110]\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r29.log \u2014 5 lines, 220 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 162,
+    "end_line": 192
+   },
+   "result": " 162:     b0 = data[offset]\n 163:     offset += 1\n 164:     fin = (b0 & 0x80) != 0\n 165:     opcode = b0 & 0x0F\n 166: \n 167:     b1 = data[offset]\n 168:     offset += 1\n 169:     masked = (b1 & 0x80) != 0\n 170:     length = b1 & 0x7F\n 171: \n 172:     mask_key = None\n 173:     if masked:\n 174:         mask_key = bytes(data[offset:offset + 4])\n 175:         offset += 4\n 176: \n 177:     if length == 126:\n 178:         length = struct.unpack(\">H\", data[offset:offset + 2])[0]\n 179:         offset += 2\n 180:     elif length == 127:\n 181:         length = struct.unpack(\">Q\", data[offset:offset + 8])[0]\n 182:         offset += 8\n 183: \n 184:     payload = data[offset:offset + length]\n 185:     if mask_key is not None:\n 186:         k0, k1, k2, k3 = mask_key\n 187:         payload = bytes(payload[i] ^ k0 ^ k1 ^ k2 ^ k3 for i in range(length))\n 188:         offset += length\n 189:     else:\n 190:         offset += length\n 191: \n 192:     return Frame(fin=fin, opcode=opcode, payload=payload, mask_key=mask_key), offset\n\n[showing lines 162-192 of 474 \u2014 line 162 is inside function decode_frame (L154-192); read_symbol(\"mud/ws.py\", \"decode_frame\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\nenc = ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04')\nprint('enc:', list(enc))\nframe, offset = ws.decode_frame(enc)\nprint('frame.opcode', frame.opcode)\nprint('frame.fin', frame.fin)\nprint('frame.mask_key', frame.mask_key)\nprint('frame.payload', frame.payload)\nprint('offset', offset)\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 6 of 6 lines, from line 1]\nenc: [129, 129, 1, 2, 3, 4, 5, 105, 103, 111, 104, 110]\nframe.opcode 1\nframe.fin True\nframe.mask_key b'\\x01\\x02\\x03\\x04'\nframe.payload b'\\x01'\noffset 7\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r30.log \u2014 6 lines, 152 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\ndata = ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04')\nprint('data:', list(data))\noffset = 0\nb0 = data[offset]; offset += 1\nprint('b0', hex(b0), 'fin', b0&0x80, 'opcode', b0&0x0F)\nb1 = data[offset]; offset += 1\nprint('b1', hex(b1), 'masked', bool(b1&0x80), 'length', b1&0x7F)\nmask_key = bytes(data[offset:offset+4]); offset += 4\nprint('mask_key', list(mask_key))\npayload = data[offset:offset+1]\nprint('payload (length 1):', list(payload))\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 5 of 5 lines, from line 1]\ndata: [129, 129, 1, 2, 3, 4, 5, 105, 103, 111, 104, 110]\nb0 0x81 fin 128 opcode 1\nb1 0x81 masked True length 1\nmask_key [1, 2, 3, 4]\npayload (length 1): [5]\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r31.log \u2014 5 lines, 157 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\ndata = ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04')\nprint('data:', list(data))\nframe, offset = ws.decode_frame(data)\nprint('frame.opcode', frame.opcode)\nprint('frame.fin', frame.fin)\nprint('frame.mask_key', frame.mask_key)\nprint('frame.payload', frame.payload)\nprint('offset', offset)\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 6 of 6 lines, from line 1]\ndata: [129, 129, 1, 2, 3, 4, 5, 105, 103, 111, 104, 110]\nframe.opcode 1\nframe.fin True\nframe.mask_key b'\\x01\\x02\\x03\\x04'\nframe.payload b'\\x01'\noffset 7\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r32.log \u2014 6 lines, 153 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "run_command",
+   "args": {
+    "command": "python3 -c \"\nimport mud.ws as ws\ndata = ws.encode_frame(ws.OP_TEXT, 'hello', mask_key=b'\\x01\\x02\\x03\\x04')\nprint('data:', list(data))\noffset = 0\nb0 = data[offset]; offset += 1\nprint('b0', hex(b0), 'fin', b0 & 0x80, 'opcode', b0 & 0x0F)\nb1 = data[offset]; offset += 1\nprint('b1', hex(b1), 'masked', bool(b1 & 0x80), 'length', b1 & 0x7F)\nmask_key = bytes(data[offset:offset + 4]); offset += 4\nprint('mask_key', list(mask_key))\nlength = b1 & 0x7F\npayload = data[offset:offset + length]\nprint('payload (raw)', list(payload))\nk0, k1, k2, k3 = mask_key\nunmasked = bytes(payload[i] ^ k0 ^ k1 ^ k2 ^ k3 for i in range(length))\nprint('unmasked', list(unmasked))\n\"\n",
+    "tail": 10
+   },
+   "result": "[last 6 of 6 lines, from line 1]\ndata: [129, 129, 1, 2, 3, 4, 5, 105, 103, 111, 104, 110]\nb0 0x81 fin 128 opcode 1\nb1 0x81 masked True length 1\nmask_key [1, 2, 3, 4]\npayload (raw) [5]\nunmasked [1]\n[output saved: /work/tiny-mud/.momo/runs/2026-10-26T19-25-35/r33.log \u2014 6 lines, 164 bytes, exit code 0]",
+   "mutating": false,
+   "exit_code": 0
+  },
+  {
+   "name": "read_file",
+   "args": {
+    "path": "mud/ws.py",
+    "start_line": 97,
+    "end_line": 152
+   },
+   "result": "  97: def _append_length(header, length) -> None:\n  98:     \"\"\"Append the length field to a frame header.\n  99: \n 100:     Writes the single length byte in ``b1`` when it fits (0-125), otherwise\n 101:     the 16-bit (126) or 64-bit (127) extension plus its value.  This is called\n 102:     once, right after the mask key, for masked frames.\n 103:     \"\"\"\n 104:     if length < 126:\n 105:         header.append(length)\n 106:     elif length <= 0xFFFF:\n 107:         header.append(126)\n 108:         header.extend(struct.pack(\">H\", length))\n 109:     else:\n 110:         header.append(127)\n 111:         header.extend(struct.pack(\">Q\", length))\n 112: \n 113: \n 114: def encode_frame(opcode: int, payload, mask_key: Optional[bytes] = None) -> bytes:\n 115:     \"\"\"Encode a single WebSocket frame and return the raw bytes.\n 116: \n 117:     Parameters\n 118:     ----------\n 119:     opcode:\n 120:         The frame opcode (see module constants).\n 121:     payload:\n 122:         The frame payload (``str`` or ``bytes``).\n 123:     mask_key:\n 124:         A 4-byte masking key.  When ``None`` the frame is sent unmasked\n 125:         (the convention for server -> client frames); otherwise the payload is\n 126:         masked and the key is placed in the header (the convention for\n 127:         client -> server frames).\n 128: \n 129:     Returns\n 130:     -------\n 131:     bytes\n 132:         The encoded frame.\n 133:     \"\"\"\n 134:     if isinstance(payload, str):\n 135:         data = payload.encode(\"utf-8\")\n 136:     else:\n 137:         data = bytes(payload)\n 138:     length = len(data)\n 139:     header = bytearray()\n 140:     header.append(0x80 | opcode)  # FIN set + opcode\n 141:     if mask_key is None:\n 142:         # Unmasked frame: b1 is just the length.\n 143:         _append_length(header, length)\n 144:         header.extend(data)\n 145:     else:\n 146:         # Masked frame: b1 carries MASK + length, then the mask key.\n 147:         header.append(0x80 | 0x01)  # FIN set + MASK set\n 148:         header.extend(mask_key)\n 149:         _append_length(header, length)  # length follows the mask key\n 150:         header.extend(bytes(b ^ mask_key[i % 4] for i, b in enumerate(data)))\n 151:     return bytes(header)\n 152: \n\n[showing lines 97-152 of 474 \u2014 line 97 is inside function _append_length (L97-111); read_symbol(\"mud/ws.py\", \"_append_length\") reads that definition whole]",
+   "mutating": false,
+   "exit_code": null
+  }
+ ]
+}

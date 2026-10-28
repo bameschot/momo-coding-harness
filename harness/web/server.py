@@ -91,7 +91,7 @@ _STATIC_FILES = {
     **{f"/{name}": (name, "text/javascript; charset=utf-8")
        for name in ("app.js", "dom.js", "markdown.js", "highlight.js", "notify.js",
                     "companion.js", "sessions.js", "files.js", "chips.js", "palette.js", "find.js",
-                    "mcp.js", "skills.js", "diff.js", "changes.js")},
+                    "mcp.js", "skills.js", "diff.js", "changes.js", "planview.js")},
 }
 _MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
@@ -288,6 +288,7 @@ class WebServer:
             "plan": h.plan.to_markdown() if h.plan is not None else None,
             "plan_phase": h.plan_phase if h.plan is not None else None,
             "plan_kind": h._plan_kind_shown(),
+            "plan_view": h.plan_view(),
             "history": list(h.input_history[-200:]),
             "companion": _companion_data(),
             "can_switch_model": h.client.can_switch_model,

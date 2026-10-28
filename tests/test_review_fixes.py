@@ -17,6 +17,7 @@ from harness.llm.llamacpp_client import LlamaCppClient
 from harness.llm.ollama_client import OllamaClient
 from harness.logger import Logger
 from harness.toolcall_text import _extract_text_tool_calls, _strip_text_tool_calls
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 
 class ScriptedClient(LLMClient):

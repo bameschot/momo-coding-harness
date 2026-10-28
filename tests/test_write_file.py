@@ -14,6 +14,7 @@ import harness.harness as hmod
 from harness.llm.base import ChatResponse, LLMClient, ToolCall
 from harness.llm.ollama_client import _xml_escape_for_ollama
 from harness.tools import dispatch
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 BODY = "def f():\n    return 1 < 2 & True\n"
 

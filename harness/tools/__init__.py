@@ -21,7 +21,7 @@ from . import registry
 from .common import edit_paths, read_text
 from .dispatcher import dispatch
 from .reference import TOOL_REF_STYLES, render_tool_reference
-from .registry import ALL_ROLES, ROLES, WRITE_ROLES, Tool, ToolContext, ToolRunContext, tool_schema
+from .registry import ALL_ROLES, INVESTIGATE_ROLES, ROLES, WRITE_ROLES, Tool, ToolContext, ToolRunContext, tool_schema
 from .shell import (MAX_COMMAND_TIMEOUT, command_env, exec_command, output_tail,
                     split_view_pipe)
 
@@ -82,7 +82,7 @@ NET_TOOLS = _group("net")
 PLAN_TOOLS = [registry.get(n).schema for n in ("create_plan", "complete_step", "revise_plan")]
 
 __all__ = [
-    "ALL_ROLES", "WRITE_ROLES", "ALL_TOOLS", "CHAT_TOOLS", "CODE_NAV_TOOLS", "DESIGN_TOOLS", "DIFF_TOOLS", "EDIT_FEATURES",
+    "ALL_ROLES", "INVESTIGATE_ROLES", "WRITE_ROLES", "ALL_TOOLS", "CHAT_TOOLS", "CODE_NAV_TOOLS", "DESIGN_TOOLS", "DIFF_TOOLS", "EDIT_FEATURES",
     "INDEX_REPLACES", "INDEX_TOOLS", "INDEX_TOOL_NAMES", "KEEPS_GREEN", "LOCKED_TOOLS",
     "MAX_COMMAND_TIMEOUT", "NET_TOOLS", "NET_TOOL_NAMES", "PLAN_EXECUTE_TOOLS",
     "PLAN_INVESTIGATE_TOOLS", "PLAN_TDD_EXECUTE_TOOLS", "PLAN_TDD_INVESTIGATE_TOOLS",

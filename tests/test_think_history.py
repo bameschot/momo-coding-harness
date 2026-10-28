@@ -13,6 +13,7 @@ from harness.commands import handle as handle_command
 from harness.llm.base import ChatResponse, LLMClient, ToolCall
 from harness.llm.llamacpp_client import LlamaCppClient
 from harness.llm.ollama_client import OllamaClient
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 
 class FakeClient(LLMClient):

@@ -11,6 +11,7 @@ from unittest import mock
 import harness.harness as hmod
 from harness import compaction
 from harness.llm.base import ChatResponse, LLMClient
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 
 def reply(goal="SUMMARY", constraint="none", nxt="1. carry on"):

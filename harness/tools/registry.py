@@ -19,8 +19,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 # Roles a tool can be offered in: the five modes, plus an approved plan while
-# it executes (it runs with the coding tools and the step-tracking tools).
-ROLES = ("design", "chat", "plan", "coding", "momo", "plan-exec")
+# it executes (it runs with the coding tools and the step-tracking tools), and
+# the two halves of a stories plan's phase: the story writer (investigates,
+# like plan mode) and a story being implemented (the coding tools).
+ROLES = ("design", "chat", "plan", "coding", "momo", "plan-exec", "story-writer", "story-exec")
 # /tools discover: which tools are listed in the prompt and declared only once
 # loaded.  "off" (the default): none, every tool is declared; "extensions":
 # custom, workspace and MCP tools (every built-in stays declared); "all": also
@@ -36,7 +38,10 @@ def discover_mode(value) -> str:
         return "all" if value else "off"
     return value if value in DISCOVER_MODES else DEFAULT_DISCOVER
 ALL_ROLES = frozenset(ROLES)
-WRITE_ROLES = frozenset({"coding", "momo", "plan-exec"})
+WRITE_ROLES = frozenset({"coding", "momo", "plan-exec", "story-exec"})
+# Roles that investigate before anything is written: they run commands (tests,
+# one-off checks) but do not edit.
+INVESTIGATE_ROLES = frozenset({"plan", "story-writer"})
 
 
 def tool_schema(name: str, description: str, properties: dict, required) -> dict:
@@ -62,6 +67,7 @@ class ToolContext:
     index_on: bool = False
     net_on: bool = False
     tdd: bool = False
+    stories: bool = False             # the next or running plan is a stories plan
     search_sources: object = None    # search.SourceRegistry, for web_search's source list
     # /tools discover (DISCOVER_MODES): on-demand tools are offered only once
     # loaded (find_tools).

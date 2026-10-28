@@ -13,6 +13,7 @@ from harness import session as session_mod
 from harness.commands import handle as handle_command
 from harness.llm.base import ChatResponse, LLMClient, ToolCall
 from harness.plan import Plan, Step
+from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 
 def call(name, **args):

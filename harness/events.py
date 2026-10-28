@@ -50,6 +50,8 @@ class StatusEvent:
     run_output_limit: int = 0     # /run-output-limit: chars per run_command view (0 = off)
     max_output_tokens: int = 25000  # /max-output-tokens: cap on one model reply (0 = off)
     undo_max: int = 20            # /undo-max: file checkpoints kept (0 = no cap)
+    loop_guard: int = 3           # /loop-guard: repeats that make a loop (0 = off)
+    loop_resets: int = 2          # /loop-guard resets: rewinds per turn before it stops
     undo_count: int = 0           # file checkpoints since the last /keep
     changes_files: int = 0        # distinct files they changed (the Changes button's badge)
     net_access: str = "off"     # "off" | "on" | "local"
@@ -71,7 +73,7 @@ class StatusEvent:
     think_known: bool = False     # the server said what the model takes
     think_history: str = "turn"   # /think-history: off | turn | all
     cavecat: str = "off"          # /cavecat: off | on
-    think_keep: str = "lean"      # /think-keep: off | lean | more | most
+    think_keep: str = "off"       # /think-keep: off | lean | more | most
     tool_ref: str = "minimal"     # /tool-ref: full | compact | minimal
     tools_off: list = field(default_factory=list)  # tools turned off for the current mode
     tools_discover: str = "off"    # /tools discover: off | extensions | all
@@ -125,6 +127,7 @@ class DoneEvent:
 @dataclass
 class AskUserEvent:
     question: str
+    options: list[str] = field(default_factory=list)   # ask_choice: numbered answers
 
 @dataclass
 class ThinkEvent:
