@@ -67,7 +67,6 @@ class Base(unittest.TestCase):
         cfg_mod.global_path().write_text(json.dumps({"mcpServers": self.servers}))
         _Scripted.replies, _Scripted.seen_tools = [], []
         self.h = hmod.Harness(host="http://fake", model="fake", workdir=self.work)
-        self.h.tools_discover = "off"    # declared, not on demand (tests/test_tool_discovery.py)
         self.h.set_mode("coding")
         self.h.start_mcp()
         self.assertEqual(self.h.mcp.wait_ready(15), [])
@@ -113,7 +112,7 @@ class Tools(Base):
         prompt = self.h.messages[0]["content"]
         self.assertIn("## MCP servers", prompt)
         self.assertIn("Use echo to test.", prompt)       # the server's instructions
-        self.assertIn("mcp__stub__echo", prompt)         # generated tool reference
+        self.assertIn("mcp__stub__echo", [t["function"]["name"] for t in self.h._current_tools()])
         secs = self.h.system_prompt_sections()
         self.assertEqual("".join(s["sep"] + s["text"] for s in secs), prompt)
 

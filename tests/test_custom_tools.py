@@ -168,7 +168,7 @@ class InTheHarness(_Folder):
     def test_loaded_at_start_offered_and_pickable(self):
         h = self.harness()
         self.assertEqual(h.custom_tools.loaded, ["echo_text"])
-        self.assertIn("echo_text", h.messages[0]["content"])           # the tool reference
+        self.assertIn("echo_text", [t["function"]["name"] for t in h._current_tools()])
         choice = next(c for c in h.tool_choices() if c["name"] == "echo_text")
         self.assertEqual(choice["group"], "custom")
         self.assertEqual(self.call(h, "echo_text", {"text": "hi"}), "echo: hi")
@@ -177,6 +177,7 @@ class InTheHarness(_Folder):
 
     def test_tools_reload_and_errors(self):
         h = self.harness()
+        h.tool_ref = "compact"         # a reference that names each tool, so a reload shows
         self.tool("second.py", "second_tool")
         self.put("broken.py", "raise ValueError('nope')\n")
         out = commands.handle("/tools reload", h).output

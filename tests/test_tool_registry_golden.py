@@ -113,7 +113,7 @@ class _Golden:
         base = [schemas[i.split("@")[1]] for i in configs["coding|new|default|off|on"]["tools"]]
         return {"schemas": schemas, "configs": configs, "prompts": prompts, "choices": choices,
                 "reference": {style: tools.render_tool_reference(base, style)
-                              for style in ("full", "compact")},
+                              for style in ("full", "compact", "minimal")},
                 "dispatch": _dispatch_errors(self.wd)}
 
 

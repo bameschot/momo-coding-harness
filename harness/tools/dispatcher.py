@@ -44,7 +44,7 @@ def has_cut_marker(text) -> bool:
 
 def required_args(name: str) -> list[str]:
     tool = registry.get(name)
-    return list(tool.parameters["required"]) if tool else []
+    return list(tool.parameters.get("required", ())) if tool else []
 
 
 def known_args(name: str) -> set[str]:

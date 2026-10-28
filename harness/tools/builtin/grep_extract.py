@@ -37,7 +37,7 @@ TOOL = Tool(
         "structured text, e.g. extract version strings, URLs, or identifiers. Results are "
         f"capped at {MAX_GREP_RESULTS} matches.",
         {"pattern": {"type": "string", "description": "Regex; use a capture group to extract part of the match. It matches the file's own text — the 'N:' line numbers shown in results are not part of the file"},
-         "path":    {"type": "string", "description": "File to search"},
+         "path":    {"type": "string"},
          "group":   {"type": "integer", "description": "Capture group to return (default: 0 = whole match)"}},
         ["pattern", "path"]),
     discoverable=True,

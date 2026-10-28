@@ -36,7 +36,7 @@ class BuiltinFiles(unittest.TestCase):
                     self.assertRegex(fn["name"], r"^[a-z][a-z0-9_]+$")
                     self.assertTrue(fn["description"].strip())
                     params = fn["parameters"]
-                    self.assertLessEqual(set(params["required"]), set(params["properties"]))
+                    self.assertLessEqual(set(params.get("required", ())), set(params["properties"]))
 
     def test_executors_take_what_they_are_given(self):
         for t in registry.builtins():
@@ -131,3 +131,17 @@ class Offered(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MinimalReference(unittest.TestCase):
+    """/tool-ref minimal: only how to write a call; no line per tool."""
+
+    def test_no_tool_lines(self):
+        offered = tools.offered("coding")
+        text = tools.render_tool_reference(offered, "minimal")
+        self.assertIn("<tool_call>", text)
+        self.assertIn("`path` before `content`", text)
+        for t in offered:
+            self.assertNotIn(t["function"]["name"], text)
+        self.assertLess(len(text), len(tools.render_tool_reference(offered, "compact")) // 5)
+        self.assertEqual(tools.render_tool_reference([], "minimal"), "")

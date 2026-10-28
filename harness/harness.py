@@ -340,11 +340,15 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._last_failed_call: tuple[str, str] | None = None
         self._syntax_watch = SyntaxWatch()   # files this turn's writes left unparseable
         self._tool_ref = ""
+        # Tool calls recovered from reply text (the model bypassed the tool API):
+        # what the prompt's tool reference is for.  Counted for the evals.
+        self.text_tool_calls = 0
         self._catalog_text = ""       # the prompt's "More tools" section (/tools discover)
         # How the prompt's tool reference is rendered: "full" (every description
-        # and parameter table) or "compact" (one line per tool; the native
-        # schemas carry the rest).  /tool-ref
-        self.tool_ref: str = "compact"
+        # and parameter table), "compact" (one line per tool) or "minimal" (only
+        # how to write a call; the native schemas carry the tools — the default
+        # since the tool-definition A/B in evals/README.md).  /tool-ref
+        self.tool_ref: str = "minimal"
         # Project guides: when on, the workdir's AGENTS.md / CLAUDE.md / ... are
         # appended to the system prompt; re-read on new/loaded session, /clear,
         # compaction and a workdir change (reload_guides).  /guides
@@ -1989,6 +1993,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
                 # The catalog too: a text call to a tool not loaded yet loads it.
                 recovered = _extract_text_tool_calls(content, tools + self._tool_catalog())
                 if recovered:
+                    self.text_tool_calls += len(recovered)
                     _calls = [(r["name"], r["arguments"]) for r in recovered]
                     content = ""
 
@@ -2499,6 +2504,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             think_history=self.think_history,
             cavecat=self.cavecat,
             think_keep=self.think_keep,
+            tool_ref=self.tool_ref,
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
             tools_discover=self.tools_discover,
             tools_loaded=len(self.loaded_tools),

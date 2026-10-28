@@ -12,8 +12,7 @@ TOOL = Tool(
         "or a preference the user has not expressed. "
         "Do NOT use this for things discoverable by reading files. "
         "Ask one focused question per call and continue after receiving the answer.",
-        {"question": {"type": "string",
-                      "description": "The question to present to the user"}},
+        {"question": {"type": "string"}},
         ["question"]),
     harness=True, order=410, group="ask & plan", modes=ALL_ROLES, keeps_green=True,
     example={"question": "Should I overwrite the existing file?"})

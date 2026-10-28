@@ -470,8 +470,8 @@ def _discover_command(harness, parts: list[str]) -> CommandResult:
         if not names:
             return CommandResult(handled=True, output=harness.discover_summary())
         mode = names[0].lower()
-        if (on := _on_off(mode)) is not None:      # on: the default mode
-            mode = registry.DEFAULT_DISCOVER if on else "off"
+        if (on := _on_off(mode)) is not None:      # on: extension tools only
+            mode = "extensions" if on else "off"
         if mode not in registry.DISCOVER_MODES or len(names) > 1:
             return _bad_choice(" ".join(names), "'off', 'extensions' or 'all'")
         return CommandResult(handled=True, output=harness.set_tools_discover(mode))
@@ -995,15 +995,16 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/tool-ref":
         def _ref_state() -> str:
-            return (f"Tool reference: {harness.tool_ref} "
-                    + ("(one line per tool; full descriptions travel in the tool schemas)"
-                       if harness.tool_ref == "compact" else
-                       "(every description and parameter, also sent as tool schemas)"))
+            return f"Tool reference: {harness.tool_ref} " + {
+                "full": "(every description and parameter, also sent as tool schemas)",
+                "compact": "(one line per tool; full descriptions travel in the tool schemas)",
+                "minimal": "(only how to write a call; the tool schemas carry the tools)",
+            }[harness.tool_ref]
         if not arg:
             return CommandResult(handled=True, output=_ref_state())
         style = arg.strip().lower()
         if style not in tools_mod.TOOL_REF_STYLES:
-            return _bad_choice(arg, "'full' or 'compact'")
+            return _bad_choice(arg, "'full', 'compact' or 'minimal'")
         harness.tool_ref = style
         session_mod.save_prefs(tool_ref=style)
         harness.rebuild_system_prompt()
@@ -1786,8 +1787,8 @@ Available commands:
   /run-output-limit [n|off]  Chars in run_command's default view (default off)
   /max-output-tokens [n|off]  Most tokens one model reply may take, reasoning
                       included (default 25000; stops a model stuck in a loop)
-  /tool-ref [full|compact]  How the system prompt describes the tools: full, or
-                      one line per tool (the tool schemas carry the rest)
+  /tool-ref [full|compact|minimal]  How the system prompt describes the tools: full,
+                      one line per tool, or only the call format (the tool schemas carry the rest)
   /system-prompt      Show the composed system prompt: role, tools, guides, skills (alias: /prompt)
   /system-prompt list  List the system prompt's parts and their size
   /tools              Pick this mode's tools (on/off per tool)
@@ -1795,7 +1796,7 @@ Available commands:
   /tools list         List this mode's tools and whether each is on
   /tools reload       Load the custom tools in ~/.momo-harness/tools/ again
   /tools errors       Why a custom tool file did not load (with the traceback)
-  /tools discover off|extensions|all  Which tools load on demand: custom, workspace and MCP tools (extensions, the default), also rarely needed built-ins (all), or none
+  /tools discover off|extensions|all  Which tools load on demand: none (off, the default), custom, workspace and MCP tools (extensions), also rarely needed built-ins (all)
   /tools load|unload <name>…  Load an on-demand tool now, or unload it (unload all: every one)
   /tools approve <name>|all  Let a workspace tool (.momo/tools/) run, after reading it
   /tools deny <name>  Keep a workspace tool from running

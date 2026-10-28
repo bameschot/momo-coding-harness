@@ -85,10 +85,9 @@ def route_to_index(args: dict, workdir: Path, index, cancel) -> str | None:
 
 # While the index is on, find_files is the fallback, and its description says
 # so first — a small model picks tools by their description.
-_FALLBACK_NOTE = ("Do NOT use this to find source or config files while the code index is on — "
-                  "call index_search(query, kind=\"file\") (fuzzy name; returns language, size and "
-                  "definitions) or index_map. Only for files the index does not cover: images, "
-                  "binaries, git-ignored or filtered-out paths. ")
+_FALLBACK_NOTE = ("Do NOT use this for source or config files while the code index is on — "
+                  "call index_search(query, kind=\"file\") or index_map. Only for files the index "
+                  "does not cover: images, binaries, git-ignored paths. ")
 
 
 def _fallback_note(ctx, schema: dict) -> dict:
@@ -100,11 +99,9 @@ def _fallback_note(ctx, schema: dict) -> dict:
 
 TOOL = Tool(
     tool_schema("find_files",
-        "Find files matching a glob pattern under a directory. A bare pattern with no '/' "
-        "(e.g. '*.py') is searched recursively through all subdirectories; use an explicit "
-        "path pattern (e.g. 'src/*.py') to restrict depth. Common noise directories (.git, "
-        ".venv, node_modules, __pycache__, dist, build, and similar) are skipped, so files "
-        f"inside them are never returned. Results are capped at {MAX_FIND_RESULTS} files.",
+        "Find files matching a glob pattern under a directory. A pattern without '/' ('*.py') "
+        "searches every subdirectory; 'src/*.py' only that one. Noise directories (.git, .venv, "
+        f"node_modules, build, …) are skipped. Results are capped at {MAX_FIND_RESULTS} files.",
         {"pattern": {"type": "string", "description": "Glob pattern, e.g. '*.py' (recursive) or 'src/*.py' (one level)"},
          "directory": {"type": "string", "description": "Directory to search (default: .)"}},
         ["pattern"]),

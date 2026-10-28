@@ -293,6 +293,12 @@
         <label title="The model writes as usual"><input type="radio" name="cavecat-view" value="off"> off</label>
         <label title="Telegraphic plans and tool text, no narration between calls, compact command output, short replies"><input type="radio" name="cavecat-view" value="on"> on</label>
       </div>
+      <div class="menu-sub">Tool reference in the prompt <kbd>/tool-ref</kbd></div>
+      <div class="seg" role="radiogroup" aria-label="Tool reference">
+        <label title="Only how to write a call by hand; the tool schemas carry the tools (the smallest prompt)"><input type="radio" name="tool-ref" value="minimal"> minimal</label>
+        <label title="One line and an example call per tool, for a model that keeps writing calls as text"><input type="radio" name="tool-ref" value="compact"> compact</label>
+        <label title="Every description and parameter table, repeating the tool schemas"><input type="radio" name="tool-ref" value="full"> full</label>
+      </div>
     </details>
     <details data-section="run">
       <summary>Running commands</summary>

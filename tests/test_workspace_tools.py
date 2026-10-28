@@ -407,7 +407,6 @@ class InTheHarness(_Workspace):
     def harness(self):
         h = hmod.Harness(host="http://fake", model="fake", workdir=self.wd)
         self.addCleanup(h.logger.close)
-        h.tools_discover = "off"     # declared, not on demand (tests/test_tool_discovery.py)
         h.set_mode("coding")
         return h
 

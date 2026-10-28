@@ -92,7 +92,7 @@ TOOL = Tool(
         "Read a file, optionally restricting to a line range. A read too large for the "
         "context left is refused with the number of lines that fit — then read a smaller "
         "range, or search the file with grep_file.",
-        {"path": {"type": "string", "description": "File to read"},
+        {"path": {"type": "string"},
          "start_line": {"type": "integer", "description": "1-based start line (default: 1); a negative number counts from the end, e.g. -50 reads the last 50 lines"},
          "end_line": {"type": "integer", "description": "1-based end line inclusive (default: EOF)"}},
         ["path"]),

@@ -22,10 +22,11 @@ from dataclasses import dataclass, field, replace
 # it executes (it runs with the coding tools and the step-tracking tools).
 ROLES = ("design", "chat", "plan", "coding", "momo", "plan-exec")
 # /tools discover: which tools are listed in the prompt and declared only once
-# loaded.  "extensions": custom, workspace and MCP tools (every built-in stays
-# declared); "all": also the built-ins marked discoverable; "off": none.
+# loaded.  "off" (the default): none, every tool is declared; "extensions":
+# custom, workspace and MCP tools (every built-in stays declared); "all": also
+# the built-ins marked discoverable.
 DISCOVER_MODES = ("off", "extensions", "all")
-DEFAULT_DISCOVER = "extensions"
+DEFAULT_DISCOVER = "off"
 
 
 def discover_mode(value) -> str:
@@ -45,11 +46,9 @@ def tool_schema(name: str, description: str, properties: dict, required) -> dict
         "function": {
             "name": name,
             "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": list(required),
-            },
+            # "required" only when something is: an empty list is tokens for nothing.
+            "parameters": {"type": "object", "properties": properties,
+                           **({"required": list(required)} if required else {})},
         },
     }
 

@@ -11,14 +11,11 @@ from ..registry import ALL_ROLES, Tool, tool_schema
 
 TOOL = Tool(
     tool_schema("index_search",
-        "Find any definition by name — exact, partial or approximate — across the whole project, "
-        "from the code index: classes, functions and methods, plus config keys (YAML/TOML/JSON "
-        "paths like 'services.web.ports'), HTML ids, CSS selectors, SQL tables and columns, shell "
-        "functions and Dockerfile stages. Use it FIRST when you know roughly what something is "
-        "called: words in any order work ('config parse' finds parse_config). Returns "
-        "file:L<start>-<end>, kind, qualified name and signature line, best match first — then "
-        "read_symbol reads one. Pass a LINE NUMBER ('1300') with path set to that one file to "
-        "learn which definition the line is in.",
+        "Find any definition by name — exact, partial or approximate — across the whole project "
+        "from the code index: code, config keys ('services.web.ports'), HTML ids, CSS selectors, "
+        "SQL tables. Use it FIRST when you know roughly what something is called: words in any "
+        "order work ('config parse' finds parse_config). Best match first; read_symbol reads one. "
+        "A LINE NUMBER ('1300') with path set to one file names the definition that line is in.",
         {"query": {"type": "string", "description": "A name or part of one: 'parse_config', 'Harness.send', 'services.web', 'retry delay', a pattern like '*_handler', or a line number like '1300' (then path must be the file)"},
          "kind":  {"type": "string", "description": "Only this kind: class, function, method, key, table, rule, id, column, stage, ..., or 'file' to find files by name, path or glob like '*.yaml' (default: any; a path-like query also finds files)"},
          "path":  {"type": "string", "description": "Only under this directory or file, or matching a glob like '*.yaml' (default: whole project)"},

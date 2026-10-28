@@ -696,6 +696,9 @@ function applyThinkStatus(s) {
   for (const r of document.querySelectorAll("input[name=think-keep]")) {
     r.checked = r.value === (s.think_keep || "lean");
   }
+  for (const r of document.querySelectorAll("input[name=tool-ref]")) {
+    r.checked = r.value === (s.tool_ref || "minimal");
+  }
   $("#think-levels").replaceChildren(...values.map((v) => {
     const r = el("input");
     r.type = "radio"; r.name = "think-level"; r.value = v; r.checked = v === level;
@@ -1575,6 +1578,9 @@ for (const r of document.querySelectorAll("input[name=think-history]")) {
 $("#cavecat-badge").onclick = (e) => toggleMenu(e, "#cavecat-menu");
 for (const r of document.querySelectorAll("input[name=cavecat], input[name=cavecat-view]")) {
   r.onchange = () => send(`/cavecat ${r.value}`);
+}
+for (const r of document.querySelectorAll("input[name=tool-ref]")) {
+  r.onchange = () => send(`/tool-ref ${r.value}`);
 }
 for (const r of document.querySelectorAll("input[name=think-keep]")) {
   r.onchange = () => send(`/think-keep ${r.value}`);

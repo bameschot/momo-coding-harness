@@ -62,10 +62,11 @@ def main():
                         help="Which tools are listed in the prompt and declared only once the model "
                              "loads them (find_tools): 'extensions' = custom, workspace and MCP "
                              "tools, 'all' = also rarely needed built-ins, 'off' = none "
-                             "(default: last /tools discover setting, else extensions)")
-    parser.add_argument("--tool-ref", choices=("full", "compact"), default=None,
-                        help="System prompt tool reference: 'full' or 'compact' (one line per "
-                             "tool) (default: last /tool-ref setting, else compact)")
+                             "(default: last /tools discover setting, else off)")
+    parser.add_argument("--tool-ref", choices=("full", "compact", "minimal"), default=None,
+                        help="System prompt tool reference: 'full', 'compact' (one line per "
+                             "tool) or 'minimal' (only the call format) (default: last "
+                             "/tool-ref setting, else minimal)")
     parser.add_argument("--max-output-tokens", type=int, default=None, metavar="N",
                         help="most tokens one model reply may take, 0 = no cap "
                              "(default: last /max-output-tokens setting, else 25000)")
@@ -268,8 +269,8 @@ def main():
     harness.run_mode = run_mode if run_mode in ("new", "classic") else "new"
     harness.tools_discover = registry_mod.discover_mode(
         args.tools_discover or prefs.get("tools_discover", registry_mod.DEFAULT_DISCOVER))
-    tool_ref = args.tool_ref or prefs.get("tool_ref", "compact")
-    harness.tool_ref = tool_ref if tool_ref in ("full", "compact") else "compact"
+    tool_ref = args.tool_ref or prefs.get("tool_ref", "minimal")
+    harness.tool_ref = tool_ref if tool_ref in ("full", "compact", "minimal") else "minimal"
     limit = args.run_output_limit if args.run_output_limit is not None \
         else prefs.get("run_output_limit", harness.run_output_limit)
     if not isinstance(limit, int) or (limit != 0 and limit < run_store_mod.MIN_LIMIT):

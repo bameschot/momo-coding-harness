@@ -26,7 +26,7 @@ TOOL = Tool(
     tool_schema("delete_file",
         "Permanently delete a single file (this cannot be undone). Works on files only — it "
         "will error on a directory. The path must be inside the working directory.",
-        {"path": {"type": "string", "description": "File to delete"}},
+        {"path": {"type": "string"}},
         ["path"]),
     run=delete_file, order=470, group="edit & shell", writes=("path",), diff=True,
     example={"path": "old-file.py"})

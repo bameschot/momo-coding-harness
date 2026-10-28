@@ -146,7 +146,10 @@ class Sections(Base):
 
     def test_compact_tool_reference(self):
         self.h.set_mode("coding")
-        self.assertEqual(self.h.tool_ref, "compact")        # the default
+        self.assertEqual(self.h.tool_ref, "minimal")        # the default
+        minimal = next(s for s in self.h.system_prompt_view()["sections"] if s["key"] == "tools")
+        self.assertIn("<tool_call>", minimal["text"])       # how to write a call by hand
+        self.assertNotIn("read_file", minimal["text"])      # but no line per tool
         self.cmd("/tool-ref full")
         full = self.h.system_prompt_view()
         self.cmd("/tool-ref compact")
@@ -160,6 +163,7 @@ class Sections(Base):
         self.assertTrue(self.cmd("/tool-ref nope").startswith("ERROR"))
         self.assertEqual(self.h.tool_ref, "compact")
         self.assertIn("full", self.cmd("/tool-ref full"))
+        self.assertEqual(self.h.status_event().tool_ref, "full")    # the web UI's picker
         self.assertEqual(self.h.tool_ref, "full")
 
     def test_plan_parts(self):

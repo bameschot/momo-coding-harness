@@ -1257,10 +1257,49 @@ of run off (28 calls).
 
 Decision: the model now reaches what it needs with discovery on, but what
 is left on demand saves 8–13% of the first request, short of the ~20% this
-section set as the bar. So the built-ins stay declared by default: the
-setting became three modes, and the default `extensions` lists only custom,
+section set as the bar. So the built-ins stay declared: the setting became
+three modes, and `extensions` lists only custom,
 workspace and MCP tools, whose cost grows with every server and tool. The
+default is `off`, every tool declared, until loading extension tools is
+measured. The
 rounds above are `all` against `off` (they ran as `--tools-discover on`,
 which meant `all`); none of these tasks has an extension tool, so
 `extensions` and `off` give them the same prompt. Not measured yet: how
 reliably the model loads an MCP tool it needs.
+
+## Tool definitions in the prompt (`tool_cost.py`, `/tool-ref minimal`, shorter descriptions, 2026-10-27)
+
+`python evals/tool_cost.py --host <llama.cpp>` measures real tokens through the
+server's chat template. Before: coding with the index on, 11,139 tokens in the
+first request, 82% of it tools. Three changes: `/tool-ref minimal` (no
+per-tool lines, −2,000), redundant parameter descriptions and empty
+`required` dropped (−90), and the ten longest descriptions shortened (−780).
+
+Ornith-1.5-9B Q8, four arms side by side (old/new descriptions × compact/minimal):
+
+| suite | old+compact (today) | old+minimal | new+compact | new+minimal |
+|---|---|---|---|---|
+| discover: checks, ideal, calls, prompt/run | 9/9, 12/12, 115, 82.4k | 9/9, 11/12, 105, 64.9k | 9/9, 12/12, 87, 64.3k | 9/9, 12/12, 99, 56.3k |
+| shell: facts, ideal, calls, prompt/run | 24/24, 15/15, 60, 46.1k | 24/24, 15/15, 51, 37.7k | 24/24, 15/15, 45, 34.5k | 24/24, 15/15, 54, 37.2k |
+| nav --index: recall, ideal, calls, prompt/run | 84%, 26/26, 70, 26.6k | 84%, 26/26, 86, 31.6k | 84%, 26/26, 70, 26.1k | 89%, 26/26, 54, 19.1k |
+
+| edit: checks, calls, coached, prompt/run | 17/18, 209, 2, 119k | 17/18, 209, 5, 96k | 17/18, 186, 5, 90k | 17/18, 194, 4, 86k |
+
+Rejected calls 0 in every arm; text-format calls 1 in two discover arms (recovered
+also with `minimal`). Every arm's one edit failure is a `rewrite-function` run,
+the task that also fails under today's setup. Coached calls over all four
+suites: 9 for old+compact, 7 for new+minimal.
+
+Decision: new descriptions + `minimal` meet the bar (no suite worse, nav recall
+84% → 89%, fewer calls on shell, nav and edit) and are the default. First
+request, real tokens, before → after:
+
+| role | index off | index on | index + net |
+|---|---|---|---|
+| design | 8,764 → 7,141 (−19%) | 10,280 → 8,194 (−20%) | 12,330 → 9,893 (−20%) |
+| chat | 5,453 → 4,208 (−23%) | 6,971 → 5,263 (−25%) | 9,021 → 6,962 (−23%) |
+| plan | 7,308 → 5,593 (−23%) | 8,826 → 6,648 (−25%) | 10,896 → 8,367 (−23%) |
+| coding | 9,608 → 7,257 (−24%) | 11,139 → 8,325 (−25%) | 13,189 → 10,024 (−24%) |
+
+Not done (smaller or riskier, see the plan): trimming the "Navigating code"
+rules, hiding grep/find while the index covers them, merging overlapping tools.

@@ -32,14 +32,10 @@ def _index_hint(result: str, args: dict, workdir: Path, index) -> str:
 TOOL = Tool(
     tool_schema("find_symbol",
         f"Find where a class, function or method is DEFINED, or WHICH definition a line belongs to "
-        f"({CODE_NAV_LANGS} files). Pass a LINE NUMBER as the name (e.g. '1300' or 'L1300') plus "
-        "that one file, and you get the definition containing that line in a single line of output "
-        "— the cheap answer after a stack trace, a grep_files hit or a find_references hit, all of "
-        "which give you 'file:line'. Pass a name and it finds the definition: unlike grep_files it "
-        "only returns real definitions, never comments, strings or call sites. Returns "
-        "file:L<start>-<end>, kind, qualified name and signature line. The name may be a wildcard "
-        "pattern ('*' and '?'), so combined with kind you can LIST definitions rather than look one "
-        "up: name='*' with kind='class' gives every class. Results are capped at 100.",
+        f"({CODE_NAV_LANGS}). A LINE NUMBER as the name ('1300') plus that one file gives the "
+        "definition containing it in one line — the cheap answer after a stack trace or a grep "
+        "hit. A name finds only real definitions, never comments or call sites. A pattern with "
+        "kind LISTS them: name='*', kind='class' gives every class.",
         {"name":      {"type": "string", "description": "A line number like '1300' to get the definition containing it; or a name to find, e.g. 'send', a qualified 'Harness.send', or a pattern like '*_handler' or '*' for all"},
          "directory": {"type": "string", "description": "Where to look: a directory, or a single file. When name is a line number this MUST be the one file that line is in, e.g. 'harness/harness.py' — not the directory containing it. Default: ."},
          "kind":      {"type": "string", "description": "Only this kind: class, interface, enum, struct, trait, impl, object, function, method, ... (default: any)"}},

@@ -64,7 +64,7 @@ TOOL = Tool(
     tool_schema("file_info",
         "Return metadata for a path: existence, type (file/directory/symlink), "
         "size in bytes, last-modified timestamp, and line count for text files.",
-        {"path": {"type": "string", "description": "Path to inspect"}},
+        {"path": {"type": "string"}},
         ["path"]),
     discoverable=True,
     run=file_info, order=110, group="files", modes=ALL_ROLES, keeps_green=True,

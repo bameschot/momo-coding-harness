@@ -16,8 +16,8 @@ MAX_GREP_LINE_CHARS = 300        # a longer hit line (minified code) is clipped 
 MAX_SCAN_MB = MAX_SCAN_FILE_BYTES // 1_000_000
 
 # Syntax-aware navigation (tree-sitter): the languages the code-nav tools name.
-CODE_NAV_LANGS = ("Python, Java, C, C++, Kotlin, Rust, JavaScript and TypeScript; also "
-                  "keys in YAML/TOML/JSON, HTML ids, CSS rules, SQL, shell and Dockerfiles")
+CODE_NAV_LANGS = ("Python, Java, C/C++, Kotlin, Rust, JS/TS; also YAML/TOML/JSON keys, HTML, "
+                  "CSS, SQL, shell, Dockerfiles")
 
 
 def read_text(path: str, workdir: Path, *, refuse_binary: bool = False) -> tuple[Path, str] | str:

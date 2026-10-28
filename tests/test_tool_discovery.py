@@ -171,7 +171,7 @@ class Harness(Base):
         self.assertIn("## More tools (load with find_tools)", prompt)
         self.assertIn("- append_to_file(path, content)", prompt)
         self.assertNotIn("**append_to_file**", prompt)          # not in the tool reference
-        self.assertIn("**find_tools**", prompt)
+        self.assertIn("find_tools", self.declared())
         self.assertNotIn("append_to_file", self.declared())
         view = self.h.system_prompt_view()
         self.assertIn("discover", [s["key"] for s in view["sections"]])
@@ -278,7 +278,7 @@ class Harness(Base):
         self.assertEqual(session_mod.load_prefs()["tools_discover"], "off")
         self.assertEqual(self.h.tools_discover, "off")
         self.assertIn("ERROR: expected", self.cmd("/tools discover sometimes"))
-        self.cmd("/tools discover on")                     # on: the default mode
+        self.cmd("/tools discover on")                     # on: extension tools only
         self.assertEqual(self.h.tools_discover, "extensions")
 
     def test_choices_and_commands(self):
@@ -312,8 +312,7 @@ def _ext_tool(name, source, discoverable=None):
 
 
 class Extensions(Base):
-    """The default mode: custom, workspace and MCP tools on demand, every
-    built-in declared."""
+    """Custom, workspace and MCP tools on demand, every built-in declared."""
 
     def setUp(self):
         super().setUp()
@@ -324,10 +323,10 @@ class Extensions(Base):
     def test_default_and_saved_values(self):
         fresh = hmod.Harness(host="http://fake", model="fake", workdir=self.wd)
         self.addCleanup(fresh.logger.close)
-        self.assertEqual(fresh.tools_discover, "extensions")
+        self.assertEqual(fresh.tools_discover, "off")              # every tool declared
         self.assertEqual(registry.discover_mode(True), "all")      # saved before the modes
         self.assertEqual(registry.discover_mode(False), "off")
-        self.assertEqual(registry.discover_mode("nonsense"), "extensions")
+        self.assertEqual(registry.discover_mode("nonsense"), "off")
         self.assertEqual(registry.discover_mode("all"), "all")
 
     def test_builtins_stay_declared(self):
@@ -402,8 +401,7 @@ class Mcp(unittest.TestCase):
         self.h.set_mode("coding")
         self.h.start_mcp()
         self.assertEqual(self.h.mcp.wait_ready(15), [])
-        self.assertEqual(self.h.tools_discover, "extensions")     # the default
-        self.h.rebuild_system_prompt()
+        self.h.set_tools_discover("extensions")
 
     def tearDown(self):
         self.h.shutdown_mcp()

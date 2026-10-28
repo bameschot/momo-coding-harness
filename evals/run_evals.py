@@ -95,7 +95,7 @@ _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")
 
 
 def run_once(task, *, host, model, provider, mode, think, timeout, index=False, route=True,
-             run_mode="new", tool_ref="compact", think_history="off", edit_features=None,
+             run_mode="new", tool_ref="minimal", think_history="off", edit_features=None,
              cavecat="off", think_keep="lean", max_secs=0, tools_discover="off"):
     """One task, one fresh conversation.  Returns what the model did.  A run
     still going after max_secs (0 = no limit) is cancelled and graded as is."""
@@ -297,6 +297,9 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
         "tools_discover": tools_discover,
         "first_request_tokens": first_request_tokens,
         "find_tools_calls": sum(1 for n in names if n == "find_tools"),
+        # Calls the harness recovered from reply text: the model wrote them
+        # instead of using the tool API (what the prompt's tool reference serves).
+        "text_calls": getattr(h, "text_tool_calls", 0),
         "loaded_tools": sorted(getattr(h, "loaded_tools", ())),
         **edit,
     }
@@ -424,7 +427,7 @@ _env_cache: dict = {}
 
 
 def fingerprint(task, *, mode, think, index, model, provider, host, route=True,
-                run_mode="new", tool_ref="compact", think_history="off",
+                run_mode="new", tool_ref="minimal", think_history="off",
                 edit_features=None, cavecat="off", think_keep="lean",
                 tools_discover="off") -> str:
     """Everything that can change a run's outcome, hashed."""
@@ -547,6 +550,9 @@ def summarise(rows):
     out.append(f"  coached calls    {sum(r['coached_calls'] for r in rows)}  "
                "(tool explained the mistake; costs a round trip)")
     out.append(f"  harness repairs  {sum(r['repairs'] for r in rows)}")
+    if any("text_calls" in r for r in rows):      # rows from before the field have none
+        out.append(f"  text-format calls {sum(r.get('text_calls', 0) for r in rows)}  "
+                   "(recovered from reply text; the tool reference's audience)")
     if any(r.get("capped") for r in rows):
         out.append(f"  capped runs      {sum(bool(r.get('capped')) for r in rows)}  "
                    "(cancelled at --max-run-secs, graded as they were)")
@@ -678,7 +684,7 @@ def main():
     ap.add_argument("--json", metavar="PATH", help="write the full per-run records here")
     ap.add_argument("--run-mode", choices=("new", "classic"), default="new",
                     help="/run-mode for every run: new (saved log + views) or classic")
-    ap.add_argument("--tool-ref", choices=("full", "compact"), default="compact",
+    ap.add_argument("--tool-ref", choices=("full", "compact", "minimal"), default="minimal",
                     help="system prompt tool reference style (/tool-ref A/B)")
     ap.add_argument("--suite", choices=("nav", "index", "lang", "shell", "edit", "cavecat",
                                         "discover", "all"),

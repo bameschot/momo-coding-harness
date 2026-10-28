@@ -49,7 +49,7 @@ Options:
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
 | `--run-mode` | last `/run-mode`, else `new` | `new`: `run_command` saves its output to a log and returns a view of it; `classic`: returns all of it (see [Command output](#command-output)) |
 | `--run-output-limit` | last setting, else `0` (off) | Characters in `run_command`'s default view in run mode `new`; `0` = the whole output |
-| `--tools-discover` | last `/tools discover`, else `extensions` | Which tools are listed in the prompt and declared only once the model loads them: `extensions` (custom, workspace and MCP tools), `all` (also rarely needed built-ins) or `off`. See [Loading tools on demand](#loading-tools-on-demand) |
+| `--tools-discover` | last `/tools discover`, else `off` | Which tools are listed in the prompt and declared only once the model loads them: `off` (none), `extensions` (custom, workspace and MCP tools) or `all` (also rarely needed built-ins). See [Loading tools on demand](#loading-tools-on-demand) |
 | `--think` | last used / `on` | Thinking level: `off`, `on`, or an effort level (`low`, `medium`, `high`, `xhigh`, …) for models that take one. See [Thinking level](#thinking-level) |
 | `--no-think` | off | Same as `--think off` |
 | `--think-history` | last used / `turn` | Send the model's own reasoning back to it: `off`, `turn` (since your last message) or `all`. See [Sending reasoning back](#sending-reasoning-back) |
@@ -311,6 +311,7 @@ The browser asks permission the first time you tick **Desktop notification**. De
 | Skills | `/load-skill`, `/unload-skill` | One checkbox per skill in `skills/`. Shared with the TUI |
 | Command output | `/run-mode`, `/run-output-limit` | View → Context: save command output to a log and return a view, and the view's size in characters. Shared with the TUI |
 | Reply cap | `/max-output-tokens` | View → Context → Reply cap: the most tokens one model reply may take (default 25000, `off` for none). Shared with the TUI |
+| Tool reference | `/tool-ref minimal\|compact\|full` | View → All settings… → Context: how the system prompt describes the tools. `minimal` (default) only says how to write a call, `compact` adds a line and example per tool, `full` every description. Shared with the TUI |
 | Code index | `/index on\|off`, `/index-persist`, `/index-max-mem`, `/index-max-files`, `/index-workers`, `/index-filter`, `/index save\|load` | View → Code index: the toggle, save/load to disk, the memory budget, the file limit, build workers, Save now / Load, and Filter… (edit which files are indexed). Shared with the TUI |
 | Play a sound | — | An audible cue (a synthesised kitten mew), focused or not, see [Notifications](#notifications) |
 | Desktop notification | — | An OS notification while the window is away, see [Notifications](#notifications) |
@@ -659,7 +660,7 @@ Switch modes with `/design`, `/chat`, `/plan`, `/code`, `/momo`, or `Shift+Tab`.
 
 ## Available Tools
 
-Each tool is one file in [`harness/tools/builtin/`](harness/tools/builtin/): its schema (what the model sees), the function that runs it, and how the harness treats it. The per-mode tool lists, the tool reference in the system prompt and the `/tools` pickers are all built from those files. You can add your own tools the same way, see [Adding a tool](#adding-a-tool). Your own tools and MCP tools are listed instead of declared until the model loads them, see [Loading tools on demand](#loading-tools-on-demand).
+Each tool is one file in [`harness/tools/builtin/`](harness/tools/builtin/): its schema (what the model sees), the function that runs it, and how the harness treats it. The per-mode tool lists, the tool reference in the system prompt and the `/tools` pickers are all built from those files. You can add your own tools the same way, see [Adding a tool](#adding-a-tool). With `/tools discover extensions`, your own tools and MCP tools are listed instead of declared until the model loads them, see [Loading tools on demand](#loading-tools-on-demand).
 
 ### Read-only (all modes)
 
@@ -816,7 +817,7 @@ In the web UI, the wrench button in the status bar opens the same list. Hover a 
 
 ### Loading tools on demand
 
-Every declared tool costs prompt tokens twice: its schema goes with every request, and its line in the tool reference sits in the system prompt. Every MCP server, custom tool and workspace tool adds to that, and a server can bring dozens. So by default momo **lists** those tools in a **More tools** section of the system prompt, one line each, and declares them only once the model loads one:
+Every declared tool costs prompt tokens twice: its schema goes with every request, and its line in the tool reference sits in the system prompt. Every MCP server, custom tool and workspace tool adds to that, and a server can bring dozens. By default every tool is declared. `/tools discover extensions` makes momo **list** those tools in a **More tools** section of the system prompt instead, one line each, and declare them only once the model loads one:
 
 ```
 ## More tools (load with find_tools)
@@ -830,9 +831,9 @@ Every declared tool costs prompt tokens twice: its schema goes with every reques
 
 | Mode | On demand | Declared |
 |---|---|---|
-| `extensions` (the default) | [Custom](#adding-a-tool), [workspace](#workspace-tools) and [MCP](#mcp-servers) tools | Every built-in tool |
+| `off` (the default) | None | Everything |
+| `extensions` | [Custom](#adding-a-tool), [workspace](#workspace-tools) and [MCP](#mcp-servers) tools | Every built-in tool |
 | `all` | The same, plus the rarely needed built-ins: `append_to_file`, `replace_symbol`, `file_info`, `grep_extract`, `stop_command`, `file_dependencies`, `index_status`, `add_search_source` | The other built-ins |
-| `off` | None | Everything, as before this existed |
 
 With no MCP servers and no custom or workspace tools, `extensions` changes nothing: there is nothing to list, so neither the catalog nor `find_tools` is in the prompt.
 
@@ -846,7 +847,7 @@ A listed tool is loaded, and from then on declared like any other, in one of thr
 
 How it behaves:
 
-- **A preference** (`/tools discover off|extensions|all`, `--tools-discover`), saved like `/run-mode`.
+- **A preference** (`/tools discover off|extensions|all`, `--tools-discover`), saved like `/run-mode`; `/tools discover on` means `extensions`. It is off by default because how reliably a small model loads an MCP or custom tool it needs has not been measured yet.
 - **Loaded tools stay loaded** for the session and are saved with it; `/new` starts with none. That is deliberate: chat templates put the tool list in the system turn, so every change to it makes the server read the whole prompt again. Loading once and keeping the tool costs that once.
 - **Loading never changes the system prompt.** The catalog always lists every on-demand tool, loaded or not, and the tool reference covers only the others, so only the request's tool list grows. A model that writes its calls as text gets the example from `find_tools`' result. Each MCP server's own instructions stay in the prompt whether its tools are loaded or not.
 - **Keeping one declared.** A custom tool with `discoverable=False`, a workspace tool with `"discoverable": false`, or an MCP server with `"exposure": "direct"` stays declared in every mode but `off`'s. A tool's role, run mode and toggles still apply, and a tool you turned off is neither listed nor loadable.
@@ -863,7 +864,7 @@ How it behaves:
 
 | Command | Effect |
 |---|---|
-| `/tools discover [off\|extensions\|all]` | Show or set which tools load on demand (saved) |
+| `/tools discover [off\|extensions\|all]` | Show or set which tools load on demand (saved; off by default) |
 | `/tools load <name>…` | Load listed tools now |
 | `/tools unload <name>…\|all` | Declare them no more (the next request re-sends the tool list) |
 
@@ -905,7 +906,7 @@ TOOL = Tool(
 | `keeps_green` | False | It changes no file, so a TDD plan's passing tests stay valid after a call |
 | `confirm` | False | Ask the user before each call |
 | `needs_net` / `needs_index` | False | Only offered while `/net` / `/index` is on |
-| `discoverable` | on demand | `False` keeps your tool declared; by default it is listed in the prompt and declared once loaded (see [Loading tools on demand](#loading-tools-on-demand)) |
+| `discoverable` | on demand | With `/tools discover extensions` or `all` your tool is listed in the prompt and declared once loaded; `False` keeps it declared (see [Loading tools on demand](#loading-tools-on-demand)) |
 | `suggests` | none | On-demand tools its results may name; a result that names one loads it |
 | `writes`, `body_arg` | none | Path arguments it writes (re-indexed after the call) and the argument holding file text (refused when it holds a history placeholder or a cut-off note) |
 | `variants`, `select`, `adapt` | none | Other schemas for some contexts (run mode, TDD plan, …), and a last change to the schema per context |
@@ -1203,7 +1204,7 @@ The approval is remembered per workdir and per server entry, so editing the entr
 | Key | Default | |
 |---|---|---|
 | `confirm` | `writes` | `always`, `writes` (ask unless the tool is annotated read-only) or `never` |
-| `exposure` | `discover` | `discover` lists the server's tools in the prompt until the model loads them ([Loading tools on demand](#loading-tools-on-demand)), `direct` declares them all. With `/tools discover off` every server's are declared |
+| `exposure` | `discover` | With `/tools discover extensions` or `all`: `discover` lists the server's tools in the prompt until the model loads them ([Loading tools on demand](#loading-tools-on-demand)), `direct` declares them all. With `off`, the default, every server's are declared |
 | `tools` | all | `{"include": [...], "exclude": [...]}`, fnmatch patterns on the server's tool names |
 | `timeout` | `120` | Seconds per call |
 | `untrusted` | `true` for http | Wrap results in an untrusted-content fence, like `fetch_url` |
@@ -1436,7 +1437,7 @@ The system message is assembled by `Harness.system_prompt_sections()` (`harness/
 | 3 | Cavecat | With `/cavecat on`, in every mode but momo | `_cavecat_rules`: plans and tool text (`ask_user`, commit messages, specs in design mode) are compressed, there is no narration between tool calls, and the reply is kept short. See [Cavecat mode](#cavecat-mode) |
 | 4 | Project guides | With `/guides on` and a guide file | `AGENTS.md`, `CLAUDE.md`, `MOMO.md`, … from the workdir |
 | 5 | Skill: &lt;name&gt; | One per loaded skill | `skills/<name>.md` |
-| 6 | Tool reference (N tools) | Always | Generated from the tool schemas; `/tool-ref full\|compact` picks the style |
+| 6 | Tool reference (N tools) | Always | Generated from the tool schemas; `/tool-ref full\|compact\|minimal` picks the style: `minimal` (the default) only says how to write a call, `compact` adds one line and example per tool |
 | 7 | Using the internet | While a net tool (`fetch_url`, `web_search`) is on | `_net_rules`: check versions and APIs rather than recall them, read the project's own manifests first, look up general facts when the topic is recent, you're unsure or the user asks, stop once answered, cite URLs |
 | 8 | Environment | Always | `_environment`: working directory, today's date, OS/shell and git branch (when `run_command` is offered), how to run Python when there is no `python` command, and whether internet access is on or off |
 | 9 | Navigating code | Always | `_nav_rules`: how to find code with the tools this mode has; with the index on it becomes the index table (`index_search`, `index_callers`, …) |
@@ -1508,6 +1509,8 @@ plan    → investigating: read-only tools + code navigation + run_command  ask_
 momo    → same as coding (full tool suite)
 ```
 
+**What they cost.** Tools are still most of the first request: in coding mode with the index on, about 6,300 of 8,300 tokens (real tokens, as the server's chat template renders the schemas). That was 11,100 before the system prompt stopped repeating the tools (`/tool-ref minimal`, the default: the native schemas carry each tool, and only how to write a call by hand stays) and the longest descriptions were shortened. `/tool-ref compact` brings back one line and example per tool (about 900–2,300 tokens more) for a model that keeps writing calls as text. `python evals/tool_cost.py --host <llama.cpp URL>` prints the schemas, the tool reference and the tool rules per mode, with `--top N` for the most costly tools; without a server it estimates. `/tools discover` lists extension tools instead of declaring them (see [Loading tools on demand](#loading-tools-on-demand)).
+
 Tools you turned off for a mode with `/tools` are removed from that mode's set, see [Turning tools on and off](#turning-tools-on-and-off).
 
 ## Slash Commands
@@ -1548,7 +1551,7 @@ Type any command in the input bar:
 | `/tools on\|off` | Enable or disable tool calls entirely (off = model receives no tool schemas) |
 | `/tools reload` | Load your custom tools in `~/.momo-harness/tools/` again — see [Adding a tool](#adding-a-tool) |
 | `/tools errors` | Why a custom or workspace tool file did not load, with the traceback |
-| `/tools discover [off\|extensions\|all]` | Which tools load on demand: custom, workspace and MCP tools (the default), also rarely needed built-ins, or none — see [Loading tools on demand](#loading-tools-on-demand) |
+| `/tools discover [off\|extensions\|all]` | Which tools load on demand: none (the default), custom, workspace and MCP tools, or also rarely needed built-ins — see [Loading tools on demand](#loading-tools-on-demand) |
 | `/tools load\|unload <name>…` | Load a listed tool now, or declare it no more (`unload all`: every one) |
 | `/tools approve\|deny <name>` | Let a [workspace tool](#workspace-tools) run, or keep it from running |
 | `/tools roles\|category\|enable\|disable <name> …` | A workspace tool's roles, category, or on/off for this workspace (saved in `.momo/tools.json`) |

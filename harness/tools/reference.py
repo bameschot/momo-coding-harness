@@ -30,7 +30,17 @@ _TOOL_REFERENCE_INTRO_COMPACT = (
     "writes put `path` before `content`."
 )
 
-TOOL_REF_STYLES = ("full", "compact")
+# "minimal": no per-tool lines at all, only how to write a call when the tool
+# API is not used; the native schemas carry every tool's description.
+_TOOL_REFERENCE_INTRO_MINIMAL = (
+    "## Tool calls\n\n"
+    "Call tools through the function-calling API. If it is not available, write a call as "
+    '`<tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>` — the '
+    "harness detects and executes it. Pass arguments in the order of the tool's parameters; "
+    "for file writes put `path` before `content`."
+)
+
+TOOL_REF_STYLES = ("full", "compact", "minimal")
 
 
 def example_args(tool: dict) -> dict:
@@ -66,6 +76,8 @@ def render_tool_reference(tool_list: list[dict], style: str = "full") -> str:
     writes text-format calls to copy."""
     if style == "compact":
         return _render_compact_reference(tool_list)
+    if style == "minimal":
+        return _TOOL_REFERENCE_INTRO_MINIMAL if tool_list else ""
     sections = [_TOOL_REFERENCE_INTRO]
     for tool in tool_list:
         fn = tool["function"]

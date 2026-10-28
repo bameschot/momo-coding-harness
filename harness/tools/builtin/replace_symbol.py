@@ -8,11 +8,9 @@ from ..registry import Tool, tool_schema
 TOOL = Tool(
     tool_schema("replace_symbol",
         "Replace ONE whole function, method or class with new source, found by name — no "
-        "old_string to copy. new_source replaces exactly the lines read_symbol shows for that "
-        "name (decorators included); its indentation is adjusted to fit, so a method keeps its "
-        "place in the class. Use it to rewrite a definition; for a change of a few lines use "
-        "edit_file. An empty new_source deletes the definition. The result shows the new lines "
-        "with their line numbers.",
+        "old_string to copy. new_source replaces exactly the lines read_symbol shows (decorators "
+        "included), re-indented to fit. Use it to rewrite a definition; for a few lines use "
+        "edit_file. An empty new_source deletes it.",
         {"path":       {"type": "string", "description": "Source file containing the definition"},
          "name":       {"type": "string", "description": "The definition to replace: 'parse', a qualified 'Parser.parse', or a line number inside it like '120'"},
          "new_source": {"type": "string", "description": "The complete new definition, from its first line (decorator or signature) to its last, exactly as it should appear in the file — quotes and backslashes are not escaped again"}},

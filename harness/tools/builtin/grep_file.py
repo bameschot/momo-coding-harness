@@ -41,7 +41,7 @@ TOOL = Tool(
         "Single-file regex search. Search for a regex pattern in one file, returns matching "
         f"lines with line numbers. Results are capped at {MAX_GREP_RESULTS} matches.",
         {"pattern": {"type": "string", "description": "Regular expression to search for. It matches the file's own text — the 'N:' line numbers shown in results are not part of the file, so never put them in the pattern"},
-         "path": {"type": "string", "description": "File to search"}},
+         "path": {"type": "string"}},
         ["pattern", "path"]),
     run=grep_file, order=140, group="files", modes=ALL_ROLES, keeps_green=True,
     example={"pattern": "def ", "path": "main.py"}, after=_index_hint)

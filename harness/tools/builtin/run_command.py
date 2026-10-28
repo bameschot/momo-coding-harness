@@ -195,38 +195,25 @@ def _after(result: str, args: dict, workdir: Path, index) -> str:
     return result
 
 
+# The web is the Environment section's business (it says never to curl a page),
+# and a trailing tail/grep/head pipe is turned into a view (shell.split_view_pipe).
 _RUN_COMMAND_NOTES = (
-    "To read a web page or call an API use fetch_url, not curl or wget; to download a "
-    "file to disk (a jar, archive, image) curl -o or wget is fine. The command runs with "
-    "the working directory as its current directory. It is NON-INTERACTIVE: no stdin is "
-    "connected, so a command that waits for input (e.g. 'git commit' with no -m, "
-    "'npm init', a prompt for a password) will hang until it times out — always pass "
-    "flags that avoid prompts.")
+    "NON-INTERACTIVE: no stdin, so pass flags that avoid prompts (git commit -m, npm init -y).")
 
 _CLASSIC = tool_schema("run_command",
-    "Run a shell command from the working directory. Returns stdout and stderr. "
-    "Use for running scripts, tests, build tools, etc. To read a web page or call an "
-    "API use fetch_url, not curl or wget; to download a file to disk (a jar, "
-    "archive, image) curl -o or wget is fine. The command runs with the "
-    "working directory as its current directory. It is NON-INTERACTIVE: no stdin is "
-    "connected, so a command that waits for input (e.g. 'git commit' with no -m, "
-    "'npm init', a prompt for a password) will hang until it times out — always pass "
-    "flags that avoid prompts. Long output is returned in full (up to the last 4 MB of "
-    "each stream); exit code is appended when non-zero. A command that times out or is "
-    "interrupted returns the end of its output so far.",
+    "Run a shell command in the working directory (scripts, tests, builds); returns stdout, "
+    "stderr and a non-zero exit code. " + _RUN_COMMAND_NOTES,
     {"command": {"type": "string", "description": "Shell command to execute (runs in the working directory)"},
      "timeout": {"type": "integer", "description": f"Timeout in seconds (default {DEFAULT_COMMAND_TIMEOUT}, maximum {MAX_COMMAND_TIMEOUT} = {MAX_COMMAND_TIMEOUT // 60} minutes) — pass a longer one for a full build or test suite"}},
     ["command"])
 
 TOOL = Tool(
     tool_schema("run_command",
-        "Run a shell command in the working directory. Pass tail=N for only the last N lines "
-        "of output, or grep=\"regex\" for only the matching lines (both: the last N matches); "
-        "with neither, short output comes back whole and long output as its beginning and end. "
-        "The full output (stdout and stderr) is saved to a log whose path ends the result: "
-        "pass it to command_output to search it again instead of rerunning the command. Do "
-        "not pipe into tail/head/grep yourself (that hides the exit code). " + _RUN_COMMAND_NOTES,
-        {"command": {"type": "string", "description": "Shell command to execute"},
+        "Run a shell command in the working directory. tail=N or grep=\"regex\" return only "
+        "part of the output; otherwise long output comes back as its beginning and end. The full "
+        "output is saved to a log named at the end of the result: search it with command_output "
+        "instead of running the command again. " + _RUN_COMMAND_NOTES,
+        {"command": {"type": "string"},
          "tail":    {"type": "integer", "description": "Only the last N lines (e.g. 30 for a test summary)"},
          "grep":    {"type": "string", "description": "Case-insensitive regex; only matching lines, numbered (e.g. \"error|fail\")"},
          "context": {"type": "integer", "description": "With grep: lines around each match"},

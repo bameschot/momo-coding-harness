@@ -72,6 +72,7 @@ class StatusEvent:
     think_history: str = "turn"   # /think-history: off | turn | all
     cavecat: str = "off"          # /cavecat: off | on
     think_keep: str = "lean"      # /think-keep: off | lean | more | most
+    tool_ref: str = "minimal"     # /tool-ref: full | compact | minimal
     tools_off: list = field(default_factory=list)  # tools turned off for the current mode
     tools_discover: str = "off"    # /tools discover: off | extensions | all
     tools_loaded: int = 0          # tools loaded on demand this session
