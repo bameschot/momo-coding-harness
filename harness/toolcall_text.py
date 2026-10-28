@@ -310,6 +310,35 @@ def _extract_text_tool_calls(text: str, tools: list[dict]) -> list[dict]:
     return results
 
 
+def text_call_error(text: str, tools: list[dict]) -> str:
+    """Why a call to a known tool written as text (Python-call syntax, the form
+    _extract_text_tool_calls reads with `ast`) could not be read: the parse error
+    and where, for the nudge that asks the model to call the tool itself.  "" when
+    the text names no tool as a call, or the call parses."""
+    known = {t["function"]["name"] for t in tools}
+    if not known:
+        return ""
+    pat = re.compile(r'\b(' + '|'.join(re.escape(n) for n in sorted(known, key=len, reverse=True))
+                     + r')\s*\(')
+    for m in pat.finditer(text):
+        fn, open_idx = m.group(1), m.end() - 1
+        close = _match_paren(text, open_idx)
+        if close >= 0:
+            end = close + 1
+        else:                       # unbalanced (a stray quote): up to the end of its code block
+            fence = re.compile(r"^[ \t]*```[ \t]*$", re.M).search(text, open_idx)
+            end = fence.start() if fence else len(text)
+        try:
+            ast.parse(fn + text[open_idx:end], mode="eval")
+        except SyntaxError as e:
+            where = f" at line {e.lineno} of the call" if e.lineno else ""
+            line = (e.text or "").strip()
+            shown = f": {line[:100]}" if line else ""
+            return f"your {fn}(…) written as text could not be read ({e.msg}{where}{shown})"
+        return ""
+    return ""
+
+
 def _derive_write_path(content: str, mode: str) -> str:
     """Infer a filename for a write_file/append_to_file call that arrived with
     'content' but no 'path'.  Some models (notably gemma) emit the large content

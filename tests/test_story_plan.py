@@ -315,7 +315,8 @@ class Failure(Base):
     def test_a_failed_story_is_re_split(self):
         self.run_plan([
             call("write_stories", stories=[FIX_ADD]),
-            ChatResponse(content="I give up.", done_reason="stop"),         # S1 fails
+            ChatResponse(content="I give up.", done_reason="stop"),         # nudged once
+            ChatResponse(content="Still no.", done_reason="stop"),          # S1 fails
             call("write_stories", replaces=["S1"], stories=[{**FIX_ADD, "id": "S2"}]),
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="add works"),
@@ -325,7 +326,7 @@ class Failure(Base):
         self.assertEqual(sset.get("S2").attempts, 1)
         resplit = self.writer_requests()[1]["messages"][1]["content"]
         self.assertIn("Story S1 (Make add() add) failed", resplit)
-        self.assertIn("I give up.", resplit)
+        self.assertIn("Still no.", resplit)
 
     def test_a_story_the_loop_guard_stops_is_re_split(self):
         self.h.loop_resets = 0
@@ -341,12 +342,126 @@ class Failure(Base):
         self.run_plan([
             call("write_stories", stories=[FIX_ADD]),
             ChatResponse(content="no", done_reason="stop"),
+            ChatResponse(content="no", done_reason="stop"),
             call("write_stories", replaces=["S1"], stories=[{**FIX_ADD, "id": "S2"}]),
+            ChatResponse(content="still no", done_reason="stop"),
             ChatResponse(content="still no", done_reason="stop")])
         self.assertIsNotNone(self.h.plan)
         self.assertEqual(self.h.plan.story_sets[1].get("S2").status, "failed")
         self.assertTrue(any("failed again" in s for s in self.system_lines()))
         self.assertTrue(any("Plan paused in phase 1/2" in s for s in self.system_lines()))
+
+
+# A write_stories call Gemma wrote as Python source in a text reply, with the
+# stray quote that made it unreadable (2026-10-28 tiny-mud run, story S7's check).
+BROKEN_TEXT_CALL = r"""I will replace the failed story.
+
+```python
+write_stories(stories=[
+    {
+        "id": "S2",
+        "title": "Make add() add",
+        "description": "add() returns 0.",
+        "technical_details": "def add(a, b) -> a + b",
+        "acceptance": [
+            {
+                "text": "add(2, 3) → 5",
+                "check": 'python3 -c "from calc import add; assert add(2, 3) == \'5\''"
+            }
+        ]
+    }
+], replaces=["S1"])
+```
+"""
+
+
+class Recovery(Base):
+    """What keeps a stories plan going when a model answers in text."""
+
+    def test_the_text_call_error_says_where(self):
+        from harness.toolcall_text import _extract_text_tool_calls, text_call_error
+        from harness.tools import ToolContext, registry
+        tools = registry.offered(ToolContext(role="story-writer"))
+        err = text_call_error(BROKEN_TEXT_CALL, tools)
+        self.assertIn("write_stories(…) written as text could not be read", err)
+        self.assertIn("unterminated string literal", err)
+        self.assertIn("\"check\":", err)                          # the line it broke on
+        fixed = BROKEN_TEXT_CALL.replace("\\'5\\''\"", "\\'5\\'\"'")
+        self.assertEqual(text_call_error(fixed, tools), "")
+        self.assertEqual(_extract_text_tool_calls(fixed, tools)[0]["name"], "write_stories")
+        self.assertEqual(text_call_error("Let's perform the edit.", tools), "")
+
+    def test_a_story_that_answers_in_text_is_nudged_once(self):
+        self.run_plan([
+            call("write_stories", stories=[FIX_ADD]),
+            ChatResponse(content="Let's perform the edit.", done_reason="stop"),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("complete_story", summary="add works"),
+            ChatResponse(content="stop", done_reason="stop")])
+        self.assertEqual(self.h.plan.story_sets[1].get("S1").status, "done")
+        notes = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                 if m.get("role") == "user" and "Your reply had no tool call" in (m.get("content") or "")]
+        self.assertTrue(notes)
+        self.assertIn("A story ends only with complete_story", notes[0])
+
+    def test_a_writer_that_writes_its_call_as_text_is_told_why(self):
+        self.run_plan([
+            ChatResponse(content=BROKEN_TEXT_CALL.replace(', replaces=["S1"]', ""), done_reason="stop"),
+            call("write_stories", stories=[FIX_ADD]),
+            ChatResponse(content="stop", done_reason="stop")])
+        self.assertTrue(self.h.plan.story_sets[1].approved)
+        notes = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                 if m.get("role") == "user" and "Your reply had no tool call" in (m.get("content") or "")]
+        self.assertIn("could not be read (unterminated string literal", notes[0])
+        self.assertIn("Call the write_stories tool itself", notes[0])
+
+    def test_resuming_retries_a_re_split_that_was_never_written(self):
+        self.run_plan([
+            call("write_stories", stories=[FIX_ADD]),
+            ChatResponse(content="no", done_reason="stop"),
+            ChatResponse(content="no", done_reason="stop"),            # S1 fails
+            ChatResponse(content=BROKEN_TEXT_CALL, done_reason="stop"),
+            ChatResponse(content=BROKEN_TEXT_CALL, done_reason="stop")])   # re-split: no stories
+        self.assertTrue(any("stopped without stories for phase 1: it replied with text" in s
+                            for s in self.system_lines()))
+        ScriptedClient.script = [
+            call("write_stories", replaces=["S1"], stories=[{**FIX_ADD, "id": "S2"}]),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("complete_story", summary="add works"),
+            ChatResponse(content="stop", done_reason="stop")]
+        self.h.send("continue")
+        sset = self.h.plan.story_sets[1]
+        self.assertEqual([(s.id, s.status) for s in sset.stories], [("S1", "replaced"), ("S2", "done")])
+        self.assertFalse(any("cannot go on" in s for s in self.system_lines()))
+        briefs = [r["messages"][1]["content"] for r in self.writer_requests()
+                  if "Story S1 (Make add() add) failed" in r["messages"][1]["content"]]
+        self.assertEqual(len(briefs), 2)                          # after the failure, and on resume
+        self.assertIn("send ONLY the replacement stories", briefs[-1])
+        self.assertEqual(self.h.plan.steps[0].status, "done")    # and the plan went on
+
+    def test_a_re_split_that_resends_finished_stories_is_accepted(self):
+        two = [FIX_ADD, {**ADD_SUB, "id": "S2", "depends_on": ["S1"], "files": ["calc.py"],
+                         "acceptance": [criterion("sub(5, 3) → 2", SUB_OK)]}]
+        self.run_plan([
+            call("write_stories", stories=two),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("complete_story", summary="add works"),
+            ChatResponse(content="no", done_reason="stop"),
+            ChatResponse(content="no", done_reason="stop"),            # S2 fails
+            call("write_stories", replaces=["S2"],
+                 stories=[FIX_ADD, {**two[1], "id": "S3"}]),          # S1 sent again
+            call("write_file", path="calc.py", content=CALC_SUB),
+            call("complete_story", summary="sub works"),
+            ChatResponse(content="stop", done_reason="stop")])
+        sset = self.h.plan.story_sets[1]
+        self.assertEqual([(s.id, s.status) for s in sset.stories],
+                         [("S1", "done"), ("S2", "replaced"), ("S3", "done")])
+        self.assertEqual(sset.get("S1").delivered, "add works")    # kept as delivered
+        # The writer's conversation ends with the accepted call; it is in the archive.
+        accepted = [r["message"]["content"] for r in self.h.compacted
+                    if r["message"].get("role") == "tool"
+                    and "kept as delivered" in (r["message"].get("content") or "")]
+        self.assertIn("S1 are done and were kept as delivered", accepted[0])
 
 
 class Commands(Base):

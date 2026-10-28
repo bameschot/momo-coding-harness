@@ -20,6 +20,7 @@ from .events import ChatEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
 from .loop_guard import _owners
 from .plan import PLAN_FILENAME, Step, delete_plan_file
 from .stories import Story, StorySet, new_stories_dir, read_story_file, write_story_file
+from .toolcall_text import text_call_error
 
 DEFAULT_STORIES_CAP = 30          # _run_loop iterations per story (/plan stories cap)
 STORIES_CAP_RANGE = (5, 100)
@@ -125,10 +126,24 @@ class StoryRunnerMixin:
                         return outcome
                 continue
             if not sset.done:
-                stuck = ", ".join(s.id for s in sset.stories if s.status in ("failed", "pending"))
+                retry = next((s for s in sset.stories
+                              if s.status == "failed" and s.attempts < MAX_ATTEMPTS), None)
+                if retry is not None:
+                    # Its re-split never got written (e.g. the writer replied with text): again.
+                    self.event_queue.put(ChatEvent("system",
+                        f"Story {retry.id} failed and was not re-split yet; asking the story "
+                        "writer again."))
+                    outcome = self._resplit(idx, retry)
+                    if outcome != "done":
+                        return outcome
+                    continue
+                failed = [s for s in sset.stories if s.status == "failed"]
+                waiting = [s.id for s in sset.blocked()]
                 self.event_queue.put(ChatEvent("system",
-                    f"Phase {n} cannot go on: {stuck} wait on stories that failed. Edit "
-                    f"{self._stories_rel(n)} (mark a story [ ] to retry it), then /plan resume."))
+                    f"Phase {n} cannot go on: {', '.join(s.id for s in failed)} failed "
+                    f"{MAX_ATTEMPTS} times" + (f" and {', '.join(waiting)} wait on it" if waiting else "")
+                    + f". Edit {self._stories_rel(n)} (mark a story [ ] to retry it), then "
+                    "/plan resume."))
                 return "paused"
             passed, report = self._phase_checks(step, sset)
             if passed:
@@ -192,8 +207,33 @@ class StoryRunnerMixin:
         if outcome == "cancelled":
             return outcome
         self.event_queue.put(ChatEvent("system",
-            f"The story writer stopped without stories for phase {n} ({outcome})."))
+            f"The story writer stopped without stories for phase {n}: {self._writer_stopped(outcome)}. "
+            "/plan resume (or any message) asks it again."))
         return "paused" if outcome == "done" else outcome
+
+    def _story_nudge(self, content: str, tools: list[dict]) -> str:
+        """The note for a story or writing pass that replied without a tool call."""
+        err = text_call_error(content, tools)
+        if self._writing:
+            what = ("Call the write_stories tool itself now, with the complete set as JSON "
+                    "arguments" + (" (send only the replacements)" if self._writing["replaces"] else "")
+                    + ".")
+        else:
+            what = ("A story ends only with complete_story. Make the change with a tool call "
+                    "(edit_file / write_file), run the acceptance checks, then call complete_story.")
+        return ("[Note from the harness, not the user] Your reply had no tool call, so nothing "
+                "happened" + (f": {err}" if err else "") + ". " + what)
+
+    def _writer_stopped(self, outcome: str) -> str:
+        """Why a writing pass ended without stories, in a few words."""
+        if outcome != "done":
+            return {"loop": "the loop guard stopped it", "limit": "it ran out of turns"}.get(outcome, outcome)
+        last = next((m.get("content") or "" for m in reversed(self.messages)
+                     if m.get("role") == "assistant"), "")
+        from .tools import registry, ToolContext
+        err = text_call_error(last, registry.offered(ToolContext(role="story-writer")))
+        return ("it replied with text instead of calling write_stories — " + err if err
+                else "it replied with text instead of calling write_stories")
 
     def _writer_brief(self, idx: int, extra: str = "") -> str:
         plan = self.plan
@@ -247,7 +287,13 @@ class StoryRunnerMixin:
         new = [Story.from_dict(s) for s in raw if isinstance(s, dict)]
         old = plan.story_sets.get(n)
         replaces = [str(x).upper() for x in (args.get("replaces") or w["replaces"]) if str(x).strip()]
+        dropped: list[str] = []
         if old is not None and (replaces or w["append"]):
+            # Finished stories sent again (a model re-listing the whole phase)
+            # are dropped: delivered work is not rewritten.
+            done = {s.id for s in old.stories if s.status == "done"}
+            dropped = [s.id for s in new if s.id in done]
+            new = [s for s in new if s.id not in done]
             # A re-split or a fix pass: the phase's stories so far (copies, so a
             # set that does not validate leaves the stored one as it was), the
             # replaced ones marked, plus the new ones.  Replacements inherit the
@@ -262,12 +308,16 @@ class StoryRunnerMixin:
             sset = StorySet(phase=n, title=plan.steps[n - 1].title, stories=kept + new)
         else:
             sset = StorySet(phase=n, title=plan.steps[n - 1].title, stories=new)
+        kept_note = (f" ({', '.join(dropped)} are done and were kept as delivered; send only "
+                     "new stories.)" if dropped else "")
         errors = sset.validate(plan.earlier_stories(n), self.workdir)
         missing = [r for r in w["replaces"] if r not in replaces]
         if missing:
             errors.append(f"'replaces' must include {', '.join(missing)}")
+        if not new and (replaces or w["append"]):
+            errors.append("no new stories: send the replacement stories")
         if errors:
-            return ("ERROR: the stories need changes before they can run:\n"
+            return ("ERROR: the stories need changes before they can run" + kept_note + ":\n"
                     + "\n".join(f"- {e}" for e in errors)
                     + "\nCall write_stories again with the complete corrected set.")
         revision = args.get("phase_revision")
@@ -281,8 +331,8 @@ class StoryRunnerMixin:
             return answer                     # feedback, or an invalid hand edit
         w["stored"] = True
         self._step_summary = f"{len([s for s in sset.stories if not s.finished])} stories for phase {n}"
-        return (f"Stories approved for phase {n} ({sset.progress()} done). The harness runs them "
-                "now, each in its own conversation. Do not call any more tools.")
+        return (f"Stories approved for phase {n} ({sset.progress()} done).{kept_note} The harness "
+                "runs them now, each in its own conversation. Do not call any more tools.")
 
     def _approve_stories(self, n: int, sset: StorySet, revision) -> str:
         """Ask the user per the setting; '' once approved, else the tool result
@@ -481,23 +531,28 @@ class StoryRunnerMixin:
         sset = self.plan.story_sets[n]
         story.attempts += 1
         story.status = "failed"
+        story.failure = getattr(self, "_story_failure", "") or outcome
         self._write_stories_file(sset)
-        reason = getattr(self, "_story_failure", "") or outcome
         if story.attempts >= MAX_ATTEMPTS:
             self.event_queue.put(ChatEvent("system",
-                f"Story {story.id} failed again ({story.attempts} attempts):\n{_tail(reason)}\n"
+                f"Story {story.id} failed again ({story.attempts} attempts):\n{_tail(story.failure)}\n"
                 f"Edit it in {self._stories_rel(n)} (mark it [ ] to retry), or /plan cancel."))
             return "paused"
-        dependents = _dependents(sset, story.id)
-        ids = [story.id] + dependents
-        nxt = max((s.number for s in sset.stories), default=0) + 1
         self.event_queue.put(ChatEvent("system",
             f"Story {story.id} failed; asking the story writer to re-split it."))
+        return self._resplit(idx, story)
+
+    def _resplit(self, idx: int, story: Story) -> str:
+        """Have the writer replace a failed story and its pending dependents."""
+        sset = self.plan.story_sets[idx + 1]
+        ids = [story.id] + _dependents(sset, story.id)
+        nxt = max((s.number for s in sset.stories), default=0) + 1
         return self._write_stories(idx, replaces=ids, extra=(
-            f"Story {story.id} ({story.title}) failed:\n\n{reason}\n\n"
+            f"Story {story.id} ({story.title}) failed:\n\n{story.failure or 'no reason recorded'}\n\n"
             f"Look at the code as it is now and replace {', '.join(ids)} with smaller or "
-            f"corrected stories that avoid this. Pass replaces={ids} and give the new stories "
-            f"new ids from S{nxt} on. Keep the other stories as they are."))
+            f"corrected stories that avoid this. Pass replaces={ids} and send ONLY the "
+            f"replacement stories, with new ids from S{nxt} on — the finished stories stay "
+            "as they are."))
 
     # ── the phase gate ────────────────────────────────────────────────────────
 

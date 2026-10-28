@@ -96,6 +96,7 @@ class Story:
     turns: int = 0
     refusals: int = 0
     check_results: list = field(default_factory=list)
+    failure: str = ""          # why its last run failed: the re-split (also on resume) uses it
 
     @property
     def number(self) -> int:
@@ -133,6 +134,7 @@ class Story:
             refusals=_count(d.get("refusals")),
             check_results=[r if isinstance(r, dict) else {} for r in (d.get("check_results") or [])]
                           if isinstance(d.get("check_results"), list) else [],
+            failure=str(d.get("failure", "") or ""),
         )
 
     def to_dict(self) -> dict:
@@ -142,7 +144,8 @@ class Story:
                 "provides": self.provides, "acceptance": [c.to_dict() for c in self.acceptance],
                 "status": self.status, "attempts": self.attempts, "delivered": self.delivered,
                 "facts": self.facts, "started_at": self.started_at, "finished_at": self.finished_at,
-                "turns": self.turns, "refusals": self.refusals, "check_results": self.check_results}
+                "turns": self.turns, "refusals": self.refusals, "check_results": self.check_results,
+                "failure": self.failure}
 
     def to_markdown(self) -> str:
         lines = [f"## [{_STATUS_MARK[self.status]}] {self.id} — {self.title}",
@@ -393,8 +396,8 @@ class StorySet:
                 continue
             old = before.get(s.id)
             if old is not None:          # how its last run went is not in the file
-                s.started_at, s.finished_at, s.turns, s.refusals = (
-                    old.started_at, old.finished_at, old.turns, old.refusals)
+                s.started_at, s.finished_at, s.turns, s.refusals, s.failure = (
+                    old.started_at, old.finished_at, old.turns, old.refusals, old.failure)
                 if [c.check for c in s.acceptance] == [c.check for c in old.acceptance]:
                     s.check_results = old.check_results
             merged.append(s)

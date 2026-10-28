@@ -2212,6 +2212,16 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                         "Call write_file now with both 'path' (the file path to write) and 'content' (the complete document)."
                     })
                     continue
+                # A story or a story-writing pass ends only with its own tool, so a
+                # reply without a tool call gets one note first instead of ending it
+                # (Gemma described an edit in text; another time it wrote
+                # write_stories as Python source with a stray quote).
+                run = self._story or self._writing
+                if run is not None and not run.get("nudged") and (content or "").strip():
+                    run["nudged"] = True
+                    self.messages.append({"role": "assistant", "content": content})
+                    self.messages.append({"role": "user", "content": self._story_nudge(content, tools)})
+                    continue
                 self.messages.append({"role": "assistant", "content": content or None})
                 break
 
