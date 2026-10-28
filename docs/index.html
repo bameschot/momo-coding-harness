@@ -610,6 +610,11 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       <p><code>/plan tdd</code> writes the tests first. Each step only moves on once momo has run the suite itself and seen it pass.</p>
       <a class="more" href="#plan-tdd">Test-driven plans →</a>
     </div>
+    <div class="card" style="--c: var(--think)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-tree"/></svg>Story plans</h3>
+      <p><code>/plan stories</code> splits big work into phases. Each phase is broken into small, checked stories when it starts, written against the code as it is then, so a small model always has one clear task.</p>
+      <a class="more" href="#plan-stories">Story plans →</a>
+    </div>
     <div class="card" style="--c: var(--tool)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-tree"/></svg>Syntax-aware navigation</h3>
       <p>Outlines, symbol lookup and references for Python, Java, C/C++, Kotlin, Rust, JS/TS and more, plus config keys, CSS, SQL and Dockerfiles.</p>
@@ -650,7 +655,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
   <div class="modes" aria-label="Modes at a glance">
     <div class="mode-card"><div class="name">design</div><p>Explores the code, asks grounded questions and writes the spec. Doesn't touch code.</p></div>
     <div class="mode-card"><div class="name">chat</div><p>A read-only conversation partner for understanding code and documents.</p></div>
-    <div class="mode-card"><div class="name">plan</div><p>Investigate → plan → approve → execute, one step at a time. Test-first with <code>/plan tdd</code>.</p></div>
+    <div class="mode-card"><div class="name">plan</div><p>Investigate → plan → approve → execute, one step at a time. Test-first with <code>/plan tdd</code>, phases of small stories with <code>/plan stories</code>.</p></div>
     <div class="mode-card"><div class="name">coding</div><p>The full tool suite: edit, move, delete, run commands and use git.</p></div>
     <div class="mode-card"><div class="name">momo</div><p>Talk to the cat. It's a companion first, but it still has every tool.</p></div>
   </div>
@@ -857,10 +862,11 @@ ollama serve</code></pre></div>
 
   <section id="plan" data-voice="plan">
     <h2>Plan mode</h2>
-    <p>momo investigates, writes a step-by-step plan to <code>.momo/plan.md</code>, and changes nothing until you approve it. There are two kinds:</p>
+    <p>momo investigates, writes a step-by-step plan to <code>.momo/plan.md</code>, and changes nothing until you approve it. There are three kinds:</p>
     <ul>
       <li><strong>Normal</strong> (<code>/plan</code>, the default): the model says when each step is done.</li>
       <li><strong>Test-driven</strong> (<code>/plan tdd</code>): tests are written first, and momo runs them to check each step. See <a href="#plan-tdd">Test-driven plans</a>.</li>
+      <li><strong>Stories</strong> (<code>/plan stories</code>): the steps are phases, each broken into small, checked stories when it starts. See <a href="#plan-stories">Story plans</a>.</li>
     </ul>
     <figure class="flow" aria-label="Plan mode lifecycle">
       <div class="flow-row"><div class="box model">1 Investigate<small>read the code, reproduce, <code>ask_user</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">2 Plan<small><code>create_plan</code> writes <code>.momo/plan.md</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">3 Confirm<small><code>y</code> runs it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">4 Execute<small>one step at a time, ▶ in the prompt</small></div><span class="arrow" aria-hidden="true">→</span><div class="box end">Done<small>the plan file is deleted</small></div></div>
@@ -881,7 +887,7 @@ ollama serve</code></pre></div>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Effect</th></tr>
       <tr><td><code>/plan</code></td><td class="wrap">Switch to plan mode, showing the current plan's state if there is one</td></tr>
-      <tr><td><code>/plan tdd</code> · <code>/plan normal</code></td><td class="wrap">Choose a test-driven or a normal plan</td></tr>
+      <tr><td><code>/plan tdd</code> · <code>/plan stories</code> · <code>/plan normal</code></td><td class="wrap">Choose a test-driven, a story or a normal plan</td></tr>
       <tr><td><code>/plan show</code></td><td class="wrap">The plan with the status of each step</td></tr>
       <tr><td><code>/plan run</code></td><td class="wrap">Approve a kept plan and execute it (re-reads the file)</td></tr>
       <tr><td><code>/plan resume</code></td><td class="wrap">Continue a paused plan from its current step</td></tr>
@@ -953,6 +959,63 @@ ollama serve</code></pre></div>
       <li><strong><code>step_test_command</code></strong> runs only the step's own tests for the red check, e.g. <code>python -m pytest -q {files}</code> or <code>go test {dirs}</code>. The full suite remains the gate.</li>
       <li><strong>The model's own run counts.</strong> If the model just ran <code>test_command</code>, it passed and nothing changed since, momo doesn't run it again.</li>
     </ul>
+  </section>
+
+  <section id="plan-stories" data-voice="plan-stories">
+    <h2>Story plans</h2>
+    <p>A plan step like <em>"Implement the WebSocket module"</em> is too big for a small model: no interfaces, no gotchas, no definition of done, and written before any code existed. A story plan plans in two layers. The plan's steps become <strong>phases</strong>. When a phase starts, a <strong>story writer</strong> looks at the code as it is <em>then</em> and breaks the phase into <strong>stories</strong>: small tasks of about one function or class each, ordered by their dependencies. Each story runs in a fresh conversation and only counts as done when its checks pass.</p>
+
+    <figure class="flow" aria-label="How a story plan runs">
+      <div class="flow-col">
+        <div class="box model"><div class="flow-who">model</div>1 Plan the phases<small><code>create_plan</code>: each phase has an <code>outcome</code> and <code>checks</code>, commands that prove it</small></div>
+        <div class="side"><b>you</b> approve the plan</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">story writer</div>2 Write the phase's stories<small>reads the code and what earlier phases delivered; <code>write_stories</code> with up to 12 stories</small></div>
+        <div class="side"><b>check</b>: ids, dependencies (no cycles, nothing undelivered), a check per criterion · <b>you</b> approve the stories</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">model</div>3 One story at a time, each in a fresh context<small>sees the story, and what the stories it depends on provide and delivered, with the current outline of their files</small></div>
+        <div class="side"><b>gate</b>: <code>complete_story</code> runs every acceptance check; a failure is refused with its output</div>
+        <div class="back">↺ next ready story</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>4 Phase gate and report<small>runs the phase's <code>checks</code>, then writes the phase report the next writer starts from</small></div>
+        <div class="back">↺ next phase: back to 2</div>
+      </div>
+      <div class="flow-legend"><span class="you">you</span><span class="model">model</span><span class="harness">harness</span></div>
+      <figcaption>Stories for a phase are written only after the previous phase is done, so they always build on real code.</figcaption>
+    </figure>
+
+    <h3>What a story holds</h3>
+    <ul>
+      <li><strong>Description</strong> and <strong>technical details</strong>: what to build, with exact signatures, formats and the existing code to call.</li>
+      <li><strong>Hints</strong> and <strong>pitfalls</strong>: helpers to reuse, and concrete traps (byte order, off-by-ones, what not to change).</li>
+      <li><strong>Provides</strong>: the interface later stories may rely on, e.g. <code>encode_frame(opcode, payload, mask_key=None) -&gt; bytes</code>.</li>
+      <li><strong>Depends on</strong>: stories of this phase (<code>S2</code>) or of earlier phases (<code>P1.S3</code>, read-only).</li>
+      <li><strong>Acceptance</strong>: criteria as <em>action → expected result</em>, each with a <code>check</code> command where running something can show it. A criterion without a check needs evidence.</li>
+    </ul>
+    <p>When a story passes, momo records what it delivered: the model's summary, plus the files and definitions it changed and the checks that passed. That is what the stories after it see.</p>
+
+    <h3>When a story gets stuck</h3>
+    <ul>
+      <li><strong>It counts as failed</strong> after 3 refused <code>complete_story</code> calls, running out of turns (<code>/plan stories cap N</code>, default 30), the <a href="#loop-guard">loop guard</a> stopping it, or ending without <code>complete_story</code>. A reply without any tool call first gets one reminder.</li>
+      <li><strong>The writer re-splits it</strong>, using what went wrong: the story and those waiting on it are replaced by smaller or corrected stories.</li>
+      <li><strong>A second failure pauses the plan.</strong> Edit the story in its file, mark it <code>[ ]</code> to retry, then <code>/plan resume</code>. A re-split that never got written is tried again on resume.</li>
+      <li><strong>Failing phase checks</strong> get one pass of fix stories before the plan pauses.</li>
+    </ul>
+
+    <h3>Files and tracking</h3>
+    <ul>
+      <li>Stories live in <code>.momo/stories/&lt;plan&gt;-&lt;YYYYMMDD-HHMM&gt;/phase-N.md</code>, one folder per plan, so a new plan never reads an old one's. Edit them before approving, or while the plan is paused. The folder is kept when the plan completes.</li>
+      <li>The status bar shows <code>phase 2/5 · S3 (2/6) · turn 7/30</code>.</li>
+      <li>In the web UI the plan drawer shows the plan as a timeline: phases on a rail, their stories on a branch with status, turns, check results and time, every item foldable, and a wide view with a details pane. A story's <code>↧</code> jumps to its run in the transcript.</li>
+    </ul>
+
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Effect</th></tr>
+      <tr><td><code>/plan stories</code></td><td class="wrap">Plan mode with a story plan</td></tr>
+      <tr><td><code>/plan stories approve each</code> · <code>once</code></td><td class="wrap">Review every phase's stories before they run (the default), or let them run; a change to later phases always asks</td></tr>
+      <tr><td><code>/plan stories cap N</code></td><td class="wrap">Turns one story may take before it counts as stuck (default 30)</td></tr>
+      <tr><td><code>/plan show stories [N]</code></td><td class="wrap">A phase's stories, the current phase by default</td></tr>
+    </table></div>
   </section>
 
   <section id="tui" data-voice="tui">
@@ -2456,6 +2519,11 @@ const SPEECH = {
     "< tests first, then code", "< red, then green~", "< /plan tdd!",
     "< skipped till its step", "< no empty tests!", "< the gate runs the suite",
     "< asserts stay put", "< tdd-step-1 tagged",
+  ],
+  "plan-stories": [
+    "< /plan stories!", "< one bite at a time~", "< phases, then stories",
+    "< written against real code", "< checks or it isn't done", "< S2 waits for S1",
+    "< stuck? re-split it", "< fresh context per story", "< P1.S3 is read-only",
   ],
   tools: [
     "< grep is love", "< read_symbol by line no.", "< find_references!",
