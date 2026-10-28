@@ -1754,11 +1754,18 @@ Compaction fires automatically when token usage exceeds the limit:
 
 The question being worked on and its latest tool calls and results are never removed.
 
-After removing messages the harness makes a one-shot LLM call to summarise what was dropped and prepends the summary to the oldest remaining user message so the model retains key context. The notice in the chat pane says "summarised N messages" when this succeeds, or "removed N messages" if summarisation was skipped or failed.
+After removing messages, what was dropped is folded into a structured summary at the top of the oldest remaining user message, in a `<context-summary>` block marked as background rather than a new request. A later compaction replaces the block instead of stacking another one. The sections come from two places:
+
+- **From the harness, without the LLM:** the user's requests, verbatim (the first two and the newest, each capped at 300 chars), the files the tools modified, moved, deleted or read, and the last 8 commands with their exit codes. A rerun of the same command keeps the latest result and notes "(failed earlier)". These sections build up across compactions and survive a failed summary.
+- **From a one-shot LLM call:** Goal, Constraints & preferences, Progress (Done / In progress / Blocked), Decisions, Failed attempts / gotchas, and Next steps. The summariser gets the previous sections and *updates* them, so it doesn't re-summarise its own summary: it keeps constraints unless the user revoked them and moves finished work to Done. If the reply isn't in that shape (no Goal, or fewer than three of the sections) or the call fails, the previous sections stay and the notice says so.
+
+The summary is capped at a tenth of the context left after the system prompt (between 400 and 2,000 tokens). Past that, long file lists, old commands and old Done bullets are shortened first. Constraints and Next steps are shortened last. During plan execution it also says which step is current; the plan itself is in the system prompt. The summary's parts are saved with the session. A session saved with an older free-text summary keeps that text as "Earlier notes" until the next summary folds it in.
+
+The notice in the chat pane says "summarised N messages" when the LLM summary succeeds, or "removed N messages" if it was skipped or failed.
 
 The system prompt is never removed. Compaction runs on the worker thread — the TUI stays responsive and shows the spinner while the summary is being generated.
 
-Use `/fast-compact` to skip LLM summarisation and compact immediately.
+Use `/fast-compact` to skip LLM summarisation and compact immediately. It still updates the requests, files and commands.
 
 ## Tool Result Cap
 

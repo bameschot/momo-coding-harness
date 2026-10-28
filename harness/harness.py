@@ -14,7 +14,8 @@ from .diff import build_diff_body
 from .events import EventBus, BusyEvent, DeltaEvent, StreamEndEvent
 from .llm import make_client
 from .logger import Logger
-from .compaction import CompactionMixin, calls_tokens, content_text, format_for_summary, text_tokens
+from .compaction import (CompactionMixin, calls_tokens, content_text, format_for_summary,
+                         new_summary_state, text_tokens)
 from .plan import Plan
 from .plan_runner import TDD_MAX_REFUSALS, PlanRunnerMixin, keeps_green
 from .mcp_mixin import MCPMixin
@@ -380,6 +381,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         ]
         # What compaction took out of `messages`, for the full export (transcript.py).
         self.compacted: list[dict] = []
+        # The parts of the compaction summary (compaction.new_summary_state).
+        self.summary_state: dict = new_summary_state()
         self._token_estimate = 0
         self._stream_chars = 0      # chars of the reply currently streaming in
         self._measured_tokens: int | None = None  # last prompt+eval the server reported
@@ -2622,6 +2625,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
             title_locked=self.title_locked,
             compacted=[{**r, "message": _mask_messages([r["message"]])[0]}
                        for r in self.compacted],
+            summary_state=self.summary_state,
         )
         session_mod.save_prefs(model=self.client.model, provider=self.provider)
 
@@ -2638,6 +2642,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self.logger = Logger(self._ts)
         self.messages = data["messages"]
         self.compacted = data.get("compacted", [])
+        self.summary_state = {**new_summary_state(), **(data.get("summary_state") or {})}
         # Sessions saved in a mode that no longer exists (e.g. the removed
         # "writing" mode) fall back to design mode.
         mode = data.get("mode", "design")
@@ -2750,6 +2755,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, MCPMixin):
         self._guides = self._read_guides() if self.guides else []
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
         self.compacted = []
+        self.summary_state = new_summary_state()
         self._token_estimate = self._estimate(schemas=True)
         self._measured_tokens = None
         self.emit_status()

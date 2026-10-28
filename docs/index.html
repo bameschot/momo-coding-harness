@@ -1588,7 +1588,50 @@ FAILED (failures=2)
       <li>Whole old turns, oldest first.</li>
       <li>The middle of the largest remaining tool results.</li>
     </ol>
-    <p>The system prompt, the current question and its latest tool results are never dropped. One extra model call summarises what was removed and keeps it at the top of the conversation. <code>/fast-compact</code> skips the summary; <code>/compact</code> compacts by hand.</p>
+    <p>The system prompt, the current question and its latest tool results are never dropped. What was removed goes into a summary at the top of the conversation. A later compaction updates that summary instead of adding another one. <code>/compact</code> compacts by hand.</p>
+
+    <h3 id="compaction-summary">The summary</h3>
+    <p>The summary has fixed sections. momo fills some of them itself from the tool calls, so they're exact and survive any compaction. One extra model call writes the rest.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Section</th><th>Written by</th><th>Across compactions</th></tr>
+      <tr><td>User requests</td><td class="wrap">momo, word for word</td><td class="wrap">Added to; the first two and the newest are kept</td></tr>
+      <tr><td>Goal, Constraints &amp; preferences, Progress, Decisions, Failed attempts, Next steps</td><td class="wrap">The model</td><td class="wrap">Updated, not rewritten: constraints stay unless you revoked them, finished work moves to Done</td></tr>
+      <tr><td>Files</td><td class="wrap">momo</td><td class="wrap">Built up: modified, moved, deleted, read</td></tr>
+      <tr><td>Commands</td><td class="wrap">momo</td><td class="wrap">The last 8 with their exit codes; a rerun shows "(failed earlier)"</td></tr>
+    </table></div>
+<div class="code-block"><div class="code-bar"><span class="code-lang">what the model sees</span></div><pre><code>&lt;context-summary&gt;
+Summary of earlier work in this conversation (compaction 1). Background, not a new request.
+
+## User requests (verbatim, oldest first)
+1. "Add a currency argument to format_price. Do not change the tests."
+
+## Goal
+format_price takes a currency and every caller passes "EUR".
+
+## Constraints &amp; preferences
+- do not change the tests
+
+## Progress
+Done:
+- signature changed in shop/pricing.py
+In progress:
+- updating callers
+
+## Next steps
+1. update shop/cart.py and shop/checkout.py
+
+## Files
+modified: shop/pricing.py
+
+## Commands (newest last)
+- `pytest tests/test_shop.py` → exit 1
+&lt;/context-summary&gt;</code></pre></div>
+    <ul>
+      <li><strong>Size:</strong> at most a tenth of the context left after the system prompt (400–2,000 tokens). Long file lists and old commands shrink first; constraints and next steps last.</li>
+      <li><strong>When the summary call fails</strong> or its reply isn't in this shape, the previous sections stay and the notice says so. Files, commands and requests are still updated.</li>
+      <li><strong><code>/fast-compact</code></strong> skips the model call. It still updates files, commands and requests.</li>
+      <li><strong>In plan mode</strong> the summary only names the current step: the plan itself is in the system prompt.</li>
+    </ul>
     <ul>
       <li><strong>The model forgets earlier work?</strong> Raise the limit, or use <a href="#plan">plan mode</a> for long jobs: the plan stays in the system prompt.</li>
       <li><strong>Starting something unrelated?</strong> Use <code>/new</code>.</li>
@@ -2464,7 +2507,7 @@ const SPEECH = {
   context: [
     "< ctx yellow at 75%", "< red at 90%, eep", "< half the model's max",
     "< old tool groups go first", "< your question stays!", "< summarised, not lost",
-    "< one summary, folded in", "< /new for a new task~",
+    "< goal & files, kept", "< /new for a new task~",
   ],
   skills: [
     "< /load-skill python", "< skills stack!", "< drop a .md in skills/",

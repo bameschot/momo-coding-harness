@@ -223,12 +223,12 @@ The system prompt at index 0 is never touched.
 
 **LLM summarisation**
 
-After both passes, removed messages are formatted and passed to the model in a one-shot call (no tools). The resulting summary is prepended to the oldest remaining `user` message as `[Earlier context summary:\n...\n]`. If the call fails the summary is silently skipped.
+The summary is rendered from `Harness.summary_state` (`compaction.new_summary_state`, saved with the session), never parsed back from the context. `merge_facts` reads the dropped messages for the user's requests, file operations (tool calls paired with their results by order; `ERROR` and `No change` results don't count) and `run_command` exit codes. `serialise_removed` gives the summariser a labelled transcript with tool-call arguments clipped and tool results kept head and tail. `summary_prompt` asks it to update the previous LLM sections (Goal, Constraints & preferences, Progress, Decisions, Failed attempts / gotchas, Next steps). `parse_sections` validates the reply: no Goal, or fewer than 3 sections, means it is ignored, and so does a failed call. `render_summary` shrinks the block until it fits its budget, and the result is prepended to the oldest remaining `user` message as `<context-summary>\n...\n</context-summary>`. A legacy `[Earlier context summary:` block is kept as the `legacy` section until a summary succeeds. The state is committed only after the summary is in, so a cancel changes nothing.
 
 ### Manual compaction
 
 - `/compact` — runs with LLM summarisation; non-blocking (worker thread, spinner shown).
-- `/fast-compact` — skips summarisation; instant.
+- `/fast-compact` — skips the LLM summary (the harness-built sections are still updated); instant.
 
 ---
 
