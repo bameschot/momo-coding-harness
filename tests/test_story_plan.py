@@ -33,6 +33,16 @@ def call(name, **args):
                         done_reason="stop")
 
 
+def write_set(*stories, revision=None):
+    """A story-writing pass's calls: the outline, one write_story per story
+    (one per turn), then finish_stories."""
+    outline = [{"id": st["id"], "title": st["title"], "depends_on": st.get("depends_on", [])}
+               for st in stories]
+    return ([call("plan_stories", outline=outline)]
+            + [call("write_story", story=st) for st in stories]
+            + [call("finish_stories", **({"phase_revision": revision} if revision else {}))])
+
+
 def criterion(text, check):
     return {"text": text, "check": check}
 
@@ -119,7 +129,7 @@ class Base(unittest.TestCase):
 
     def writer_requests(self):
         return [r for r in ScriptedClient.requests
-                if "write_stories" in r["tools"] and len(r["messages"]) == 2]
+                if "write_story" in r["tools"] and len(r["messages"]) == 2]
 
     def system_lines(self):
         return [ev.text for ev in self.h.event_queue._backlog
@@ -127,10 +137,10 @@ class Base(unittest.TestCase):
 
 
 HAPPY = [
-    call("write_stories", stories=[FIX_ADD]),               # phase 1 writer
+    *write_set(FIX_ADD),                                    # phase 1 writer
     call("write_file", path="calc.py", content=CALC_RIGHT),  # P1 S1
     call("complete_story", summary="add(a, b) returns a + b."),
-    call("write_stories", stories=[ADD_SUB]),               # phase 2 writer
+    *write_set(ADD_SUB),                                    # phase 2 writer
     call("write_file", path="calc.py", content=CALC_SUB),    # P2 S1
     call("complete_story", summary="Added sub(a, b)."),
 ]
@@ -178,7 +188,7 @@ class Run(Base):
 
     def test_facts_are_recorded(self):
         ScriptedClient.script = []
-        self.run_plan(list(HAPPY[:3]) + [ChatResponse(content="stop", done_reason="stop")])
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
         s1 = self.h.plan.story_sets[1].get("S1")
         self.assertEqual(s1.status, "done")
         self.assertEqual(s1.facts["files"], ["calc.py"])
@@ -187,7 +197,7 @@ class Run(Base):
 
     def test_a_failing_check_refuses_the_story(self):
         self.run_plan([
-            call("write_stories", stories=[FIX_ADD]),
+            *write_set(FIX_ADD),
             call("complete_story", summary="done?"),               # calc.py still wrong
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="fixed"),
@@ -203,7 +213,7 @@ class Progress(Base):
     """What the web UI's plan timeline shows: plan_view() and the run data."""
 
     def test_a_run_records_times_turns_and_checks(self):
-        self.run_plan(list(HAPPY[:3]) + [ChatResponse(content="stop", done_reason="stop")])
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
         s1 = self.h.plan.story_sets[1].get("S1")
         self.assertTrue(s1.started_at and s1.finished_at)
         self.assertEqual(s1.turns, 2)                          # write_file, complete_story
@@ -213,7 +223,7 @@ class Progress(Base):
 
     def test_a_refusal_shows_until_the_fix(self):
         self.run_plan([
-            call("write_stories", stories=[FIX_ADD]),
+            *write_set(FIX_ADD),
             call("complete_story", summary="done?"),
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="fixed"),
@@ -230,13 +240,13 @@ class Progress(Base):
             orig(i)
             seen.append(self.h._plan_progress())
         self.h._story_tick = tick
-        self.run_plan(list(HAPPY[:3]) + [ChatResponse(content="stop", done_reason="stop")])
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
         self.assertIn("phase 1/2 · S1 (0/1) · turn 2/30", seen)
         self.assertIn("phase 1/2 · writing stories", seen)
 
     def test_the_view(self):
         self.run_plan([
-            call("write_stories", stories=[FIX_ADD, {**ADD_SUB, "id": "S2", "depends_on": ["S1"]}]),
+            *write_set(FIX_ADD, {**ADD_SUB, "id": "S2", "depends_on": ["S1"]}),
             ChatResponse(content="I give up.", done_reason="stop"),
             ChatResponse(content="stop", done_reason="stop")])
         view = self.h.plan_view()
@@ -263,7 +273,7 @@ class Progress(Base):
             orig(i)
             seen.append(self.h.plan_view()["current"])
         self.h._story_tick = tick
-        self.run_plan(list(HAPPY[:3]) + [ChatResponse(content="stop", done_reason="stop")])
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
         self.assertIn({"step": 1, "writing": True, "turns": 1}, seen)
         self.assertIn({"step": 1, "story": "S1", "turns": 2}, seen)
 
@@ -274,19 +284,21 @@ class Progress(Base):
 class Writer(Base):
     def test_an_invalid_set_goes_back_to_the_writer(self):
         bad = {**FIX_ADD, "acceptance": []}
-        self.run_plan([call("write_stories", stories=[bad]),
-                       call("write_stories", stories=[FIX_ADD]),
+        self.run_plan([call("plan_stories", outline=[{"id": "S1", "title": "Make add() add"}]),
+                       call("write_story", story=bad),
+                       call("write_story", story=FIX_ADD),
+                       call("finish_stories"),
                        ChatResponse(content="stop", done_reason="stop")])
         refusals = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
-                    if m.get("role") == "tool" and "need changes" in (m.get("content") or "")]
+                    if m.get("role") == "tool" and "needs changes" in (m.get("content") or "")]
         self.assertTrue(refusals)
         self.assertIn("S1 (Make add() add): no acceptance criteria", refusals[0])
         self.assertIn(1, self.h.plan.story_sets)
 
     def test_feedback_sends_the_writer_back(self):
         self.answers = ["y", "split it smaller"]               # plan yes, stories feedback
-        self.run_plan([call("write_stories", stories=[FIX_ADD]),
-                       call("write_stories", stories=[FIX_ADD]),
+        self.run_plan([*write_set(FIX_ADD),
+                       call("finish_stories"),                     # the drafts are kept
                        ChatResponse(content="stop", done_reason="stop")])
         feedback = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
                     if m.get("role") == "tool" and "User requested changes" in (m.get("content") or "")]
@@ -307,17 +319,17 @@ class Writer(Base):
                 f.write_text(f.read_text().replace("Make add() add", "Make add() really add"))
             return "y"
         self.h._ask_user = edit_then_yes
-        self.run_plan(list(HAPPY[:3]) + [ChatResponse(content="stop", done_reason="stop")])
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
         self.assertEqual(self.h.plan.story_sets[1].get("S1").title, "Make add() really add")
 
 
 class Failure(Base):
     def test_a_failed_story_is_re_split(self):
         self.run_plan([
-            call("write_stories", stories=[FIX_ADD]),
+            *write_set(FIX_ADD),
             ChatResponse(content="I give up.", done_reason="stop"),         # nudged once
             ChatResponse(content="Still no.", done_reason="stop"),          # S1 fails
-            call("write_stories", replaces=["S1"], stories=[{**FIX_ADD, "id": "S2"}]),
+            *write_set({**FIX_ADD, "id": "S2"}),
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="add works"),
             ChatResponse(content="stop", done_reason="stop")])
@@ -330,20 +342,20 @@ class Failure(Base):
 
     def test_a_story_the_loop_guard_stops_is_re_split(self):
         self.h.loop_resets = 0
-        self.run_plan([call("write_stories", stories=[FIX_ADD])]
+        self.run_plan(write_set(FIX_ADD)
                       + [call("read_file", path="calc.py")] * 3
-                      + [call("write_stories", replaces=["S1"], stories=[{**FIX_ADD, "id": "S2"}]),
-                         ChatResponse(content="stop", done_reason="stop")])
+                      + write_set({**FIX_ADD, "id": "S2"})
+                      + [ChatResponse(content="stop", done_reason="stop")])
         resplit = self.writer_requests()[1]["messages"][1]["content"]
         self.assertIn("the loop guard stopped it", resplit)
         self.assertEqual(self.h.plan.story_sets[1].get("S1").status, "replaced")
 
     def test_failing_again_pauses_the_plan(self):
         self.run_plan([
-            call("write_stories", stories=[FIX_ADD]),
+            *write_set(FIX_ADD),
             ChatResponse(content="no", done_reason="stop"),
             ChatResponse(content="no", done_reason="stop"),
-            call("write_stories", replaces=["S1"], stories=[{**FIX_ADD, "id": "S2"}]),
+            *write_set({**FIX_ADD, "id": "S2"}),
             ChatResponse(content="still no", done_reason="stop"),
             ChatResponse(content="still no", done_reason="stop")])
         self.assertIsNotNone(self.h.plan)
@@ -352,25 +364,125 @@ class Failure(Base):
         self.assertTrue(any("Plan paused in phase 1/2" in s for s in self.system_lines()))
 
 
+class OneStoryAtATime(Base):
+    """The writer outlines first, then writes one story per turn, and may
+    rewrite an earlier story or the outline before it finishes."""
+
+    TWO = [FIX_ADD, {**ADD_SUB, "id": "S2", "depends_on": ["S1"]}]
+    OUTLINE = [{"id": "S1", "title": "Make add() add"},
+               {"id": "S2", "title": "Add sub()", "depends_on": ["S1"]}]
+    STOP = [ChatResponse(content="I give up.", done_reason="stop"),
+            ChatResponse(content="stop", done_reason="stop")]
+
+    def tool_results(self, needle):
+        return [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                if m.get("role") == "tool" and needle in (m.get("content") or "")]
+
+    def test_a_second_story_in_the_same_turn_is_refused(self):
+        both = ChatResponse(content="", done_reason="stop", tool_calls=[
+            ToolCall(name="write_story", arguments={"story": self.TWO[0]}),
+            ToolCall(name="write_story", arguments={"story": self.TWO[1]})])
+        self.run_plan([call("plan_stories", outline=self.OUTLINE), both,
+                       call("write_story", story=self.TWO[1]), call("finish_stories")]
+                      + self.STOP)
+        self.assertIn("one story per turn — S2 was not stored", self.tool_results("one story per turn")[0])
+        self.assertEqual([s.id for s in self.h.plan.story_sets[1].stories], ["S1", "S2"])
+
+    def test_a_story_before_the_outline_is_refused(self):
+        self.run_plan([call("write_story", story=FIX_ADD), *write_set(FIX_ADD)] + self.STOP)
+        self.assertTrue(self.tool_results("outline the phase first"))
+        self.assertIn(1, self.h.plan.story_sets)
+
+    def test_finishing_with_a_story_missing_names_it(self):
+        self.run_plan([call("plan_stories", outline=self.OUTLINE),
+                       call("write_story", story=FIX_ADD), call("finish_stories"),
+                       call("write_story", story=self.TWO[1]), call("finish_stories")] + self.STOP)
+        refusal = self.tool_results("not every story is written")[0]
+        self.assertIn("S2 still needs write_story", refusal)
+        self.assertIn("Next: write S2 — Add sub() (depends on S1)", refusal)
+
+    def test_each_result_names_the_next_story(self):
+        self.run_plan(write_set(*self.TWO) + self.STOP)
+        self.assertIn("Next: write S1 — Make add() add", self.tool_results("Outline stored (2 stories)")[0])
+        self.assertIn("Next: write S2 — Add sub()", self.tool_results("Stored S1 (1/2 written)")[0])
+        self.assertIn("call finish_stories", self.tool_results("Stored S2 (2/2 written)")[0])
+        lines = self.system_lines()
+        self.assertIn("✎ P1.S1 drafted — Make add() add (1/2)", lines)
+        self.assertIn("✎ P1.S2 drafted — Add sub() (2/2)", lines)
+
+    def test_an_earlier_story_can_be_rewritten(self):
+        self.run_plan([call("plan_stories", outline=self.OUTLINE),
+                       call("write_story", story=self.TWO[0]),
+                       call("write_story", story=self.TWO[1]),
+                       call("write_story", story={**FIX_ADD, "title": "Make add() add, for sub()"}),
+                       call("finish_stories")] + self.STOP)
+        self.assertTrue(self.tool_results("Replaced the draft of S1 (2/2 written)"))
+        self.assertEqual(self.h.plan.story_sets[1].get("S1").title, "Make add() add, for sub()")
+        self.assertIn("✎ P1.S1 rewritten — Make add() add, for sub() (2/2)", self.system_lines())
+
+    def test_a_new_outline_drops_the_drafts_left_out(self):
+        self.run_plan([call("plan_stories", outline=self.OUTLINE),
+                       call("write_story", story=self.TWO[0]),
+                       call("write_story", story=self.TWO[1]),
+                       call("plan_stories", outline=self.OUTLINE[:1]),
+                       call("finish_stories")] + self.STOP)
+        self.assertTrue(self.tool_results("Dropped the drafts of S2"))
+        self.assertEqual([s.id for s in self.h.plan.story_sets[1].stories], ["S1"])
+
+    def test_a_story_outside_the_outline_is_added_to_it(self):
+        self.run_plan([call("plan_stories", outline=self.OUTLINE[:1]),
+                       call("write_story", story=self.TWO[0]),
+                       call("write_story", story=self.TWO[1]),
+                       call("finish_stories")] + self.STOP)
+        self.assertTrue(self.tool_results("Stored S2 (2/2 written)"))
+        self.assertEqual([s.id for s in self.h.plan.story_sets[1].stories], ["S1", "S2"])
+
+    def test_a_bad_outline_is_refused(self):
+        cyclic = [{"id": "S1", "title": "a", "depends_on": ["S2"]},
+                  {"id": "S2", "title": "b", "depends_on": ["S1"]}]
+        self.run_plan([call("plan_stories", outline=cyclic), *write_set(FIX_ADD)] + self.STOP)
+        refusal = self.tool_results("the outline needs changes")[0]
+        self.assertIn("dependency cycle", refusal)
+
+
 # A write_stories call Gemma wrote as Python source in a text reply, with the
-# stray quote that made it unreadable (2026-10-28 tiny-mud run, story S7's check).
-BROKEN_TEXT_CALL = r"""I will replace the failed story.
+# stray quote that made it unreadable (2026-10-28 tiny-mud run, story S7's
+# check), as the write_story call it would be now.
+BROKEN_TEXT_CALL = r"""I will write the story.
 
 ```python
-write_stories(stories=[
-    {
-        "id": "S2",
-        "title": "Make add() add",
-        "description": "add() returns 0.",
-        "technical_details": "def add(a, b) -> a + b",
-        "acceptance": [
-            {
-                "text": "add(2, 3) → 5",
-                "check": 'python3 -c "from calc import add; assert add(2, 3) == \'5\''"
-            }
-        ]
+write_story(story={
+    "id": "S2",
+    "title": "Make add() add",
+    "description": "add() returns 0.",
+    "technical_details": "def add(a, b) -> a + b",
+    "acceptance": [
+        {
+            "text": "add(2, 3) → 5",
+            "check": 'python3 -c "from calc import add; assert add(2, 3) == \'5\''"
+        }
+    ]
+})
+```
+"""
+
+
+# A write_stories call Gemma wrote as JSON in a text reply after leaked ChatML
+# turn markers, with the stray `1,` that made it unreadable (2026-10-28
+# tiny-mud run), as the write_story call it would be now.
+BROKEN_JSON_CALL = """I'll now call `write_story` with this story.<|im_end|>
+<|im_start|>assistant
+```json
+{
+    "name": "write_story",
+    "arguments": {
+        "story": {
+            1,
+            "id": "S3",
+            "title": "Implement WebSocket Client for Integration Tests"
+        }
     }
-], replaces=["S1"])
+}
 ```
 """
 
@@ -378,22 +490,35 @@ write_stories(stories=[
 class Recovery(Base):
     """What keeps a stories plan going when a model answers in text."""
 
+    def test_the_text_call_error_reads_a_json_call(self):
+        from harness.toolcall_text import _extract_text_tool_calls, text_call_error
+        from harness.tools import ToolContext, registry
+        tools = registry.offered(ToolContext(role="story-writer"))
+        self.assertEqual(_extract_text_tool_calls(BROKEN_JSON_CALL, tools), [])
+        err = text_call_error(BROKEN_JSON_CALL, tools)
+        self.assertIn("write_story call written as JSON could not be read", err)
+        self.assertIn("Expecting property name", err)
+        self.assertIn("line 5 of the call: 1,", err)
+        fixed = BROKEN_JSON_CALL.replace("            1,\n", "")
+        self.assertEqual(text_call_error(fixed, tools), "")
+        self.assertEqual(_extract_text_tool_calls(fixed, tools)[0]["name"], "write_story")
+
     def test_the_text_call_error_says_where(self):
         from harness.toolcall_text import _extract_text_tool_calls, text_call_error
         from harness.tools import ToolContext, registry
         tools = registry.offered(ToolContext(role="story-writer"))
         err = text_call_error(BROKEN_TEXT_CALL, tools)
-        self.assertIn("write_stories(…) written as text could not be read", err)
+        self.assertIn("write_story(…) written as text could not be read", err)
         self.assertIn("unterminated string literal", err)
         self.assertIn("\"check\":", err)                          # the line it broke on
         fixed = BROKEN_TEXT_CALL.replace("\\'5\\''\"", "\\'5\\'\"'")
         self.assertEqual(text_call_error(fixed, tools), "")
-        self.assertEqual(_extract_text_tool_calls(fixed, tools)[0]["name"], "write_stories")
+        self.assertEqual(_extract_text_tool_calls(fixed, tools)[0]["name"], "write_story")
         self.assertEqual(text_call_error("Let's perform the edit.", tools), "")
 
     def test_a_story_that_answers_in_text_is_nudged_once(self):
         self.run_plan([
-            call("write_stories", stories=[FIX_ADD]),
+            *write_set(FIX_ADD),
             ChatResponse(content="Let's perform the edit.", done_reason="stop"),
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="add works"),
@@ -406,18 +531,19 @@ class Recovery(Base):
 
     def test_a_writer_that_writes_its_call_as_text_is_told_why(self):
         self.run_plan([
-            ChatResponse(content=BROKEN_TEXT_CALL.replace(', replaces=["S1"]', ""), done_reason="stop"),
-            call("write_stories", stories=[FIX_ADD]),
+            ChatResponse(content=BROKEN_TEXT_CALL, done_reason="stop"),
+            *write_set(FIX_ADD),
             ChatResponse(content="stop", done_reason="stop")])
         self.assertTrue(self.h.plan.story_sets[1].approved)
         notes = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
                  if m.get("role") == "user" and "Your reply had no tool call" in (m.get("content") or "")]
         self.assertIn("could not be read (unterminated string literal", notes[0])
-        self.assertIn("Call the write_stories tool itself", notes[0])
+        self.assertIn("Call the tool itself now", notes[0])
+        self.assertIn("outline the stories with plan_stories", notes[0])
 
     def test_resuming_retries_a_re_split_that_was_never_written(self):
         self.run_plan([
-            call("write_stories", stories=[FIX_ADD]),
+            *write_set(FIX_ADD),
             ChatResponse(content="no", done_reason="stop"),
             ChatResponse(content="no", done_reason="stop"),            # S1 fails
             ChatResponse(content=BROKEN_TEXT_CALL, done_reason="stop"),
@@ -425,7 +551,7 @@ class Recovery(Base):
         self.assertTrue(any("stopped without stories for phase 1: it replied with text" in s
                             for s in self.system_lines()))
         ScriptedClient.script = [
-            call("write_stories", replaces=["S1"], stories=[{**FIX_ADD, "id": "S2"}]),
+            *write_set({**FIX_ADD, "id": "S2"}),
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="add works"),
             ChatResponse(content="stop", done_reason="stop")]
@@ -436,20 +562,19 @@ class Recovery(Base):
         briefs = [r["messages"][1]["content"] for r in self.writer_requests()
                   if "Story S1 (Make add() add) failed" in r["messages"][1]["content"]]
         self.assertEqual(len(briefs), 2)                          # after the failure, and on resume
-        self.assertIn("send ONLY the replacement stories", briefs[-1])
+        self.assertIn("write ONLY the replacement stories", briefs[-1])
         self.assertEqual(self.h.plan.steps[0].status, "done")    # and the plan went on
 
     def test_a_re_split_that_resends_finished_stories_is_accepted(self):
         two = [FIX_ADD, {**ADD_SUB, "id": "S2", "depends_on": ["S1"], "files": ["calc.py"],
                          "acceptance": [criterion("sub(5, 3) → 2", SUB_OK)]}]
         self.run_plan([
-            call("write_stories", stories=two),
+            *write_set(*two),
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="add works"),
             ChatResponse(content="no", done_reason="stop"),
             ChatResponse(content="no", done_reason="stop"),            # S2 fails
-            call("write_stories", replaces=["S2"],
-                 stories=[FIX_ADD, {**two[1], "id": "S3"}]),          # S1 sent again
+            *write_set(FIX_ADD, {**two[1], "id": "S3"}),            # S1 sent again
             call("write_file", path="calc.py", content=CALC_SUB),
             call("complete_story", summary="sub works"),
             ChatResponse(content="stop", done_reason="stop")])
@@ -457,11 +582,11 @@ class Recovery(Base):
         self.assertEqual([(s.id, s.status) for s in sset.stories],
                          [("S1", "done"), ("S2", "replaced"), ("S3", "done")])
         self.assertEqual(sset.get("S1").delivered, "add works")    # kept as delivered
-        # The writer's conversation ends with the accepted call; it is in the archive.
+        # The writer's outline dropped S1; that conversation is in the archive.
         accepted = [r["message"]["content"] for r in self.h.compacted
                     if r["message"].get("role") == "tool"
                     and "kept as delivered" in (r["message"].get("content") or "")]
-        self.assertIn("S1 are done and were kept as delivered", accepted[0])
+        self.assertIn("S1 is done and kept as delivered", accepted[0])
 
 
 class Commands(Base):
@@ -485,7 +610,7 @@ class Commands(Base):
         self.assertIn("needs an 'outcome'", self.h._handle_create_plan(args))
 
     def test_show_stories(self):
-        self.run_plan(list(HAPPY[:3]) + [ChatResponse(content="stop", done_reason="stop")])
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
         self.assertIn("# Stories: phase 1 — Fix add", self.cmd("/plan show stories 1"))
         self.assertIn("no stories yet", self.cmd("/plan show stories 2"))
 

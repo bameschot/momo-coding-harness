@@ -137,6 +137,31 @@ class Story:
             failure=str(d.get("failure", "") or ""),
         )
 
+    def problems(self, ids: set[str], earlier: dict[str, "Story"] | None = None,
+                 workdir: Path | None = None) -> list[str]:
+        """What is wrong with this story on its own ([] when nothing).  ids: the
+        stories of this phase it may depend on; earlier: those of finished
+        phases by "P<n>.S<m>"."""
+        earlier = earlier or {}
+        errors: list[str] = []
+        where = f"{self.id} ({self.title})"
+        if not self.description:
+            errors.append(f"{where}: no description")
+        if not self.acceptance:
+            errors.append(f"{where}: no acceptance criteria — add at least one, with a "
+                          "check command where it can be checked by running something")
+        for c in self.acceptance:
+            if not c.text:
+                errors.append(f"{where}: an acceptance criterion has no text")
+            if c.check is not None and not c.check:
+                errors.append(f"{where}: empty check for \"{c.text}\" — give the command, "
+                              "or leave check out for a criterion backed by evidence")
+        errors += _dependency_problems(where, self.id, self.depends_on, ids, earlier)
+        for f in self.files:
+            if _bad_path(f, workdir):
+                errors.append(f"{where}: file {f} is outside the working directory")
+        return errors
+
     def to_dict(self) -> dict:
         return {"id": self.id, "title": self.title, "description": self.description,
                 "technical_details": self.technical_details, "hints": self.hints,
@@ -250,34 +275,7 @@ class StorySet:
             seen.add(s.id)
         ids = {s.id for s in live}
         for s in live:
-            where = f"{s.id} ({s.title})"
-            if not s.description:
-                errors.append(f"{where}: no description")
-            if not s.acceptance:
-                errors.append(f"{where}: no acceptance criteria — add at least one, with a "
-                              "check command where it can be checked by running something")
-            for c in s.acceptance:
-                if not c.text:
-                    errors.append(f"{where}: an acceptance criterion has no text")
-                if c.check is not None and not c.check:
-                    errors.append(f"{where}: empty check for \"{c.text}\" — give the command, "
-                                  "or leave check out for a criterion backed by evidence")
-            for d in s.depends_on:
-                if d == s.id:
-                    errors.append(f"{where}: depends on itself")
-                elif _RX_REF.match(d):
-                    dep = earlier.get(d)
-                    if dep is None:
-                        errors.append(f"{where}: depends on {d}, which is not a story of an "
-                                      "earlier phase")
-                    elif dep.status != "done":
-                        errors.append(f"{where}: depends on {d}, which was not delivered")
-                elif d not in ids:
-                    errors.append(f"{where}: depends on {d}, which is not in this phase "
-                                  "(earlier phases' stories are P<n>.S<m>)")
-            for f in s.files:
-                if _bad_path(f, workdir):
-                    errors.append(f"{where}: file {f} is outside the working directory")
+            errors += s.problems(ids, earlier, workdir)
         cycle = _cycle(live)
         if cycle:
             errors.append("dependency cycle: " + " → ".join(cycle))
@@ -439,6 +437,79 @@ def _bad_path(path: str, workdir: Path | None) -> bool:
         except ValueError:
             return True
     return False
+
+
+def _dependency_problems(where: str, story_id: str, depends_on: list[str], ids: set[str],
+                         earlier: dict[str, Story]) -> list[str]:
+    errors: list[str] = []
+    for d in depends_on:
+        if d == story_id:
+            errors.append(f"{where}: depends on itself")
+        elif _RX_REF.match(d):
+            dep = earlier.get(d)
+            if dep is None:
+                errors.append(f"{where}: depends on {d}, which is not a story of an "
+                              "earlier phase")
+            elif dep.status != "done":
+                errors.append(f"{where}: depends on {d}, which was not delivered")
+        elif d not in ids:
+            errors.append(f"{where}: depends on {d}, which is not in this phase "
+                          "(earlier phases' stories are P<n>.S<m>)")
+    return errors
+
+
+def outline_entries(raw) -> list[dict]:
+    """plan_stories' outline as [{id, title, depends_on, provides}], tolerant of
+    what a model sends (a single item, ids in any case, deps as a string)."""
+    items = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+    out = []
+    for d in items:
+        if not isinstance(d, dict):
+            continue
+        provides = d.get("provides")
+        out.append({"id": str(d.get("id", "") or "").strip().upper(),
+                    "title": str(d.get("title", "") or "").strip() or "(untitled story)",
+                    "depends_on": _ids(d.get("depends_on")),
+                    "provides": "; ".join(_items(provides)) if isinstance(provides, list)
+                                else str(provides or "").strip()})
+    return out
+
+
+def validate_outline(outline: list[dict], kept: list[Story] | None = None,
+                     earlier: dict[str, Story] | None = None) -> list[str]:
+    """What is wrong with an outline from outline_entries ([] when nothing).
+    kept: the phase's stories a re-split or a fix pass adds to, the replaced
+    ones marked so (their ids stay taken); earlier: the stories of finished
+    phases by "P<n>.S<m>"."""
+    kept = kept or []
+    live = [s for s in kept if s.status != "replaced"]
+    taken = {s.id for s in kept}
+    if not outline:
+        return ["no stories: outline at least one"]
+    errors: list[str] = []
+    if len(live) + len(outline) > MAX_STORIES:
+        errors.append(f"{len(live) + len(outline)} stories — at most {MAX_STORIES} per phase; "
+                      "merge the smallest or move work to a later phase")
+    seen: set[str] = set()
+    for e in outline:
+        if not _RX_ID.match(e["id"]):
+            errors.append(f"{e['id'] or '(no id)'}: ids are S1, S2, …")
+        elif e["id"] in seen:
+            errors.append(f"{e['id']}: id used twice")
+        elif e["id"] in taken:
+            nxt = max((s.number for s in kept), default=0) + 1
+            errors.append(f"{e['id']}: already a story of this phase — new ids start at S{nxt}")
+        seen.add(e["id"])
+    ids = seen | {s.id for s in live}
+    for e in outline:
+        errors += _dependency_problems(f"{e['id']} ({e['title']})", e["id"], e["depends_on"],
+                                       ids, earlier or {})
+    stubs = live + [Story(id=e["id"], title=e["title"], depends_on=e["depends_on"])
+                    for e in outline]
+    cycle = _cycle(stubs)
+    if cycle:
+        errors.append("dependency cycle: " + " → ".join(cycle))
+    return errors
 
 
 def _cycle(stories: list[Story]) -> list[str]:

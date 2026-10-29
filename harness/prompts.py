@@ -68,8 +68,9 @@ def _story_writer_prompt(workdir: str) -> str:
         return raw.replace("{workdir}", workdir)
     return (
         "You are the story writer of a phased plan. Investigate the code the current phase "
-        "builds on with the read tools, then call write_stories with small, dependency-ordered "
-        "stories, each with exact technical details and acceptance criteria with check commands. "
+        "builds on with the read tools, outline small, dependency-ordered stories with "
+        "plan_stories, then write them one per turn with write_story, each with exact technical "
+        "details and acceptance criteria with check commands, and call finish_stories. "
         f"Do not edit files. Working directory: {workdir}"
     )
 

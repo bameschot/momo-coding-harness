@@ -7,7 +7,8 @@ from pathlib import Path
 
 from harness.plan import Plan, Step
 from harness.stories import (MAX_STORIES, Criterion, Story, StorySet, new_stories_dir,
-                             read_story_file, slug, write_story_file)
+                             outline_entries, read_story_file, slug, validate_outline,
+                             write_story_file)
 
 
 def story(sid, deps=(), status="pending", **kw):
@@ -155,6 +156,53 @@ class Validate(unittest.TestCase):
         self.assertEqual(self.errors(), ["no stories: write at least one"])
         self.assertEqual(self.errors(story("S1", status="replaced")),
                          ["no stories: write at least one"])
+
+
+class Outline(unittest.TestCase):
+    """plan_stories' outline, and one story checked on its own (write_story)."""
+
+    def test_entries_are_lenient(self):
+        self.assertEqual(outline_entries({"id": "s1", "title": " A ", "depends_on": "none",
+                                          "provides": ["f()", "g()"]}),
+                         [{"id": "S1", "title": "A", "depends_on": [], "provides": "f(); g()"}])
+        self.assertEqual(outline_entries("nonsense"), [])
+
+    def test_a_good_outline(self):
+        out = outline_entries([{"id": "S1", "title": "a"},
+                               {"id": "S2", "title": "b", "depends_on": ["S1", "P1.S1"]}])
+        self.assertEqual(validate_outline(out, earlier={"P1.S1": story("S1", status="done")}), [])
+
+    def test_ids_dependencies_cycles_and_size(self):
+        self.assertEqual(validate_outline([]), ["no stories: outline at least one"])
+        errs = validate_outline(outline_entries([
+            {"id": "X1", "title": "a"}, {"id": "S2", "title": "b", "depends_on": ["S9"]},
+            {"id": "S2", "title": "c"}]))
+        self.assertTrue(any("X1: ids are S1" in e for e in errs))
+        self.assertTrue(any("S2: id used twice" in e for e in errs))
+        self.assertTrue(any("depends on S9, which is not in this phase" in e for e in errs))
+        errs = validate_outline(outline_entries([{"id": "S1", "title": "a", "depends_on": ["S2"]},
+                                                 {"id": "S2", "title": "b", "depends_on": ["S1"]}]))
+        self.assertTrue(any(e.startswith("dependency cycle") for e in errs))
+        many = outline_entries([{"id": f"S{i}", "title": "x"} for i in range(1, MAX_STORIES + 2)])
+        self.assertTrue(any(f"at most {MAX_STORIES}" in e for e in validate_outline(many)))
+
+    def test_added_to_kept_stories(self):
+        kept = [story("S1", status="done"), story("S2", status="replaced")]
+        new = outline_entries([{"id": "S3", "title": "c", "depends_on": ["S1"]}])
+        self.assertEqual(validate_outline(new, kept), [])
+        errs = validate_outline(outline_entries([{"id": "S2", "title": "again"}]), kept)
+        self.assertIn("S2: already a story of this phase — new ids start at S3", errs)
+        errs = validate_outline(outline_entries([{"id": "S3", "title": "c", "depends_on": ["S2"]}]),
+                                kept)
+        self.assertTrue(any("depends on S2, which is not in this phase" in e for e in errs))
+
+    def test_one_story_checks_as_the_set_does(self):
+        bad = story("S1", deps=["S1", "S7", "P1.S1"], acceptance=[], description="",
+                    files=["../out.py"])
+        alone = bad.problems({"S1"}, {}, Path("/tmp/x"))
+        in_set = StorySet(phase=1, stories=[bad]).validate({}, Path("/tmp/x"))
+        self.assertEqual(alone + ["dependency cycle: S1 → S1"], in_set)   # the cycle is the set's
+        self.assertEqual(len(alone), 6)
 
 
 class Order(unittest.TestCase):

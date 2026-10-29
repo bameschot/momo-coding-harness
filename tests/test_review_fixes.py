@@ -16,7 +16,8 @@ from harness.llm.base import ChatResponse, LLMClient
 from harness.llm.llamacpp_client import LlamaCppClient
 from harness.llm.ollama_client import OllamaClient
 from harness.logger import Logger
-from harness.toolcall_text import _extract_text_tool_calls, _strip_text_tool_calls
+from harness.toolcall_text import (_extract_text_tool_calls, _strip_text_tool_calls,
+                                   _strip_turn_markers)
 from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 
@@ -200,6 +201,15 @@ class TextToolCalls(unittest.TestCase):
         self.assertEqual(_extract_text_tool_calls(text, tools.ALL_TOOLS),
                          [{"name": "read_file", "arguments": {"path": "a}.py"}}])
         self.assertEqual(_strip_text_tool_calls(text), "")
+
+    def test_leaked_turn_markers_are_stripped(self):
+        text = ('Calling it now.<|im_end|>\n<|im_start|>assistant\n'
+                '{"name": "read_file", "arguments": {"path": "a.py"}}')
+        self.assertEqual(_extract_text_tool_calls(text, tools.ALL_TOOLS),
+                         [{"name": "read_file", "arguments": {"path": "a.py"}}])
+        self.assertEqual(_strip_turn_markers("Done.<end_of_turn>\n<start_of_turn>model\nOk."),
+                         "Done.\nOk.")
+        self.assertEqual(_strip_turn_markers("<|im_end|>"), "")
 
 
 class Prompts(unittest.TestCase):

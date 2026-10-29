@@ -49,7 +49,8 @@ from .prompts import (_index_banner, MODES,
                       _cavecat_rules, _load_role, _nav_rules, _net_rules, _story_writer_prompt,
                       planner_for_tdd)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
-                            _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls)
+                            _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls,
+                            _strip_turn_markers)
 
 # DIFF_TOOLS (Tool.diff): tools whose result a frontend may receive as
 # DiffEvents instead of a ToolResultEvent; served to the web UI.  The harness
@@ -2116,6 +2117,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     self.text_tool_calls += len(recovered)
                     _calls = [(r["name"], r["arguments"]) for r in recovered]
                     content = ""
+            # After recovery, so the arguments of a text call keep the markers.
+            content = _strip_turn_markers(content)
 
             self.logger.log_response(
                 self.mode, self.client.model,
@@ -2338,8 +2341,12 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                         result = "Step marked complete."
                     else:
                         result = "ERROR: complete_step is only available while executing an approved plan."
-                elif name == "write_stories":
-                    result = self._handle_write_stories(args if isinstance(args, dict) else {})
+                elif name == "plan_stories":
+                    result = self._handle_plan_stories(args if isinstance(args, dict) else {})
+                elif name == "write_story":
+                    result = self._handle_write_story(args if isinstance(args, dict) else {})
+                elif name == "finish_stories":
+                    result = self._handle_finish_stories(args if isinstance(args, dict) else {})
                 elif name == "complete_story":
                     result = self._handle_complete_story(args if isinstance(args, dict) else {})
                 else:
@@ -2502,9 +2509,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     "Stop and summarise what you have found or done so far, "
                     "or describe your next step if you are not finished."
                 )
-                if self.story_role == "story-writer":
-                    nudge = ("You have been calling tools for several turns. Once you know the code "
-                             "this phase builds on, call write_stories with the complete set.")
+                if self.story_role == "story-writer" and self._writing:
+                    nudge = ("You have been calling tools for several turns. "
+                             + self._writer_next(self._writing))
                 elif self.story_role == "story-exec":
                     nudge = ("You have been calling tools for several turns. Once the story is "
                              "implemented and its acceptance checks pass, call complete_story with "

@@ -32,7 +32,8 @@ def tdd_variant(ctx) -> str:
 
 # Stories plans: create_plan's steps are phases, each with what exists when it
 # is done and the commands that close it.  Its stories come later, written per
-# phase by the story writer (write_stories) against the code as it is then.
+# phase by the story writer (plan_stories, write_story, finish_stories) against
+# the code as it is then.
 PHASE = {
     "type": "object",
     "properties": {
@@ -74,6 +75,20 @@ STORY = {
         "acceptance":        {"type": "array", "items": CRITERION, "description": "When the story is done; at least one, with check commands wherever possible"},
     },
     "required": ["id", "title", "description", "technical_details", "acceptance"],
+}
+
+# plan_stories: one line per story, the split and the order only; the details
+# come one story at a time with write_story.
+OUTLINE_ITEM = {
+    "type": "object",
+    "properties": {
+        "id":         {"type": "string", "description": "S1, S2, … in this phase"},
+        "title":      {"type": "string", "description": "Short imperative summary naming the definition"},
+        "depends_on": {"type": "array", "items": {"type": "string"},
+                       "description": "Ids of stories that must be done first: S<n> in this phase, P<n>.S<m> for an earlier phase's"},
+        "provides":   {"type": "string", "description": "One line: what later stories may rely on"},
+    },
+    "required": ["id", "title"],
 }
 
 

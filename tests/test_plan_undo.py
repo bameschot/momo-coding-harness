@@ -10,7 +10,7 @@ from harness.commands import handle as handle_command
 from harness.llm.base import ChatResponse
 from harness.plan import PLAN_FILENAME
 from test_story_plan import (ADD_OK, CALC_RIGHT, CALC_WRONG, FIX_ADD, PLAN_ARGS, Base,
-                             ScriptedClient, call, criterion)
+                             ScriptedClient, call, criterion, write_set)
 from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 NORMAL = {"title": "Calc", "goal": "Fix add().",
@@ -90,7 +90,7 @@ class StoriesPlan(_Undo):
         self.assertEqual(self.h.set_plan_kind("stories"), "")
         ScriptedClient.script = [
             call("create_plan", **PLAN_ARGS),
-            call("write_stories", stories=[FIX_ADD, CHECK_ADD]),
+            *write_set(FIX_ADD, CHECK_ADD),
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="add(a, b) returns a + b."),
             call("complete_story", summary="add checked.")]

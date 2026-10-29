@@ -336,7 +336,42 @@ def text_call_error(text: str, tools: list[dict]) -> str:
             shown = f": {line[:100]}" if line else ""
             return f"your {fn}(…) written as text could not be read ({e.msg}{where}{shown})"
         return ""
+    # A call written as JSON, {"name": "<tool>", "arguments": {...}}, that tier 3
+    # of _extract_text_tool_calls could not read (gemma once put a stray `1,`
+    # inside a story object of a write_stories call).
+    pat = re.compile(r'\{\s*"name"\s*:\s*"(' + '|'.join(re.escape(n) for n in known) + r')"')
+    for m in pat.finditer(text):
+        try:
+            _JSON_DECODER.raw_decode(text, m.start())
+        except json.JSONDecodeError as e:
+            line_no = text.count("\n", m.start(), e.pos) + 1
+            line_start = text.rfind("\n", 0, e.pos) + 1
+            line_end = text.find("\n", e.pos)
+            line = text[line_start:line_end if line_end >= 0 else len(text)].strip()
+            shown = f": {line[:100]}" if line else ""
+            return (f"your {m.group(1)} call written as JSON could not be read "
+                    f"({e.msg} at line {line_no} of the call{shown})")
+        return ""
     return ""
+
+
+# Chat-template turn markers a model sometimes writes as text, e.g. gemma ending
+# its reply with "<|im_end|>\n<|im_start|>assistant" and carrying on as if in a
+# new turn.  Markup only: they must not be shown or sent back as content.
+_RX_TURN_MARKERS = re.compile(
+    r'<\|im_start\|>(?:system|user|assistant|tool)?\n?'
+    r'|<\|im_end\|>'
+    r'|<start_of_turn>(?:system|user|model)?\n?'
+    r'|<end_of_turn>'
+    r'|<\|start_header_id\|>\w*<\|end_header_id\|>\n?'
+    r'|<\|eot_id\|>'
+    r'|<\|endoftext\|>'
+)
+
+
+def _strip_turn_markers(text: str) -> str:
+    """Remove leaked chat-template turn markers from a reply's text."""
+    return _RX_TURN_MARKERS.sub("", text).strip() if text else text
 
 
 def _derive_write_path(content: str, mode: str) -> str:

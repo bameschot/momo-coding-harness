@@ -351,6 +351,30 @@ table { border-collapse: collapse; font-size: 14px; width: 100%; }
 .ctx-legend .reply::before { background: repeating-linear-gradient(135deg, transparent 0 3px, color-mix(in srgb, var(--think) 35%, transparent) 3px 6px); }
 .ctx-fig figcaption { margin-top: 6px; color: var(--muted); }
 
+/* .seq: sequence diagrams (the story writer); scrolls inside itself on a phone */
+.seq { margin: 1em 0; }
+.seq figcaption { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.seq-scroll { overflow-x: auto; }
+.seq svg { display: block; width: 100%; min-width: 600px; max-width: 720px; height: auto; font: 12px var(--sans); }
+.seq .model   { --gen: var(--assistant); }
+.seq .harness { --gen: var(--tool); }
+.seq .you     { --gen: var(--user); }
+.seq .lane rect { fill: var(--surface); stroke: var(--gen); stroke-width: 1.5; }
+.seq .lane text { fill: var(--gen); font: 600 11px var(--sans); letter-spacing: .06em; text-transform: uppercase; text-anchor: middle; }
+.seq .lane line { stroke: var(--border); stroke-dasharray: 4 4; }
+.seq .msg { stroke: var(--gen); stroke-width: 1.5; }
+.seq .msg.reply { stroke-dasharray: 5 3; }
+.seq .msg.opt { stroke-dasharray: 2 3; }
+.seq .ah { fill: var(--gen); }
+.seq .lbl { fill: var(--text); text-anchor: middle; }
+.seq .lbl.c { font: 11.5px var(--mono); }
+.seq .sub { fill: var(--muted); font-size: 11px; text-anchor: middle; }
+.seq .note { fill: var(--muted); font-size: 11.5px; }
+.seq .act { fill: var(--surface); stroke: var(--gen); }
+.seq .act-t { fill: var(--text); text-anchor: middle; }
+.seq .frame { fill: none; stroke: var(--border); stroke-width: 1.2; }
+.seq .frame-tab { fill: var(--code-bg); stroke: var(--border); }
+.seq .frame-t { fill: var(--muted); font: 600 11px var(--sans); }
 /* .flow: step diagrams (agent loop, fetch_url guard, plan lifecycle) */
 .flow { margin: 1em 0; font-size: 13.5px; --gen: var(--border); }
 .flow figcaption { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
@@ -970,7 +994,7 @@ ollama serve</code></pre></div>
         <div class="box model"><div class="flow-who">model</div>1 Plan the phases<small><code>create_plan</code>: each phase has an <code>outcome</code> and <code>checks</code>, commands that prove it</small></div>
         <div class="side"><b>you</b> approve the plan</div>
         <div class="down" aria-hidden="true">↓</div>
-        <div class="box model"><div class="flow-who">story writer</div>2 Write the phase's stories<small>reads the code and what earlier phases delivered; <code>write_stories</code> with up to 12 stories</small></div>
+        <div class="box model"><div class="flow-who">story writer</div>2 Write the phase's stories<small>reads the code and what earlier phases delivered; outlines up to 12 stories with <code>plan_stories</code>, writes them one per turn with <code>write_story</code>, then <code>finish_stories</code> (<a href="#story-writer">sequence</a>)</small></div>
         <div class="side"><b>check</b>: ids, dependencies (no cycles, nothing undelivered), a check per criterion · <b>you</b> approve the stories</div>
         <div class="down" aria-hidden="true">↓</div>
         <div class="box model"><div class="flow-who">model</div>3 One story at a time, each in a fresh context<small>sees the story, and what the stories it depends on provide and delivered, with the current outline of their files</small></div>
@@ -982,6 +1006,77 @@ ollama serve</code></pre></div>
       </div>
       <div class="flow-legend"><span class="you">you</span><span class="model">model</span><span class="harness">harness</span></div>
       <figcaption>Stories for a phase are written only after the previous phase is done, so they always build on real code.</figcaption>
+    </figure>
+
+    <h3 id="story-writer">How the writer writes a phase's stories</h3>
+    <p>When the writer sent a whole phase in one call, small models worked out every story in one long chain of thought. That was slow and often looped. Now the writer works in steps, all in one conversation so it keeps what it read in the code, and each tool result tells it what to do next:</p>
+    <ol>
+      <li><strong>Outline.</strong> <code>plan_stories</code> gets one line per story: id, title, <code>depends_on</code> and a one-line <code>provides</code>. The split and the order are decided here, not the details. momo checks the ids, the dependencies (no cycles) and the limit of 12 stories.</li>
+      <li><strong>One story per turn.</strong> <code>write_story</code> sends the next story in full. momo checks that story on its own, shows <code>✎ P1.S2 drafted — … (2/4)</code> and names the story to write next. A second <code>write_story</code> in the same turn is refused, so the model only has to think about one story at a time.</li>
+      <li><strong>Adjust along the way.</strong> Sending an id again rewrites that story. A new id joins the outline. Calling <code>plan_stories</code> again changes the outline and drops drafts that are no longer in it.</li>
+      <li><strong>Finish.</strong> <code>finish_stories</code> checks the whole set, writes <code>phase-N.md</code> and asks you to approve it. Feedback goes back to the writer, which keeps its drafts and only revises what you asked about. An optional <code>phase_revision</code> proposes changes to later phases.</li>
+    </ol>
+
+    <figure class="seq" aria-label="Sequence of a story-writing pass">
+      <div class="seq-scroll">
+      <svg viewBox="0 0 660 624" role="img" aria-labelledby="seq-title">
+        <title id="seq-title">The story writer outlines with plan_stories, writes one story per turn with write_story, and submits with finish_stories; then you approve and the stories run.</title>
+        <defs>
+          <marker id="seq-a-model" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah model" d="M0 0 10 5 0 10z"/></marker>
+          <marker id="seq-a-harness" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah harness" d="M0 0 10 5 0 10z"/></marker>
+          <marker id="seq-a-you" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah you" d="M0 0 10 5 0 10z"/></marker>
+        </defs>
+
+        <!-- lanes -->
+        <g class="lane model"><rect x="35" y="12" width="150" height="36" rx="8"/><text x="110" y="35">story writer</text><line x1="110" y1="48" x2="110" y2="612"/></g>
+        <g class="lane harness"><rect x="305" y="12" width="150" height="36" rx="8"/><text x="380" y="35">harness</text><line x1="380" y1="48" x2="380" y2="612"/></g>
+        <g class="lane you"><rect x="525" y="12" width="110" height="36" rx="8"/><text x="580" y="35">you</text><line x1="580" y1="48" x2="580" y2="612"/></g>
+
+        <!-- brief and investigation -->
+        <text class="lbl" x="245" y="80">phase brief + earlier reports</text>
+        <line class="msg harness" x1="380" y1="86" x2="112" y2="86" marker-end="url(#seq-a-harness)"/>
+        <rect class="act model" x="40" y="104" width="140" height="30" rx="6"/>
+        <text class="act-t" x="110" y="123">investigate the code</text>
+
+        <!-- outline -->
+        <text class="lbl c" x="245" y="168">plan_stories(outline)</text>
+        <line class="msg model" x1="110" y1="174" x2="378" y2="174" marker-end="url(#seq-a-model)"/>
+        <text class="sub" x="245" y="190">id · title · depends_on · provides</text>
+        <text class="note" x="392" y="178">checks ids, deps, ≤ 12</text>
+        <text class="lbl" x="245" y="214">Next: write S1</text>
+        <line class="msg harness reply" x1="380" y1="220" x2="112" y2="220" marker-end="url(#seq-a-harness)"/>
+
+        <!-- one story per turn -->
+        <rect class="frame" x="20" y="240" width="620" height="152" rx="4"/>
+        <path class="frame-tab" d="M20 240h168v14l-8 8H20z"/>
+        <text class="frame-t" x="28" y="255">loop · one story per turn</text>
+        <text class="lbl c" x="245" y="280">write_story(S<tspan font-style="italic">k</tspan>)</text>
+        <line class="msg model" x1="110" y1="286" x2="378" y2="286" marker-end="url(#seq-a-model)"/>
+        <text class="note" x="392" y="284">checks this story</text>
+        <text class="note" x="392" y="300">✎ P1.S<tspan font-style="italic">k</tspan> drafted (<tspan font-style="italic">k</tspan>/<tspan font-style="italic">n</tspan>)</text>
+        <text class="lbl" x="245" y="320">Stored S<tspan font-style="italic">k</tspan> · Next: write S<tspan font-style="italic">k</tspan>+1</text>
+        <line class="msg harness reply" x1="380" y1="326" x2="112" y2="326" marker-end="url(#seq-a-harness)"/>
+        <text class="lbl c" x="245" y="358">write_story(S1) · plan_stories</text>
+        <line class="msg model opt" x1="110" y1="364" x2="378" y2="364" marker-end="url(#seq-a-model)"/>
+        <text class="sub" x="245" y="381">optional: fix an earlier story or the outline</text>
+
+        <!-- finish and approval -->
+        <text class="lbl c" x="245" y="422">finish_stories</text>
+        <line class="msg model" x1="110" y1="428" x2="378" y2="428" marker-end="url(#seq-a-model)"/>
+        <text class="note" x="392" y="432">checks the whole set</text>
+        <text class="note" x="392" y="448">writes phase-N.md</text>
+        <text class="lbl" x="480" y="482">approve?</text>
+        <line class="msg harness" x1="380" y1="488" x2="578" y2="488" marker-end="url(#seq-a-harness)"/>
+        <text class="lbl" x="480" y="518">y — or feedback</text>
+        <line class="msg you reply" x1="580" y1="524" x2="382" y2="524" marker-end="url(#seq-a-you)"/>
+        <text class="lbl" x="245" y="550">feedback: revise, finish again</text>
+        <line class="msg harness reply" x1="380" y1="556" x2="112" y2="556" marker-end="url(#seq-a-harness)"/>
+        <rect class="act harness" x="290" y="576" width="180" height="30" rx="6"/>
+        <text class="act-t" x="380" y="595">on y: run the stories</text>
+      </svg>
+      </div>
+      <div class="flow-legend"><span class="model">story writer</span><span class="harness">harness</span><span class="you">you</span></div>
+      <figcaption>Solid arrows are calls, dashed ones are replies. A failed story's re-split and a fix pass follow the same steps for the new stories only.</figcaption>
     </figure>
 
     <h3>What a story holds</h3>
@@ -997,7 +1092,7 @@ ollama serve</code></pre></div>
     <h3>When a story gets stuck</h3>
     <ul>
       <li><strong>It counts as failed</strong> after 3 refused <code>complete_story</code> calls, running out of turns (<code>/plan stories cap N</code>, default 30), the <a href="#loop-guard">loop guard</a> stopping it, or ending without <code>complete_story</code>. A reply without any tool call first gets one reminder.</li>
-      <li><strong>The writer re-splits it</strong>, using what went wrong: the story and those waiting on it are replaced by smaller or corrected stories.</li>
+      <li><strong>The writer re-splits it</strong>, using what went wrong: the story and those waiting on it are replaced by smaller or corrected stories. It outlines and writes only the replacements, with new ids, one per turn as above.</li>
       <li><strong>A second failure pauses the plan.</strong> Edit the story in its file, mark it <code>[ ]</code> to retry, then <code>/plan resume</code>. A re-split that never got written is tried again on resume.</li>
       <li><strong>Failing phase checks</strong> get one pass of fix stories before the plan pauses.</li>
     </ul>
