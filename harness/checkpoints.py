@@ -102,6 +102,8 @@ class CheckpointStore:
                 t["files"] = {k: e for k, e in t["files"].items()
                               if self._inside(k) and isinstance(e, dict)
                               and isinstance(e.get("before"), dict)}
+                if not isinstance(t.get("plan"), dict):
+                    t.pop("plan", None)
             self._turns = [t for t in self._turns if t["files"]]
             try:
                 self._next_id = max([int(data.get("next_id", 1))]
@@ -161,11 +163,15 @@ class CheckpointStore:
 
     # ── recording (the worker thread, from dispatch) ─────────────────────
 
-    def begin_turn(self, turn: int, label: str, step: str = "") -> None:
+    def begin_turn(self, turn: int, label: str, step: str = "",
+                   plan: dict | None = None) -> None:
         """A new user turn or plan step: its writes go to a new checkpoint,
-        made on the first one."""
+        made on the first one.  plan: the plan step or story it runs, which
+        an undo of it puts back to pending (Harness._reset_plan_progress)."""
         with self._lock:
             self._pending = {"turn": turn, "label": " ".join(label.split())[:80], "step": step}
+            if plan:
+                self._pending["plan"] = plan
             self._open = None
             self._ran_commands = False
 
@@ -328,7 +334,7 @@ class CheckpointStore:
 
     def turns(self) -> list[dict]:
         """The stack for the Changes menu, newest first: [{id, turn, label, step,
-        ts, ran_commands, files: [{path, rel, op, from?, added, removed,
+        plan, ts, ran_commands, files: [{path, rel, op, from?, added, removed,
         restorable}]}]; op is A(dded), M(odified), D(eleted) or R(enamed)."""
         with self._lock:
             out = []
@@ -346,7 +352,7 @@ class CheckpointStore:
                     files.append(self._row(e, key, before, after, self._show(after),
                                            src=src, restorable=key in special
                                            or _restorable(before)))
-                out.append({k: t.get(k) for k in ("id", "turn", "label", "step", "ts",
+                out.append({k: t.get(k) for k in ("id", "turn", "label", "step", "plan", "ts",
                                                   "ran_commands")} | {"files": files})
             return out
 

@@ -394,7 +394,8 @@ class StoryRunnerMixin:
         # "▶ P1.S3 — …": the web UI links this line and the story's row both ways.
         self.event_queue.put(ChatEvent("system",
             f"▶ P{n}.{story.id} — {story.title} ({sset.progress()} done in phase {n})"))
-        self.checkpoints.begin_turn(self._turn_count, story.title, step=f"P{n} {story.id}")
+        self.checkpoints.begin_turn(self._turn_count, story.title, step=f"P{n} {story.id}",
+                                    plan={"plan": self.plan.title, "phase": n, "story": story.id})
         self._story = {"phase": n, "id": story.id, "refusals": 0, "done": False,
                        "failure": "", "start": len(self.messages)}
         self._append_user(self._story_brief(n, story))

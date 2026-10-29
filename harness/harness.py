@@ -1341,6 +1341,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                          + ", ".join(r["skipped"]))
         for rel, why in r["failed"]:
             lines.append(f"Could not restore {rel}: {why}")
+        if (reset := self._reset_plan_progress([t.get("plan") for t in taken])):
+            lines.append(reset)
         left = store.count()
         lines.append(f"{left} checkpoint{'s' if left != 1 else ''} left." if left
                      else "Nothing left to undo.")

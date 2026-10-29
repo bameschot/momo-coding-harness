@@ -133,6 +133,7 @@ async function askUndo(t, host) {
       + (plan.lost.length ? `; can't restore ${plan.lost.join(", ")}` : "")
       + (plan.ran_commands ? ". Command changes aren't tracked." : ".");
   }
+  if (plan.plan_progress) question += ` ${plan.plan_progress}.`;
   if (!(await confirmInline(host, question, force ? "Overwrite" : "Undo"))) return;
   try { await hooks.post("api/undo", { checkpoint: t.id, force }); }
   catch (e) { toast(e.message, "error"); }

@@ -107,6 +107,22 @@ class Recording(_Store):
         again.record(["b.py"], "write_file")
         self.assertEqual({t["id"] for t in again.turns()}, {1, 2})
 
+    def test_the_plan_step_it_ran_survives_a_restart(self):
+        ref = {"plan": "Calc", "phase": 1, "story": "S1"}
+        self.store.begin_turn(1, "story", step="P1 S1", plan=ref)
+        self.write("a.py", "1\n")
+        self.begin()
+        self.write("b.py", "1\n")
+        again = CheckpointStore(self.wd, "s1")
+        self.assertEqual([t["plan"] for t in again.turns()], [None, ref])
+
+    def test_a_plan_ref_that_is_not_a_dict_is_dropped_on_load(self):
+        self.store.begin_turn(1, "step", plan={"plan": "Calc", "step": 0, "title": "A"})
+        self.write("a.py", "1\n")
+        self.store._turns[0]["plan"] = "step 0"
+        self.store._save()
+        self.assertNotIn("plan", CheckpointStore(self.wd, "s1")._turns[0])
+
     def test_big_files_are_noted_not_saved(self):
         big = self.wd / "big.bin"
         big.write_bytes(b"x" * (cp_mod.MAX_FILE_BYTES + 1))

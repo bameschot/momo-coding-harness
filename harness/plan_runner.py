@@ -96,6 +96,97 @@ class PlanRunnerMixin:
             if err:
                 self.event_queue.put(ErrorEvent(err))
 
+    # ── undo of a step's or story's checkpoint ───────────────────────────────
+
+    def _undone_units(self, refs: list) -> tuple[list[int], dict[int, list[str]]]:
+        """What undoing checkpoints with these plan refs (checkpoints.begin_turn)
+        puts back to pending: step indexes, and per phase the story ids — the
+        undone stories, then the done ones that depend on them.  Refs of another
+        plan, or of a step revise_plan replaced since, are left out."""
+        plan = self.plan
+        steps: list[int] = []
+        stories: dict[int, list[str]] = {}
+        if plan is None:
+            return steps, stories
+        for ref in refs:
+            if not isinstance(ref, dict) or ref.get("plan") != plan.title:
+                continue
+            idx, n = ref.get("step"), ref.get("phase")
+            if isinstance(idx, int) and 0 <= idx < len(plan.steps):
+                st = plan.steps[idx]
+                if (st.title == ref.get("title") and st.status in ("done", "in_progress")
+                        and idx not in steps):
+                    steps.append(idx)
+            elif isinstance(n, int) and n in plan.story_sets:
+                s = plan.story_sets[n].get(str(ref.get("story") or ""))
+                ids = stories.setdefault(n, [])
+                if s is not None and s.status in ("done", "in_progress") and s.id not in ids:
+                    ids.append(s.id)
+        # Done stories built on one that goes back, here or in a later phase, go back too.
+        frontier = [(n, sid) for n, ids in stories.items() for sid in ids]
+        while frontier:
+            n, sid = frontier.pop()
+            for m, sset in plan.story_sets.items():
+                if m < n:
+                    continue
+                dep = sid if m == n else f"P{n}.{sid}"
+                ids = stories.setdefault(m, [])
+                for s in sset.stories:
+                    if s.status == "done" and dep in s.depends_on and s.id not in ids:
+                        ids.append(s.id)
+                        frontier.append((m, s.id))
+        return sorted(steps), {n: stories[n] for n in sorted(stories) if stories[n]}
+
+    def _units_text(self, steps: list[int], stories: dict[int, list[str]]) -> str:
+        """'step 2/5 "Parse args"' or 'P1 S2, S3; P2 S1'."""
+        n = len(self.plan.steps)
+        parts = [f'step {i + 1}/{n} "{self.plan.steps[i].title}"' for i in steps]
+        parts += [f"P{p} " + ", ".join(ids) for p, ids in stories.items()]
+        return "; ".join(parts)
+
+    def plan_progress_undone(self, ids: list[int], partial: bool = False) -> str:
+        """The confirm line for undoing checkpoints ids: the plan progress that
+        goes back with them ('' when none).  partial: some files will be skipped,
+        and a checkpoint not taken back completely keeps its progress."""
+        refs = [t.get("plan") for t in self.checkpoints.turns() if t["id"] in ids]
+        steps, stories = self._undone_units(refs)
+        if not (steps or stories):
+            return ""
+        return (f"Plan progress goes back to pending: {self._units_text(steps, stories)}"
+                + (" (for the checkpoints taken back completely)" if partial else ""))
+
+    def _reset_plan_progress(self, refs: list) -> str:
+        """Put the steps / stories whose checkpoints were undone back to pending,
+        so /plan resume runs them again; the report line ('' when none)."""
+        steps, stories = self._undone_units(refs)
+        if not (steps or stories):
+            return ""
+        plan = self.plan
+        for i in steps:
+            st = plan.steps[i]
+            st.status, st.note, st.started_at, st.finished_at, st.turns = "pending", "", "", "", 0
+        for n, ids in stories.items():
+            sset = plan.story_sets[n]
+            for sid in ids:
+                s = sset.get(sid)
+                s.status, s.delivered, s.facts, s.check_results = "pending", "", {}, []
+                s.started_at, s.finished_at, s.turns, s.refusals, s.failure = "", "", 0, 0, ""
+            sset.gate = {}
+            if n <= len(plan.steps) and plan.steps[n - 1].status == "done":
+                phase = plan.steps[n - 1]
+                phase.status, phase.finished_at, phase.note, phase.report = "pending", "", "", ""
+            self._write_stories_file(sset)
+        # current_index() takes a step in progress first: a later one waits now.
+        first = min(steps + [n - 1 for n in stories])
+        for st in plan.steps[first + 1:]:
+            if st.status == "in_progress":
+                st.status = "pending"
+        self._sync_plan_file()
+        self.rebuild_system_prompt()
+        n = len(steps) + sum(len(ids) for ids in stories.values())
+        return (f"Plan progress back to pending: {self._units_text(steps, stories)} — "
+                f"/plan resume runs {'it' if n == 1 else 'them'} again.")
+
     @staticmethod
     def _parse_steps(raw) -> list[Step]:
         """Build steps from a tool's 'steps' argument.  Tolerates a JSON-encoded
@@ -445,7 +536,8 @@ class PlanRunnerMixin:
             self.emit_status()
             n = len(plan.steps)
             self.event_queue.put(ChatEvent("system", f"▶ Plan step {idx + 1}/{n}: {step.title}"))
-            self.checkpoints.begin_turn(self._turn_count, step.title, step=f"step {idx + 1}/{n}")
+            self.checkpoints.begin_turn(self._turn_count, step.title, step=f"step {idx + 1}/{n}",
+                                        plan={"plan": plan.title, "step": idx, "title": step.title})
             # A TDD stage starts with its tests switched on and run once (red first),
             # and with the test files as they are then, to audit at its gate.
             switched = (self._tdd_switch_on(step)

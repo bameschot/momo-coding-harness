@@ -160,8 +160,11 @@ def _undo(harness: Harness, arg: str) -> CommandResult:
     first = turns[ids[-1]]
     what = (f"checkpoint #{ids[0]} (turn {first['turn']} · {first['label'] or 'no message'})"
             if len(ids) == 1 else f"{len(ids)} checkpoints (#{ids[-1]}–#{ids[0]})")
+    text = checkpoints_mod.describe(plan, force)
+    if (progress := harness.plan_progress_undone(ids, partial=bool(plan["conflicts"]) and not force)):
+        text += "\n" + progress
     return CommandResult(handled=True,
-                         confirm_prompt=f"Undo {what}?\n" + checkpoints_mod.describe(plan, force),
+                         confirm_prompt=f"Undo {what}?\n" + text,
                          confirm_action=lambda: harness.undo_files(checkpoint, force))
 
 

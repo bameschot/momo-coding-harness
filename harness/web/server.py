@@ -490,7 +490,10 @@ class WebServer:
                     cp = int(cp) if cp else None
                     if path == "/api/changes/preview":
                         plan = h.checkpoints.preview(cp)
-                        self._json({**plan, "text": checkpoints_mod.describe(plan)})
+                        self._json({**plan, "text": checkpoints_mod.describe(plan),
+                                    "plan_progress": h.plan_progress_undone(
+                                        # The UI forces an undo with conflicts only.
+                                        plan["ids"], partial=bool(plan["conflicts"] and plan["restore"]))})
                         return
                     # Only a path the store tracks: never a way to read any file.
                     diff = h.checkpoints.diff(arg("path"), cp)
