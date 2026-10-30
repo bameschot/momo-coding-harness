@@ -264,6 +264,11 @@ def grammar_available(lang: str) -> bool:
         return False
 
 
+def any_grammar() -> bool:
+    """True when tree-sitter and at least one grammar wheel are installed."""
+    return AVAILABLE and any(grammar_available(lang) for lang in set(_EXTENSIONS.values()))
+
+
 # ── symbol extraction ────────────────────────────────────────────────────────
 
 @dataclass

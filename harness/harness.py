@@ -1141,7 +1141,15 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
     def set_index(self, enabled: bool, clear_choices: bool = True) -> str:
         """Turn the code index on or off; returns a notice.  Turning it on turns
         every index tool on in every role, unless clear_choices is False (startup,
-        where a restored session's choices stand)."""
+        where a restored session's choices stand).  Without any tree-sitter
+        package there is nothing to index: the index stays off, with a warning."""
+        if enabled and not code_nav.any_grammar():
+            self._stop_index()
+            self.index_enabled = False
+            self.rebuild_system_prompt()
+            self.emit_status()
+            return ("WARNING: Code index: no tree-sitter packages are installed, so indexing "
+                    "is off. Install them (pip install -r requirements.txt), then /index on.")
         if enabled and not self.index_enabled and clear_choices:
             self._clear_choices(INDEX_TOOL_NAMES)
         self.index_enabled = enabled

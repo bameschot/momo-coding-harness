@@ -1261,6 +1261,16 @@ class HarnessIndex(unittest.TestCase):
     def tool_names(self):
         return {t["function"]["name"] for t in self.h._current_tools()}
 
+    def test_no_tree_sitter_warns_and_stays_off(self):
+        with mock.patch.object(hmod.code_nav, "any_grammar", return_value=False):
+            note = self.h.set_index(True, clear_choices=False)
+            self.assertTrue(note.startswith("WARNING"), note)
+            self.assertIn("tree-sitter", note)
+            self.assertFalse(self.h.index_enabled)
+            self.assertIsNone(self.h.index)
+            self.assertTrue(self.cmd("/index on").startswith("WARNING"))
+            self.assertFalse(self.h.index_enabled)
+
     def test_toggle_swaps_tools_and_prompt(self):
         self.assertIn("find_symbol", self.tool_names())
         self.assertIn("Code index: on", self.cmd("/index on"))
