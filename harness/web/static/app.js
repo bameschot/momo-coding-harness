@@ -257,6 +257,7 @@ function renderChat(role, text, extra = "") {
   }
   wrap.textContent = text;
   if (role === "system" && text.startsWith("ERROR")) wrap.classList.add("error");
+  else if (role === "system" && text.startsWith("WARNING")) wrap.classList.add("warning");
   const node = role === "system" ? lineKeyOf(text) : null;
   if (node) {
     wrap.classList.add("story-start");
@@ -764,20 +765,27 @@ function applyLoopStatus(s) {
   }
 }
 
+const INDEX_INSTALL_HINT = "no tree-sitter packages are installed. "
+  + "Install them (pip install -r requirements.txt), then /index on.";
+
 // The INDEX badge and the View → Code index section, mirroring the NET ones.
 function applyIndexStatus(s) {
   const on = !!s.index_enabled;
-  const trouble = on && (s.index_degraded || s.index_state === "stopped");
+  const missing = !!s.index_unavailable;
+  const trouble = missing || (on && (s.index_degraded || s.index_state === "stopped"));
   const badge = $("#index-badge");
   badge.classList.toggle("warn", trouble);
-  badge.textContent = !on ? "INDEX: off"
+  badge.textContent = missing ? "INDEX: no tree-sitter"
+    : !on ? "INDEX: off"
     : s.index_progress ? `INDEX: ${s.index_state} ${s.index_progress}`
     : s.index_state === "stopped" ? "INDEX: stopped"
     : `INDEX: ${s.index_files} files · ${formatSize(s.index_mem)}/${formatSize(s.index_max_bytes)}`;
-  badge.title = !on ? "Code index: off"
+  badge.title = missing ? `Code index unavailable: ${INDEX_INSTALL_HINT}`
+    : !on ? "Code index: off"
     : (s.index_degraded ? "Code index is over its memory budget and dropped a part. " : "")
       + "Code index — what it holds";
   $("#index-on").checked = on;
+  $("#index-on").disabled = missing;
   $("#index-persist").checked = !!s.index_persist;
   $("#index-route").checked = s.index_route !== false;
   const im = $("#index-max-mem");
@@ -2266,13 +2274,15 @@ async function refreshIndexMenu() {
     return;
   }
   if (menu.hidden) return;
-  if (!b.enabled) return renderIndexOff(menu);
+  if (!b.enabled) return renderIndexOff(menu, b.unavailable);
   renderIndexMenu(menu, b);
 }
-// The INDEX chip while the index is off: what it is, and the switch.
-function renderIndexOff(menu) {
+// The INDEX chip while the index is off: what it is, and the switch — or,
+// without tree-sitter, why it can't be switched on.
+function renderIndexOff(menu, unavailable) {
   const on = el("button", "btn primary small", "Turn the code index on");
   on.type = "button";
+  on.disabled = !!unavailable;
   on.onclick = () => { closeMenu(); send("/index on"); };
   const more = el("button", "link-btn", "Index settings…");
   more.type = "button";
@@ -2280,11 +2290,12 @@ function renderIndexOff(menu) {
   const foot = el("div", "menu-foot");
   foot.append(more);
   menu.replaceChildren(
-    el("div", "menu-title", "Code index: off"),
-    el("div", "menu-note", "With the index on, the model finds definitions, callers and text in one call "
-      + "(index_* tools) instead of grepping file by file."),
+    el("div", "menu-title", unavailable ? "Code index: unavailable" : "Code index: off"),
+    el("div", "menu-note", unavailable ? `The index can't run: ${INDEX_INSTALL_HINT}`
+      : "With the index on, the model finds definitions, callers and text in one call "
+        + "(index_* tools) instead of grepping file by file."),
     on, foot);
-  on.focus();
+  (unavailable ? more : on).focus();
 }
 function renderIndexMenu(menu, b) {
   const used = b.used || 1;

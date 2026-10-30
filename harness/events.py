@@ -94,6 +94,7 @@ class StatusEvent:
     index_persist: bool = True    # /index-persist: load/save a pickle
     index_route: bool = True      # /index-route: answer grep_files/find_files from the index
     index_degraded: bool = False  # over budget: a component was dropped
+    index_unavailable: bool = False  # no tree-sitter packages: the index can't run
     mcp_enabled: bool = True      # /mcp on|off
     mcp_confirm: bool = True      # /mcp-confirm: ask before MCP calls (per server policy)
     mcp_ready: int = 0            # servers connected

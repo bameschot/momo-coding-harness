@@ -1270,6 +1270,9 @@ class HarnessIndex(unittest.TestCase):
             self.assertIsNone(self.h.index)
             self.assertTrue(self.cmd("/index on").startswith("WARNING"))
             self.assertFalse(self.h.index_enabled)
+            self.assertTrue(self.h.status_event().index_unavailable)
+            self.assertTrue(self.h.index_breakdown()["unavailable"])
+        self.assertFalse(self.h.status_event().index_unavailable)
 
     def test_toggle_swaps_tools_and_prompt(self):
         self.assertIn("find_symbol", self.tool_names())

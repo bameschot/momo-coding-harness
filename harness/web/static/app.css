@@ -266,12 +266,13 @@ button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border)
 }
 .msg.assistant { color: var(--text); }
 .msg.assistant.plain { white-space: pre-wrap; }
-/* Notices from momo (startup, settings changed) stay quiet; errors stand out. */
+/* Notices from momo (startup, settings changed) stay quiet; warnings and errors stand out. */
 .msg.system {
   color: var(--muted); font: var(--fs-sm)/1.5 var(--mono); white-space: pre-wrap;
   border-left: 2px solid var(--border); padding-left: 10px; margin: 6px auto;
 }
 .msg.error { color: var(--danger); border-left-color: var(--danger); font-size: var(--fs); }
+.msg.warning { color: var(--warn); border-left-color: var(--warn); font-size: var(--fs); }
 .turn-meta { margin: -6px auto 12px; font: var(--fs-xs) var(--mono); color: var(--muted); }
 
 details.think { margin: 8px auto; color: var(--think); font-size: var(--fs); }

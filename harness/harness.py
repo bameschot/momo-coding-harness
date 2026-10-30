@@ -1247,7 +1247,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     "max_files": self.index_max_files, "workers": self.index_workers,
                     "workers_used": self.index_workers or code_index.auto_workers(),
                     "persist": self.index_persist,
-                    "route": self.index_route}
+                    "route": self.index_route,
+                    "unavailable": not code_nav.any_grammar()}
         return {**code_index.breakdown(idx), "persist": self.index_persist,
                 "route": self.index_route}
 
@@ -2888,7 +2889,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         idx = self.index
         base = {"index_enabled": self.index_enabled, "index_max_bytes": self.index_max_bytes,
                 "index_max_files": self.index_max_files, "index_workers": self.index_workers,
-                "index_persist": self.index_persist, "index_route": self.index_route}
+                "index_persist": self.index_persist, "index_route": self.index_route,
+                "index_unavailable": not code_nav.any_grammar()}
         if idx is None:
             return {**base, "index_state": "off"}
         busy = idx.state in ("building", "refreshing") and idx.total
