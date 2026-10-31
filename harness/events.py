@@ -65,6 +65,8 @@ class StatusEvent:
     provider: str = ""
     plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
     plan_kind: str = "normal"  # plan mode: the active plan's type, else the next plan's
+    todos_progress: str = ""  # the todos list: "2/5" (done/all), "" without one
+    todos: list = field(default_factory=list)  # its items: [{text, status}]
     title: str = ""          # session title (model-generated or /title)
     guides: bool = False     # project guide files (AGENTS.md, ...) in the system prompt
     think_level: str = "on"       # /think: off | on | low | medium | high

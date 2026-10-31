@@ -20,6 +20,7 @@ from . import session as session_mod
 from . import tools as tools_mod
 from . import transcript as transcript_mod
 from . import loop_guard as loop_guard_mod
+from . import todos as todos_mod
 from .compaction import content_text
 from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS
 from .think_trim import KEEP_LEVELS
@@ -1111,6 +1112,18 @@ def handle(line: str, harness: Harness) -> CommandResult:
     if cmd == "/loop-guard":
         return _loop_guard(harness, arg)
 
+    if cmd == "/todos":
+        sub = arg.strip().lower()
+        if sub == "clear":
+            harness.todos = []
+            harness.refresh_status()
+            return CommandResult(handled=True, output="Todo list cleared.")
+        if sub:
+            return CommandResult(handled=True, output="ERROR: usage: /todos [clear]")
+        return CommandResult(handled=True, output=(
+            todos_mod.render(harness.todos) if harness.todos
+            else "No todo list. The model keeps one with the todos tool in coding and momo modes."))
+
     if cmd == "/max-output-tokens":
         def _cap() -> str:
             n = harness.max_output_tokens
@@ -1899,6 +1912,8 @@ Available commands:
                       at n (default 3, saved)
   /loop-guard resets <n>  Loop resets per turn before the turn stops (default 2;
                       0 = stop at the first loop)
+  /todos              Show the model's todo list (the todos tool, coding and momo modes)
+  /todos clear        Empty the todo list
   /tool-ref [full|compact|minimal]  How the system prompt describes the tools: full,
                       one line per tool, or only the call format (the tool schemas carry the rest)
   /system-prompt      Show the composed system prompt: role, tools, guides, skills (alias: /prompt)

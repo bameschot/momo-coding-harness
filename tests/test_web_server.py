@@ -53,6 +53,17 @@ class WebServer(unittest.TestCase):
         conn.close()
         return r, data
 
+    def test_complete_offers_command_words_and_paths(self):
+        _, body = self.request("GET", "/api/complete?text=/pla&cursor=4")
+        got = json.loads(body)
+        self.assertEqual(got["start"], 0)
+        self.assertIn("/plan ", [i["value"] for i in got["items"]])
+        (self.home / "pkg").mkdir()
+        _, body = self.request("GET", "/api/complete?text=/read%20pk")
+        self.assertEqual([i["value"] for i in json.loads(body)["items"]], ["pkg/"])
+        _, body = self.request("GET", "/api/complete?text=hello")
+        self.assertEqual(json.loads(body)["items"], [])
+
     def test_export_full_download(self):
         self.h.messages += [{"role": "user", "content": "hi"},
                             {"role": "thinking", "content": "PONDER"}]

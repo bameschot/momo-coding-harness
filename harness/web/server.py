@@ -28,6 +28,7 @@ Routes
   GET  /api/files     ?path= → directory listing (read-only, confined to the workspace)
   GET  /api/file      ?path= → file contents as text (same conversion as uploads)
   GET  /api/files/search ?q= → fuzzy path search for @-mentions
+  GET  /api/complete  ?text=&cursor= → input-box completion: /command words and @ paths
   GET  /api/changes   the file checkpoints since the last /keep: per turn, and net per file
   GET  /api/changes/diff ?path=&checkpoint= → one file's diff (no checkpoint: since keep)
   GET  /api/changes/preview ?checkpoint= → what undoing back to it would restore / skip
@@ -70,6 +71,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .. import attachments as attach_mod
 from .. import checkpoints as checkpoints_mod
 from .. import companion
+from .. import complete as complete_mod
 from .. import ignore_rules
 from ..diff import build_diff_body
 from ..file_search import fuzzy_search, workspace_files
@@ -91,7 +93,7 @@ _STATIC_FILES = {
     **{f"/{name}": (name, "text/javascript; charset=utf-8")
        for name in ("app.js", "dom.js", "markdown.js", "highlight.js", "notify.js",
                     "companion.js", "sessions.js", "files.js", "chips.js", "palette.js", "find.js",
-                    "mcp.js", "skills.js", "diff.js", "changes.js", "planview.js")},
+                    "mcp.js", "skills.js", "diff.js", "changes.js", "planview.js", "todos.js")},
 }
 _MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
@@ -478,6 +480,15 @@ class WebServer:
                     self._file(h.workdir, arg("path"))
                 elif path == "/api/files/search":
                     self._json({"results": fuzzy_search(workspace_files(h.workdir), arg("q"))})
+                elif path == "/api/complete":
+                    text = arg("text")
+                    try:
+                        cursor = max(0, min(len(text), int(arg("cursor", str(len(text))))))
+                    except ValueError:
+                        cursor = len(text)
+                    got = complete_mod.complete(text, cursor, complete_mod.Sources(h, help_commands()),
+                                                wait=True)
+                    self._json(got.to_dict() if got else {"start": cursor, "items": [], "waiting": False})
                 elif path == "/api/changes":
                     store = h.checkpoints
                     self._json({"turns": store.turns(), "since_keep": store.cumulative(),

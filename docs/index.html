@@ -1123,7 +1123,7 @@ ollama serve</code></pre></div>
       <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>input</td><td class="wrap">Move between lines. At the top or bottom edge, browse history.</td></tr>
       <tr><td><kbd>Shift+↑</kbd> / <kbd>Shift+↓</kbd></td><td>input</td><td class="wrap">History, wherever the cursor is</td></tr>
       <tr><td><kbd>Ctrl+A</kbd> <kbd>Ctrl+E</kbd> <kbd>Ctrl+K</kbd> <kbd>Ctrl+U</kbd></td><td>input</td><td class="wrap">Start of line, end of line, delete to end, delete to start</td></tr>
-      <tr><td><kbd>@</kbd> / <kbd>/</kbd></td><td>input</td><td class="wrap">Path autocomplete, command autocomplete</td></tr>
+      <tr><td><kbd>@</kbd> / <kbd>/</kbd></td><td>input</td><td class="wrap">Path autocomplete (folder by folder once you type a <code>/</code>), command autocomplete for every word and path argument</td></tr>
       <tr><td><kbd>Tab</kbd></td><td>anywhere</td><td class="wrap">Switch focus between chat and input</td></tr>
       <tr><td><kbd>Shift+Tab</kbd></td><td>anywhere</td><td class="wrap">Cycle mode</td></tr>
       <tr><td><kbd>PgUp</kbd> / <kbd>PgDn</kbd></td><td>anywhere</td><td class="wrap">Scroll the chat by a page</td></tr>
@@ -1319,6 +1319,7 @@ and tell the user what is blocking you.</code></pre></div>
       <tr><th>Tool</th><th>Modes</th><th>Description</th></tr>
       <tr><td><code>write_file</code></td><td>design, coding, momo</td><td class="wrap">Write a file. Warns when the new content doesn't parse or drops definitions.</td></tr>
       <tr><td><code>ask_user</code></td><td>all modes</td><td class="wrap">Pause and ask you a focused question. The status bar shows <code>? waiting for input</code>.</td></tr>
+      <tr><td><code>todos</code></td><td>coding, momo</td><td class="wrap">The model's checklist for a request with several parts. It sends the whole list each call, with one item <code>in_progress</code>; the list is kept through compaction. While an item is open it stays on screen: a strip above the companion in the TUI (Shift+L toggles it) and a live panel above the input in the web UI, plus the <code>TODO: 2/5</code> count. Lighter than plan mode: no plan file, no approval. <code>/todos</code> shows it.</td></tr>
       <tr><td><code>edit_file</code></td><td>design, coding, momo</td><td class="wrap">Replace <code>old_string</code> with <code>new_string</code>. See <a href="#editing">Editing files</a>.</td></tr>
       <tr><td><code>edit_files</code></td><td>coding, momo</td><td class="wrap">Several edits across files in one call. All are written or none.</td></tr>
       <tr><td><code>replace_symbol</code></td><td>coding, momo</td><td class="wrap">Replace or delete a whole function, method or class by name. Needs tree-sitter.</td></tr>
@@ -2285,6 +2286,7 @@ python momo-coding-harness.py --web-host 0.0.0.0 --web-cert momo.pem --web-key m
       <tr><td><code>/max-output-tokens [n|off]</code></td><td class="wrap">The <a href="#reply-cap">reply cap</a> (remembered)</td></tr>
       <tr><td><code>/loop-guard [n|off|on]</code></td><td class="wrap">Repeats that make a <a href="#loop-guard">loop</a> (default 3, remembered)</td></tr>
       <tr><td><code>/loop-guard resets &lt;n&gt;</code></td><td class="wrap">Loop resets per turn before the turn stops (default 2; 0 = stop at the first loop)</td></tr>
+      <tr><td><code>/todos [clear]</code></td><td class="wrap">Show the model's todo list, or empty it</td></tr>
       <tr><td><code>/cost</code></td><td class="wrap">Token usage by mode and model</td></tr>
     </table></div>
     <h3>Display</h3>

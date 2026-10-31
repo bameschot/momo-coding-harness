@@ -200,16 +200,17 @@ The browser and the terminal are two views of **the same session**, not separate
     - Both drop the old reply, and everything after it, from the conversation the model sees. They aren't offered while the model is working or a plan is executing, nor on answers to questions or on `/commands`. The TUI has `/retry`.
     - When the reply being replaced changed files, both first ask *That reply changed N files. Put them back as before, too?* **Yes** retries from the files as they were before it, **No** retries against the files as they are now. See [Undoing file changes](#undoing-file-changes).
   - When you've scrolled up, new messages don't pull you down. A **↓ New messages** button appears instead. Long replies are shown from their beginning.
-- **Plan drawer** shows the current plan with its checklist and **Run**, **Resume** and **Cancel plan** buttons, which send `/plan run`, `/plan resume` and `/plan cancel`.
+- **Plan drawer** shows the current plan with its checklist and **Run**, **Resume** and **Cancel plan** buttons, which send `/plan run`, `/plan resume` and `/plan cancel`. The **Plan** button in the header is always there; without a plan the drawer says *No plan*.
 - **Input box**
   - It grows with its content. Text starting with `/` is highlighted as a command.
-  - Typing `/` opens **command autocomplete** with the usage and description of every slash command. Use ↑/↓ to pick one and Tab or Enter to insert it.
-  - Typing `@` followed by part of a file name opens **path autocomplete**, a fuzzy search over the workspace. Picking a file inserts its path, e.g. `` `src/app/main.py` ``. Only the path is inserted: the model reads the file itself with its tools. To send the contents, attach the file instead.
+  - Typing `/` opens **command autocomplete** with the usage and description of every slash command. Use ↑/↓ to pick one and Tab or Enter to insert it. It goes on word by word: after `/plan ` it offers `stories`, `tdd`, `run`…, after `/plan stories ` it offers `approve` and `cap`, and live values where a usage has a placeholder (models, sessions, MCP servers, tools, skills, thinking levels). Path arguments complete folder by folder: `/read`, `/ls`, `/grep`, `/undo file` and `/export` inside the workspace, `/workspace` any folder on disk (`~/pro` → `~/projects/`).
+  - Typing `@` followed by part of a file name opens **path autocomplete**, a fuzzy search over the workspace, folders included. Once the query has a `/` (`@harness/llm/`) it lists that folder instead: folders first, then files, filtered by what follows the last `/`. Picking a folder fills it in and keeps the list open on its contents; picking a file inserts its path, e.g. `` `src/app/main.py` ``. Only the path is inserted: the model reads the file itself with its tools. To send the contents, attach the file instead.
   - Messages sent **while the model is working** are queued instead of rejected. They appear as queued chips (clock icon) above the input and are sent one per turn once the model is done. The pencil moves a queued message back into the input box and × removes it. `/commands` still run immediately, and while the model is waiting for your answer, what you type is the answer.
   - The placeholder changes to `Answer momo…` when the model is waiting for your reply.
   - A spinner and a **■ Stop** button appear while the model is working.
   - The **paperclip** button attaches files (see [Attaching files](#attaching-files)).
 - **momo companion** walks along the top of the input box, with the same frames and mode-specific speech as in the TUI. It is hidden on narrow screens.
+- **Todo panel** above the input, while the model's [todo list](#todo-list) has an open item. It updates in place and collapses to one line.
 
 The layout adapts to phone-width screens: the status bar collapses to mode, CTX and the view-options button. It follows the system light or dark theme.
 
@@ -336,7 +337,7 @@ Typing the TUI command in the browser (e.g. `/think-output off`) has the same ef
 | @ | input box | Open workspace path autocomplete |
 | Esc | anywhere | Interrupt the running response (as Esc does in the TUI). Also closes menus and drawers, and cancels editing a message |
 | Shift+Tab | anywhere | Cycle mode |
-| Shift+T / M / D / Q | outside the input box | Toggle thinking / markdown / diffs / companion |
+| Shift+T / M / D / Q / L | outside the input box | Toggle thinking / markdown / diffs / companion / todo strip |
 | Shift+P | outside the input box | Toggle `run_command` confirmation |
 | Shift+C | outside the input box | Interrupt the running response |
 
@@ -483,10 +484,12 @@ curl -sN localhost:8765/api/events          # watch the live event stream
 
 - **Chat pane** — conversation history including inline tool calls (yellow), results, and thinking blocks (orange). Scroll with `↑`/`↓` or `PgUp`/`PgDn`.
 - **Streaming** — replies appear as they are generated, ending in a `▍` cursor, and are replaced by the fully rendered message when complete. Disable with `--no-stream`.
+- **Todo strip** — while the model's [todo list](#todo-list) has an open item, up to 4 lines above the companion: the item in progress, then the pending ones, and the done/all count. Shift+L toggles it.
 - **Status bar** — current mode, model, Ollama host, context usage %, and working directory. When the line is too narrow to fit, the working directory is shortened from the front (`…/tail`) so its most specific part stays visible.
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
   - Shows `THINK: <level>` when the [thinking level](#thinking-level) isn't the default `on`, or `THINK: high→on` when the model gets something other than your choice.
   - Shows `LOOP: off` when the [loop guard](#loop-guard) is off, or `LOOP: 4×/1` (repeats/resets) when it isn't at the default 3 and 2.
+  - Shows `TODO: 2/5` (done/all) while the model keeps a [todo list](#todo-list).
   - Shows `⠋ thinking` (spinner) while the model is working.
   - Shows `? waiting for input` when the model has called `ask_user` and is waiting for your reply. Type your answer and press Enter — the model resumes from where it paused.
   - Top rule turns green when the chat pane has focus; bottom rule turns green when the input pane has focus.
@@ -504,8 +507,8 @@ curl -sN localhost:8765/api/events          # watch the live event stream
   - **Ctrl+E / End** — move cursor to end of the current line.
   - **Ctrl+K** — delete from cursor to end of the current line (kills the newline itself when the cursor is right before one).
   - **Ctrl+U** — delete from start of the current line to the cursor.
-  - **@ path autocomplete**: typing `@` followed by part of a file name opens a fuzzy workspace search above the input, the same search the web UI uses. `↑`/`↓` select, `Tab` inserts the first (or highlighted) path, `Enter` inserts a highlighted path (with nothing highlighted it still submits), and `Esc` closes the list. The pick replaces `@query` with `` `path/to/file` ``. While the list is open, `Tab` inserts instead of switching focus.
-  - **/ command autocomplete**: typing `/` at the start of the input lists the matching slash commands with their usage and description. It uses the same keys as `@`. A picked command that takes an argument gets a trailing space so you can type the argument.
+  - **@ path autocomplete**: typing `@` followed by part of a file name opens a fuzzy workspace search above the input (folders included), the same completion the web UI uses (`harness/complete.py`). With a `/` in the query (`@harness/llm/`) it lists that folder. `↑`/`↓` select, `Tab` inserts the first (or highlighted) entry, `Enter` inserts a highlighted one (with nothing highlighted it still submits), and `Esc` closes the list until you type again. A picked file replaces `@query` with `` `path/to/file` ``; a picked folder becomes `@folder/` and the list shows its contents. While the list is open, `Tab` inserts instead of switching focus.
+  - **/ command autocomplete**: typing `/` at the start of the input lists the matching slash commands with their usage and description. It uses the same keys as `@`, and goes on word by word: a picked command or subcommand that takes more gets a trailing space and the list shows what can follow (`/plan ` → `stories ` → `approve ` → `once`), with live values for placeholders and folder-by-folder paths for path arguments (see the web UI section above).
   - When the model is waiting for input (after `ask_user`), the prefix changes from `›` to `?`.
 - **Chat pane scrolling** — `↑`/`↓`, `PgUp`/`PgDn`. When a table or other wide content is present, `←`/`→` scrolls horizontally (chat focus required). While you are scrolled up, new output does not pull the view down; the status line shows `▼ NEW (PgDn)` until you are back at the bottom. Resizing the terminal re-wraps the transcript to the new width.
 - **Changes** — `/changes` opens the [file checkpoints](#undoing-file-changes) over the chat pane, newest first, each with its files: `↑`/`↓` move, `Enter` shows the highlighted file's diff (`↑`/`↓`/`PgUp`/`PgDn` scroll it, `Esc` goes back), `Tab` switches between *by turn* and *since keep*, `u` undoes back to before the highlighted checkpoint, `r` reverts the highlighted file, `k` keeps everything, `Esc` closes. Actions close the overlay and ask `[y/N]` in the chat. The status bar shows `UNDO: n` while there are checkpoints.
@@ -531,7 +534,20 @@ Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep
 
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
-Available tools: all design tools + `edit_file`, `edit_files`, `replace_symbol`, `delete_file`, `move_file`, `append_to_file`, `run_command`, and the code-navigation tools (`code_outline`, `find_symbol`, `read_symbol`, `find_references`)
+Available tools: all design tools + `edit_file`, `edit_files`, `replace_symbol`, `delete_file`, `move_file`, `append_to_file`, `run_command`, `todos`, and the code-navigation tools (`code_outline`, `find_symbol`, `read_symbol`, `find_references`)
+
+#### Todo list
+
+For a request with several parts ("rename X, add a test for Y, update the README"), the model can keep a checklist with the `todos` tool, in coding and momo modes. It is lighter than [plan mode](#plan-mode): no plan file and no approval step.
+
+- **The whole list on every call.** The model sends `items: [{text, status}]` with status `pending`, `in_progress` (at most one) or `done`, up to 20 items. Each call replaces the list, and the result shows it back (`[x]`, `[>]`, `[ ]`, "2 of 5 done"), so the newest result is the current list. An invalid list returns an `ERROR:` and leaves the old one.
+- **Not in the system prompt.** The plan is, but the list changes every few calls, and a changed system prompt makes llama.cpp process the whole context again.
+- **Kept through compaction:** while an item is open, the list goes into the [compaction summary](#context-management) word for word. It is saved with the session too.
+- **Where you see it,** while an item is open; done items count but take no row, and a finished list leaves only the count:
+  - **TUI:** a strip of up to 4 lines between the chat and the companion: the item in progress first (`[>]`), then the pending ones (`[ ]`), and `1/3` on the right. More items than fit end in `… +N more (/todos)`. Shift+L hides or shows it, and it is left out when the terminal is too short for it. The status bar shows `TODO: 1/3` either way.
+  - **Web UI:** a panel above the input, updated live during the turn: ▸ in progress, ○ pending, ✓ done (struck through). Click its header to collapse it to one line with the current item; the browser remembers which. The `todo 1/3` chip in the header toggles the panel, or prints the list with `/todos` once every item is done.
+  - `/todos` prints the list in both, and `/todos clear` empties it.
+- Not offered in plan mode, while a plan or story runs (they track their own steps), or in design and chat mode. It costs about 130 tokens of tool schema in coding and momo mode; with [`/tools discover all`](#loading-tools-on-demand) it is only listed until the model loads it.
 
 #### Loop guard
 
@@ -801,6 +817,7 @@ Offered only while internet access is on (`/net on`), so the model never sees a 
 | `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 2 minutes (120s) unless the model passes `timeout=` (up to 900s, the hard cap); a command the default stopped is told how to ask for longer. In run mode `new` (the default) the output is saved to a log and the model gets a view of it: `tail=N` for the last N lines, `grep="regex"` for the matching lines, or by default the whole output when it is short and its beginning, end and error/fail/warning lines when it is long. `background=true` (with an optional `wait_for=`) leaves a server running. See [Command output](#command-output). |
 | `command_output` | Search or page through the saved output of an earlier `run_command` without running it again: `grep=`, `tail=`, `start_line=`/`end_line=`. Takes the log path printed at the end of that result. Only in run mode `new`. |
 | `stop_command` | Stop a command `run_command` started with `background=true` (a dev server, a watcher), and everything it started. Only in run mode `new`. |
+| `todos` | The model's checklist for a request with several parts: the whole list on every call, one item `in_progress`. Coding and momo modes only. See [Todo list](#todo-list). |
 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected. `run_command` is a shell, so it is not confined; turn on `/run-confirm` to approve each command.
 
@@ -1668,6 +1685,7 @@ Type any command in the input bar:
 | `/undo-max [n\|off]` | How many turns of file checkpoints are kept (default 20, saved; `off` = no cap) |
 | `/loop-guard [n\|off\|on]` | Repeats of one tool call (or one error) that make a [loop](#loop-guard) (default 3, saved; `--loop-guard`) |
 | `/loop-guard resets <n>` | Loop resets per turn before the turn stops (default 2, saved; `0` = stop at the first loop; `--loop-resets`) |
+| `/todos [clear]` | Show the model's [todo list](#todo-list), or empty it |
 | `/cost` | Show token usage for this session, aggregated by mode and model (in/out/total tokens per combination) |
 | `/sessions` | List up to 20 recent sessions with mode and model |
 | `/session` | Show the current session file path |

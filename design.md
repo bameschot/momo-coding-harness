@@ -96,6 +96,14 @@ Some models emit tool calls as plain text rather than using the API's structured
 
 If a text tool call is recovered it is executed normally; if every tier fails the text is treated as a regular assistant response, unless the reply was cut off in the middle of it (see below).
 
+### Input completion (`harness/complete.py`)
+
+Both frontends complete the input box with the same code: the TUI calls `complete.complete(..., wait=False)` on its key loop (the workspace file list and the model list come from caches refreshed in the background, and `waiting` asks it to retry), the web UI calls `GET /api/complete?text=&cursor=` (`wait=True`). "/" completes every word from the `/help` usages, parsed into literals, choices, optional words (`[force]`) and placeholders; a placeholder takes live values from `Sources.values` (models, sessions, MCP servers, tools, skills, thinking levels) or completes a path: inside the workspace through `safe_path` for `/read`, `/ls`, `/grep`, `/undo file`, `/export`, any folder for `/workspace`. "@" is a fuzzy search over files and their folders, or, once the query has a "/", that folder's entries. An item's `more` keeps the list open after a pick (a folder, a word with words after it).
+
+### Todo list (`todos`)
+
+In coding and momo modes the model can keep a checklist with the harness-answered `todos` tool (`harness/todos.py`, `Harness._handle_todos`). Each call sends and replaces the whole list; the result renders it, so the newest result is the list. It is kept on `Harness.todos`, saved with the session, shown in `StatusEvent.todos_progress`, and put into the compaction summary while an item is open (`_todos_summary_line`, next to `_plan_summary_line`). It is deliberately not in the system prompt: it changes too often, and a changed system prompt invalidates llama.cpp's prompt cache. Both frontends draw it from `StatusEvent.todos` while an item is open: the TUI as a strip between the chat and the companion (`_todos_strip_h` / `_todos_lines`, a relayout when its height changes), the web UI as a panel above the input (`static/todos.js`).
+
 ### Settled results (calls not run)
 
 A call the harness does not run still gets an answer that says why and what a retry should change (`harness/settle.py`). Every result starts with `ERROR: not run`, so the loop guard counts the same cut-off made again like any repeated failure.

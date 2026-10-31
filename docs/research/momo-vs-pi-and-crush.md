@@ -33,6 +33,9 @@ Both reviews reach the same conclusion. **momo wins on the coding loop itself**:
 - **Structured compaction** (`7fc7217`). Both reviews asked for this.
 - **Loop detection:** `--loop-guard` and `/loop-guard` (`b825b8b`). This was crush's #3.
 - **Compacting with room to spare:** compaction now starts at 50% of the model's real window by default (`harness/harness.py:638`), which covers crush's #2.
+- **Calls that can't run say why** (#3 below, `aa0fa09`): cut-off, malformed and interrupted calls are not run and get an `ERROR: not run` result with what to change (`harness/settle.py`).
+- **Already present before the reviews, missed by them** (part of #11): structured multiple-choice questions (`ask_choice`) and MCP resources (`mcp_list_resources`, `mcp_read_resource`).
+- **`todos` checklist** (part of #11) in coding and momo modes, kept through compaction (`harness/todos.py`).
 
 ## 3. Remaining improvements (best value for effort first)
 
@@ -40,7 +43,7 @@ Both reviews reach the same conclusion. **momo wins on the coding loop itself**:
 |---|---|---|---|
 | 1 | **Refuse edits to files the model hasn't read or that changed since** (track the hash of the last read per path). momo has nothing like this today. | crush | S |
 | 2 | **Move `run_command` to the background after N seconds** so a dev server run in the foreground doesn't block. Background runs already exist, so this is mostly a timer. | crush | S |
-| 3 | **Explain cut-off or unanswered tool calls** with what a retry should change ("output ran out, split the write"). | crush | S |
+| 3 | ~~**Explain cut-off or unanswered tool calls** with what a retry should change ("output ran out, split the write").~~ Done. | crush | S |
 | 4 | **Load `SKILL.md` skills lazily** (only name and description in the prompt) and also read `~/.claude/skills`. | both | S |
 | 5 | **Headless mode** (`momo run "task"` / `-p --json`). Also lets you run evals headless. | both | S–M |
 | 6 | **Auto-approve safe commands** in confirm mode, and block risky arguments (`npm i -g`, `pip install --user`). | crush | S |
@@ -48,7 +51,7 @@ Both reviews reach the same conclusion. **momo wins on the coding loop itself**:
 | 8 | **Show linter/type errors after edits** (`ruff`, `tsc --noEmit`, `go vet`, at most 10 findings) as a lighter substitute for language servers. | crush | M |
 | 9 | **Sub-agents:** a read-only explorer and a web researcher that return only a summary. Run evals first, since small models summarise poorly. | crush (pi as an extension) | M |
 | 10 | **Hooks in Claude Code's format** (PreToolUse/PostToolUse, exit code 2 blocks). This would stop `harness.py` and `commands.py` from growing. | both | M |
-| 11 | A lightweight `todos` list, structured multiple-choice questions, images in `read_file`, MCP resources | crush / pi | S each |
+| 11 | Images in `read_file`. (`todos`, structured questions and MCP resources are done.) | crush / pi | S–M |
 | 12 | Forking a session from an earlier message, paired with checkpoints | pi | M–L |
 | 13 | Codemode (the model writes a script that calls tools; only the output enters context). Run evals before building. | pi | L |
 

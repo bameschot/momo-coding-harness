@@ -38,6 +38,7 @@ from .syntax_watch import SyntaxWatch
 from .loop_guard import MAX_RESETS as DEFAULT_LOOP_RESETS, THRESHOLD as DEFAULT_LOOP_GUARD, Hit, LoopGuard
 from . import transcript as transcript_mod
 from . import think_trim
+from . import todos as todos_mod
 from .tools.dispatcher import written_paths
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
@@ -418,6 +419,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         # The type of the next plan create_plan makes: "normal" | "tdd" | "stories"
         # (/plan tdd, /plan stories).  A plan that exists keeps its own kind (plan.kind).
         self.plan_kind: str = "normal"
+        # The model's todos checklist in coding and momo modes (harness/todos.py).
+        self.todos: list[dict] = []
         # A stories plan's phase at work: "story-writer" while its stories are
         # written, "story-exec" while one runs; None otherwise.  It replaces the
         # role (tools and prompt) for that while.
@@ -2400,6 +2403,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 elif name == "ask_choice":
                     result = self._ask_choice(args if isinstance(args, dict) else {})
                     guard.bump()
+                elif name == "todos":
+                    result = self._handle_todos(args if isinstance(args, dict) else {})
                 elif name == "create_plan":
                     result = self._handle_create_plan(args)
                     if self.plan_phase == "executing":
@@ -2778,6 +2783,16 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             text += "They also ran commands, whose effects were not undone. "
         return text
 
+    def _handle_todos(self, args: dict) -> str:
+        """todos: replace the checklist with the one sent; an invalid list leaves
+        the old one as it was."""
+        items = todos_mod.validate(args.get("items"))
+        if isinstance(items, str):
+            return items
+        self.todos = items
+        self.emit_status()
+        return todos_mod.render(items)
+
     def _ask_choice(self, args: dict) -> str:
         """ask_choice: ask until the user picks an option.  Anything else they type is
         information: the model rewrites the question with it, up to _CHOICE_MAX_ROUNDS
@@ -2940,6 +2955,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             provider=self.provider,
             plan_progress=self._plan_progress(),
             plan_kind=self._plan_kind_shown(),
+            todos_progress=todos_mod.progress(self.todos),
+            todos=[dict(t) for t in self.todos],
             title=self.title,
             guides=self.guides,
             think_level=self.think_level,
@@ -3069,6 +3086,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             compacted=[{**r, "message": _mask_messages([r["message"]])[0]}
                        for r in self.compacted],
             summary_state=self.summary_state,
+            todos=self.todos,
         )
         session_mod.save_prefs(model=self.client.model, provider=self.provider)
 
@@ -3143,6 +3161,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.plan = Plan.from_dict(saved_plan) if saved_plan else None
         self.plan_phase = (data.get("plan_phase") or "investigating") if self.plan else "investigating"
         self.plan_kind = data.get("plan_kind") if data.get("plan_kind") in ("tdd", "stories") else "normal"
+        saved_todos = todos_mod.validate(data.get("todos") or [])
+        self.todos = saved_todos if isinstance(saved_todos, list) else []
         if self.plan_phase == "executing" and self.mode == "plan":
             self.mode = "coding"   # sessions from before plans ran in coding mode
         self.input_history.clear()
@@ -3187,6 +3207,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.plan = None
         self.plan_phase = "investigating"
         self.plan_kind = "normal"
+        self.todos = []
         self.momo_lines = []
         self._momo_recap_turn = 0
         self.title = ""

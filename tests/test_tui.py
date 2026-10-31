@@ -381,3 +381,130 @@ class ChangesOverlay(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+TODOS = [{"text": "Rename parse()", "status": "done"},
+         {"text": "Add a test", "status": "in_progress"},
+         {"text": "Update the README", "status": "pending"}]
+
+
+class TodoStrip(unittest.TestCase):
+    """The todo strip between the chat and the companion: its place in the
+    layout, its height, its lines, and the relayout a status change causes."""
+
+    def test_the_regions_stack_without_overlap(self):
+        L = T._compute_layout(40, 80, companion_h=4, todos_h=3)
+        self.assertEqual(L["todos_y"], L["chat_y"] + L["chat_h"])
+        self.assertEqual(L["companion_y"], L["todos_y"] + L["todos_h"])
+        self.assertEqual(L["status_y"], L["companion_y"] + L["companion_h"])
+        self.assertEqual(L["input_y"] + L["input_h"], 40)
+        self.assertEqual(L["chat_h"], T._compute_layout(40, 80, companion_h=4)["chat_h"] - 3)
+
+    def test_height(self):
+        self.assertEqual(T._todos_strip_h([], 40, 4), 0)
+        self.assertEqual(T._todos_strip_h([{"text": "a", "status": "done"}], 40, 4), 0)
+        self.assertEqual(T._todos_strip_h(TODOS, 40, 4), 2)
+        many = [{"text": str(i), "status": "pending"} for i in range(9)]
+        self.assertEqual(T._todos_strip_h(many, 40, 4), T._TODOS_MAX_H)
+        self.assertEqual(T._todos_strip_h(TODOS, 20, 4), 0)     # the chat would get under 8 rows
+
+    def test_lines(self):
+        lines = T._todos_lines(TODOS, 40, 4)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith(" [>] Add a test"))
+        self.assertTrue(lines[0].endswith(" 1/3 "))
+        self.assertEqual(len(lines[0]), 40)
+        self.assertEqual(lines[1], " [ ] Update the README")
+        self.assertNotIn("Rename", "".join(lines))
+
+    def test_long_text_is_cut_and_overflow_becomes_a_more_line(self):
+        long = [{"text": "x" * 100, "status": "in_progress"}]
+        self.assertTrue(T._todos_lines(long, 30, 4)[0].rstrip().endswith("0/1"))
+        self.assertIn("…", T._todos_lines(long, 30, 4)[0])
+        many = [{"text": f"item {i}", "status": "pending"} for i in range(6)]
+        lines = T._todos_lines(many, 40, 4)
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[-1], " … +3 more  (/todos)")
+
+    @staticmethod
+    def status():
+        from harness.events import StatusEvent
+        return StatusEvent(mode="coding", model="m", context_limit=1, workdir="", ctx_pct=0,
+                           ctx_color="normal", todos=TODOS, todos_progress="1/3")
+
+    def test_a_status_with_a_new_list_relayouts_once(self):
+        t = make_tui(cols=80, chat_h=20)
+        t.stdscr.getmaxyx = lambda: (40, 80)
+        t._layout["todos_h"] = 0
+        t._todos = []
+        t._st_provider, t._st_dir = "", ""
+        t.harness = mock.Mock()
+        with mock.patch.object(T.TUI, "_rebuild") as rebuild, \
+                mock.patch.object(T.TUI, "_reload_picker"), mock.patch.object(T.TUI, "_reload_changes"), \
+                mock.patch.object(T, "workspace_files_nowait"):
+            t._apply_status(self.status())
+            rebuild.assert_called_once()
+            self.assertIn("TODO: 1/3", t._st_extra)
+            t._layout["todos_h"] = 2          # what the rebuild laid out
+            t._apply_status(self.status())
+            rebuild.assert_called_once()      # same height: no second relayout
+            t._view["todos"] = False          # Shift+L
+            t._apply_status(self.status())
+            self.assertEqual(rebuild.call_count, 2)
+
+
+class Completion(unittest.TestCase):
+    """Picking a suggestion: a folder keeps the list open on its contents, a
+    file is inserted and the list closes (harness/complete.py makes the items)."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        from harness import complete as complete_mod
+        from harness.commands import help_commands
+        self.tmp = tempfile.TemporaryDirectory()
+        wd = Path(self.tmp.name).resolve()
+        (wd / "src" / "sub").mkdir(parents=True)
+        (wd / "src" / "a.py").write_text("x")
+        self.t = t = make_tui()
+        t.harness = mock.Mock(workdir=wd)
+        t._complete_src = complete_mod.Sources(t.harness, help_commands())
+        t._focus = "input"
+        t._sugg, t._sugg_idx, t._sugg_waiting, t._sugg_query, t._sugg_start = [], -1, False, None, 0
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def type(self, text):
+        self.t._input, self.t._cursor = text, len(text)
+        self.t._update_suggest()
+
+    def test_a_folder_keeps_browsing_and_a_file_closes(self):
+        self.type("see @src/")
+        self.assertEqual([c["value"] for c in self.t._sugg], ["@src/sub/", "`src/a.py` "])
+        self.t._pick_suggest(0)
+        self.assertEqual(self.t._input, "see @src/sub/")
+        self.assertEqual(self.t._cursor, len("see @src/sub/"))
+        self.assertEqual(self.t._sugg, [])          # src/sub is empty: nothing more to list
+        # The cursor before " now": the file goes in there, with one space after it.
+        self.t._input, self.t._cursor = "see @src/ now", len("see @src/")
+        self.t._update_suggest()
+        self.t._pick_suggest(1)
+        self.assertEqual(self.t._input, "see `src/a.py` now")
+        self.assertEqual(self.t._sugg, [])
+
+    def test_a_command_goes_on_word_by_word(self):
+        self.type("/plan sto")
+        self.t._pick_suggest(0)
+        self.assertEqual(self.t._input, "/plan stories ")
+        self.assertIn("approve ", [c["value"] for c in self.t._sugg])     # still open, one level down
+
+    def test_esc_keeps_the_list_closed_until_the_text_changes(self):
+        self.type("/plan ")
+        self.assertTrue(self.t._sugg)
+        self.t._close_suggest()
+        self.t._update_suggest()
+        self.assertEqual(self.t._sugg, [])
+        self.type("/plan s")
+        self.assertTrue(self.t._sugg)

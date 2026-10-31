@@ -24,7 +24,7 @@ from harness.tools import discover, registry
 
 STUB = str(Path(__file__).parent / "fixtures" / "mcp_stub_server.py")
 ON_DEMAND = {"append_to_file", "replace_symbol", "file_info", "grep_extract", "stop_command",
-             "file_dependencies", "index_status", "add_search_source"}
+             "file_dependencies", "index_status", "add_search_source", "todos"}
 
 
 class _Scripted(LLMClient):

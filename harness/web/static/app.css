@@ -512,6 +512,30 @@ details.think.live summary { font-style: italic; }
 }
 .edit-banner span:first-child { flex: 1; display: inline-flex; align-items: center; gap: 6px; }
 
+/* The model's todo list (todos.js): above the input while an item is open. */
+.todos-panel {
+  margin-bottom: 8px; border: 1px solid var(--border); border-radius: var(--r);
+  background: var(--surface-2); font-size: var(--fs-sm);
+}
+.todos-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 4px 10px;
+  border: 0; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.todos-head:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: var(--r); }
+.todos-title { font-weight: 600; }
+.todos-current { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--tool); }
+.todos-head .icon { margin-left: auto; color: var(--muted); transition: transform .15s; }
+.todos-panel.collapsed .todos-head .icon { transform: rotate(-90deg); }
+.todos-list {
+  list-style: none; margin: 0; padding: 0 10px 6px; max-height: 9.5em; overflow: auto;
+}
+.todo { display: flex; gap: 8px; padding: 1px 0; overflow-wrap: anywhere; }
+.todo-mark { flex: none; width: 1em; text-align: center; color: var(--muted); }
+.todo.in_progress { color: var(--tool); font-weight: 500; }
+.todo.in_progress .todo-mark { color: var(--tool); }
+.todo.done { color: var(--muted); text-decoration: line-through; }
+.todo.done .todo-mark { color: var(--ok); text-decoration: none; }
+
 /* ── syntax highlighting (highlight.js) ─────────────────────────────────── */
 .tk-kw   { color: var(--syn-kw); }
 .tk-str  { color: var(--syn-str); }

@@ -6,6 +6,7 @@
 import { initChips, refreshChipMenus, renderChipMenu } from "./chips.js";
 import { applyMcpStatus, initMcp, refreshMcpMenu } from "./mcp.js";
 import { applySkillsStatus, initSkills, refreshSkillsMenu } from "./skills.js";
+import { applyTodosStatus, initTodos } from "./todos.js";
 import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
 import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, formatSize, icon, loadJSON,
          makeResizable, openLayer, saveJSON, toast } from "./dom.js";
@@ -612,6 +613,7 @@ function applyStatus(s) {
   const pp = $("#plan-progress");
   pp.hidden = !s.plan_progress;
   pp.textContent = s.plan_progress;
+  applyTodosStatus(s);
   updatePlanKind();
   const offline = s.backend_reachable === false;
   $("#model").textContent = offline ? `${s.model} · offline` : s.model;
@@ -1107,7 +1109,8 @@ async function refreshState() {
 let planFileView = false;
 let shownPlanFile = null;   // the markdown the plan-file view shows, to skip unchanged refreshes
 function renderPlan() {
-  $("#plan-btn").hidden = !state.plan;
+  // Always there, so the drawer is one click away; without a plan it says so.
+  $("#plan-btn").title = state.plan ? "Plan" : "Plan (no plan)";
   const body = $("#plan-body");
   if (state.plan_view && !planFileView) {
     shownPlanFile = null;
@@ -1118,12 +1121,13 @@ function renderPlan() {
     shownPlanFile = state.plan || "";
     stopPlanTimer();
     $("#plan-drawer").classList.remove("plan-wide");
-    body.innerHTML = state.plan ? renderMarkdown(state.plan) : "<p class='muted'>No active plan.</p>";
+    body.innerHTML = state.plan ? renderMarkdown(state.plan) : "<p class='muted'>No plan.</p>";
     addCopyButtons(body);
     if (state.plan_view) body.prepend(planViewToggle());
   }
   const phase = state.plan_phase || "";
   $("#plan-phase").textContent = phase;
+  $("#plan-phase").hidden = !phase;
   const executing = phase === "executing";
   $("#plan-run").hidden = !state.plan || executing;
   $("#plan-resume").hidden = !executing;
@@ -1455,99 +1459,31 @@ document.addEventListener("drop", (e) => {
   input.focus();
 });
 
-let sugg = [], suggIdx = -1;
-let pathTimer = null;
+let sugg = [], suggIdx = -1, suggStart = 0;
+let suggTimer = null, suggSeq = 0;
 const AT_RX = /(?:^|\s)@([\w./~+-]*)$/;
 
-// Suggestions: "/" completes commands, "@" completes workspace paths.
+// Suggestions come from the harness (api/complete, harness/complete.py, shared
+// with the TUI): "/" completes every word of a command, "@" a workspace path,
+// folder by folder.
 function updateSuggest() {
-  const v = input.value;
-  const at = v.slice(0, input.selectionStart).match(AT_RX);
-  if (at) return schedulePathSearch(at[1]);
-  clearTimeout(pathTimer);
-  const arg = v.match(/^(\/[\w-]+) (\S*)$/);
-  if (state && arg && state.commands.some((c) => c.cmd === arg[1].toLowerCase())) {
-    return suggestArgs(arg[1].toLowerCase(), arg[2]);
-  }
-  if (!state || !v.startsWith("/") || v.includes("\n") || /\s\S*\s/.test(v)) return closeSuggest();
-  const word = v.split(/\s/)[0].toLowerCase();
-  sugg = state.commands.filter((c) => c.cmd.startsWith(word) || c.usage.startsWith(v));
-  if (!sugg.length || (sugg.length === 1 && sugg[0].usage === v.trim())) return closeSuggest();
-  renderSuggest();
-}
-
-// Values a command takes after its name: the `a|b|c` and literal words of its
-// /help usages, plus live lists for models, sessions and skills.
-let argSeq = 0;
-const argCache = new Map();   // source → {at, values}
-async function cachedValues(key, load) {
-  const hit = argCache.get(key);
-  if (hit && Date.now() - hit.at < 10_000) return hit.values;
-  const values = await load();
-  argCache.set(key, { at: Date.now(), values });
-  return values;
-}
-async function argValues(cmd) {
-  const out = new Map();     // value → description
-  for (const c of state.commands.filter((x) => x.cmd === cmd)) {
-    // "on|off", "[new|classic]", "auto|<n>", "[n|off]": the literal choices.  A
-    // lone bracketed word ("[filename]"), <placeholders> and "n" are not values.
-    for (const tok of c.usage.split(/\s+/).slice(1)) {
-      const opt = /^\[.*\]$/.test(tok);
-      if (opt && !tok.includes("|")) continue;
-      for (const v of (opt ? tok.slice(1, -1) : tok).split("|")) {
-        if (v && !/[<>[\]]/.test(v) && v !== "n" && !out.has(v)) out.set(v, c.desc);
-      }
-    }
-  }
-  try {
-    if (cmd === "/model") {
-      for (const m of await cachedValues("models", async () => (await (await fetch("api/models")).json()).models || [])) {
-        out.set(m, m === status.model ? "the model in use" : "");
-      }
-    } else if (cmd === "/session") {
-      const rows = await cachedValues("sessions", async () => (await (await fetch("api/sessions")).json()).sessions || []);
-      for (const s of rows) out.set(s.name, s.title || s.preview || "");
-    } else if (cmd === "/load-skill" || cmd === "/unload-skill") {
-      const { available = [], active = [] } = state.skills || {};
-      out.clear();
-      for (const s of cmd === "/load-skill" ? available.filter((x) => !active.includes(x)) : active) out.set(s, "");
-    } else if (cmd === "/think") {
-      for (const v of status.think_choices || []) out.set(v, `${status.model} takes this`);
-    } else if (cmd === "/mcp") {
-      for (const m of status.mcp || []) out.set(m.name, `${m.state}${m.tools ? ` · ${m.tools} tools` : ""}`);
-    }
-  } catch { /* offline: the static choices still help */ }
-  return [...out];
-}
-async function suggestArgs(cmd, partial) {
-  const seq = ++argSeq;
-  const values = await argValues(cmd);
-  if (seq !== argSeq) return;                       // typed on meanwhile
-  const p = partial.toLowerCase();
-  sugg = values.filter(([v]) => v.toLowerCase().includes(p) && v !== partial)
-    .sort(([a], [b]) => (b.toLowerCase().startsWith(p) - a.toLowerCase().startsWith(p)))
-    .slice(0, 30)
-    .map(([v, d]) => ({ usage: `${cmd} ${v}`, desc: d, fill: `${cmd} ${v}` }));
-  if (!sugg.length) return closeSuggest();
-  renderSuggest();
-}
-
-function schedulePathSearch(q) {
-  clearTimeout(pathTimer);
-  pathTimer = setTimeout(async () => {
-    let results = [];
+  clearTimeout(suggTimer);
+  const text = input.value, cursor = input.selectionStart ?? text.length;
+  const before = text.slice(0, cursor);
+  if (!AT_RX.test(before) && (!before.startsWith("/") || before.includes("\n"))) return closeSuggest();
+  const seq = ++suggSeq;
+  suggTimer = setTimeout(async () => {
+    let got;
     try {
-      const r = await fetch(`api/files/search?q=${encodeURIComponent(q)}`);
-      results = (await r.json()).results || [];
+      const q = `text=${encodeURIComponent(text)}&cursor=${cursor}`;
+      got = await (await fetch(`api/complete?${q}`)).json();
     } catch { return; }
-    const now = input.value.slice(0, input.selectionStart).match(AT_RX);
-    if (!now || now[1] !== q) return;  // the user typed on — a newer search is coming
-    sugg = results.map((p) => ({ usage: p, desc: "", path: p }));
+    if (seq !== suggSeq) return;          // the user typed on: a newer request is coming
+    sugg = got.items || [];
+    suggStart = got.start ?? cursor;
     if (!sugg.length) return closeSuggest();
-    suggIdx = Math.min(suggIdx, sugg.length - 1);
     renderSuggest();
-  }, 150);
+  }, 80);
 }
 
 function renderSuggest() {
@@ -1556,27 +1492,30 @@ function renderSuggest() {
   box.replaceChildren(...sugg.map((c, i) => {
     const row = el("div", i === suggIdx ? "sel" : "");
     row.setAttribute("role", "option");
-    row.append(el("span", "u", c.path ? `@ ${c.usage}` : c.usage), el("span", "d", c.desc));
+    row.append(el("span", "u", c.label), el("span", "d", c.desc));
     row.onmousedown = (e) => { e.preventDefault(); pickSuggest(i); };
     return row;
   }));
   box.hidden = false;
   box.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
 }
-function closeSuggest() { $("#suggest").hidden = true; sugg = []; suggIdx = -1; clearTimeout(pathTimer); }
+function closeSuggest() {
+  $("#suggest").hidden = true; sugg = []; suggIdx = -1; clearTimeout(suggTimer); suggSeq++;
+}
 function pickSuggest(i) {
   const c = sugg[i];
-  if (c.path) {
-    insertPath(c.path, true);
-  } else if (c.fill) {
-    input.value = c.fill;
-  } else {
-    const takesArg = c.usage.includes(" ") && !c.usage.includes(" | ");
-    input.value = c.cmd + (takesArg ? " " : "");
-  }
-  closeSuggest();
+  if (!c || c.kind === "note") return;
+  const cursor = input.selectionStart ?? input.value.length;
+  const before = input.value.slice(0, suggStart);
+  const after = input.value.slice(cursor);
+  const value = c.value.endsWith(" ") && after.startsWith(" ") ? c.value.slice(0, -1) : c.value;
+  input.value = before + value + after;
+  const caret = before.length + value.length;
+  input.setSelectionRange(caret, caret);
   autosize();
   input.focus();
+  // A folder, or a word with more after it: list what comes next.
+  if (c.more) { suggIdx = -1; updateSuggest(); } else closeSuggest();
 }
 
 // Put a workspace path into the input: replace a pending "@query", else insert at the caret.
@@ -2578,7 +2517,7 @@ function paletteActions() {
     { label: "Sessions", desc: "Open, rename or delete saved sessions", run: () => $("#sessions-btn").click() },
     { label: "Workspace files", desc: "Browse and preview the workspace", run: () => $("#files-btn").click() },
     { label: "Changes", desc: "What momo changed since the last keep: diffs, undo, keep", run: () => showChanges() },
-    ...(state?.plan ? [{ label: "Plan", desc: "The current plan", run: () => $("#plan-btn").click() }] : []),
+    { label: "Plan", desc: state?.plan ? "The current plan" : "No plan", run: () => $("#plan-btn").click() },
     { label: "System prompt", desc: "What the model gets as its system message", run: openPromptDrawer },
     { label: "Context breakdown", desc: "Where the context is spent; compact it", run: () => toggleMenu(fakeClick, "#ctx-menu", "Context", refreshCtxMenu) },
     { label: "Tools for this mode", desc: "Turn single tools on or off", run: () => toggleMenu(fakeClick, "#tools-menu", "Tools", refreshToolsMenu) },
@@ -2614,6 +2553,7 @@ initMcp({
   attach: (f) => { attachments.push({ id: ++attSeq, status: "ready", ...f }); renderChips(); },
 });
 initSkills({ send, status: () => status, closeMenu, openPrompt: openPromptDrawer, changed: refreshState });
+initTodos({ send });
 initFind();
 initPalette({
   commands: () => state?.commands || [],

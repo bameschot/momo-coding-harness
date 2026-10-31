@@ -85,7 +85,8 @@ def save(ts: str, model: str, mode: str, workdir: Path,
          title_turn: int = 0,
          title_locked: bool = False,
          compacted: list[dict] | None = None,
-         summary_state: dict | None = None):
+         summary_state: dict | None = None,
+         todos: list[dict] | None = None):
     data = {
         "created_at": ts,
         "model": model,
@@ -101,6 +102,7 @@ def save(ts: str, model: str, mode: str, workdir: Path,
         "plan": plan,
         "plan_phase": plan_phase,
         "plan_kind": plan_kind,
+        "todos": todos or [],
         "momo_lines": momo_lines or [],
         "momo_recap_turn": momo_recap_turn,
         "turn_count": turn_count,

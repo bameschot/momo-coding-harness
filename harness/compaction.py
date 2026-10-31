@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 
 from . import transcript as transcript_mod
+from . import todos as todos_mod
 from .events import ChatEvent, DoneEvent
 from .toolcall_text import _extract_and_strip_thinking
 
@@ -560,7 +561,8 @@ class CompactionMixin:
         if removed_msgs and first_user is not None:
             budget = max(_SUMMARY_MIN_TOKENS,
                          min(_SUMMARY_MAX_TOKENS, (self.context_limit - fixed) // 10))
-            body = render_summary(state, budget, self._plan_summary_line())
+            body = render_summary(state, budget, "\n\n".join(
+                filter(None, (self._plan_summary_line(), self._todos_summary_line()))))
             msgs[first_user]["content"] = f"{_SUMMARY_OPEN}{body}{_SUMMARY_CLOSE}{first_body}"
         self.summary_state = state
         self.messages = [msgs[k] for k in keep_idx]
@@ -607,6 +609,11 @@ class CompactionMixin:
             return None
         content, _ = _extract_and_strip_thinking(response.content or "")
         return parse_sections(content)
+
+    def _todos_summary_line(self) -> str:
+        """The todos list while an item is open: compaction drops the old todos
+        results, which were the only copy of it in the context."""
+        return todos_mod.summary_line(getattr(self, "todos", []))
 
     def _plan_summary_line(self) -> str:
         """Where an executing plan stands, for the summary: the plan itself is in

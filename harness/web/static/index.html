@@ -62,10 +62,11 @@
       </select>
     </label>
     <button id="plan-progress" class="chip button" type="button" title="Show the plan" hidden></button>
+    <button id="todos-chip" class="chip button" type="button" title="The model's todo list" hidden></button>
     <button id="model-btn" class="field strong model-btn" type="button" title="Switch model" aria-haspopup="dialog"><span id="model"></span><svg class="icon sm" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
     <span id="host" class="field muted collapse"></span>
     <span class="spacer"></span>
-    <button id="plan-btn" class="icon-btn" type="button" title="Plan" aria-label="Plan" hidden><svg class="icon" aria-hidden="true"><use href="#i-plan"/></svg></button>
+    <button id="plan-btn" class="icon-btn" type="button" title="Plan" aria-label="Plan"><svg class="icon" aria-hidden="true"><use href="#i-plan"/></svg></button>
     <button id="theme-btn" class="icon-btn" type="button" title="Switch to dark mode" aria-label="Switch to dark mode"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button>
     <button id="mcp-btn" class="icon-btn" type="button" title="MCP servers" aria-label="MCP servers" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg><span id="mcp-count" class="count" hidden></span></button>
     <button id="tools-btn" class="icon-btn" type="button" title="Tools for this mode (/tools)" aria-label="Tools for this mode" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg><span id="tools-off" class="count" hidden></span><span id="tools-pending" class="count pending" hidden></span></button>
@@ -384,6 +385,14 @@
   <div id="suggest" class="suggest" role="listbox" hidden></div>
   <div id="queue" class="attachments" aria-live="polite" hidden></div>
   <div id="offline-bar" class="offline-bar" role="status" hidden></div>
+  <section id="todos-panel" class="todos-panel" aria-label="Todo list" hidden>
+    <button id="todos-head" class="todos-head" type="button" aria-expanded="true" aria-controls="todos-list" title="Show or hide the todo list">
+      <span class="todos-title">Todo</span><span id="todos-count" class="chip"></span>
+      <span id="todos-current" class="todos-current"></span>
+      <svg class="icon sm" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+    </button>
+    <ol id="todos-list" class="todos-list"></ol>
+  </section>
   <div id="edit-banner" class="edit-banner" hidden>
     <span><svg class="icon sm" aria-hidden="true"><use href="#i-pencil"/></svg> Editing your last message<span id="edit-atts"></span> — Enter re-sends it</span>
     <button id="edit-cancel" type="button" class="icon-btn" title="Cancel editing" aria-label="Cancel editing"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>

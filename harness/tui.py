@@ -12,13 +12,14 @@ import sys
 import tempfile
 import time
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
+from . import complete as complete_mod
 from . import md_render
 from .loop_guard import MAX_RESETS as _LOOP_RESETS, THRESHOLD as _LOOP_GUARD
 from .commands import help_commands
 from .diff import build_diff_body
-from .file_search import fuzzy_search, workspace_files_nowait
+from .file_search import workspace_files_nowait
 from .controller import Controller
 from .events import (AskUserEvent, ChatEvent, CompanionEvent, DeltaEvent, DiffEvent,
                      DoneEvent, ErrorEvent, ResetEvent, StatusEvent, StreamEndEvent, ThinkEvent,
@@ -70,7 +71,6 @@ _KEY_IGNORED      = 607  # an escape sequence we don't bind, swallowed whole
 
 # Suggestions, as in the web UI: "@query" right before the caret opens workspace
 # path suggestions; a leading "/" opens slash-command suggestions.
-_AT_RX = re.compile(r"(?:^|\s)@([\w./~+-]*)$")
 _SUGGEST_MAX_ROWS = 8
 _PICKER_DESC_LINES = 4   # /tools picker: description lines under the list
 _ARG_MAX = 60           # tool-call argument values are cut to this, as in the web UI
@@ -383,16 +383,20 @@ def _shorten_path_left(path: str, budget: int) -> str:
 
 _INPUT_H  = 5  # fixed height of the multi-line input area
 _STATUS_H = 3  # top border + text + bottom border
+_TODOS_MAX_H = 4      # rows of the todo strip at most
+_TODOS_MIN_CHAT = 8   # the strip is left out when the chat would get fewer rows
 
-def _compute_layout(rows: int, cols: int, companion_h: int = 0) -> dict:
+def _compute_layout(rows: int, cols: int, companion_h: int = 0, todos_h: int = 0) -> dict:
     # chat_h absorbs all slack.  A terminal too short for the fixed regions is
     # caught by _build_windows, which shows a placeholder instead.
-    chat_h      = max(4, rows - _STATUS_H - _INPUT_H - companion_h)
-    companion_y = chat_h
-    status_y    = chat_h + companion_h
+    chat_h      = max(4, rows - _STATUS_H - _INPUT_H - companion_h - todos_h)
+    todos_y     = chat_h
+    companion_y = chat_h + todos_h
+    status_y    = companion_y + companion_h
     input_y     = status_y + _STATUS_H
     return {
         "chat_y":      0,       "chat_h":      chat_h,
+        "todos_y":     todos_y, "todos_h":     todos_h,
         "companion_y": companion_y, "companion_h": companion_h,
         "status_y":    status_y,
         "input_y":     input_y, "input_h":     _INPUT_H,
@@ -400,11 +404,50 @@ def _compute_layout(rows: int, cols: int, companion_h: int = 0) -> dict:
     }
 
 
+def _open_todos(items: list) -> list:
+    """The todo items still to do, the one in progress first."""
+    return ([t for t in items if t.get("status") == "in_progress"]
+            + [t for t in items if t.get("status") == "pending"])
+
+
+def _todos_strip_h(items: list, rows: int, companion_h: int = 0) -> int:
+    """Rows for the todo strip: one per open item up to _TODOS_MAX_H, or 0
+    with nothing open or when the chat would drop below _TODOS_MIN_CHAT rows
+    (the status bar's TODO: x/y still shows the count)."""
+    h = min(len(_open_todos(items)), _TODOS_MAX_H)
+    if not h or rows - _STATUS_H - _INPUT_H - companion_h - h < _TODOS_MIN_CHAT:
+        return 0
+    return h
+
+
+def _todos_lines(items: list, width: int, max_rows: int) -> list[str]:
+    """The strip's lines: the open items, in progress first, each cut to the
+    width; the first line ends with the done/all count, and items that do not
+    fit become a "… +N more" line."""
+    open_items = _open_todos(items)
+    if not open_items or max_rows < 1 or width < 10:
+        return []
+    shown = open_items if len(open_items) <= max_rows else open_items[:max_rows - 1]
+    lines = [f" {'[>]' if t['status'] == 'in_progress' else '[ ]'} {t['text']}" for t in shown]
+    if len(shown) < len(open_items):
+        lines.append(f" … +{len(open_items) - len(shown)} more  (/todos)")
+    done = sum(1 for t in items if t.get("status") == "done")
+    count = f" {done}/{len(items)} "
+    for i, line in enumerate(lines):
+        room = width - (len(count) if i == 0 else 0)
+        if len(line) > room:
+            line = line[:max(0, room - 1)] + "…"
+        lines[i] = line.ljust(room) + count if i == 0 else line
+    return lines
+
+
 # View options, keyed like the CommandResult fields that set them.
 _VIEW_DEFAULTS = {"tool_output": True, "think_output": True, "md_render": True,
-                  "diff_output": True, "diff_style": "compact", "companion": True}
+                  "diff_output": True, "diff_style": "compact", "companion": True,
+                  "todos": True}
 # Shift+letter shortcuts (chat focus): the view option each one toggles.
-_VIEW_KEYS = {"T": "think_output", "M": "md_render", "D": "diff_output", "Q": "companion"}
+_VIEW_KEYS = {"T": "think_output", "M": "md_render", "D": "diff_output", "Q": "companion",
+              "L": "todos"}
 
 
 # ── main TUI ──────────────────────────────────────────────────────────────────
@@ -422,6 +465,10 @@ class TUI:
         self._chat_buf    = _LineBuffer()
         self._chat_events: list[tuple] = []  # raw events for toggle rebuild
         self._view = dict(_VIEW_DEFAULTS)
+        # The model's todo list (StatusEvent.todos), drawn in the strip above the companion.
+        self._todos: list = []
+        self._todos_win = None
+        self._todos_drawn = None
         # Follow new output only while the user hasn't scrolled away from it;
         # otherwise the status line says there is more below.
         self._follow = True
@@ -435,12 +482,14 @@ class TUI:
         self._history_stash: str = ""   # saves live input while browsing
         self._focus: str = "input"      # "input" | "chat"
         # @-path / slash-command suggestions, drawn over the bottom of the chat pane.
-        # Each item is {"path": p}, {"note": text}, or a help_commands() entry {cmd, usage, desc}.
+        # Each item is a complete.Item as a dict: {value, label, desc, more, kind}.
         self._sugg: list[dict] = []
         self._sugg_idx: int = -1        # -1 = nothing highlighted (Enter still submits)
         self._sugg_query: tuple | None = None  # query the list was computed for
         self._sugg_waiting = False      # the file list is still being walked
         self._commands = help_commands()
+        self._complete_src = complete_mod.Sources(harness, self._commands)
+        self._sugg_start = 0            # where the text a suggestion replaces begins
         # /tools: the per-role tool picker, drawn over the chat pane while open.
         # {"items": harness.tool_choices(), "idx": highlighted row}
         self._picker: dict | None = None
@@ -521,7 +570,7 @@ class TUI:
         if cols < 20 or L["chat_h"] < 1 or L["input_y"] + L["input_h"] > rows:
             self._too_small = True
             self._chat_win = self._status_win = self._input_win = None
-            self._companion_win = None
+            self._companion_win = self._todos_win = None
             return
         self._too_small = False
         self._chat_win   = curses.newwin(L["chat_h"],  cols, L["chat_y"],   0)
@@ -537,13 +586,19 @@ class TUI:
             self._companion_win.leaveok(True)
         else:
             self._companion_win = None
+        self._todos_drawn = None       # the new strip window starts blank
+        if L["todos_h"] > 0:
+            self._todos_win = curses.newwin(L["todos_h"], cols, L["todos_y"], 0)
+            self._todos_win.leaveok(True)
+        else:
+            self._todos_win = None
 
     def _rebuild(self):
         """New terminal size (or companion shown/hidden): new windows, and the
         transcript re-wrapped to the new width."""
         rows, cols = self.stdscr.getmaxyx()
-        self._layout = _compute_layout(
-            rows, cols, companion_h=_COMPANION_H if self._view["companion"] else 0)
+        self._layout = _compute_layout(rows, cols, companion_h=self._companion_h(),
+                                       todos_h=self._todos_h(rows))
         self._build_windows()
         self._rebuild_chat_buf()
         self.stdscr.clear()
@@ -565,11 +620,39 @@ class TUI:
         self._draw_suggest()
         self._draw_picker()
         self._draw_changes()
+        self._draw_todos()
         if self._companion_win is not None:
             self._companion.draw(self._companion_win, L["cols"])
         self._draw_status()
         self._draw_input()
         curses.doupdate()
+
+    def _companion_h(self) -> int:
+        return _COMPANION_H if self._view["companion"] else 0
+
+    def _todos_h(self, rows: int) -> int:
+        """The todo strip's height for this terminal (0: hidden or no room)."""
+        if not self._view["todos"]:
+            return 0
+        return _todos_strip_h(self._todos, rows, self._companion_h())
+
+    def _draw_todos(self):
+        """The todo strip: the model's open items, repainted only when they change."""
+        win = self._todos_win
+        if win is None:
+            return
+        L = self._layout
+        lines = _todos_lines(self._todos, L["cols"] - 1, L["todos_h"])
+        key = (tuple(lines), L["cols"])
+        if key == self._todos_drawn:
+            return
+        win.erase()
+        for i, line in enumerate(lines):
+            busy = i == 0 and line.startswith(" [>]")
+            _put(win, i, 0, line, L["cols"] - 1,
+                 curses.color_pair(_C_TOOL_NAME if busy else _C_TOOL_RES))
+        self._todos_drawn = key
+        win.noutrefresh()
 
     def _draw_too_small(self):
         """Render a placeholder when the terminal can't fit the layout, instead
@@ -749,38 +832,27 @@ class TUI:
     # ── @-path and /command suggestions ──────────────────────────────────────
 
     def _update_suggest(self):
-        """Recompute suggestions when the "@query" or "/command" being typed changes."""
+        """Recompute suggestions (harness/complete.py) when the text before the
+        cursor changes: "/" completes every word of a command, "@" a path."""
         query = None
         if self._focus == "input":
-            v = self._input
-            m = _AT_RX.search(v[:self._cursor])
-            if m:
-                query = ("@", m.group(1))
-            elif v.startswith("/") and "\n" not in v and not re.search(r"\s\S*\s", v):
-                query = ("/", v)  # until a second word is finished, like the web UI
+            query = (self._input[:self._cursor], str(self.harness.workdir))
         if query == self._sugg_query:
             return  # unchanged (also keeps an Esc-dismissed list closed)
         self._sugg_query = query
         self._sugg_idx = -1
         self._sugg_waiting = False
-        if query is None:
+        got = None
+        if query is not None:
+            # wait=False: never walk the tree or ask the server on the key loop;
+            # until the background walk has a list, the idle tick recomputes.
+            got = complete_mod.complete(self._input, self._cursor, self._complete_src, wait=False)
+        if got is None:
             self._sugg = []
-        elif query[0] == "@":
-            # Never walk the tree on the key loop: until the background walk has a
-            # list, say so, and the idle tick recomputes when it arrives.
-            files = workspace_files_nowait(self.harness.workdir)
-            if files is None:
-                self._sugg_waiting = True
-                self._sugg = [{"note": "searching the workspace…"}]
-            else:
-                self._sugg = [{"path": p} for p in fuzzy_search(files, query[1])]
-        else:
-            v = query[1]
-            word = v.split()[0].lower()
-            self._sugg = [c for c in self._commands
-                          if c["cmd"].startswith(word) or c["usage"].startswith(v)]
-            if len(self._sugg) == 1 and self._sugg[0]["usage"] == v.strip():
-                self._sugg = []  # already fully typed
+            return
+        self._sugg_start = got.start
+        self._sugg_waiting = got.waiting
+        self._sugg = [asdict(i) for i in got.items]
 
     def _close_suggest(self):
         self._sugg = []
@@ -789,23 +861,21 @@ class TUI:
 
     def _pick_suggest(self, i: int):
         item = self._sugg[i]
-        if "note" in item:
+        if item["kind"] == "note":
             return
-        if "path" in item:
-            # Replace the pending "@query" with `path`, like the web UI.
-            path = item["path"]
-            before = re.sub(r"@[\w./~+-]*$", lambda _m: f"`{path}`", self._input[:self._cursor])
-            after = self._input[self._cursor:]
-            glue = "" if after.startswith(" ") else " "
-            self._input = before + glue + after
-            self._cursor = len(before) + len(glue)
+        value = item["value"]
+        before = self._input[:self._sugg_start]
+        after = self._input[self._cursor:]
+        if value.endswith(" ") and after.startswith(" "):
+            value = value[:-1]
+        self._input = before + value + after
+        self._cursor = len(before) + len(value)
+        if item["more"]:
+            # A folder or a word with more after it: list what comes next.
+            self._sugg_query = None
+            self._update_suggest()
         else:
-            # Commands that take an argument get a trailing space to type it.
-            usage = item["usage"]
-            takes_arg = " " in usage and " | " not in usage
-            self._input = item["cmd"] + (" " if takes_arg else "")
-            self._cursor = len(self._input)
-        self._close_suggest()
+            self._close_suggest()
 
     def _draw_suggest(self):
         if not self._sugg or self._chat_win is None:
@@ -818,25 +888,18 @@ class TUI:
             return
         # Scroll the visible slice so the highlighted row stays in view.
         first = min(max(0, self._sugg_idx - n + 1), len(self._sugg) - n)
-        kind = "path" if "path" in self._sugg[0] else "note" if "note" in self._sugg[0] else "cmd"
-        if kind == "path":
-            width = min(cols - 2, max(len(c["path"]) for c in self._sugg) + 4)
-        elif kind == "note":
-            width = min(cols - 2, len(self._sugg[0]["note"]) + 4)
-        else:
-            usage_w = max(len(c["usage"]) for c in self._sugg)
-            width = min(cols - 2, usage_w + max(len(c["desc"]) for c in self._sugg) + 4)
+        label_w = min(max(len(c["label"]) for c in self._sugg), cols - 4)
+        desc_w = max(len(c["desc"]) for c in self._sugg)
+        width = min(cols - 2, label_w + (desc_w + 2 if desc_w else 0) + 2)
         for row, i in enumerate(range(first, first + n)):
             item = self._sugg[i]
-            if kind == "path":
-                label = "@ " + _shorten_path_left(item["path"], width - 3)
-            elif kind == "note":
-                label = item["note"]
-            else:
-                label = f"{item['usage'].ljust(usage_w)}  {item['desc']}"
+            # A deep path keeps its tail, the most specific part.
+            label = (_shorten_path_left(item["label"], label_w) if item["kind"] == "path"
+                     else item["label"][:label_w])
+            text = f"{label.ljust(label_w)}  {item['desc']}" if desc_w else label
             attr = (curses.A_REVERSE | curses.color_pair(_C_FOCUS) if i == self._sugg_idx
                     else curses.color_pair(_C_CMD))
-            _put(win, content_h - n + row, 0, (" " + label).ljust(width), width, attr)
+            _put(win, content_h - n + row, 0, (" " + text).ljust(width), width, attr)
         win.noutrefresh()
 
     # ── /tools and /mcp pickers ───────────────────────────────────────────────
@@ -1393,6 +1456,12 @@ class TUI:
             parts.append("LOOP: off")
         elif (ev.loop_guard, ev.loop_resets) != (_LOOP_GUARD, _LOOP_RESETS):
             parts.append(f"LOOP: {ev.loop_guard}×/{ev.loop_resets}")
+        if ev.todos_progress:
+            parts.append(f"TODO: {ev.todos_progress}")
+        self._todos = list(ev.todos)
+        rows, _ = self.stdscr.getmaxyx()
+        if self._todos_h(rows) != self._layout["todos_h"]:
+            self._rebuild()          # the strip appeared, went or changed height
         if ev.undo_count:
             parts.append(f"UNDO: {ev.undo_count}")
         self._st_extra = "".join(f" | {p}" for p in parts)
@@ -1463,7 +1532,7 @@ class TUI:
         if not changes:
             return
         self._view.update(changes)
-        if "companion" in changes:
+        if "companion" in changes or "todos" in changes:
             self._rebuild()          # a new layout, which re-renders and redraws too
         else:
             self._rebuild_chat_buf()
