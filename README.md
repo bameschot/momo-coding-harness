@@ -554,6 +554,20 @@ Both numbers are settings, saved like the others:
 
 `/loop-guard` alone shows both. In the web UI, the `LOOP` badge in the status bar opens them; View → All settings… → Context has them too.
 
+#### Calls that were not run
+
+Some calls never run, and each still gets a result that says why and what a retry should change:
+
+| Case | What the model gets |
+|---|---|
+| The reply hit the output limit (`/max-output-tokens`) or the context window in the middle of a call, so its arguments are not complete JSON | `ERROR: not run — your reply hit the 25,000-token output limit before this write_file call was complete…`, with advice for the tool: write a file in parts (`write_file`, then `append_to_file`), make an edit smaller, or split the work |
+| The arguments are not valid JSON, without a cut-off | `ERROR: not run — the arguments … were not valid JSON (…)` |
+| You pressed Esc while an earlier call in the same batch ran | `ERROR: not run — the user interrupted the turn before this call ran` for each call left |
+| A call written as text was cut off (`<tool_call>{"name": "write_file", …` with no end) | The text before the call is kept, and a note marked as the harness's gives the same advice. At most 2 such notes per turn |
+| The reply was cut off with nothing to show and no reasoning (the server dropped an unfinished call) | The cut-off retry asks for a smaller call instead of "write a brief response" |
+
+Before this, a cut-off call ran with no arguments: the model was told an argument was missing and sent the same oversized write again, and a tool with no required arguments ran on its defaults. Every result starts with `ERROR: not run`, so the same cut-off made 3 times is a [loop](#loop-guard). When the cut-off reply also had reasoning, the next request runs without thinking, since reasoning shares the output budget.
+
 ### Plan mode
 
 Plan mode is for features and bugfixes you want thought through before any code changes. The assistant investigates first, asks about genuine uncertainties, and writes a concrete implementation plan. Nothing is edited until you approve that plan. Approving switches momo to **coding mode**, and it carries the plan out step by step with coding mode's prompt, tools, tool choices and loaded skills, keeping track of which step it is on. When the plan is done you stay in coding mode, so your next message is a normal coding turn rather than a new plan; `/plan` takes you back.

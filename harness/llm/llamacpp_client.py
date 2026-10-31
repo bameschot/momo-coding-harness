@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 
-from .base import DEFAULT_EFFORTS, EFFORT_LEVELS, ChatResponse, LLMClient, ThinkingCaps, ToolCall
+from .base import (DEFAULT_EFFORTS, EFFORT_LEVELS, ChatResponse, LLMClient, ThinkingCaps,
+                   ToolCall, parse_tool_args)
 from .http import HTTPClient, normalize_base_url
 
 
@@ -238,11 +239,8 @@ class LlamaCppClient(LLMClient):
                     finish = choice["finish_reason"]
         tool_calls = []
         for _, slot in sorted(calls.items()):
-            try:
-                args = json.loads(slot["args"]) if slot["args"].strip() else {}
-            except ValueError:
-                args = {}
-            tool_calls.append(ToolCall(name=slot["name"], arguments=args if isinstance(args, dict) else {}))
+            args, err = parse_tool_args(slot["args"])
+            tool_calls.append(ToolCall(name=slot["name"], arguments=args, args_error=err))
         return ChatResponse(
             content="".join(content),
             thinking="".join(reasoning),
@@ -264,16 +262,10 @@ class LlamaCppClient(LLMClient):
             fn = tc.get("function") or {}
             raw_args = fn.get("arguments")
             if isinstance(raw_args, str):
-                try:
-                    args = json.loads(raw_args)
-                except Exception:
-                    args = {}
-            elif isinstance(raw_args, dict):
-                args = raw_args
+                args, err = parse_tool_args(raw_args)
             else:
-                args = {}
-            calls.append(ToolCall(name=fn.get("name", ""),
-                                  arguments=args if isinstance(args, dict) else {}))
+                args, err = (raw_args if isinstance(raw_args, dict) else {}), ""
+            calls.append(ToolCall(name=fn.get("name", ""), arguments=args, args_error=err))
 
         usage = data.get("usage") or {}
         return ChatResponse(

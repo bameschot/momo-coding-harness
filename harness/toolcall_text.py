@@ -355,6 +355,36 @@ def text_call_error(text: str, tools: list[dict]) -> str:
     return ""
 
 
+# Where a call written in one of the tagged formats starts.
+_RX_CALL_START = re.compile(
+    r'<tool_call>|<\|tool_call\|>|<function_?call>|\[TOOL_CALL\]|<｜tool▁call▁begin｜>', re.IGNORECASE)
+
+
+def partial_text_call(text: str, tools: list[dict]) -> tuple[str, int] | None:
+    """(tool, start) for a call a cut-off reply was writing as text when it
+    stopped: the tool ("a tool" when the call names none yet) and where the call
+    starts, so the unfinished markup can be cut off before the reply is stored.
+    None when the text starts no call.  For text _extract_text_tool_calls found
+    no call in: an opening tag, a {"name": "<tool>" object that does not parse,
+    or an unbalanced <tool>(."""
+    known = {t["function"]["name"] for t in tools}
+    if not text or not known:
+        return None
+    names = '|'.join(re.escape(n) for n in sorted(known, key=len, reverse=True))
+    if (start := _RX_CALL_START.search(text)):
+        found = re.compile(r'\b(' + names + r')\b').search(text, start.end())
+        return (found.group(1) if found else "a tool"), start.start()
+    for m in re.finditer(r'\{\s*"name"\s*:\s*"(' + names + r')"', text):
+        try:
+            _JSON_DECODER.raw_decode(text, m.start())
+        except json.JSONDecodeError:
+            return m.group(1), m.start()
+    for m in re.finditer(r'\b(' + names + r')\s*\(', text):
+        if _match_paren(text, m.end() - 1) < 0:
+            return m.group(1), m.start()
+    return None
+
+
 # Chat-template turn markers a model sometimes writes as text, e.g. gemma ending
 # its reply with "<|im_end|>\n<|im_start|>assistant" and carrying on as if in a
 # new turn.  Markup only: they must not be shown or sent back as content.

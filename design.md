@@ -94,7 +94,16 @@ Some models emit tool calls as plain text rather than using the API's structured
 3. **Python-call syntax**: gemma-family models often emit calls as Python source — `edit_file(path='a.py', old_string='x', new_string='y')` or positionally `edit_file("a.py", "x", "y")`, sometimes wrapped in `print(...)`. `_match_paren` carves out the balanced `name(...)` (skipping quoted strings), then `ast` parses it and `ast.literal_eval` recovers each argument. Positional args are mapped to the tool's declared parameter order; keyword args override. Bare mentions in prose are rejected because their values are not literals.
 4. **Bare JSON anchored to tool names**: pattern built dynamically from the current tool set; scans for `{"name": "<known_tool>", "arguments": {…}}` or `known_tool({…})` anywhere in the response.
 
-If a text tool call is recovered it is executed normally; if every tier fails the text is treated as a regular assistant response.
+If a text tool call is recovered it is executed normally; if every tier fails the text is treated as a regular assistant response, unless the reply was cut off in the middle of it (see below).
+
+### Settled results (calls not run)
+
+A call the harness does not run still gets an answer that says why and what a retry should change (`harness/settle.py`). Every result starts with `ERROR: not run`, so the loop guard counts the same cut-off made again like any repeated failure.
+
+- **Cut off or malformed arguments.** The adapters keep the JSON error on `ToolCall.args_error` (arguments stay `{}`). With `done_reason == "length"` the call is settled as *truncated* (the cause is the `/max-output-tokens` cap when the reply used 95% of it, else the context window), with advice per tool: `write_file` then `append_to_file`, smaller edits, or smaller arguments. Otherwise it is *malformed*. Complete calls earlier in the batch run normally. Thinking is suppressed for the next turn when the cut-off reply had reasoning.
+- **Esc during a batch.** The remaining calls are settled as *interrupted*, and the loop then returns `cancelled`.
+- **A text call cut off.** `partial_text_call` finds an opening tag, an unparseable `{"name": "<tool>"`, or an unbalanced `<tool>(`. The text before it is kept as the assistant turn, and a harness note with the same advice follows. At most 2 per `send()`.
+- **An empty cut-off with no reasoning** retries with `_RETRY_TEXT["cut_off_call", …]`, which asks for a smaller call.
 
 ### Missing-path write rescue
 

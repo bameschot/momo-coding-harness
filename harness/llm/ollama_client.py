@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-from .base import DEFAULT_EFFORTS, ChatResponse, LLMClient, ThinkingCaps, ToolCall
+from .base import DEFAULT_EFFORTS, ChatResponse, LLMClient, ThinkingCaps, ToolCall, parse_tool_args
 from .http import HTTPClient, LLMHTTPError, normalize_base_url
 
 # Message fields Ollama's /api/chat understands (the ollama SDK kept exactly these).
@@ -196,13 +196,12 @@ class OllamaClient(LLMClient):
         for tc in raw_calls:
             fn = (tc or {}).get("function") or {}
             args = fn.get("arguments") or {}
+            err = ""
             # Older Ollama versions return arguments as a raw JSON string.
             if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except ValueError:
-                    args = {}
-            calls.append(ToolCall(name=fn.get("name", ""), arguments=args if isinstance(args, dict) else {}))
+                args, err = parse_tool_args(args)
+            calls.append(ToolCall(name=fn.get("name", ""), arguments=args if isinstance(args, dict) else {},
+                                  args_error=err))
         return calls
 
     @classmethod

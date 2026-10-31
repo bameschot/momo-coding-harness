@@ -1209,6 +1209,7 @@ ollama serve</code></pre></div>
       <li><strong>Bad calls get useful errors.</strong> An unknown, missing or extra argument returns an <code>ERROR:</code> that lists the valid arguments, often with a hint such as "to change part of a file, use edit_file".</li>
       <li><strong>Obvious mix-ups are routed:</strong> <code>write_file</code> with <code>old_string</code>/<code>new_string</code> runs as <code>edit_file</code>.</li>
       <li><strong>Unsafe writes are refused,</strong> such as file content copied from a shortened tool result.</li>
+      <li><strong>Calls that can't run say why.</strong> A call the output limit cut off, arguments that aren't valid JSON, or the rest of a batch after you press Esc: none of them run. Each gets an <code>ERROR: not run</code> result that names the cause and what to change, such as "write the file in parts: write_file, then append_to_file". A call written as text and cut off gets the same note instead of ending the turn as the reply.</li>
       <li><strong>Repeated failures are flagged:</strong> making the exact same failing call again adds a note to change the arguments.</li>
       <li><strong>Silent loops get a nudge:</strong> after 10 rounds of tool calls without any text (20 with <a href="#cavecat">cavecat</a>), the model is asked for a short progress update.</li>
       <li><strong>Loops are cut out:</strong> the same call made 3 times with nothing changed, or the same error 3 times, rewinds the conversation. See <a href="#loop-guard">Loop guard</a>.</li>

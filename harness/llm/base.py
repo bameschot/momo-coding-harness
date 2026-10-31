@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable
@@ -64,6 +65,23 @@ class ToolCall:
     parsed dict (never a raw JSON string)."""
     name: str
     arguments: dict
+    # Why the arguments could not be parsed ("" when they could): arguments is
+    # then {}, and the harness settles the call instead of running it.
+    args_error: str = ""
+
+
+def parse_tool_args(raw: str) -> tuple[dict, str]:
+    """Tool-call arguments sent as a JSON string: (the dict, "") or, when they do
+    not parse (a reply cut off mid-call, or malformed JSON), ({}, why)."""
+    if not raw.strip():
+        return {}, ""
+    try:
+        args = json.loads(raw)
+    except ValueError as e:
+        return {}, str(e)
+    if not isinstance(args, dict):
+        return {}, f"expected a JSON object, got {type(args).__name__}"
+    return args, ""
 
 
 @dataclass

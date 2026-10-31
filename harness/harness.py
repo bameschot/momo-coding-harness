@@ -50,7 +50,8 @@ from .prompts import (_index_banner, MODES,
                       planner_for_tdd)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls,
-                            _strip_turn_markers)
+                            _strip_turn_markers, partial_text_call)
+from . import settle
 
 # DIFF_TOOLS (Tool.diff): tools whose result a frontend may receive as
 # DiffEvents instead of a ToolResultEvent; served to the web UI.  The harness
@@ -216,6 +217,14 @@ _RETRY_TEXT = {
         'Your previous response was cut off. Do NOT output any reasoning or thinking. Call create_plan now if your investigation is complete, or call a tool to continue investigating, or ask_user if you need information.',
     ('cut_off', 'other'):
         'Your previous response was cut off. Do NOT output any reasoning or thinking. Call a tool directly or write a brief response.',
+    # Cut off with nothing to show and no reasoning: the server dropped a tool
+    # call it never finished, so the retry must make it smaller, not the same.
+    ('cut_off_call', 'design'):
+        "Your previous response was cut off before it was complete, so nothing was run or written. If you were writing the document, write it in parts: write_file with the first part, then append_to_file for each next part. Or call ask_user if you need information.",
+    ('cut_off_call', 'investigating'):
+        'Your previous response was cut off before it was complete, so nothing was run. Make the next tool call smaller, or call create_plan now if your investigation is complete.',
+    ('cut_off_call', 'other'):
+        'Your previous response was cut off before it was complete, so nothing was run or written. Do not repeat the same call at the same size: split a large write_file into write_file plus append_to_file parts, and a large edit into smaller edits.',
     ('thinking_only', 'design'):
         "You produced reasoning but no response or tool call. Based on your analysis, call write_file now with both 'path' (the file path to write) and 'content' (the complete document). Or call ask_user if you need more information.",
     ('thinking_only', 'investigating'):
@@ -2010,6 +2019,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         _suppress_think_next = False  # disable thinking for one turn after cutoff or thinking-only retry
         _nudged = False
         _write_nudged = False  # one write-intent recovery nudge per send()
+        cut_notes = 0          # notes for a text call the cut-off left unfinished, at most 2
         compact_notice = ""    # last auto-compaction notice, to not repeat a no-op one
         while True:
             if self._cancel.is_set():
@@ -2115,6 +2125,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
 
             # Native tool calls the adapter parsed from the API response.
             _calls: list[tuple[str, dict]] = [(tc.name, tc.arguments) for tc in response.tool_calls]
+            # Per call, why its arguments did not parse ("": they did).
+            arg_errors: list[str] = [tc.args_error for tc in response.tool_calls]
 
             # Recover tool calls embedded as text when the model bypassed the
             # tool API.  Suppress the raw content in that case — the tool events
@@ -2125,9 +2137,18 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 if recovered:
                     self.text_tool_calls += len(recovered)
                     _calls = [(r["name"], r["arguments"]) for r in recovered]
+                    arg_errors = [""] * len(_calls)
                     content = ""
             # After recovery, so the arguments of a text call keep the markers.
             content = _strip_turn_markers(content)
+            # A text call the cut-off left unfinished: nothing recovers it, so it
+            # would end the turn as the reply.  Keep the text before it only (the
+            # half markup breaks Qwen3's template when sent back).
+            cut_call = None
+            if not _calls and content and done_reason == "length" and cut_notes < 2:
+                cut_call = partial_text_call(content, tools + self._tool_catalog())
+                if cut_call is not None:
+                    content = content[:cut_call[1]].rstrip()
 
             self.logger.log_response(
                 self.mode, self.client.model,
@@ -2152,6 +2173,19 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 self.event_queue.put(ChatEvent("assistant", content))
 
             if not _calls:
+                if cut_call is not None:
+                    cut_notes += 1
+                    name = cut_call[0]
+                    self.event_queue.put(ChatEvent("system",
+                        f"Reply cut off while writing {name} — not run; asked the model to split it."))
+                    if raw_thinking:
+                        _suppress_think_next = True   # thinking shares the output budget
+                    names = {t["function"]["name"] for t in tools}
+                    cause = settle.cut_off_cause(self.max_output_tokens, eval_tokens)
+                    self.messages.append({"role": "assistant", "content": content or None})
+                    self.messages.append({"role": "user",
+                                          "content": settle.cut_off_text_note(name, names, cause)})
+                    continue
                 if not content:
                     if last_tool == "write_file":
                         # After write_file the model sometimes returns nothing — the
@@ -2172,10 +2206,18 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                                 # Generation cut off by context window — thinking consumed all tokens.
                                 # Disable thinking for the retry so it has budget to respond.
                                 _suppress_think_next = True
-                                self.event_queue.put(ChatEvent("system",
-                                    "Response cut off (context or /max-output-tokens limit). "
-                                    "Retrying without thinking."))
-                                reason = "cut_off"
+                                if raw_thinking or not tools:
+                                    self.event_queue.put(ChatEvent("system",
+                                        "Response cut off (context or /max-output-tokens limit). "
+                                        "Retrying without thinking."))
+                                    reason = "cut_off"
+                                else:
+                                    # Nothing to show and no reasoning: the server
+                                    # dropped a tool call it never finished.
+                                    self.event_queue.put(ChatEvent("system",
+                                        "Response cut off before it was complete (context or "
+                                        "/max-output-tokens limit). Asking for a smaller call."))
+                                    reason = "cut_off_call"
                             elif raw_thinking:
                                 # Model reasoned but produced no output or tool call.
                                 # Disable thinking for the retry — passing think=True on a
@@ -2267,7 +2309,40 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             self._turn_stats["calls"] += len(_calls)
             loaded_before = set(self.loaded_tools)
             hit: Hit | None = None    # the first loop the guard saw in this batch
-            for name, args in _calls:
+            for (name, args), args_error in zip(_calls, arg_errors):
+                # Esc while an earlier call in this batch ran: the rest are not run,
+                # but each gets a result so the call/result pairing holds.
+                if self._cancel.is_set():
+                    self.event_queue.put(ToolResultEvent(name, "not run — interrupted"))
+                    self.messages.append({"role": "tool", "name": name,
+                                          "content": settle.settled_result("interrupted", name)})
+                    continue
+                # Arguments that did not parse: running the call with {} told the model
+                # an argument was missing (or ran a tool on its defaults).
+                if args_error:
+                    if done_reason == "length":
+                        result = settle.settled_result(
+                            "truncated", name, {t["function"]["name"] for t in tools},
+                            cause=settle.cut_off_cause(self.max_output_tokens, eval_tokens))
+                        self.event_queue.put(ChatEvent("system",
+                            f"Reply cut off while writing {name} — not run; asked the model to split it."))
+                        if raw_thinking:
+                            _suppress_think_next = True   # thinking shares the output budget
+                    else:
+                        result = settle.settled_result("malformed", name, error=args_error)
+                    self.event_queue.put(ToolCallEvent(name, args))
+                    self.event_queue.put(ToolResultEvent(name, result))
+                    self.logger.log_tool_call(self.mode, self.client.model, name, args)
+                    self.logger.log_tool_result(self.mode, self.client.model, name, len(result))
+                    self.messages.append({"role": "tool", "name": name, "content": result})
+                    # The same cut-off made again is a repeat like any failed call.
+                    if hit is None or hit.severity == "nudge":
+                        found = guard.record(name, args, result, batch_msg, False)
+                        if found is not None and (hit is None or found.severity == "rewind"):
+                            hit = found
+                    if last_tool != "write_file":
+                        last_tool = name
+                    continue
                 # complete_step ends the step: calls after it in the same batch are not
                 # run, but each still gets a result so the call/result pairing holds.
                 if self._step_summary is not None:
