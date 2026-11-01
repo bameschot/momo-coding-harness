@@ -119,9 +119,22 @@ class InTheLoop(unittest.TestCase):
         self.assertEqual(len(self.h.client.requests), 1)
 
     def test_other_modes_are_not_checked(self):
-        for mode in ("chat", "design", "plan"):
+        for mode in ("design", "plan"):
             with self.subTest(mode=mode):
                 turn = self.run_script([ANNOUNCE, text("ok")], mode=mode)
+                self.assertEqual(self.notes(turn), [])
+                self.h.logger.close()
+
+    def test_chat_mode_an_announced_lookup_gets_the_note(self):
+        turn = self.run_script([text("Let me read config.py to see how the port is set."),
+                                text("The port comes from PORT, default 8080.")], mode="chat")
+        self.assertEqual(len(self.notes(turn)), 1)
+
+    def test_chat_mode_a_question_or_an_answer_ends_the_turn(self):
+        for reply in ("What should happen when the list is empty?",
+                      "parse() returns None on an empty line. Does that match what you expect?"):
+            with self.subTest(reply=reply):
+                turn = self.run_script([text(reply)], mode="chat")
                 self.assertEqual(self.notes(turn), [])
                 self.h.logger.close()
 

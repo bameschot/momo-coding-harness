@@ -857,7 +857,7 @@ ollama serve</code></pre></div>
         <div class="side"><b>declined</b> → the model gets “declined” as the result</div>
         <div class="down" aria-hidden="true">↓</div>
         <div class="box harness"><div class="flow-who">harness</div>Run the tools, add the results to the history<small>in your working directory</small></div>
-        <div class="side"><b>100 rounds</b> (40 in design mode) → stop; a running plan pauses</div>
+        <div class="side"><b>100 rounds</b> (40 in design mode) → the model sums up, then stop; a running plan pauses</div>
         <div class="back">↺ back to compact, then the model</div>
       </div>
       <div class="flow-legend"><span class="you">you</span><span class="model">model</span><span class="harness">harness</span><span class="harness cond">only in some cases</span></div>
@@ -1147,7 +1147,7 @@ ollama serve</code></pre></div>
       <li><strong>Status bar:</strong> sessions, file browser, <a href="#changes">changes</a>, mode and model pickers, the CTX meter (click for a breakdown), setting badges, and buttons for <a href="#mcp">MCP</a>, <a href="#tool-choices">tools</a> and <a href="#skills">skills</a>.</li>
       <li><strong>Transcript:</strong> streamed replies, collapsible thinking and tool calls, coloured diffs and Yes/No question cards.</li>
       <li><strong>Changes drawer:</strong> every file momo changed since the last keep, per turn, with diffs, undo and keep. See <a href="#changes">The Changes drawer</a>.</li>
-      <li><strong>Input:</strong> <kbd>/</kbd> command and <kbd>@</kbd> path autocomplete, a message queue while the model is busy, and Retry / Edit.</li>
+      <li><strong>Input:</strong> <kbd>/</kbd> command and <kbd>@</kbd> path autocomplete, messages that steer a running turn (the model reads them after its current step), a queue while offline, and Retry / Edit.</li>
       <li><strong>Attachments:</strong> drag, paste or pick files; text and PDFs become text.</li>
       <li><strong>Notifications:</strong> a kitten mew and optional desktop notifications.</li>
     </ul>
@@ -1199,7 +1199,7 @@ ollama serve</code></pre></div>
         <div class="side"><b>bad arguments</b> → an <code>ERROR:</code> saying how to fix the call</div>
         <div class="down" aria-hidden="true">↓</div>
         <div class="box harness"><div class="flow-who">harness</div>Return the result<small>capped to fit the context, with hints; edits are also shown to you as a diff</small></div>
-        <div class="side"><b>looping</b> → <a href="#loop-guard">rewind</a> and ask for another approach<br><b>100 rounds</b> (40 in design mode) → stop</div>
+        <div class="side"><b>looping</b> → <a href="#loop-guard">rewind</a> and ask for another approach<br><b>100 rounds</b> (40 in design mode) → a summary, then stop</div>
         <div class="back">↺ back to the model</div>
       </div>
       <div class="flow-legend"><span class="model">model</span><span class="harness">harness</span><span class="harness cond">only in some cases</span></div>
@@ -1215,6 +1215,9 @@ ollama serve</code></pre></div>
       <li><strong>Calls that can't run say why.</strong> A call the output limit cut off, arguments that aren't valid JSON, or the rest of a batch after you press Esc: none of them run. Each gets an <code>ERROR: not run</code> result that names the cause and what to change, such as "write the file in parts: write_file, then append_to_file". A call written as text and cut off gets the same note instead of ending the turn as the reply.</li>
       <li><strong>Repeated failures are flagged:</strong> making the exact same failing call again adds a note to change the arguments.</li>
       <li><strong>Silent loops get a nudge:</strong> after 10 rounds of tool calls without any text (20 with <a href="#cavecat">cavecat</a>), the model is asked for a short progress update.</li>
+      <li><strong>You can steer a running turn:</strong> a message sent while the model works reaches it before its next request; if the turn has ended, it runs next.</li>
+      <li><strong>Server hiccups are retried:</strong> a busy, restarting or unreachable server is retried after 2, 4 and 8 seconds, and a prompt the server rejects as too long is compacted once and sent again.</li>
+      <li><strong>The round limit ends with a summary:</strong> at 100 rounds (40 in design mode) the model is asked, without tools, what is done, what is left and what is next, and that is the reply.</li>
       <li><strong>Calls that change nothing get a note:</strong> narrated or not, 15 tool calls in a row with no file written, no question to you and no plan tool (12 in momo mode, 25 while planning) get a note asking the model to act on what it has found; a second at twice that, then none. <code>/progress-note off</code> turns it off.</li>
       <li><strong>Loops are cut out:</strong> the same call made 3 times with nothing changed, or the same error 3 times, rewinds the conversation. See <a href="#loop-guard">Loop guard</a>.</li>
     </ul>

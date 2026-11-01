@@ -139,7 +139,7 @@ If the port is already in use, the TUI still starts and shows `Web UI failed to 
 The browser and the terminal are two views of **the same session**, not separate conversations:
 
 - A message typed in either window appears in both, and so do the model's replies, tool calls, diffs and command output.
-- While the model works, both windows show it as busy. A message sent from either one while busy gets the usual `Busy — waiting for response...` reply.
+- While the model works, both windows show it as busy. A message sent from either one while busy is **steered** into the running turn: the model sees it before its next request, after the tool calls it is making. If the turn has already ended by then, the message runs as the next turn. Esc drops queued messages, with a note (↑ brings them back).
 - A question from the model (`ask_user`, a `run_command` confirmation, plan approval, or a `[y/N]` prompt from a command) can be answered from **either** window.
 - Mode, model, host, context usage and plan progress are shared, so a change in one window shows up in the other.
 - **View options are per window.** Hiding thinking output in the browser doesn't hide it in the TUI, and vice versa. The browser remembers its view options between visits (in `localStorage`).
@@ -167,7 +167,7 @@ The browser and the terminal are two views of **the same session**, not separate
 ├──────────────────────────────────────────────────────────────────────────┤
 │   /\   \  < mew~                                                         │  ← momo companion
 │ ┌──────────────────────────────────────────────────────────────────────┐ │
-│ ◷ also update the README                                   ✎ ×          │  ← queued while busy
+│ ◷ also update the README                                   ✎ ×          │  ← queued while offline
 │ │ Message momo…  (/ commands · @ files)                                │ │  ← input box
 │ └──────────────────────────────────────────────────────────────────────┘ │
 │ ⠋ thinking                                          [■ Stop] [Send ↵]    │
@@ -208,7 +208,7 @@ The browser and the terminal are two views of **the same session**, not separate
   - It grows with its content. Text starting with `/` is highlighted as a command.
   - Typing `/` opens **command autocomplete** with the usage and description of every slash command. Use ↑/↓ to pick one and Tab or Enter to insert it. It goes on word by word: after `/plan ` it offers `stories`, `tdd`, `run`…, after `/plan stories ` it offers `approve` and `cap`, and live values where a usage has a placeholder (models, sessions, MCP servers, tools, skills, thinking levels). Path arguments complete folder by folder: `/read`, `/ls`, `/grep`, `/undo file` and `/export` inside the workspace, `/workspace` any folder on disk (`~/pro` → `~/projects/`).
   - Typing `@` followed by part of a file name opens **path autocomplete**, a fuzzy search over the workspace, folders included. Once the query has a `/` (`@harness/llm/`) it lists that folder instead: folders first, then files, filtered by what follows the last `/`. Picking a folder fills it in and keeps the list open on its contents; picking a file inserts its path, e.g. `` `src/app/main.py` ``. Only the path is inserted: the model reads the file itself with its tools. To send the contents, attach the file instead.
-  - Messages sent **while the model is working** are queued instead of rejected. They appear as queued chips (clock icon) above the input and are sent one per turn once the model is done. The pencil moves a queued message back into the input box and × removes it. `/commands` still run immediately, and while the model is waiting for your answer, what you type is the answer.
+  - Messages sent **while the model is working** go to the running turn: the model sees them after its current step (see [Finishing the turn](#finishing-the-turn)). Messages sent **while the connection is down** are queued as chips (clock icon) above the input and sent once it is back. The pencil moves a queued message back into the input box and × removes it. `/commands` still run immediately, and while the model is waiting for your answer, what you type is the answer.
   - The placeholder changes to `Answer momo…` when the model is waiting for your reply.
   - A spinner and a **■ Stop** button appear while the model is working.
   - The **paperclip** button attaches files (see [Attaching files](#attaching-files)).
@@ -538,7 +538,13 @@ Available tools: all design tools + `edit_file`, `edit_files`, `replace_symbol`,
 
 #### Finishing the turn
 
-In coding and momo mode a reply without a tool call ends the turn. A reply that only announces its next step ("My next step is to implement…", "I will begin with the first task", a plan list ending "3. Run the tests") gets a note to take that step now instead, at most twice per turn, and the chat shows a system line saying why the turn went on. A question to you, "let me know…", or a summary in the past tense ("Updated …, added …") ends the turn as before. It doesn't run in plan mode, while a plan or story runs (they end with their own tools), or in design and chat mode. On a 26B, 10 of 12 failed multi-part runs had ended this way; with the note, none did (`evals/multipart_bench.py`).
+In coding, momo and chat mode a reply without a tool call ends the turn. A reply that only announces its next step ("My next step is to implement…", "I will begin with the first task", a plan list ending "3. Run the tests") gets a note to take that step now instead, at most twice per turn, and the chat shows a system line saying why the turn went on. A question to you, "let me know…", or a summary in the past tense ("Updated …, added …") ends the turn as before. In chat mode an announced lookup ("Let me read config.py.") gets the same note, while a question to you still ends the turn. It doesn't run in plan mode, while a plan or story runs (they end with their own tools), or in design mode. On a 26B, 10 of 12 failed multi-part runs had ended this way; with the note, none did (`evals/multipart_bench.py`).
+
+A turn that hits its round limit (100, or 40 in design mode) ends with one more request without tools, asking the model what is done, what is left and the next step; that is the turn's reply. A reply cut off after a `write_file` in coding mode no longer ends the turn: only in design mode is the written file the end.
+
+**Messages typed while a turn runs** are steered into it: before the model's next request, after the tool calls of its current step, as your own message. If the turn ended first, they run as the next turn. Esc drops them with a note.
+
+**Server errors.** A transient error (429, 500, 502, 503, 504, a refused or dropped connection, a model still loading) is retried after 2, 4 and 8 seconds, with a system line before each try; Esc stops the wait. A prompt the server rejects as too long (llama.cpp's "exceeds the available context size" and the like) is compacted once and sent again. Other errors end the turn as before.
 
 #### Loop guard
 

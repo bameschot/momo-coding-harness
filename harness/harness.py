@@ -296,6 +296,40 @@ _LOOP_NUDGE = (
     "[Note from the harness, not the user] {removed}{changes}Do not repeat {what}. "
     "Continue with the different approach from your analysis; if it found none that "
     "fits what the user asked, stop and tell the user what is blocking you.")
+# A server error during a request (_run_loop): "transient" ones (busy, restarting,
+# dropped connection) are retried after these delays; "overflow" (the server
+# rejected the prompt as too long) compacts once and sends again.
+_SERVER_RETRY_DELAYS = (2, 4, 8)
+_RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+_RX_OVERFLOW = re.compile(r"exceeds? the (?:available )?context|context (?:length|size|window) "
+                          r"(?:exceeded|of)|n_ctx|prompt is too long|maximum context length|"
+                          r"too many tokens|input is too long", re.I)
+_RX_TRANSIENT = re.compile(r"connection (?:refused|reset|aborted)|remote end closed|broken pipe|"
+                           r"stream interrupted|timed out|temporarily unavailable|"
+                           r"loading model|model is loading", re.I)
+
+
+def _server_error_kind(e: Exception) -> str:
+    """"overflow", "transient" or "" (report it) for an error from client.chat."""
+    text = str(e)
+    if _RX_OVERFLOW.search(text):
+        return "overflow"
+    status = getattr(e, "status", None)
+    if status in _RETRY_STATUSES or (status is None and _RX_TRANSIENT.search(text)):
+        return "transient"
+    return ""
+
+
+def _clip_error(e: Exception) -> str:
+    text = " ".join(str(e).split())
+    return text if len(text) <= 120 else text[:117] + "…"
+
+
+# The round cap (_run_loop): one request with no tools for a summary the user can act on.
+_WRAP_UP_PROMPT = (
+    "[Note from the harness, not the user] Do not call any tool. This turn has used its round "
+    "limit, so it stops here. Tell the user briefly: what is done (and every file you changed), "
+    "what is left, and the next step.")
 # A final reply in coding/momo mode that only announces its next step (see _run_loop).
 _NEXT_STEP_NOTES = 2   # announced-next-step notes per turn (a 26B announced twice in a row)
 _NEXT_STEP_NOTE = (
@@ -402,6 +436,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.think_budget: int = think_watch.DEFAULT_BUDGET
         self.think_repeat: bool = True
         self.progress_note: bool = True     # /progress-note, see _IDLE_AFTER
+        # Messages typed while a turn runs (steer): added before the model's next
+        # request, or run as one more turn when the turn ended first (Controller).
+        self._steer: list[str] = []
+        self._steer_lock = threading.Lock()
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
         # Per-role tool choices: mode -> names the user turned off (/tools <name>
@@ -2034,6 +2072,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             if outcome == "plan_approved":
                 self._execute_plan()
         finally:
+            if self._cancel.is_set() and (dropped := self.take_steer()):
+                self.event_queue.put(ChatEvent("system",
+                    f"Interrupted: {len(dropped)} queued message{'s' if len(dropped) != 1 else ''} "
+                    "not sent (↑ brings it back)."))
             self.emit_status()
             self._autosave()
             self.event_queue.put(self._done_event())
@@ -2082,6 +2124,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         _write_nudged = False  # one write-intent recovery nudge per send()
         cut_notes = 0          # notes for a text call the cut-off left unfinished, at most 2
         think_stops = 0        # replies the reasoning watch stopped, at most STOPS_PER_TURN
+        server_retries = 0     # retries of a transient server error in a row
+        overflow_compacted = False   # one compaction per turn after "prompt too long"
         idle_calls = 0         # tool calls in a row that changed nothing (/progress-note)
         idle_notes = 0         # notes about them, at most _IDLE_NOTES
         loop_role = self.story_role or ("plan-exec" if executing else self.mode)
@@ -2092,9 +2136,16 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 self.event_queue.put(ChatEvent("system", "Interrupted."))
                 return "cancelled"
             if iteration >= _MAX_ITERATIONS:
-                self.event_queue.put(ErrorEvent(f"Tool call loop exceeded {_MAX_ITERATIONS} iterations — stopping"))
+                self._wrap_up(_MAX_ITERATIONS)
                 return "limit"
             iteration += 1
+            # Messages the user typed while this turn ran (steer): before the next
+            # request, as their own message (pi's steering, crush's queue).
+            if (queued := self.take_steer()):
+                for text in queued:
+                    self._append_user(text)
+                guard.bump()                 # the user said something: a new epoch
+                idle_calls = 0
             if self._story or self._writing:
                 self._story_tick(iteration)     # the plan view counts turns
             elif executing and self.plan is not None and not self.plan.stories:
@@ -2158,8 +2209,33 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 if self._cancel.is_set():
                     self.event_queue.put(ChatEvent("system", "Interrupted."))
                     return "cancelled"
+                kind = _server_error_kind(e)
+                if kind == "overflow" and not overflow_compacted:
+                    # The server rejected the prompt as too long (the estimate was
+                    # low, or a tool result was huge): compact once and send again.
+                    overflow_compacted = True
+                    changed, notice = self._compact()
+                    if changed and not self._cancel.is_set():
+                        guard.bump()
+                        self.event_queue.put(ChatEvent("system",
+                            f"The server said the prompt is too long. {notice}"))
+                        self.emit_status()
+                        iteration -= 1
+                        continue
+                if kind == "transient" and server_retries < len(_SERVER_RETRY_DELAYS):
+                    delay = _SERVER_RETRY_DELAYS[server_retries]
+                    server_retries += 1
+                    self.event_queue.put(ChatEvent("system",
+                        f"Server error ({_clip_error(e)}); retrying in {delay} s "
+                        f"({server_retries}/{len(_SERVER_RETRY_DELAYS)})."))
+                    if self._cancel.wait(delay):
+                        self.event_queue.put(ChatEvent("system", "Interrupted."))
+                        return "cancelled"
+                    iteration -= 1       # a retry is not a round of the model's
+                    continue
                 self.event_queue.put(ErrorEvent(f"{self.client.provider_name} error: {e}"))
                 return "error"
+            server_retries = 0
 
             # response is a normalized ChatResponse — the adapter has already mapped
             # its provider's wire format onto this shape.
@@ -2261,9 +2337,12 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                                           "content": settle.cut_off_text_note(name, names, cause)})
                     continue
                 if not content:
-                    if last_tool == "write_file":
+                    if last_tool == "write_file" and self.mode == "design":
                         # After write_file the model sometimes returns nothing — the
                         # write already happened so this is a clean terminal state.
+                        # Design mode only: there the written spec is the end.  In
+                        # coding a write is a step, and a reasoning-only reply after
+                        # one ("Next I must also update b.py…") ended the turn.
                         # Its answer may sit in the reasoning (seen: a summary of
                         # test failures after writing them to a file).
                         if raw_thinking and raw_thinking.strip():
@@ -2606,8 +2685,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     self._track_tdd_green(name, args)
 
                 # Track last_tool and reset counter only on successful calls.
-                # write_file is sticky — it must not be overwritten by a later
-                # tool in the same batch so the terminal detection below works.
+                # write_file is sticky for the turn: design mode's end signal (the
+                # empty-reply branch above), so a later tool must not overwrite it.
                 _call_ok = not result.startswith("ERROR:")
                 tool = registry.get(name)
                 wrote = _call_ok and (name in DIFF_TOOLS or (
@@ -2938,10 +3017,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         return text
 
     def _ends_turn_checked(self) -> bool:
-        """Whether a final reply is checked for an announced next step: coding
-        and momo mode only.  A plan step and a story
+        """Whether a final reply is checked for an announced next step: coding,
+        momo and chat mode (chat: "Let me read X." with no lookup).  A plan step and a story
         end with their own tools."""
-        return (self.mode in ("coding", "momo") and not self.story_role
+        return (self.mode in ("coding", "momo", "chat") and not self.story_role
                 and not self._plan_executing() and not (self._story or self._writing))
 
     def _ask_choice(self, args: dict) -> str:
@@ -3011,14 +3090,33 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
     def _loop_analysis(self, hit: Hit, what: str) -> str:
         """The model's analysis of the loop, asked with the loop in context and no
         tools; "" when the call fails or the reply holds nothing usable."""
+        return self._no_tool_reply(_LOOP_ANALYSIS_PROMPT.format(
+            what=what, count=hit.count,
+            between=", with nothing changing in between" if hit.kind == "call" else "",
+            repeated=_LOOP_REPEATED.get(hit.kind, _LOOP_REPEATED["call"])))
+
+    def _wrap_up(self, rounds: int) -> None:
+        """The round cap: rather than stop with the history ending in tool results,
+        ask once, with no tools, what is done and what is left, and give that as
+        the turn's reply."""
+        reply = "" if self._cancel.is_set() else self._no_tool_reply(_WRAP_UP_PROMPT)
+        if not reply:
+            self.event_queue.put(ErrorEvent(
+                f"Tool call loop exceeded {rounds} iterations — stopping"))
+            return
+        self.event_queue.put(ChatEvent("system",
+            f"Stopped after {rounds} rounds, the limit for one turn — the model's summary:"))
+        self.messages.append({"role": "assistant", "content": reply})   # after the tool results
+        self.event_queue.put(ChatEvent("assistant", reply))
+
+    def _no_tool_reply(self, prompt: str) -> str:
+        """One request with the history in view, this prompt after it and no tools
+        (the loop analysis, the wrap-up at the round cap); "" when the call fails
+        or the reply holds nothing usable.  Nothing is added to the history."""
         msgs = self._api_messages()
         if msgs and msgs[-1].get("role") == "tool":
             msgs.append({"role": "assistant", "content": None})
-        msgs.append({"role": "user",
-                     "content": _LOOP_ANALYSIS_PROMPT.format(
-                         what=what, count=hit.count,
-                         between=", with nothing changing in between" if hit.kind == "call" else "",
-                         repeated=_LOOP_REPEATED.get(hit.kind, _LOOP_REPEATED["call"]))})
+        msgs.append({"role": "user", "content": prompt})
         try:
             self.client.max_output_tokens = self.max_output_tokens or None
             response = self.client.chat(msgs, [], think=False,
@@ -3344,6 +3442,19 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
 
     def session_path(self) -> Path:
         return session_mod.session_path(self._ts)
+
+    def steer(self, text: str) -> None:
+        """Queue a message typed while a turn runs (called from the frontend's
+        thread): _run_loop adds it before the model's next request."""
+        with self._steer_lock:
+            self._steer.append(text)
+        self.event_queue.put(ChatEvent("system", "Queued — the model sees it after the current step."))
+
+    def take_steer(self) -> list[str]:
+        """The queued messages, and an empty queue."""
+        with self._steer_lock:
+            queued, self._steer = self._steer, []
+        return queued
 
     def _mark_current(self) -> None:
         """Remember this session and its workspace for the next launch."""

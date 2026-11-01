@@ -65,7 +65,19 @@ Tool results are appended as `{"role": "tool", ...}` messages. Thinking content 
 - Design mode: 40 iterations maximum.
 - All other modes (coding, chat, plan, momo): 100 iterations maximum. Plan execution gets 100 iterations *per step*.
 
-On hitting the limit an `ErrorEvent` is emitted and the loop exits.
+On hitting the limit `_wrap_up` makes one request with no tools (`_no_tool_reply`, shared with the loop analysis) asking what is done, what is left and the next step (`_WRAP_UP_PROMPT`). The reply becomes the turn's assistant answer; an empty one falls back to the `ErrorEvent`. The loop then returns `"limit"`.
+
+### Steering
+
+`Controller.submit` hands a message typed while a turn runs (busy, not waiting for an answer) to `Harness.steer`, which queues it under a lock. At the top of each round `_run_loop` drains the queue with `_append_user` (merging, bridging tool → user, new turn anchor) and moves the loop guard's epoch. A message queued after the turn's last request is run as one more `send` by `Controller._finish_bg`, which checks the queue and clears busy under the controller lock so nothing is left unsent. On a cancel, `send` drops the queue with a note.
+
+### Server errors
+
+The `except` around `client.chat` classifies the error (`_server_error_kind`):
+- **transient:** status 408/429/5xx, or a refused or dropped connection, a timeout or a model loading, without a status. Retried after `_SERVER_RETRY_DELAYS` (2, 4, 8 s) with `self._cancel.wait`, so Esc stops it. The counter resets after a successful request, and a retry does not count as a round.
+- **overflow:** `_RX_OVERFLOW` (llama.cpp "exceeds the available context size", "prompt is too long", …). `_compact()` runs once per turn, then the request is sent again.
+
+Anything else ends the turn with an `ErrorEvent`.
 
 ### Nudge logic
 

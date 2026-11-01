@@ -867,9 +867,9 @@ function applyBusy(b, w) {
     if (queue.length) setTimeout(sendNextQueued, 150);
   }
   $("#stop").hidden = !(busy && !waiting);
-  // Enter while momo works queues the message: the button says so.
-  $("#send-label").textContent = busy && !waiting ? "Queue" : "Send";
-  $("#send").title = busy && !waiting ? "momo is working — this is sent when it's done" : "Send (Enter)";
+  // Enter while momo works steers the turn: the button says when it is read.
+  $("#send-label").textContent = "Send";
+  $("#send").title = busy && !waiting ? "momo is working — the model reads this after its current step (Enter)" : "Send (Enter)";
   if (wasBusy && !busy) closeGroup();
   updatePlanKind();
   const bz = $("#busy");
@@ -1300,8 +1300,10 @@ async function submitInput() {
     return;
   }
   if (!text.trim() && !ready.length) return;
-  // Busy with a turn, or offline: queue plain messages instead of bouncing them.
-  if (!isCmd && ((busy && !waiting) || !connected)) {
+  // Offline: queue plain messages instead of bouncing them.  While momo works
+  // they go straight to the server, which hands them to the model after its
+  // current step (Harness.steer).
+  if (!isCmd && !connected) {
     queueMessage(text, ready, !connected);
     return;
   }

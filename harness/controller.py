@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from . import attachments as attach_mod
 from .commands import mask_token, handle as handle_command
-from .events import (BusyEvent, ChatEvent, CompanionEvent, ThinkEvent, ToolCallEvent,
+from .events import (BusyEvent, ChatEvent, CompanionEvent, ErrorEvent, ThinkEvent, ToolCallEvent,
                      ToolResultEvent, UserEvent)
 from .harness import Harness
 from .llm import make_client
@@ -322,9 +322,26 @@ class Controller:
             try:
                 fn(*args)
             finally:
-                self._set_busy(False)
+                self._finish_bg(fn)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _finish_bg(self, fn: Callable):
+        """End a worker run.  Messages typed during a turn that it ended before
+        taking in (Harness.steer) run as one more turn first; checking the queue
+        and clearing busy under the lock leaves no gap for a message to be
+        queued with nobody left to send it."""
+        h = self.harness
+        while True:
+            with self._lock:
+                queued = h.take_steer() if fn == h.send else []
+                if not queued:
+                    self._set_busy(False)
+                    return
+            try:
+                h.send("\n\n".join(queued))
+            except Exception as e:           # a thread must report, not vanish
+                self.bus.put(ErrorEvent(f"{type(e).__name__}: {e}"))
 
     # ── actions ───────────────────────────────────────────────────────────────
 
@@ -522,8 +539,7 @@ class Controller:
                 h.provide_user_input(full)
                 self._emit_busy()
             else:
-                self._system("Busy — waiting for response..." +
-                             (" (attachments were not sent)" if attachments else ""))
+                h.steer(full)       # the model sees it after the current step
             return SubmitOutcome()
 
         self._run_bg(h.send, full)

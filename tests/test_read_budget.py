@@ -133,7 +133,9 @@ class ReadBudget(HarnessBase):
 
 
 class AnswerOnlyInReasoning(HarnessBase):
-    def test_after_write_file(self):
+    def test_after_write_file_in_design_mode(self):
+        # There the written spec is the end of the turn.
+        self.h.set_mode("design")
         chats = self.run_turn([
             ChatResponse(tool_calls=[ToolCall(name="write_file",
                                               arguments={"path": "out.txt", "content": "x\n"})],
@@ -144,6 +146,21 @@ class AnswerOnlyInReasoning(HarnessBase):
         self.assertEqual(answers, ["Three tests fail: a, b and c."])
         self.assertEqual(self.h.messages[-1], {"role": "assistant",
                                                "content": "Three tests fail: a, b and c."})
+
+    def test_after_write_file_in_coding_mode_the_turn_goes_on(self):
+        # A write is a step in coding: a reasoning-only reply after one ("Next I
+        # must also update b.py…") gets the usual retry instead of ending the turn.
+        chats = self.run_turn([
+            ChatResponse(tool_calls=[ToolCall(name="write_file",
+                                              arguments={"path": "out.txt", "content": "x\n"})],
+                         done_reason="stop"),
+            ChatResponse(thinking="Next I must also update b.py.", done_reason="stop"),
+            ChatResponse(content="Updated b.py as well.", done_reason="stop"),
+        ])
+        answers = [e.text for e in chats if e.role == "assistant"]
+        self.assertEqual(answers, ["Updated b.py as well."])
+        self.assertTrue(any(m.get("role") == "user" and "reasoning but no response"
+                            in str(m.get("content")) for m in self.h.messages))
 
     def test_after_two_reasoning_only_replies(self):
         chats = self.run_turn([
