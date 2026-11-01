@@ -43,7 +43,7 @@ Options:
 | `--provider` | last-used or `ollama` | LLM backend: `ollama` or `llamacpp` |
 | `--host` | `11434` (ollama) / `8080` (llamacpp) | Backend base URL |
 | `--model` | `qwen3.5:9b` | Model name (llama.cpp serves whatever model it was launched with) |
-| `--workspace` / `--workdir` | `.` (current directory) | Root for all file operations |
+| `--workspace` / `--workdir` | the last session's workspace, else `.` | Root for all file operations. Given a path, momo reopens the last session used there, or starts an empty one. See [Sessions](#sessions-1) |
 | `--context` | auto-detected | Override context token limit (default: half the model's maximum) |
 | `--mode` | `design` | Starting mode (`design`, `chat`, `plan`, `coding`, or `momo`) |
 | `--max-tool-result` | `0` (unlimited) | Max chars returned by a single tool call |
@@ -56,6 +56,9 @@ Options:
 | `--think-keep` | last `/think-keep`, else `off` | How much of its earlier reasoning the model gets back: `lean`, `more` (×2), `most` (×4), or `off` (all of it). See [Trimming the reasoning sent back](#trimming-the-reasoning-sent-back) |
 | `--cavecat` | last `/cavecat`, else `off` | `on`: compress plans, tool text and command output, and keep replies short, to save tokens; `off`. See [Cavecat mode](#cavecat-mode) |
 | `--max-output-tokens` | last setting, else `25000` | Most tokens one model reply may take, reasoning included; `0` = no cap. See `/max-output-tokens` |
+| `--think-budget` | last `/think-budget`, else `8000` | Reasoning tokens one streamed reply may take before it is stopped and the model asked to act; `0` = off. See [Reasoning watch](#reasoning-watch) |
+| `--progress-note` | last `/progress-note`, else `on` | A note to the model after many tool calls in a row that changed nothing, or `off`. See [Progress note](#progress-note) |
+| `--plan-questions` | last `/plan questions`, else `on` | Plan mode: a first `create_plan` made before any question to you is sent back once, or `off`. See [Ask before planning](#2-ask-before-planning) |
 | `--loop-guard` | last `/loop-guard`, else `3` | Repeats of one tool call (or one error) that count as a loop, or `off`. See [Loop guard](#loop-guard) |
 | `--loop-resets` | last `/loop-guard resets`, else `2` | Loop resets per turn before the turn stops; `0` = stop at the first loop |
 | `--undo-max` | last `/undo-max`, else `20` | Turns of file checkpoints `/undo` can go back before the oldest is dropped; `0` = no cap (back to the last `/keep`). See [Undoing file changes](#undoing-file-changes) |
@@ -558,6 +561,26 @@ Both numbers are settings, saved like the others:
 
 `/loop-guard` alone shows both. In the web UI, the `LOOP` badge in the status bar opens them; View → All settings… → Context has them too.
 
+#### Reasoning watch
+
+A reply can think for a long time before it acts. On a local model, 20k tokens of reasoning take minutes, and a model caught in a repetition loop writes the same lines until `/max-output-tokens` cuts it off. While a reply streams, the harness watches its reasoning and stops the reply when either of these happens:
+
+- **Over budget**: the reasoning passes `/think-budget` tokens (default 8,000, counted at 4 characters a token).
+- **Repeating**: one line of 40 or more characters comes back 3 times within the last 6,000 characters of reasoning, the same apart from case and spacing. Short lines ("Wait.") and step-by-step tracing with changing numbers don't count.
+
+The harness then drops the reply (nothing in it runs) and asks the model, in a note marked as the harness's, to decide from what it already knows and act. For a long reply the note carries where its reasoning had got to; for a repeating one, the line it kept coming back to. The next request runs without thinking. The reasoning stays in the chat and the transcript, but isn't sent back. At most 2 replies per turn are stopped; after that a reply runs to the output cap as before. A non-streamed reply (`--no-stream`) isn't watched.
+
+| Command | Flag | Default |
+|---|---|---|
+| `/think-budget [n\|off]` | `--think-budget N` (`0` = off) | `8000`; at least `1000` |
+| `/think-budget repeat [on\|off]` | — | `on` |
+
+#### Progress note
+
+The 10-tool-only-turns nudge misses a model that writes one line with every call, as coding mode asks it to. A model that keeps reading without acting needs something else. So the harness also counts tool calls in a row that changed nothing: no file written, no question to you, and no plan or story tool called. At 15 such calls (12 in momo mode, 25 while investigating in plan mode or writing stories), the model gets a note asking it to act. A coder should make the change if it knows enough, otherwise get the one fact it still needs; a planner should call `create_plan` once it can name every step's file and function; a designer should ask its next question. A second note comes at twice the count, then none: the loop guard and the iteration cap stay the hard stops. `/progress-note off` (or `--progress-note off`) turns it off.
+
+In the web UI, the reasoning watch is in the thinking menu (the `THINK` badge) and both settings are in View → All settings… → Context. The TUI status bar shows `THINK-CAP` and `PROGRESS` when they differ from the defaults.
+
 #### Calls that were not run
 
 Some calls never run, and each still gets a result that says why and what a retry should change:
@@ -574,7 +597,7 @@ Before this, a cut-off call ran with no arguments: the model was told an argumen
 
 ### Plan mode
 
-Plan mode is for features and bugfixes you want thought through before any code changes. The assistant investigates first, asks about genuine uncertainties, and writes a concrete implementation plan. Nothing is edited until you approve that plan. Approving switches momo to **coding mode**, and it carries the plan out step by step with coding mode's prompt, tools, tool choices and loaded skills, keeping track of which step it is on. When the plan is done you stay in coding mode, so your next message is a normal coding turn rather than a new plan; `/plan` takes you back.
+Plan mode is for features and bugfixes you want thought through before any code changes. The assistant investigates the code and the options for the change, asks you about the decisions that shape the plan, and then writes a concrete implementation plan. Nothing is edited until you approve that plan. Approving switches momo to **coding mode**, and it carries the plan out step by step with coding mode's prompt, tools, tool choices and loaded skills, keeping track of which step it is on. When the plan is done you stay in coding mode, so your next message is a normal coding turn rather than a new plan; `/plan` takes you back.
 
 Switch to it with `/plan` (or `Shift+Tab`) and describe the feature or bug.
 
@@ -582,11 +605,17 @@ Switch to it with `/plan` (or `Shift+Tab`) and describe the feature or bug.
 
 The assistant explores the code (`find_files`, `grep_files`, `read_file`, `find_symbol`, `find_references`, …) and follows the code path the change touches. For a bug it tries to reproduce the problem with `run_command` (run the failing test, the script, or a one-liner), and it finds how the project is tested. `run_command` is available so it can observe the system, not so it can change it; `/run-confirm on` makes every command ask first.
 
-When the code can't answer a question that changes the plan (two valid designs, unclear scope, a destructive step), it asks you with `ask_user`, one question at a time.
+It then works out the decisions that shape the plan: the approach, the scope, behaviour on edge cases and errors, compatibility with existing callers and data, and how the change is verified. For each it looks for 2–3 real options in the code (a helper or pattern to reuse, a library the project already has, the plausible places for the change), with the trade-off of each and the one it recommends.
 
-#### 2. Plan
+#### 2. Ask before planning
 
-The assistant calls `create_plan` with a title, a goal (the root cause, key decisions, and your answers), and an ordered list of steps. Each step names the file and function it changes, what the change is, and how to verify it. The last step runs the project's tests.
+Before it writes the plan, the assistant asks you about those decisions: usually 2–5 questions, fewer for a small fix and more for a large feature, highest-impact first and one at a time. Each one is an `ask_choice` with the options it found, its recommendation first and marked "(recommended)". It uses `ask_user` only for an open question with no options to offer. It doesn't ask what the code answers or what you already said, and it asks again only about decisions your answers or later feedback open.
+
+A first `create_plan` made before any question is sent back once with a note to ask first. Sent again, it goes through, since a small, fully specified fix may need no question; the plan's goal then says so. `/plan questions off` (or `--plan-questions off`, or View → All settings… → Context in the web UI) turns this check off. It never applies to revising a plan already shown.
+
+#### 3. Plan
+
+The assistant calls `create_plan` with a title, a goal (the root cause, the options considered, the decisions and your choices), and an ordered list of steps. Each step names the file and function it changes, what the change is, and how to verify it. The last step runs the project's tests.
 
 The harness writes the plan to **`.momo/plan.md`** in the working directory and shows it in chat:
 
@@ -610,7 +639,7 @@ paginate() stops its range before the final partial page; page_count() floors in
   Files: test_pager.py
 ```
 
-#### 3. Confirm
+#### 4. Confirm
 
 The harness then asks: *Execute this plan?*
 
@@ -622,7 +651,7 @@ The harness then asks: *Execute this plan?*
 
 You can also **edit `.momo/plan.md` by hand** before answering (or before `/plan run`). You can reword, reorder, add, or delete steps, or mark a step `[-]` to skip it. The file is re-read when you approve, so your edits are what gets executed.
 
-#### 4. Execute
+#### 5. Execute
 
 The harness drives the plan one step at a time:
 
@@ -1662,7 +1691,7 @@ Type any command in the input bar:
 | `/max-output-tokens [n\|off]` | Most tokens one model reply may take, reasoning included (default 25000, saved; `--max-output-tokens N`, 0 = off). A model caught in a repetition loop is cut off there; the harness then retries without thinking. Without a cap, one eval reply ran to 125k tokens and held the turn for 80 minutes |
 | `/compact` | Compact context — removes old messages and summarises them with the LLM |
 | `/fast-compact` | Compact context without LLM summarisation (instant) |
-| `/clear` | Clear conversation history and discard any active plan (removes `.momo/plan.md`, like `/plan cancel`) |
+| `/clear` | Clear conversation history and discard any active plan (removes `.momo/plan.md`, like `/plan cancel`), the compaction summary and the saved copy, so a restart opens it empty |
 | `/new` | Save this session and start a new, empty one (same model, host and mode) |
 | `/retry` | Re-send your last message, replacing the reply it got. When that reply changed files, asks whether they go back too |
 | `/changes` | Open the Changes drawer (web) or overlay (TUI): what momo changed since the last `/keep`, per turn, with diffs. See [Undoing file changes](#undoing-file-changes) |
@@ -1855,6 +1884,8 @@ Each session is automatically saved after every assistant response to:
 ```
 
 Each session stores the model, Ollama host, mode, working directory, context settings, active skills, per-mode tool choices, input history, and the full message history — all restored when the session is reloaded (the auth token is the only thing deliberately left out).
+
+At launch with no `--workspace`, momo reopens the session you were last in, in the workspace you were last in, whatever folder you start it from. A session you cleared with `/clear`, or started with `/new` and never used, opens empty in that workspace; a workspace that no longer exists falls back to the current folder. `--workspace PATH` reopens the last session you used in PATH, or starts an empty one there. Other arguments (`--model`, `--host`, `--mode`, …) don't change what is reopened. `--fresh` reopens nothing: an empty session in `--workspace` or the current folder. Launch never falls back to an older session and its plan; `/session` still opens one on purpose. `/clear` deletes the session's saved conversation and resets everything carried from it: the plan, the compaction summary, the companion's recap lines and an unlocked title. Its settings stay.
 
 A log file (`.log`) is written alongside the JSON, recording every request, response, tool call, and token count in newline-delimited JSON format. Use it to audit what the model did or analyse token usage.
 

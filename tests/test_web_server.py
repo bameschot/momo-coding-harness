@@ -126,6 +126,34 @@ class WebServer(unittest.TestCase):
         self.assertTrue(json.loads(body)["ok"])
         self.assertEqual(self.h.mode, "coding")
 
+    def test_reasoning_watch_and_progress_note_from_the_web(self):
+        _, body = self.request("GET", "/api/state")
+        st = json.loads(body)["status"]
+        self.assertEqual((st["think_budget"], st["think_repeat"], st["progress_note"]),
+                         (8000, True, True))
+        for text in ("/think-budget 6000", "/think-budget repeat off", "/progress-note off"):
+            r, _ = self.request("POST", "/api/submit", {"text": text})
+            self.assertEqual(r.status, 200)
+        self.assertEqual((self.h.think_budget, self.h.think_repeat, self.h.progress_note),
+                         (6000, False, False))
+        _, body = self.request("GET", "/api/state")
+        st = json.loads(body)["status"]
+        self.assertEqual((st["think_budget"], st["think_repeat"], st["progress_note"]),
+                         (6000, False, False))
+
+    def test_plan_questions_from_the_web(self):
+        _, body = self.request("GET", "/api/state")
+        self.assertTrue(json.loads(body)["status"]["plan_questions"])
+        r, _ = self.request("POST", "/api/submit", {"text": "/plan questions off"})
+        self.assertEqual(r.status, 200)
+        self.assertFalse(self.h.plan_questions)
+        _, body = self.request("GET", "/api/state")
+        self.assertFalse(json.loads(body)["status"]["plan_questions"])
+        self.c._busy = True                         # a flag, so allowed while a turn runs
+        self.c.submit("/plan questions on", source="web")
+        self.c._busy = False
+        self.assertTrue(self.h.plan_questions)
+
     def test_state_carries_the_upload_limit(self):
         _, body = self.request("GET", "/api/state")
         self.assertGreater(json.loads(body)["max_upload"], 0)

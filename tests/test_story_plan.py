@@ -99,6 +99,7 @@ class Base(unittest.TestCase):
         hmod.make_client = lambda *a, **k: ScriptedClient("http://fake", "fake")
         ScriptedClient.script, ScriptedClient.requests = [], []
         self.h = hmod.Harness(host="http://fake", model="fake", workdir=self.wd)
+        self.h.plan_questions = False   # scripts plan without asking; see test_plan_questions
         self.h.stream = False
         self.h.session_titles = False
         self.questions = []

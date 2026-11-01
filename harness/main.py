@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import code_index
 from . import loop_guard as loop_guard_mod
+from . import think_watch as think_watch_mod
 from . import story_runner as story_runner_mod
 from . import net as net_mod
 from . import run_store as run_store_mod
@@ -46,8 +47,9 @@ def main():
                         help="Model name (default: last-used model or qwen3.5:9b)")
     parser.add_argument("--workspace", "--workdir", default=None, metavar="PATH",
                         dest="workdir", help="Root directory for all file operations "
-                                             "(default: the restored session's, else the "
-                                             "current directory)")
+                                             "(default: the last session's workspace, else "
+                                             "the current directory; with PATH, that "
+                                             "workspace's last session is reopened)")
     parser.add_argument("--context", default=None, type=int, metavar="N",
                         help="Override context token limit (default: read from model)")
     parser.add_argument("--mode",    default=None, choices=["design", "chat", "plan", "coding", "momo"],
@@ -72,6 +74,16 @@ def main():
     parser.add_argument("--max-output-tokens", type=int, default=None, metavar="N",
                         help="most tokens one model reply may take, 0 = no cap "
                              "(default: last /max-output-tokens setting, else 25000)")
+    parser.add_argument("--think-budget", type=int, default=None, metavar="N",
+                        help="reasoning tokens one streamed reply may take before it is stopped "
+                             "and the model asked to act, 0 = off (default: last /think-budget "
+                             f"setting, else {think_watch_mod.DEFAULT_BUDGET})")
+    parser.add_argument("--progress-note", choices=("on", "off"), default=None,
+                        help="note to the model after many tool calls in a row with no change, "
+                             "question or plan (default: last /progress-note setting, else on)")
+    parser.add_argument("--plan-questions", choices=("on", "off"), default=None,
+                        help="plan mode: refuse a first create_plan made before any question to "
+                             "the user, once (default: last /plan questions setting, else on)")
     parser.add_argument("--loop-guard", default=None, metavar="N|off",
                         help="repeats of one tool call (or one error) that count as a loop, "
                              "or off (default: last /loop-guard setting, else 3)")
@@ -190,10 +202,14 @@ def main():
         parser.error("--web-allow-host only applies to --web-insecure "
                      "(with a token, the Host header is not restricted)")
 
-    workdir = Path(args.workdir or ".").expanduser().resolve()
-    if not workdir.is_dir():
-        print(f"error: --workdir is not a directory: {workdir}", file=sys.stderr)
+    given = Path(args.workdir).expanduser().resolve() if args.workdir else None
+    if given is not None and not given.is_dir():
+        print(f"error: --workdir is not a directory: {given}", file=sys.stderr)
         sys.exit(1)
+    # What to reopen: the last session in its workspace, or with --workspace that
+    # workspace's last session (session.restore_target); --fresh reopens nothing.
+    last, remembered = (None, None) if args.fresh else session_mod.restore_target(given)
+    workdir = given or remembered or Path(".").resolve()
 
     if args.context is not None and args.context < 256:
         parser.error("--context: expected at least 256")
@@ -230,6 +246,11 @@ def main():
     harness.cavecat = cavecat if cavecat in CAVECAT_LEVELS else "off"
     keep = args.think_keep or prefs.get("think_keep")
     harness.think_keep = keep if keep in KEEP_LEVELS else "off"
+    questions = args.plan_questions or prefs.get("plan_questions")
+    if isinstance(questions, bool):
+        harness.plan_questions = questions
+    elif questions in ("on", "off"):
+        harness.plan_questions = questions == "on"
     if prefs.get("stories_approve") in story_runner_mod.APPROVE_MODES:
         harness.stories_approve = prefs["stories_approve"]
     cap = pref_int("stories_cap", lambda v: story_runner_mod.STORIES_CAP_RANGE[0] <= v
@@ -300,6 +321,21 @@ def main():
                          f"{MIN_MAX_OUTPUT_TOKENS}")
         cap = DEFAULT_MAX_OUTPUT_TOKENS
     harness.max_output_tokens = cap
+    budget = args.think_budget if args.think_budget is not None \
+        else prefs.get("think_budget", harness.think_budget)
+    if (isinstance(budget, bool) or not isinstance(budget, int) or budget < 0
+            or (budget and budget < think_watch_mod.MIN_BUDGET)):
+        if args.think_budget is not None:
+            parser.error(f"--think-budget: expected 0 (off) or at least {think_watch_mod.MIN_BUDGET}")
+        budget = think_watch_mod.DEFAULT_BUDGET
+    harness.think_budget = budget
+    if isinstance(prefs.get("think_repeat"), bool):
+        harness.think_repeat = prefs["think_repeat"]
+    note = args.progress_note or prefs.get("progress_note")
+    if isinstance(note, bool):
+        harness.progress_note = note
+    elif note in ("on", "off"):
+        harness.progress_note = note == "on"
     undo_max = args.undo_max if args.undo_max is not None else prefs.get("undo_max", DEFAULT_UNDO_MAX)
     if not isinstance(undo_max, int) or isinstance(undo_max, bool) or undo_max < 0:
         if args.undo_max is not None:
@@ -331,7 +367,8 @@ def main():
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 
     # Restore last session unless --fresh
-    last = None if args.fresh else session_mod.latest_session()
+    if last is None:
+        harness._mark_current()
     if last is not None:
         harness.load_session(last)
         # Backend flags given on the command line beat the backend the restored
@@ -343,15 +380,17 @@ def main():
                 new_provider,
                 host=args.host or (_DEFAULT_HOSTS[new_provider] if switched else harness.client.host),
                 model=args.model or (model if switched else harness.client.model))
-        # Likewise an explicit --workdir beats the restored session's, and a
+        # Likewise an explicit --workdir beats the restored session's, so does the
+        # remembered one (newer: /workspace in a session not saved since), and a
         # restored workdir that no longer exists falls back to this one.
-        if args.workdir is not None or not harness.workdir.is_dir():
+        if args.workdir is not None or remembered is not None or not harness.workdir.is_dir():
             if not harness.workdir.is_dir():
                 harness.event_queue.put(ChatEvent(
                     "system", f"The session's working directory {harness.workdir} no longer "
                               f"exists; using {workdir}."))
             if harness.workdir.resolve() != workdir:
                 harness.workdir = workdir
+                harness._mark_current()
                 harness.set_mode(harness.mode)   # the system prompt names the workdir
                 harness.reload_guides()
     else:

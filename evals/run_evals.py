@@ -129,7 +129,7 @@ def run_once(task, *, host, model, provider, mode, think, timeout, index=False, 
     # The model mostly asks "want me to look into X too?" once it has answered, so
     # decline — an open-ended reply sent it exploring and its last message then
     # described whatever it found next.
-    h._ask_user = lambda q: "No thanks, that's all I needed."
+    h._ask_user = lambda q, options=None: "1" if options else "No thanks, that's all I needed."
     h.index_route = route
     if index:
         h.set_index(True)

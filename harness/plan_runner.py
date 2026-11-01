@@ -25,6 +25,14 @@ _TDD_TEXT_RETRIES = 2
 
 TDD_MAX_REFUSALS = 3   # gate refusals in a row before the user is asked
 
+# /plan questions: the answer to a first create_plan made before any question.
+_ASK_FIRST = (
+    "ERROR: plan not submitted — you have not asked the user anything yet. Before planning, "
+    "ask about the decisions that shape this plan (approach, scope, edge cases and errors, "
+    "compatibility, how to verify): one ask_choice per decision, with the options you found "
+    "and your recommendation first. If the request already settles every decision, call "
+    "create_plan again and say so in goal.")
+
 # Tools that cannot change files (Tool.keeps_green): a green run of the test
 # command stays valid across them (tdd gate reuse).  Any other call,
 # run_command included, ends it.  KEEPS_GREEN: the built-in ones.
@@ -224,6 +232,7 @@ class PlanRunnerMixin:
         if not self.plan.steps:
             return "The plan has no steps."
         self.plan_phase = "executing"
+        self._plan_asked, self._plan_gate_refused = 0, False   # the next plan asks afresh
         self._sync_plan_file()
         # The plan runs in coding mode (set_mode rebuilds the prompt and emits status).
         self.set_mode("coding")
@@ -235,12 +244,20 @@ class PlanRunnerMixin:
         title = self.plan.title
         self.plan = None
         self.plan_phase = "investigating"
+        self._plan_asked, self._plan_gate_refused = 0, False
         delete_plan_file(self.workdir)
         self.rebuild_system_prompt()
         self.emit_status()
         return f"Plan discarded: {title} ({PLAN_FILENAME} removed)"
 
     def _handle_create_plan(self, args: dict) -> str:
+        # Ask before planning (roles/planner.md, step 4): a first plan made without
+        # one question to the user is refused once; sent again, it goes through,
+        # as a small, fully specified fix may need no question.
+        if (self.plan_questions and self.plan is None and not self._plan_asked
+                and not self._plan_gate_refused):
+            self._plan_gate_refused = True
+            return _ASK_FIRST
         steps = self._parse_steps(args.get("steps"))
         if not steps:
             return ("ERROR: create_plan needs a non-empty 'steps' list of "

@@ -20,6 +20,7 @@ from . import session as session_mod
 from . import tools as tools_mod
 from . import transcript as transcript_mod
 from . import loop_guard as loop_guard_mod
+from . import think_watch as think_watch_mod
 from .compaction import content_text
 from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS
 from .think_trim import KEEP_LEVELS
@@ -207,6 +208,20 @@ def _plan_stories_setting(harness: Harness, words: list[str]) -> str:
             f"— now approve {harness.stories_approve}, cap {harness.stories_cap}")
 
 
+def _plan_questions_setting(harness: Harness, words: list[str]) -> str:
+    """/plan questions [on|off]"""
+    if words and (len(words) > 1 or words[0] not in ("on", "off")):
+        return "ERROR: usage: /plan questions [on|off]"
+    if words:
+        harness.plan_questions = words[0] == "on"
+        session_mod.save_prefs(plan_questions=harness.plan_questions)
+        harness.emit_status()
+    if harness.plan_questions:
+        return ("Plan questions: on — a first create_plan made before any question to you is "
+                "refused once, so the planner asks about the decisions first.")
+    return "Plan questions: off — the planner may plan without asking."
+
+
 def _show_stories(harness: Harness, words: list[str]) -> str:
     """/plan show stories [N]: a phase's stories (the current phase by default)."""
     plan = harness.plan
@@ -266,6 +281,66 @@ def _loop_guard(harness: Harness, arg: str) -> CommandResult:
                     f"{loop_guard_mod.MAX_THRESHOLD} repeats, off or on"))
         harness.loop_guard = n
         session_mod.save_prefs(loop_guard=n)
+    harness.emit_status()
+    return CommandResult(handled=True, output=_state())
+
+
+def _think_budget(harness: Harness, arg: str) -> CommandResult:
+    """/think-budget [n|off] · /think-budget repeat [on|off]"""
+    def _state() -> str:
+        n = harness.think_budget
+        cap = (f"a reply's reasoning is stopped after {n:,} tokens" if n
+               else "no reasoning budget (only /max-output-tokens caps a reply)")
+        rep = ("reasoning that repeats itself is stopped" if harness.think_repeat
+               else "repeating reasoning is not stopped")
+        return (f"reasoning watch: {cap} · {rep}; the model is then asked to act "
+                f"(at most {think_watch_mod.STOPS_PER_TURN} per turn, streaming replies only)")
+    words = arg.lower().split()
+    if not words:
+        return CommandResult(handled=True, output=_state())
+    if words[0] == "repeat":
+        if len(words) == 1:
+            return CommandResult(handled=True, output=_state())
+        if len(words) > 2 or words[1] not in ("on", "off"):
+            return CommandResult(handled=True, output="ERROR: usage: /think-budget repeat [on|off]")
+        harness.think_repeat = words[1] == "on"
+        session_mod.save_prefs(think_repeat=harness.think_repeat)
+    else:
+        if len(words) > 1:
+            return CommandResult(handled=True, output="ERROR: usage: /think-budget [n|off] "
+                                                      "or /think-budget repeat [on|off]")
+        if words[0] in ("off", "0", "none"):
+            n = 0
+        elif words[0] == "on":
+            n = harness.think_budget or think_watch_mod.DEFAULT_BUDGET
+        else:
+            try:
+                n = int(words[0].replace(",", "").replace("_", ""))
+            except ValueError:
+                return CommandResult(handled=True, output=f"ERROR: invalid number: {words[0]}")
+            if n < think_watch_mod.MIN_BUDGET:
+                return CommandResult(handled=True, output=(
+                    f"ERROR: the budget must be at least {think_watch_mod.MIN_BUDGET:,} tokens, or off"))
+        harness.think_budget = n
+        session_mod.save_prefs(think_budget=n)
+    harness.emit_status()
+    return CommandResult(handled=True, output=_state())
+
+
+def _progress_note(harness: Harness, arg: str) -> CommandResult:
+    """/progress-note [on|off]"""
+    def _state() -> str:
+        if not harness.progress_note:
+            return "progress note: off"
+        return ("progress note: on — after many tool calls in a row with no change, question "
+                "or plan (12-25 by role), the model is asked to act; twice per turn at most")
+    words = arg.lower().split()
+    if not words:
+        return CommandResult(handled=True, output=_state())
+    if len(words) > 1 or words[0] not in ("on", "off"):
+        return CommandResult(handled=True, output="ERROR: usage: /progress-note [on|off]")
+    harness.progress_note = words[0] == "on"
+    session_mod.save_prefs(progress_note=harness.progress_note)
     harness.emit_status()
     return CommandResult(handled=True, output=_state())
 
@@ -717,6 +792,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
     if cmd == "/plan":
         sub = arg.lower()
         words = sub.split()
+        if words[:1] == ["questions"]:
+            return CommandResult(handled=True, output=_plan_questions_setting(harness, words[1:]))
         if words[:1] == ["stories"] and len(words) > 1:
             return CommandResult(handled=True, output=_plan_stories_setting(harness, words[1:]))
         if words[:2] == ["show", "stories"]:
@@ -804,16 +881,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return _undo_max(harness, arg)
 
     if cmd == "/clear":
-        # An active plan goes too: it refers to a conversation that no longer exists.
-        # (Safe here — the Controller rejects /clear while a plan step is running.)
-        plan_note = ""
-        if harness.plan is not None:
-            plan_note = "; " + harness.cancel_plan()  # also refreshes messages[0]
-        system_msg = harness.messages[0]
-        harness.messages = [system_msg]
-        harness.compacted = []
-        harness.drop_run_logs()
-        harness.checkpoints.keep()      # the turns they belonged to are gone
+        plan_note = harness.clear_conversation()
+        plan_note = f"; {plan_note}" if plan_note else ""
         guides_note = harness.reload_guides()
         harness.refresh_status()
         return CommandResult(handled=True, output="Conversation cleared" + plan_note
@@ -830,6 +899,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 except OSError as e:
                     return f"ERROR: could not create directory: {e}"
                 harness.workdir = p
+                harness._mark_current()
                 harness.set_mode(harness.mode)
                 guides_note = harness.reload_guides()
                 index_note = harness.restart_index()
@@ -843,6 +913,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 confirm_action=_create,
             )
         harness.workdir = p
+        harness._mark_current()     # the next launch comes back here
         harness.set_mode(harness.mode)  # always refresh system prompt with new workdir
         guides_note = harness.reload_guides()
         index_note = harness.restart_index()
@@ -1110,6 +1181,12 @@ def handle(line: str, harness: Harness) -> CommandResult:
 
     if cmd == "/loop-guard":
         return _loop_guard(harness, arg)
+
+    if cmd == "/think-budget":
+        return _think_budget(harness, arg)
+
+    if cmd == "/progress-note":
+        return _progress_note(harness, arg)
 
     if cmd == "/max-output-tokens":
         def _cap() -> str:
@@ -1835,6 +1912,8 @@ Available commands:
   /plan stories approve each|once  Review every phase's stories before they run (default
                       each), or let them run (saved)
   /plan stories cap N  Turns one story may take before it counts as stuck (default 30, saved)
+  /plan questions [on|off]  Ask before planning: a first create_plan made without a
+                      question to you is refused once (default on, saved)
   /plan show          Show the current plan and its progress
   /plan show stories [N]  Show a phase's stories (the current phase by default)
   /plan run           Approve and execute the plan in coding mode (re-reads .momo/plan.md edits)
@@ -1893,6 +1972,12 @@ Available commands:
   /run-output-limit [n|off]  Chars in run_command's default view (default off)
   /max-output-tokens [n|off]  Most tokens one model reply may take, reasoning
                       included (default 25000; stops a model stuck in a loop)
+  /think-budget [n|off]  Reasoning tokens one streamed reply may take before it
+                      is stopped and the model asked to act (default 8000, saved)
+  /think-budget repeat [on|off]  Also stop reasoning that keeps repeating one
+                      line (default on, saved)
+  /progress-note [on|off]  Note to the model after many tool calls in a row with
+                      no change, question or plan (default on, saved)
   /loop-guard [n|off|on]  Repeats that make a tool-call loop: the same call n times with
                       nothing changed, one error n times (failing commands too),
                       or n+1 edit/fail cycles on one definition, with a warning

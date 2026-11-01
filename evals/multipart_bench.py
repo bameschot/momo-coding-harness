@@ -314,7 +314,7 @@ def run_once(task: Task, *, host: str, timeout: int, max_secs: int,
     if context_limit:
         h.context_fixed, h.context_limit = True, context_limit
     # Nobody answers: a question gets "go on", so the run is about the request.
-    h._ask_user = lambda q: "Use your best judgement and carry on."
+    h._ask_user = lambda q, options=None: "1" if options else "Use your best judgement and carry on."
     h.messages = [{"role": "system", "content": h._build_system_prompt()}]
 
     sub = h.event_queue.subscribe(replay=False)

@@ -49,6 +49,10 @@ class StatusEvent:
     run_mode: str = "new"         # /run-mode: "new" (saved log + view) | "classic"
     run_output_limit: int = 0     # /run-output-limit: chars per run_command view (0 = off)
     max_output_tokens: int = 25000  # /max-output-tokens: cap on one model reply (0 = off)
+    think_budget: int = 8000      # /think-budget: reasoning tokens per reply before it is stopped (0 = off)
+    think_repeat: bool = True     # /think-budget repeat: stop reasoning that repeats itself
+    progress_note: bool = True    # /progress-note: note after many calls that changed nothing
+    plan_questions: bool = True   # /plan questions: refuse a first create_plan made before any question
     undo_max: int = 20            # /undo-max: file checkpoints kept (0 = no cap)
     loop_guard: int = 3           # /loop-guard: repeats that make a loop (0 = off)
     loop_resets: int = 2          # /loop-guard resets: rewinds per turn before it stops

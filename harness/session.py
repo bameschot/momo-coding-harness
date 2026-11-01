@@ -126,17 +126,87 @@ def list_sessions() -> list[Path]:
     return sorted(folder.glob("*.json"), reverse=True)
 
 
+def _has_conversation(path: Path) -> bool:
+    try:
+        msgs = load(path).get("messages") or []
+    except (OSError, ValueError, AttributeError):
+        return False
+    return any(isinstance(m, dict) and m.get("role") == "user" for m in msgs)
+
+
 def latest_session() -> Path | None:
     """The newest saved session that has a conversation (a user message);
     unreadable files and settings-only sessions are skipped."""
-    for path in list_sessions():
-        try:
-            msgs = load(path).get("messages") or []
-        except (OSError, ValueError, AttributeError):
-            continue
-        if any(isinstance(m, dict) and m.get("role") == "user" for m in msgs):
-            return path
-    return None
+    return next((p for p in list_sessions() if _has_conversation(p)), None)
+
+
+_WORKSPACES_KEPT = 50   # workspace -> last session entries kept in prefs
+
+
+def mark_current(ts: str, workdir: Path) -> None:
+    """Remember the session in use and its workspace, for restore_target() on
+    the next launch: overall, and as that workspace's last session.  A session
+    belongs to one workspace: another one's entry for it (it moved with
+    /workspace) is dropped, so that workspace falls back to its newest session."""
+    key = str(workdir)
+    per = {k: v for k, v in (load_prefs().get("workspace_sessions") or {}).items()
+           if isinstance(k, str) and isinstance(v, str) and k != key and v != ts}
+    per[key] = ts
+    per = dict(list(per.items())[-_WORKSPACES_KEPT:])
+    save_prefs(last_session=ts, last_workdir=key, workspace_sessions=per)
+
+
+def forget(ts: str) -> None:
+    """Delete a session's saved conversation (not its log): /clear."""
+    if _NAME_RE.match(ts):
+        (session_dir() / f"{ts}.json").unlink(missing_ok=True)
+
+
+def _saved_workdir(path: Path) -> str | None:
+    try:
+        wd = load(path).get("workdir")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return wd if isinstance(wd, str) else None
+
+
+def _usable(ts, workdir: str | None = None) -> Path | None:
+    """ts's session file when it has a conversation (and, given a workdir, was
+    saved in it); None otherwise."""
+    if not isinstance(ts, str) or not _NAME_RE.match(ts):
+        return None
+    path = session_dir() / f"{ts}.json"
+    if not path.is_file() or not _has_conversation(path):
+        return None
+    if workdir is not None and _saved_workdir(path) != workdir:
+        return None
+    return path
+
+
+def restore_target(workdir: Path | None = None) -> tuple[Path | None, Path | None]:
+    """What a launch reopens: (the session file to load or None, the workspace
+    to use or None).
+
+    Without a workdir: the session in use when momo last ran, in the workspace
+    it was in, even when that session has no conversation (cleared, or new and
+    never used): the launch then starts empty there rather than reviving an
+    older session and its plan.  With a workdir: that workspace's last session,
+    or none (an empty one, or one /workspace moved elsewhere, counts as none).
+    Prefs from before these were kept fall back to the newest session (in that
+    workspace, given one)."""
+    prefs = load_prefs()
+    if workdir is None:
+        wd = prefs.get("last_workdir")
+        remembered = Path(wd) if isinstance(wd, str) and Path(wd).is_dir() else None
+        if "last_session" in prefs:
+            return _usable(prefs.get("last_session")), remembered
+        return latest_session(), remembered
+    key = str(workdir)
+    per = prefs.get("workspace_sessions")
+    if isinstance(per, dict) and key in per:
+        return _usable(per[key], key), workdir
+    return next((p for p in list_sessions()
+                 if _has_conversation(p) and _saved_workdir(p) == key), None), workdir
 
 
 def find_session(name: str) -> Path | None:

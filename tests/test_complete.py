@@ -91,6 +91,12 @@ class Levels(Base):
         # "/tools <name> on|off" would also take "discover" as a tool name.
         self.assertEqual(self.values("/tools discover "), ["all", "extensions", "off"])
 
+    def test_reasoning_watch_and_progress_note(self):
+        self.assertEqual(self.values("/think-budget "), ["off", "repeat "])
+        self.assertEqual(self.values("/think-budget repeat "), ["off", "on"])
+        self.assertEqual(self.values("/progress-note "), ["off", "on"])
+        self.assertEqual(self.values("/plan questions "), ["off", "on"])
+
     def test_an_optional_word_may_be_skipped(self):
         self.assertEqual(self.values("/undo file "), ["force ", "src/"])
         self.assertEqual(self.values("/undo file force sr"), ["src/"])

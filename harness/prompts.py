@@ -291,7 +291,7 @@ _CAVECAT_WRITE = ("telegraphic: verb + file + change. Not \"We should add retry 
 _CAVECAT_TEXT = {
     "design":    "The Markdown specs you write and ask_user questions",
     "chat":      "ask_user questions",
-    "plan":      "create_plan steps and ask_user questions",
+    "plan":      "create_plan steps, ask_user and ask_choice questions",
     "coding":    "ask_user questions and commit messages",
     "plan-exec": "complete_step summaries, revise_plan steps, ask_user questions and commit "
                  "messages",

@@ -105,7 +105,9 @@ def run_once(kind: str, args, keep: Path | None) -> dict:
         h.check_backend()      # adopt the model the server serves, as momo does at startup
     h.stream = False
     h.cavecat = args.cavecat
-    h._ask_user = lambda q: "y" if q.startswith("Execute this plan?") else "Use your recommendation."
+    # ask_choice: option 1 is the planner's recommendation (roles/planner.md).
+    h._ask_user = lambda q, options=None: ("1" if options else "y" if q.startswith("Execute this plan?")
+                                           else "Use your recommendation.")
     _count_calls(h.client)
     handle(f"/plan {kind}", h)
 

@@ -87,6 +87,7 @@ class _Base(unittest.TestCase):
         self._orig = hmod.make_client
         hmod.make_client = lambda *a, **k: ScriptedClient("http://fake", "fake")
         self.h = hmod.Harness(host="http://fake", model="fake", workdir=self.wd)
+        self.h.plan_questions = False   # scripts plan without asking; see test_plan_questions
         self.h.stream = False
         self.h._ask_user = lambda q: "y"
         self.sub = self.h.event_queue.subscribe(replay=False)

@@ -136,6 +136,8 @@ Do not ask open-ended questions like "What are your security requirements?" — 
 
 You still send one `ask_user` call at a time, but each call should move the design forward as far as one answer can.
 
+**Keep the interview short.** Aim to settle the must-settle topics in about 5 `ask_user` calls. After about 8, stop asking: write the design, with what is still open under Open questions and your assumptions under Key decisions and trade-offs.
+
 ---
 
 ## Writing the design
@@ -159,103 +161,21 @@ fits in one `write_file` call.
 
 ### Design document structure
 
-Include every section that applies, and keep each one specific — avoid vague
-placeholders. If a section genuinely does not apply (e.g. no external API, no
-persistent data), keep the heading and write a one-line "N/A — <reason>" rather
-than inventing filler or dropping it silently.
+Use these sections, in this order. Keep each one specific. If one genuinely does not apply (no
+external API, no persistent data), keep the heading and write "N/A — <reason>".
 
-#### Summary
-A short TL;DR — two or three sentences a reader can scan first: what is being
-built, the headline technical approach, and the intended outcome. Write it last,
-once the rest of the document is settled.
-
-#### Overview
-What this is, why it exists, who it is for, and what problem it solves.
-
-#### Goals
-What success looks like. Be measurable where possible:
-- "API responds in < 200ms at p95 under 100 concurrent users"
-- "Zero PII stored outside the EU"
-
-#### Functional requirements
-A numbered list of concrete, testable behaviours. Written from the system's perspective:
-- FR-1: The system shall…
-- FR-2: Users shall be able to…
-
-Group related requirements under sub-headings if the list is long.
-
-#### Non-functional requirements
-A numbered list of quality attributes and constraints:
-- NFR-1 (Performance): …
-- NFR-2 (Security): …
-- NFR-3 (Reliability): …
-- NFR-4 (Scalability): …
-- NFR-5 (Operability): …
-
-Each NFR must have a concrete target or criterion, not a vague aspiration.
-
-#### Tech stack
-A table or list of every major technology choice with a one-line justification:
-
-| Layer | Choice | Rationale |
-|-------|--------|-----------|
-| Backend | FastAPI 0.111 / Python 3.12 | Async, typed, familiar to team |
-| Database | PostgreSQL 16 | Relational data with FK constraints needed |
-| … | … | … |
-
-#### Security design
-A dedicated section covering every security concern raised in the interview:
-- Authentication and authorisation model
-- Input validation boundaries
-- Secrets and credential management
-- Encryption (in transit, at rest)
-- Rate limiting and abuse controls
-- Audit logging
-- Any threat-specific mitigations
-
-If a concern was discussed and ruled out, say so and why.
-
-#### Architecture and components
-A description of the key components, modules, or layers and how they interact. Include a rough ASCII diagram of the architecture or data flow where it adds clarity. For each component: what it does, what it owns, what it depends on.
-
-#### Data model
-The key entities, their fields, and their relationships. Use a simple table or entity list — no formal notation required unless the user asked for it. Include any constraints (unique, nullable, foreign key).
-
-#### API or interface design
-For any external-facing interface: the key endpoints, methods, request/response shapes, and authentication requirements. Enough detail that a developer can implement without guessing.
-
-#### Key decisions and trade-offs
-The significant choices made above, the main alternative(s) considered, and why
-this option won. Include known risks and how the design mitigates or accepts each
-one. This is where the risks and technical recommendations surfaced during the
-interview are recorded — distinct from Open questions, which are still unresolved.
-
-#### Testing strategy
-- What to unit test and at what granularity
-- What integration tests are needed
-- Any end-to-end or contract tests
-- Security-specific tests (auth bypass, injection, boundary inputs)
-- CI requirements if specified
-
-#### Implementation plan
-A sequence of concrete build steps, grouped into phases so a working skeleton
-exists before features are layered on. For each step:
-- **Build:** what to create — name the files, modules, functions, schema
-  migrations, or endpoints.
-- **Satisfies:** the requirements it implements (FR-N / NFR-N).
-- **Depends on:** earlier steps or external prerequisites that must be in place first.
-- **Verify:** the concrete check that proves the step is done — a command to run,
-  a test that passes, an output to observe. Every step ends in something
-  runnable or testable.
-
-Order phases so the system runs end-to-end as early as possible (skeleton → core
-features → hardening). Every functional requirement must be covered by at least
-one step; call out explicitly any that are deferred or out of this plan. Close
-with a short end-to-end acceptance walkthrough: the sequence of actions that
-demonstrates the finished system meets the Goals.
-
-#### Out of scope
-Explicit list of things this design does not cover.
-
-#### Open questions
-Anything still unresolved that would affect the design or implementation.
+- **Summary** — two or three sentences: what is built, the headline approach, the outcome. Write it last.
+- **Overview** — what this is, why it exists, who it is for, the problem it solves.
+- **Goals** — measurable success criteria ("p95 < 200 ms at 100 concurrent users").
+- **Functional requirements** — numbered, testable: `FR-1: The system shall…`; group under sub-headings when long.
+- **Non-functional requirements** — numbered with the quality in brackets and a concrete target: `NFR-1 (Performance): …`.
+- **Tech stack** — a table `| Layer | Choice | Rationale |`, one row per major choice, versions where they matter.
+- **Security design** — auth model, input validation boundaries, secrets, encryption, rate limiting, audit logging, threat-specific mitigations; say why any concern raised was ruled out.
+- **Architecture and components** — each component: what it does, owns and depends on; an ASCII diagram where it helps.
+- **Data model** — entities, fields, relationships and constraints (unique, nullable, foreign key).
+- **API or interface design** — endpoints or calls with methods, request/response shapes and auth, enough to implement without guessing.
+- **Key decisions and trade-offs** — each significant choice, the alternative, why this won, and the risks accepted or mitigated.
+- **Testing strategy** — unit, integration and end-to-end scope, security tests, CI if specified.
+- **Implementation plan** — phases from a running skeleton to core features to hardening. Each step: **Build** (files, modules, functions, migrations, endpoints), **Satisfies** (FR-N / NFR-N), **Depends on**, **Verify** (a command, test or observable output). Cover every FR or say it is deferred; end with a short end-to-end acceptance walkthrough.
+- **Out of scope** — what this design does not cover.
+- **Open questions** — anything unresolved that affects the design.

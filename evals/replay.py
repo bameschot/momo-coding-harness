@@ -115,7 +115,7 @@ def run_variant(exp: str, variant: str, *, host: str, model: str, max_iter: int)
         h.stream = False
         h.think_history = "turn"
         h.edit_features = EDIT_FEATURES
-        h._ask_user = lambda q: "No thanks, that's all I needed."
+        h._ask_user = lambda q, options=None: "1" if options else "No thanks, that's all I needed."
         msg_i = pairs[cut][0]
         prefix = copy.deepcopy(recorded[1:msg_i + 1])
         prefix[-1]["content"] = pairs[cut][3] if variant == "A" else new_result

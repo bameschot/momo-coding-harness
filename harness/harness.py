@@ -38,6 +38,7 @@ from .syntax_watch import SyntaxWatch
 from .loop_guard import MAX_RESETS as DEFAULT_LOOP_RESETS, THRESHOLD as DEFAULT_LOOP_GUARD, Hit, LoopGuard
 from . import transcript as transcript_mod
 from . import think_trim
+from . import think_watch
 from .tools.dispatcher import written_paths
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
@@ -214,7 +215,7 @@ _RETRY_TEXT = {
     ('cut_off', 'design'):
         "Your previous response was cut off. Do NOT output any reasoning or thinking. Call write_file with both 'path' (the file path to write) and 'content' (the complete document). Or call ask_user if you need information.",
     ('cut_off', 'investigating'):
-        'Your previous response was cut off. Do NOT output any reasoning or thinking. Call create_plan now if your investigation is complete, or call a tool to continue investigating, or ask_user if you need information.',
+        'Your previous response was cut off. Do NOT output any reasoning or thinking. Call a tool to continue investigating, ask_choice about an open decision, or create_plan once the decisions are settled with the user.',
     ('cut_off', 'other'):
         'Your previous response was cut off. Do NOT output any reasoning or thinking. Call a tool directly or write a brief response.',
     # Cut off with nothing to show and no reasoning: the server dropped a tool
@@ -222,19 +223,19 @@ _RETRY_TEXT = {
     ('cut_off_call', 'design'):
         "Your previous response was cut off before it was complete, so nothing was run or written. If you were writing the document, write it in parts: write_file with the first part, then append_to_file for each next part. Or call ask_user if you need information.",
     ('cut_off_call', 'investigating'):
-        'Your previous response was cut off before it was complete, so nothing was run. Make the next tool call smaller, or call create_plan now if your investigation is complete.',
+        'Your previous response was cut off before it was complete, so nothing was run. Make the next tool call smaller, or call create_plan once your investigation is complete and the decisions are settled with the user.',
     ('cut_off_call', 'other'):
         'Your previous response was cut off before it was complete, so nothing was run or written. Do not repeat the same call at the same size: split a large write_file into write_file plus append_to_file parts, and a large edit into smaller edits.',
     ('thinking_only', 'design'):
         "You produced reasoning but no response or tool call. Based on your analysis, call write_file now with both 'path' (the file path to write) and 'content' (the complete document). Or call ask_user if you need more information.",
     ('thinking_only', 'investigating'):
-        'You produced reasoning but no response or tool call. Based on your analysis, call create_plan now if you are ready, call a tool to keep investigating, or call ask_user if you need information.',
+        'You produced reasoning but no response or tool call. Based on your analysis, call a tool to keep investigating, ask_choice about an open decision, or create_plan once the decisions are settled with the user.',
     ('thinking_only', 'other'):
         'You produced reasoning but no response or tool call. Based on your analysis, call a tool to continue or write your conclusion.',
     ('empty', 'design'):
         "Please respond. If you are ready to write the design, call write_file now with both 'path' (the file path to write) and 'content' (the full document).",
     ('empty', 'investigating'):
-        'Please respond. If your investigation is complete, call create_plan now; otherwise call a tool to continue.',
+        'Please respond. Call a tool to continue investigating, ask_choice about an open decision, or create_plan once the decisions are settled with the user.',
     ('empty', 'other'):
         'Please respond with your current analysis or next step.',
 }
@@ -302,6 +303,48 @@ _NEXT_STEP_NOTE = (
     "action, and a reply without a tool call ends your turn. Continue now: call the tool for "
     "that step. If the work is done, give your final summary; if you need the user, ask with "
     "ask_user.")
+# /think-budget: a reply whose reasoning the watch stopped (think_watch.py).  Its
+# reasoning is not sent back, so the note carries where it had got to.
+_THINK_NOTE = (
+    "[Note from the harness, not the user] {what}, so that reply was dropped and nothing "
+    "was run. Do not start the analysis over; decide from what you already know. {act}"
+    "{tail}")
+_THINK_REPEAT_TAIL = "\n\nThe line it kept coming back to:\n\n> {line}"
+_THINK_BUDGET_TAIL = "\n\nWhere your reasoning had got to:\n\n{gist}"
+# /progress-note: tool calls in a row that changed nothing (no write, no question
+# to the user, no plan or story tool) before a note asks the model to act, per
+# role; a second note at twice that, then none.  The tool-only-turns nudge below
+# misses this: any text alongside a call resets it, and coder.md asks for text
+# with every call, while some edit-suite runs used up the time cap without
+# making an edit (evals/README.md, multipart round 4).
+_IDLE_AFTER = {"coding": 15, "plan-exec": 15, "story-exec": 15, "momo": 12, "chat": 15,
+               "design": 15, "plan": 25, "story-writer": 25}
+_IDLE_NOTES = 2
+# Calls that move the work on even though they write no file.
+_PROGRESS_TOOLS = frozenset({"ask_user", "ask_choice", "create_plan", "revise_plan",
+                             "complete_step", "plan_stories", "write_story", "finish_stories",
+                             "complete_story"})
+_IDLE_NOTE = "[Note from the harness, not the user] {n} tool calls in a row without {since}. {act}"
+_IDLE_ACT = {
+    "coding": ("a change", "If the user asked a question, answer it now. If they asked for a "
+               "change and you know enough, make it now. Otherwise work out the one fact you "
+               "still need and get it in one call; if you are blocked, ask with ask_user."),
+    "momo": ("a change", "If you have what the user asked for, answer or make the change now; "
+             "otherwise get the one thing you still need in one call."),
+    "chat": ("a reply", "Answer now from what you have found; put any doubt in your answer "
+             "instead of searching further."),
+    "design": ("a question to the user", "Ask your next question with ask_user, or write the "
+               "design with write_file once the must-settle topics are settled."),
+    "plan": ("a question or a plan", "If you know what the change touches, ask the user about "
+             "the open decisions with ask_choice, your recommendation first; once they are "
+             "settled, call create_plan. Otherwise get the one thing you still need in one call."),
+    "plan-exec": ("a change", "Make the step's change now if you know enough, or get the one "
+                  "fact you still need in one call. Once the step is done and verified, call "
+                  "complete_step."),
+    "story-exec": ("a change", "Make the story's change now if you know enough, or get the one "
+                   "fact you still need in one call. Once its acceptance checks pass, call "
+                   "complete_story."),
+}
 # What the analysis lists under "What I repeated", per kind of loop.
 _LOOP_REPEATED = {
     "call": "the exact call, and what it returned each time",
@@ -354,6 +397,11 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.think_keep: str = "off"        # /think-keep, see think_trim.KEEP_LEVELS
         self._trim_cache: dict[tuple, str] = {}
         self.max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS   # /max-output-tokens, 0 = off
+        # /think-budget: reasoning tokens per reply before the watch stops it (0 =
+        # off), and /think-budget repeat: stop reasoning that repeats itself.
+        self.think_budget: int = think_watch.DEFAULT_BUDGET
+        self.think_repeat: bool = True
+        self.progress_note: bool = True     # /progress-note, see _IDLE_AFTER
         self.stream: bool = True   # stream replies to the frontends as they are generated; --no-stream
         self.tools_enabled: bool = True
         # Per-role tool choices: mode -> names the user turned off (/tools <name>
@@ -425,6 +473,12 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         # The type of the next plan create_plan makes: "normal" | "tdd" | "stories"
         # (/plan tdd, /plan stories).  A plan that exists keeps its own kind (plan.kind).
         self.plan_kind: str = "normal"
+        # /plan questions: a first create_plan made before any question to the user
+        # is refused once (PlanRunnerMixin._handle_create_plan).  _plan_asked counts
+        # the questions answered while investigating; both reset with the plan.
+        self.plan_questions: bool = True
+        self._plan_asked = 0
+        self._plan_gate_refused = False
         # A stories plan's phase at work: "story-writer" while its stories are
         # written, "story-exec" while one runs; None otherwise.  It replaces the
         # role (tools and prompt) for that while.
@@ -2027,6 +2081,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         _nudged = False
         _write_nudged = False  # one write-intent recovery nudge per send()
         cut_notes = 0          # notes for a text call the cut-off left unfinished, at most 2
+        think_stops = 0        # replies the reasoning watch stopped, at most STOPS_PER_TURN
+        idle_calls = 0         # tool calls in a row that changed nothing (/progress-note)
+        idle_notes = 0         # notes about them, at most _IDLE_NOTES
+        loop_role = self.story_role or ("plan-exec" if executing else self.mode)
         next_notes = 0         # "you announced a step but took none" notes, at most _NEXT_STEP_NOTES
         compact_notice = ""    # last auto-compaction notice, to not repeat a no-op one
         while True:
@@ -2078,7 +2136,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 # num_ctx is the model's real window when known, so the model can
                 # use its full context; context_limit governs compaction separately.
                 num_ctx = self.model_max_ctx or self.context_limit
-                stream_kw = {"on_delta": self._delta_sink()} if self.stream else {}
+                watch = think_watch.ThinkWatch(self.think_budget, self.think_repeat)
+                if think_stops >= think_watch.STOPS_PER_TURN or not watch.active:
+                    watch = None
+                stream_kw = {"on_delta": self._delta_sink(watch)} if self.stream else {}
                 try:
                     response = self.client.chat(api_messages, tools,
                                                 think=think_this_turn,
@@ -2088,6 +2149,11 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                         stream_kw["on_delta"].flush()
                         self.event_queue.put(StreamEndEvent())
                     self._stream_chars = 0
+            except think_watch.Overrun as over:
+                think_stops += 1
+                self._think_overrun(over, investigating)
+                _suppress_think_next = True
+                continue
             except Exception as e:
                 if self._cancel.is_set():
                     self.event_queue.put(ChatEvent("system", "Interrupted."))
@@ -2418,9 +2484,11 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     answer = self._ask_user(args.get("question", ""))
                     result = f"User answered: {answer}"
                     guard.bump()
+                    self._plan_asked += investigating
                 elif name == "ask_choice":
                     result = self._ask_choice(args if isinstance(args, dict) else {})
                     guard.bump()
+                    self._plan_asked += investigating and not result.startswith("ERROR")
                 elif name == "create_plan":
                     result = self._handle_create_plan(args)
                     if self.plan_phase == "executing":
@@ -2541,6 +2609,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 # write_file is sticky — it must not be overwritten by a later
                 # tool in the same batch so the terminal detection below works.
                 _call_ok = not result.startswith("ERROR:")
+                tool = registry.get(name)
+                wrote = _call_ok and (name in DIFF_TOOLS or (
+                    tool is not None and isinstance(args, dict) and bool(written_paths(tool, args))))
+                idle_calls = 0 if wrote or name in _PROGRESS_TOOLS else idle_calls + 1
                 # In design mode an edit_file revises the written spec: the
                 # same finished state as the write itself.
                 if _call_ok and (name == "write_file"
@@ -2584,7 +2656,25 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     return "cancelled"
                 loop_resets += 1
                 guard.reset()
-                tool_only_turns, last_tool, _nudged = 0, None, False
+                tool_only_turns, last_tool, _nudged, idle_calls = 0, None, False, 0
+                continue
+
+            # Many calls that changed nothing, narrated or not: one note, a second
+            # at twice the count, then the loop guard and the iteration cap decide.
+            idle_after = _IDLE_AFTER.get(loop_role, 15)
+            if (self.progress_note and idle_notes < _IDLE_NOTES
+                    and idle_calls >= idle_after * (idle_notes + 1)):
+                idle_notes += 1
+                if loop_role == "story-writer":
+                    since, act = "a story written", (self._writer_next(self._writing)
+                                                    if self._writing else "")
+                else:
+                    since, act = _IDLE_ACT.get(loop_role, _IDLE_ACT["coding"])
+                self.event_queue.put(ChatEvent("system",
+                    f"{idle_calls} tool calls without {since} — asked the model to act."))
+                self.messages.append({"role": "user", "content": _IDLE_NOTE.format(
+                    n=idle_calls, since=since, act=act).rstrip()})
+                tool_only_turns = 0
                 continue
 
             # Inject as role "user" — Ollama's tool-use turn format expects
@@ -2600,8 +2690,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     "or, once you have enough, call write_file with both 'path' (the file path to write) and 'content' (the complete spec)."
                     if self.mode == "design" else
                     "You have been calling tools for several turns without a text response. "
-                    "If your investigation is complete, call create_plan now. "
-                    "If a decision needs the user, call ask_user. "
+                    "If your investigation is complete, ask the user about the open decisions "
+                    "with ask_choice, or call create_plan once they are settled. "
                     + ("Otherwise keep investigating." if quiet else
                        "Otherwise keep investigating, with one line of text alongside your next tool call.")
                     if investigating else
@@ -2629,9 +2719,11 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
 
     # ── streaming ─────────────────────────────────────────────────────────────
 
-    def _delta_sink(self):
+    def _delta_sink(self, watch: think_watch.ThinkWatch | None = None):
         """Streaming callback that coalesces deltas (~50 ms / 200 chars) before
-        putting them on the bus, so frontends are not flooded token by token."""
+        putting them on the bus, so frontends are not flooded token by token.
+        With a watch, the reasoning deltas go through it too: it raises
+        think_watch.Overrun out of the stream when a trip fires."""
         buf: list[str] = []
         state = {"kind": None, "ts": time.monotonic()}
 
@@ -2657,6 +2749,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             buf.append(text)
             if time.monotonic() - state["ts"] >= 0.05 or sum(map(len, buf)) >= 200:
                 flush()
+            if watch is not None and kind == "thinking":
+                watch.feed(text)        # <think> tags in the content stream land here too
 
         # Qwen-style models put reasoning inside <think>…</think> in the content
         # stream; route it to "thinking" live, as the final response does. Tags may
@@ -2770,6 +2864,49 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.logger.log_loop_reset(self.mode, self.client.model, hit.kind, hit.name,
                                    hit.count, removed, analysed)
         return True
+
+    def _think_overrun(self, over: think_watch.Overrun, investigating: bool) -> None:
+        """The reasoning watch stopped a reply: drop the stream, keep the reasoning
+        (shown, not sent back) and ask the model to act on what it has."""
+        self.client.abort()          # stop the generation server-side, not only reading it
+        reasoning = over.reasoning
+        self._turn_stats["eval"] += over.tokens
+        self._turn_stats["text"]["think"].append(reasoning)
+        self.event_queue.put(ChatEvent("system", over.describe() + " — asked the model to act."))
+        self.logger.log_response(self.mode, self.client.model, None, over.tokens, False)
+        if reasoning.strip():
+            self.event_queue.put(ThinkEvent(reasoning))
+        if over.kind == "repeat":
+            line = over.line if len(over.line) <= 300 else over.line[:300] + "…"
+            tail = _THINK_REPEAT_TAIL.format(line=line)
+        else:
+            tail = _THINK_BUDGET_TAIL.format(gist=think_trim.trim(reasoning, {}, "lean"))
+        what = ("Your reasoning kept repeating itself" if over.kind == "repeat"
+                else f"Your reasoning ran past {self.think_budget:,} tokens without acting")
+        if self.story_role == "story-writer" and self._writing:
+            act = self._writer_next(self._writing)
+        elif self.mode == "design":
+            act = "Ask your next question with ask_user, or call write_file once the design is settled."
+        elif investigating:
+            act = ("Call the next tool, ask_choice about an open decision, or call create_plan "
+                   "once the decisions are settled with the user.")
+        elif self.story_role == "story-exec":
+            act = "Call the tool for your next step now; once the acceptance checks pass, call complete_story."
+        elif self._plan_executing():
+            act = "Call the tool for your next step now; once the step is verified, call complete_step."
+        else:
+            act = ("Call the tool for your next step now. If the work is done, give your final "
+                   "summary; if you are blocked, ask with ask_user.")
+        # The reasoning is stored but never sent: the note carries its gist.  The
+        # empty assistant turn keeps the roles alternating (Qwen3's template).
+        last = next((m.get("role") for m in reversed(self.messages)
+                     if m.get("role") != "thinking"), "")
+        if reasoning.strip():
+            self.messages.append({"role": "thinking", "content": reasoning, "unsent": True})
+        if last in ("user", "tool"):
+            self.messages.append({"role": "assistant", "content": None})
+        self.messages.append({"role": "user", "content": _THINK_NOTE.format(
+            what=what, act=act, tail=tail)})
 
     def _nudge_loop(self, hit: Hit) -> None:
         """Warn about a loop in the making (edit churn): a note to the model, with
@@ -2954,6 +3091,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             run_mode=self.run_mode,
             run_output_limit=self.run_output_limit,
             max_output_tokens=self.max_output_tokens,
+            think_budget=self.think_budget,
+            think_repeat=self.think_repeat,
+            progress_note=self.progress_note,
+            plan_questions=self.plan_questions,
             undo_max=self.undo_max,
             loop_guard=self.loop_guard,
             loop_resets=self.loop_resets,
@@ -3120,6 +3261,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         mode = data.get("mode", "design")
         self.mode = mode if mode in MODES else "design"
         self.workdir = Path(data.get("workdir", str(self.workdir)))
+        self._mark_current()
         self.context_pct = data.get("context_pct", None)
         # Sessions from before context_fixed saved every limit, derived or not:
         # they now follow the model's window.
@@ -3203,6 +3345,38 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
     def session_path(self) -> Path:
         return session_mod.session_path(self._ts)
 
+    def _mark_current(self) -> None:
+        """Remember this session and its workspace for the next launch."""
+        session_mod.mark_current(self._ts, self.workdir)
+
+    def clear_conversation(self) -> str:
+        """/clear: drop the conversation and everything carried from it, keeping
+        the session's settings.  The saved copy goes too: a cleared session left
+        on disk came back with its plan on the next launch, and an old compaction
+        summary came back into the first message after the next compaction.
+        Returns a note on the plan it discarded, or ""."""
+        # An active plan goes too: it refers to a conversation that no longer exists.
+        # (Safe here — the Controller rejects /clear while a plan step is running.)
+        note = self.cancel_plan() if self.plan is not None else ""
+        self.plan_kind = "normal"
+        self._plan_asked, self._plan_gate_refused = 0, False
+        self.messages = [self.messages[0]]
+        self.compacted = []
+        self.summary_state = new_summary_state()
+        self.momo_lines = []
+        self._momo_recap_turn = 0
+        self._turn_count = 0
+        if not self.title_locked:
+            self.title, self._title_turn = "", 0
+        self._last_run = self._last_failed_call = None
+        self.drop_run_logs()
+        self.checkpoints.keep()      # the turns they belonged to are gone
+        session_mod.forget(self._ts)
+        self._mark_current()
+        self._token_estimate = self._estimate(schemas=True)
+        self._measured_tokens = None
+        return note
+
     def new_session(self) -> str:
         """Save the current session and start an empty one (same model/host/mode)."""
         if len(self.messages) > 1:
@@ -3212,10 +3386,12 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.checkpoints.keep()     # a new conversation starts with nothing to undo
         self._reverted = []
         self._ts = session_mod.new_timestamp()
+        self._mark_current()
         self.logger = Logger(self._ts)
         self.plan = None
         self.plan_phase = "investigating"
         self.plan_kind = "normal"
+        self._plan_asked, self._plan_gate_refused = 0, False
         self.momo_lines = []
         self._momo_recap_turn = 0
         self.title = ""

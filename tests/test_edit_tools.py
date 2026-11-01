@@ -377,6 +377,24 @@ class ChecksWithoutIndex(Base):
         self.assertTrue(out.startswith("Applied as sent (repeated): `Inventory` removed."), out)
         self.assertEqual((self.root / "inv.py").read_text(), content)
 
+    def test_a_rewrite_that_drops_the_same_definitions_again_is_applied(self):
+        # Multi-part round 4: the second rewrite differed, was refused again, and
+        # the model gave up with the stray function still in the file.
+        out = self.run_tool("write_file", path="inv.py", content="def calc_tax(amount):\n    return 0\n")
+        self.assertTrue(out.startswith("ERROR: not written"), out)
+        content = "def calc_tax(amount):\n    return amount * 0\n"
+        out = self.run_tool("write_file", path="inv.py", content=content)
+        self.assertTrue(out.startswith("Applied as sent (repeated): `Inventory` removed."), out)
+        self.assertEqual((self.root / "inv.py").read_text(), content)
+
+    def test_a_rewrite_that_drops_other_definitions_is_refused_again(self):
+        self.write("two.py", "def a():\n    return 1\n\n\ndef b():\n    return 2\n")
+        out = self.run_tool("write_file", path="two.py", content="def a():\n    return 1\n")
+        self.assertTrue(out.startswith("ERROR: not written"), out)
+        out = self.run_tool("write_file", path="two.py", content="def b():\n    return 2\n")
+        self.assertTrue(out.startswith("ERROR: not written"), out)
+        self.assertIn("`a`", out)
+
 
 @NAV
 class ChecksWithIndex(Base):

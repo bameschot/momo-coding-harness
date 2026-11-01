@@ -1515,13 +1515,22 @@ def write_file(path: str, content: str, *, workdir: Path, index=None, cancel=Non
                 lost = anchor_loss(_parse(lang, old_text), _parse(lang, content), need_added=False)
             except Exception:
                 lost = []
+            # A rewrite that drops the same definitions again, with other content,
+            # confirms it too: a model removing a stray function it had added was
+            # refused twice and gave up (multi-part bench, round 4).
+            drop_key = _call_key(p, "write_file drops", sorted(g.name for g in lost))
+            if lost and drop_key in _REFUSED:
+                kept = f"Applied as sent (repeated): {_REFUSED.pop(drop_key)} removed. "
+                _REFUSED.pop(key, None)
+                lost = []
             if lost:
                 names = _names([f"`{g.name}`" for g in lost], 6)
                 _remember(key, names)
+                _remember(drop_key, names)
                 return (f"ERROR: not written — the new content of {_rel_of(p, workdir, path)} drops "
                         f"{names}, which the file defines now. Keep them in content, or change only "
                         f"part of the file with edit_file. If dropping them is what you want, send "
-                        f"the same call again.")
+                        f"the call again: any rewrite that drops the same definitions is applied.")
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")

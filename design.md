@@ -108,6 +108,24 @@ Both frontends complete the input box with the same code: the TUI calls `complet
 
 In coding and momo mode (`Harness._run_loop`, `_ends_turn_checked`: no plan step or story running), a reply without a tool call that only announces its next step (`toolcall_text.announces_next_step`: first-person intent in the last 400 characters, or a last line that is an imperative plan step; not a question) gets `_NEXT_STEP_NOTE`, at most `_NEXT_STEP_NOTES` (2) per turn. The reply and the note are appended as a user turn and the loop continues, like the design-mode write-intent nudge. The detector is checked against labelled final replies from the multi-part bench (`evals/multipart_bench.py`, `tests/golden/next_step_replies.json`). A `todos` checklist tool with an open-items note was tried alongside it and removed: a 26B called it once in 27 runs, and this note alone stopped the early endings it was meant for (`evals/README.md`, "The todo list").
 
+### Reasoning watch (`/think-budget`)
+
+`Harness._delta_sink(watch)` feeds every streamed reasoning delta (the adapter's reasoning field, or `<think>` text in the content stream) to a `think_watch.ThinkWatch`. It raises `think_watch.Overrun` out of the adapter's stream when the reasoning passes `think_budget` tokens (chars / 4), or when one line of `MIN_LINE`+ characters, after case and whitespace normalisation, appears `REPEATS` (3) times in the last `WINDOW` (6,000) characters. `_run_loop` catches it at the chat call, and `_think_overrun` handles it:
+- `client.abort()` closes the stream, so the server stops generating;
+- the reasoning is stored as `thinking` marked `unsent`, followed by an empty assistant turn (role alternation);
+- `_THINK_NOTE` follows as a user turn, with the role's next action and either `think_trim.trim(..., "lean")` of the reasoning or the repeated line;
+- the next request runs with thinking suppressed.
+
+At most `STOPS_PER_TURN` (2) per `_run_loop`; later replies get no watch. Without streaming there are no deltas, so only `/max-output-tokens` applies. `/think-budget repeat off` turns the repetition trip off; `/think-budget off` turns the budget off.
+
+### Progress note (`/progress-note`)
+
+`_run_loop` counts `idle_calls`: consecutive executed tool calls that wrote nothing (`DIFF_TOOLS` or a tool's `written_paths`), outside `_PROGRESS_TOOLS` (`ask_user`, `ask_choice`, the plan and story tools). Text alongside a call does not reset it, unlike `tool_only_turns`. A loop reset does. At `_IDLE_AFTER[role]` (15; momo 12; plan and story-writer 25) and again at twice that, `_IDLE_NOTE` with `_IDLE_ACT[role]` is appended as a user turn (story-writer: `_writer_next`). The role key is `story_role`, else `plan-exec` while a plan runs, else the mode.
+
+### Ask before planning (`/plan questions`)
+
+`roles/planner.md` has the planner investigate the options for each decision that shapes the plan, then ask about them with `ask_choice` before `create_plan`. `_run_loop` counts the `ask_user` / `ask_choice` answers given while investigating in `_plan_asked`. `PlanRunnerMixin._handle_create_plan` refuses a create_plan with `_ASK_FIRST` when `plan_questions` is on, there is no draft (`self.plan is None`) and nothing was asked. It refuses once per plan (`_plan_gate_refused`): the next create_plan goes through. `approve_plan`, `cancel_plan` and a new session reset both. `create_plan` is exempt from the loop guard, so the refusal is not counted as a repeat. `/plan questions` is allowed while a turn runs (`controller._blocked_while_busy`).
+
 ### Settled results (calls not run)
 
 A call the harness does not run still gets an answer that says why and what a retry should change (`harness/settle.py`). Every result starts with `ERROR: not run`, so the loop guard counts the same cut-off made again like any repeated failure.
@@ -296,7 +314,13 @@ JSON files at `~/.momo-harness/sessions/<timestamp>.json`. The timestamp format 
 
 Session fields: `created_at`, `model`, `host`, `mode`, `workdir`, `context_limit`, `context_pct`, `active_skills`, `input_history`, `messages`. The Ollama `host` is restored on load (before the model context query runs against it); the auth token is deliberately never persisted.
 
-Sessions are auto-saved at the end of every `send()` call. On startup the most recent session (by filename, sorted newest-first) is restored unless `--fresh` is passed. The TUI replays the message history into the chat buffer at startup via `_replay_session()`.
+Sessions are auto-saved at the end of every `send()` call. `Harness._mark_current` records the session in use with its workspace (`session.mark_current`): the prefs `last_session` and `last_workdir`, and `workspace_sessions[workdir] = ts` (50 kept; another workspace's entry for the same session is dropped, since it moved). It runs from `new_session`, `load_session`, `clear_conversation`, `/workspace` and a launch that restores nothing. `main` asks `session.restore_target(given)` before it builds the Harness:
+- With no `--workspace`, it gets `last_session` (if it has a conversation) and `last_workdir` (if it is still a directory). The remembered workspace also beats the one saved with the session, since a `/workspace` in an unsaved session is newer.
+- With `--workspace PATH`, it gets that workspace's entry, only if it has a conversation and was saved in PATH.
+- An entry that is cleared or moved means nothing is restored, never an older session and its plan.
+- Without the prefs (older prefs files), it gets the newest session with a user message, in PATH when one is given.
+
+`--fresh` skips all of this. `Harness.clear_conversation` (`/clear`) deletes the saved JSON (`session.forget`) and resets the plan, `compacted`, `summary_state` (otherwise the next compaction would write the old requests into the new first message), recap lines and an unlocked title. The TUI replays the message history into the chat buffer at startup via `_replay_session()`.
 
 `/session <name>` resolves sessions by exact filename stem first, then partial prefix — so `2026-06-22` matches the first session whose stem starts with that string.
 

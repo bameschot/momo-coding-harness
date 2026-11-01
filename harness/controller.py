@@ -39,7 +39,7 @@ def _blocked_while_busy(cmd: str, parts: list[str]) -> bool:
     """Commands that would change the turn a worker thread is running."""
     arg = parts[1].strip().lower() if len(parts) > 1 else ""
     return (cmd in _MUTATING or cmd in _MODE_COMMANDS
-            or (cmd == "/plan" and arg != "show")
+            or (cmd == "/plan" and arg != "show" and arg.split(" ")[0] != "questions")
             or (cmd in ("/session", "/workspace", "/workdir", "/run-mode", "/scratch",
                         "/search-sources", "/host", "/model", "/undo-max") and bool(arg))
             # a per-tool change (/tools <name> on|off) and a reload of the custom

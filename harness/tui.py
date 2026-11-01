@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from . import complete as complete_mod
 from . import md_render
 from .loop_guard import MAX_RESETS as _LOOP_RESETS, THRESHOLD as _LOOP_GUARD
+from .think_watch import DEFAULT_BUDGET as _THINK_BUDGET
 from .commands import help_commands
 from .diff import build_diff_body
 from .file_search import workspace_files_nowait
@@ -1377,6 +1378,11 @@ class TUI:
             parts.append("LOOP: off")
         elif (ev.loop_guard, ev.loop_resets) != (_LOOP_GUARD, _LOOP_RESETS):
             parts.append(f"LOOP: {ev.loop_guard}×/{ev.loop_resets}")
+        if ev.think_budget != _THINK_BUDGET or not ev.think_repeat:
+            cap = f"{ev.think_budget:,}" if ev.think_budget else "off"
+            parts.append(f"THINK-CAP: {cap}" + ("" if ev.think_repeat else ", repeats ok"))
+        if not ev.progress_note:
+            parts.append("PROGRESS: off")
         if ev.undo_count:
             parts.append(f"UNDO: {ev.undo_count}")
         self._st_extra = "".join(f" | {p}" for p in parts)
