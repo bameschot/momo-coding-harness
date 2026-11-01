@@ -1303,3 +1303,136 @@ request, real tokens, before → after:
 
 Not done (smaller or riskier, see the plan): trimming the "Navigating code"
 rules, hiding grep/find while the index covers them, merging overlapping tools.
+
+## Multi-part requests and the todo list (`multipart_bench.py`)
+
+What goes wrong when one request has several parts? The bench began as `todos_bench.py`, an A/B of a `todos` checklist tool: is it called in coding mode, and does it make multi-part changes come out better? The tool was removed after round 4 (see [the outcome](#outcome-the-todos-tool-is-removed-2026-11-01)). The bench stays, without arms, as the measurement for the announced-next-step note and the anchor-loss refusal. Three change requests on a copy of `evals/edit/project`, each part graded on its own by a hidden check:
+- `numbered-4`: a numbered list over four files, ending in a test run;
+- `prose-chain`: four cart changes in prose, later ones building on earlier ones;
+- `prose-6`: six independent changes in one paragraph.
+
+A one-step control, `single`, checks the tool stays unused when there is nothing to track. `--selftest` confirms that every check fails on the untouched project and passes on a reference solution.
+
+```bash
+python evals/multipart_bench.py --host http://127.0.0.1:9931 --runs 3
+python evals/multipart_bench.py --selftest
+```
+
+Rounds 1–4 had arms: `on` (the tool as the harness shipped it) and `off` (the tool turned off; since round 2 the announced-next-step note still applies there). Round 1 also had two arms that patched the bench's own `Harness`; both are now built in:
+- `nudge`: a rule in the system prompt ("several parts → call todos first, one item per part, no final reply with an item open") and a more directive tool description.
+- `guard`: `nudge`, plus an end-of-turn check. A final reply while the list still has open items gets one note that lists them.
+
+Runs go 4 at a time (`--jobs`, one per server slot).
+
+### Round 1 (Gemma 4 26B q4_0 on llama.cpp, thinking on, 2026-10-31)
+
+Raw rows are in `todos/round1-2026-10-31.json`. Each run is capped at 900 s.
+
+| arm | runs | parts passing | all parts | todos called | capped | mean secs | output tokens |
+|---|---|---|---|---|---|---|---|
+| on | 9 | 58% | 4/9 | **0/9** | 2 | 618 | 4,592 |
+| off | 9 | 62% | 3/9 | – | 0 | 403 | 4,101 |
+| nudge | 6 | 64% | 3/6 | 2/6 (only `prose-6`) | 1 | 465 | 3,724 |
+| guard | 6 | 93% | 4/6 | 2/6 (only `prose-6`) | 2 | 724 | 9,580 |
+
+`single`: passed 4/4 runs, and `todos` was never called, under `on` or `nudge`.
+
+- **As shipped, the tool is not used.** It was called in 0 of 9 runs, so `on` and `off` differ only by sampling noise. The model writes its plan in its reasoning ("Task 1 … Task 4"), works from memory, and the system prompt never mentions the tool.
+- **The main failure is stopping early, and it has nothing to do with the list.** In 10 of the 12 failing baseline runs, the final reply lists what is left ("My next steps are: 1. … 2. …", "I will begin with the first task") and the turn ends. The harness takes any reply without a tool call as the end of the turn. The other 2 failures hit the time cap.
+- **The rule makes the model write a list, but not first and not kept up to date.** Under `nudge` it was called only for the 6-part task: in 4 of 4 `prose-6` runs, and in 0 of 8 runs of the 4-part tasks. It came after reading the files (call index 6–8), with 5–6 items for 6 parts, and was rarely updated (0–1.5 updates per run). In both `prose-6` runs under `nudge`, the model made the list, announced its first step and stopped with every item still pending, scoring 0/6 and 2/6.
+- **The guard turns exactly that case around.** It fired in both `prose-6` runs under `guard`. In each, the model had stopped with items open; after the note it carried on and scored 5/6 (capped) and 6/6. The pooled 93% for `guard` is mostly that effect: the guard fired only where a list existed, and the 4-part tasks under `guard` ran with the same setup as under `nudge`. With 2 runs per cell, this is a mechanism seen twice, not a measured rate.
+- **It costs time and tokens.** The guard's second round doubles output tokens on the runs where it fires.
+
+Seen along the way, unrelated to the list:
+- Edits that delete a method next to the change. `Inventory.restock` (smoke run), `Cart.add`, and `Cart.subtotal`/`tax`/`total` were replaced instead of being kept, through an `old_string` that ended on the neighbouring method.
+- Gemma's tool-call markup leaking into an argument (`list_directory` with path `.}<tool_call|><|channel>thought…`).
+- Single replies of about 20k tokens of reasoning, which account for the capped runs.
+
+### Round 2: the checks built in (same model and setup, 2026-10-31)
+
+Changes since round 1:
+- the "Requests with several parts" prompt section while `todos` is offered;
+- `done=[n]` updates and numbered results;
+- the open-items note (at most 2 per turn);
+- the announced-next-step note (1 per turn), which also applies in `off`;
+- `roles/coder.md`'s Plan step now says to write the plan together with a tool call.
+
+Raw rows are in `todos/round2-2026-10-31.json`.
+
+| arm | runs | parts passing | all parts | todos called | notes (open items / next step) | capped |
+|---|---|---|---|---|---|---|
+| on | 9 | 68% | 5/9 | 1/9 | 1 / 3 | 4 |
+| off | 9 | **100%** | **9/9** | – | 0 / 5 | 1 |
+| round 1 on / off | 9 / 9 | 58% / 62% | 4/9 / 3/9 | 0/9 | – | 2 / 0 |
+
+`single` passed 2/2 runs, with no note and no `todos` call.
+
+- **The announced-next-step note fixes the early stops.** In `off` it fired 5 times, and every run finished every part, up from 3/9 in round 1.
+- **The todo list still isn't used.** Despite the prompt section, the tool was called once in 9 runs, with 5 items for 4 parts and one `done=` call. Gemma 4 26B doesn't follow the rule.
+- **`on` failed for reasons unrelated to the list:**
+  - Two final replies the detector missed. One plan item starts with a bold file label ("5. **`shop/util.py`**: Update the `slug` function…"). The other is a second stop, "Let's check `tests/test_shop.py`…", after the one allowed note.
+  - Two runs where one reply went past 600 s and was cancelled. Nothing was stored, so the cause is unknown.
+  - One run where the 10-tool-turn nudge for plain coding mode said "Stop and summarise … or describe your next step if you are not finished", which invites exactly this stop.
+
+Fixed after round 2:
+- the detector accepts a bold or code label before the verb, and "let's";
+- 2 next-step notes per turn;
+- the tool-only-turns nudge in coding mode now asks for a summary if done, otherwise one line of progress together with the next tool call.
+
+### Round 3: after the round-2 fixes (same model and setup, 2026-10-31)
+
+Raw rows are in `todos/round3-2026-10-31.json`.
+
+| arm | runs | parts passing | all parts | todos called | notes | capped (one reply > 600 s) |
+|---|---|---|---|---|---|---|
+| on | 9 | 86% | 7/9 | 0/9 | 0 | 6 (2) |
+| off | 9 | 85% | 3/9 | – | 0 | 4 (1) |
+
+- **No early stops left.** No run ended with work announced but not done, so no note fired. Over the three rounds, runs that stopped early went from 10 of 18 (round 1), to 0 among the 9 `off` runs of round 2 (5 notes fired there), to 0 of 18 here. The fixed Plan step in `coder.md` and the reworded tool-only-turns nudge now seem to prevent most stops at the source, with the note as a backstop. These runs can't separate the two.
+- **The todo list makes no difference on this model.** It was called once in the 18 runs of rounds 2 and 3, and `on` ≈ `off` in parts passing (86% against 85%). The prompt section costs about 70 tokens and Gemma 4 26B doesn't follow it. It should be measured on a smaller model before it is kept or dropped.
+- **The remaining failures are editing mistakes and the time cap:**
+  - Three runs replaced the neighbouring `test_slug` with the new `test_remove`, leaving 3 tests: the "edit deletes a neighbouring definition" pattern.
+  - `free_shipping` logic was wrong twice.
+  - One edit left `slug` with an `IndentationError`.
+  - Three runs had one reply go past 600 s; 10 of 18 hit the 900 s cap.
+
+### Round 4: refusing edits that drop a neighbouring definition (same model, `on` arm, 3 runs per multi-part task, 2026-10-31)
+
+Before this round, every recorded edit of rounds 1–3 was replayed from a fresh project copy. **45 of 235 edits (19%) removed an existing definition, in 30 of 72 runs**. In each, the model used the old code as the `old_string` anchor and left it out of `new_string`. **20 runs ended with original code still missing.** The hidden checks didn't cover that code, so it went unnoticed. The `keep` edit feature (see "Keeping the anchor" in `design.md`) now refuses such an edit before writing. The same call sent again applies it.
+
+Raw rows are in `todos/round4-2026-10-31.json`. `lost` = runs that end with a definition of the original project missing.
+
+| arm | runs | parts passing | all parts | refusals (runs) | lost | capped |
+|---|---|---|---|---|---|---|
+| on, round 3 (before) | 9 | 86% | 7/9 | – | not measured | 6 |
+| on, round 4 | 9 | 89% | 8/9 | 7 (5) | **0/9** | 2 |
+
+- **No code lost.** Five `edit_file` refusals hit the familiar cases: `restock` for `remove` twice, `restock` for `total_value`, `test_find` for `test_remove`, and `total` for `item_count`/`remove`. Each time the next edit to the file kept the anchor, either directly or after one `read_file`. No run sent the dropping edit again.
+- **One cost, from `write_file`.** In one prose-chain run, the model wrote `tests/test_cart.py` with a stray module-level `test_checkout_items_fixed`, then tried to rewrite the file without it. That was refused twice. The second call had different content, so it didn't count as "the same call", and the model gave up with the stray function left in. The run still passed 4/4. The protection should cover only definitions the file had before the run, or a resend that drops the same names should count as the confirmation.
+- **The 0/6 run isn't an anchor loss.** One edit left a stray `"` in `TAX_RATES`, which broke the import. The fix then came as a `<tool_call>` written in the final reply text and was never run. That is the Gemma tool-call markup finding.
+
+Regression check on the edit suite: `run_evals.py --suite edit --runs 2` for rename-across, rewrite-function, signature-change and ambiguous-edit, with `keep` on and off.
+
+| | ambiguous-edit | rewrite-function | rename-across | signature-change | total |
+|---|---|---|---|---|---|
+| `keep` on | 2/2 | 0/2 | 1/2 | 1/2 | 4/8 |
+| `keep` off | 1/2 | 0/2 | 2/2 | 1/2 | 4/8 |
+
+The rename-across and signature-change failures under `keep` were both runs that hit the 600 s cap before making any edit. rewrite-function fails in both arms on the same wrong `parse_duration` logic. 9 of the 16 runs hit the cap, so this only shows there is no sign of a regression. The deterministic tests (`tests/test_anchor_loss.py`) cover renames in every language.
+
+### Outcome: the `todos` tool is removed (2026-11-01)
+
+The tool was called in 1 of 36 runs where it was offered (0/9, 1/9, 0/9, 0/9 over rounds 1–4). That includes 27 runs with the "Requests with several parts" prompt rule. `off` did as well as `on` or better (round 2: 100% against 68%; round 3: 85% against 86%). Why it wasn't used:
+
+1. **This model doesn't need it.** With thinking on, Gemma 4 26B plans in its reasoning and keeps 4–6 parts in mind over about 20 calls. Since round 3 it hardly writes a plan in text at all: the numbered lists in the transcripts are final summaries. A list gave it nothing it lacked.
+2. **A static rule loses to the role's workflow.** The section sat at character ~8,000 of an 11,000-character prompt, after "Tool calls". Meanwhile `coder.md`'s "Workflow (follow every time)" asks for the plan as a numbered list in text, so two instructions covered the same step and the role won. The model does follow a harness note that comes at the moment it applies (the next-step note, rounds 2–4).
+3. **The one measured benefit was the guard, not the list.** In round 1, the open-items note revived the runs that had stopped early. The announced-next-step note does that without a list: no early stops in rounds 3–4.
+4. **The description offered a way out** ("Skip it for a single-step task") and described how to call it, not what it was for. Discovery is off by default, so the tool was declared every time. That wasn't the cause.
+
+Removed: the tool, its prompt section, the open-items note, `/todos`, the TUI strip, the web panel and the compaction-summary line. Kept, since they don't depend on it:
+- the announced-next-step note;
+- the coding-mode wording of the tool-only-turns nudge;
+- `coder.md`'s Plan step written together with a tool call;
+- the anchor-loss refusal (round 4).
+
+The rows above stay as the record (`todos/round{1-4}-2026-10-31.json`).

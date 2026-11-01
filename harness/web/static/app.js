@@ -6,7 +6,6 @@
 import { initChips, refreshChipMenus, renderChipMenu } from "./chips.js";
 import { applyMcpStatus, initMcp, refreshMcpMenu } from "./mcp.js";
 import { applySkillsStatus, initSkills, refreshSkillsMenu } from "./skills.js";
-import { applyTodosStatus, initTodos } from "./todos.js";
 import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
 import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, formatSize, icon, loadJSON,
          makeResizable, openLayer, saveJSON, toast } from "./dom.js";
@@ -613,7 +612,6 @@ function applyStatus(s) {
   const pp = $("#plan-progress");
   pp.hidden = !s.plan_progress;
   pp.textContent = s.plan_progress;
-  applyTodosStatus(s);
   updatePlanKind();
   const offline = s.backend_reachable === false;
   $("#model").textContent = offline ? `${s.model} · offline` : s.model;
@@ -2553,7 +2551,6 @@ initMcp({
   attach: (f) => { attachments.push({ id: ++attSeq, status: "ready", ...f }); renderChips(); },
 });
 initSkills({ send, status: () => status, closeMenu, openPrompt: openPromptDrawer, changed: refreshState });
-initTodos({ send });
 initFind();
 initPalette({
   commands: () => state?.commands || [],

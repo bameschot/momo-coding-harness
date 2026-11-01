@@ -38,7 +38,6 @@ from .syntax_watch import SyntaxWatch
 from .loop_guard import MAX_RESETS as DEFAULT_LOOP_RESETS, THRESHOLD as DEFAULT_LOOP_GUARD, Hit, LoopGuard
 from . import transcript as transcript_mod
 from . import think_trim
-from . import todos as todos_mod
 from .tools.dispatcher import written_paths
 from . import code_index, code_nav, ignore_rules
 from .events import (AskUserEvent, ChatEvent, DiffEvent, DoneEvent, ErrorEvent,  # noqa: F401
@@ -51,7 +50,7 @@ from .prompts import (_index_banner, MODES,
                       planner_for_tdd)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls,
-                            _strip_turn_markers, partial_text_call)
+                            _strip_turn_markers, announces_next_step, partial_text_call)
 from . import settle
 
 # DIFF_TOOLS (Tool.diff): tools whose result a frontend may receive as
@@ -296,6 +295,13 @@ _LOOP_NUDGE = (
     "[Note from the harness, not the user] {removed}{changes}Do not repeat {what}. "
     "Continue with the different approach from your analysis; if it found none that "
     "fits what the user asked, stop and tell the user what is blocking you.")
+# A final reply in coding/momo mode that only announces its next step (see _run_loop).
+_NEXT_STEP_NOTES = 2   # announced-next-step notes per turn (a 26B announced twice in a row)
+_NEXT_STEP_NOTE = (
+    "[Note from the harness, not the user] Your reply describes a next step but takes no "
+    "action, and a reply without a tool call ends your turn. Continue now: call the tool for "
+    "that step. If the work is done, give your final summary; if you need the user, ask with "
+    "ask_user.")
 # What the analysis lists under "What I repeated", per kind of loop.
 _LOOP_REPEATED = {
     "call": "the exact call, and what it returned each time",
@@ -419,8 +425,6 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         # The type of the next plan create_plan makes: "normal" | "tdd" | "stories"
         # (/plan tdd, /plan stories).  A plan that exists keeps its own kind (plan.kind).
         self.plan_kind: str = "normal"
-        # The model's todos checklist in coding and momo modes (harness/todos.py).
-        self.todos: list[dict] = []
         # A stories plan's phase at work: "story-writer" while its stories are
         # written, "story-exec" while one runs; None otherwise.  It replaces the
         # role (tools and prompt) for that while.
@@ -2023,6 +2027,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         _nudged = False
         _write_nudged = False  # one write-intent recovery nudge per send()
         cut_notes = 0          # notes for a text call the cut-off left unfinished, at most 2
+        next_notes = 0         # "you announced a step but took none" notes, at most _NEXT_STEP_NOTES
         compact_notice = ""    # last auto-compaction notice, to not repeat a no-op one
         while True:
             if self._cancel.is_set():
@@ -2281,6 +2286,19 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     self.messages.append({"role": "assistant", "content": content})
                     self.messages.append({"role": "user", "content": self._story_nudge(content, tools)})
                     continue
+                # Coding and momo: a reply without a tool call ends the turn, so one
+                # that only announces its next step gets a note and the loop goes on
+                # (a 26B stopped this way in 10 of 12 failed multi-part runs;
+                # evals/multipart_bench.py).
+                if ((content or "").strip() and self._ends_turn_checked()
+                        and not self._cancel.is_set() and next_notes < _NEXT_STEP_NOTES
+                        and announces_next_step(content)):
+                    next_notes += 1
+                    self.event_queue.put(ChatEvent(
+                        "system", "The reply announced a next step — asked the model to continue."))
+                    self.messages.append({"role": "assistant", "content": content})
+                    self.messages.append({"role": "user", "content": _NEXT_STEP_NOTE})
+                    continue
                 self.messages.append({"role": "assistant", "content": content or None})
                 break
 
@@ -2403,8 +2421,6 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 elif name == "ask_choice":
                     result = self._ask_choice(args if isinstance(args, dict) else {})
                     guard.bump()
-                elif name == "todos":
-                    result = self._handle_todos(args if isinstance(args, dict) else {})
                 elif name == "create_plan":
                     result = self._handle_create_plan(args)
                     if self.plan_phase == "executing":
@@ -2595,8 +2611,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     "with a short summary."
                     if executing else
                     "You have been calling tools for several turns without a text response. "
-                    "Stop and summarise what you have found or done so far, "
-                    "or describe your next step if you are not finished."
+                    "If the request is done, give your summary now; otherwise write one line "
+                    "on your progress together with your next tool call (a reply without a "
+                    "tool call ends your turn)."
                 )
                 if self.story_role == "story-writer" and self._writing:
                     nudge = ("You have been calling tools for several turns. "
@@ -2783,15 +2800,12 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             text += "They also ran commands, whose effects were not undone. "
         return text
 
-    def _handle_todos(self, args: dict) -> str:
-        """todos: replace the checklist with the one sent; an invalid list leaves
-        the old one as it was."""
-        items = todos_mod.validate(args.get("items"))
-        if isinstance(items, str):
-            return items
-        self.todos = items
-        self.emit_status()
-        return todos_mod.render(items)
+    def _ends_turn_checked(self) -> bool:
+        """Whether a final reply is checked for an announced next step: coding
+        and momo mode only.  A plan step and a story
+        end with their own tools."""
+        return (self.mode in ("coding", "momo") and not self.story_role
+                and not self._plan_executing() and not (self._story or self._writing))
 
     def _ask_choice(self, args: dict) -> str:
         """ask_choice: ask until the user picks an option.  Anything else they type is
@@ -2955,8 +2969,6 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             provider=self.provider,
             plan_progress=self._plan_progress(),
             plan_kind=self._plan_kind_shown(),
-            todos_progress=todos_mod.progress(self.todos),
-            todos=[dict(t) for t in self.todos],
             title=self.title,
             guides=self.guides,
             think_level=self.think_level,
@@ -3086,7 +3098,6 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             compacted=[{**r, "message": _mask_messages([r["message"]])[0]}
                        for r in self.compacted],
             summary_state=self.summary_state,
-            todos=self.todos,
         )
         session_mod.save_prefs(model=self.client.model, provider=self.provider)
 
@@ -3161,8 +3172,6 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.plan = Plan.from_dict(saved_plan) if saved_plan else None
         self.plan_phase = (data.get("plan_phase") or "investigating") if self.plan else "investigating"
         self.plan_kind = data.get("plan_kind") if data.get("plan_kind") in ("tdd", "stories") else "normal"
-        saved_todos = todos_mod.validate(data.get("todos") or [])
-        self.todos = saved_todos if isinstance(saved_todos, list) else []
         if self.plan_phase == "executing" and self.mode == "plan":
             self.mode = "coding"   # sessions from before plans ran in coding mode
         self.input_history.clear()
@@ -3207,7 +3216,6 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.plan = None
         self.plan_phase = "investigating"
         self.plan_kind = "normal"
-        self.todos = []
         self.momo_lines = []
         self._momo_recap_turn = 0
         self.title = ""

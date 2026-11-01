@@ -35,7 +35,7 @@ Both reviews reach the same conclusion. **momo wins on the coding loop itself**:
 - **Compacting with room to spare:** compaction now starts at 50% of the model's real window by default (`harness/harness.py:638`), which covers crush's #2.
 - **Calls that can't run say why** (#3 below, `aa0fa09`): cut-off, malformed and interrupted calls are not run and get an `ERROR: not run` result with what to change (`harness/settle.py`).
 - **Already present before the reviews, missed by them** (part of #11): structured multiple-choice questions (`ask_choice`) and MCP resources (`mcp_list_resources`, `mcp_read_resource`).
-- **`todos` checklist** (part of #11) in coding and momo modes, kept through compaction (`harness/todos.py`).
+- **`todos` checklist** (part of #11): built, then removed. A 26B called it once in 27 bench runs, and the announced-next-step note alone fixed the early stops it was meant for (`evals/README.md`, "The todo list").
 
 ## 3. Remaining improvements (best value for effort first)
 
@@ -51,7 +51,7 @@ Both reviews reach the same conclusion. **momo wins on the coding loop itself**:
 | 8 | **Show linter/type errors after edits** (`ruff`, `tsc --noEmit`, `go vet`, at most 10 findings) as a lighter substitute for language servers. | crush | M |
 | 9 | **Sub-agents:** a read-only explorer and a web researcher that return only a summary. Run evals first, since small models summarise poorly. | crush (pi as an extension) | M |
 | 10 | **Hooks in Claude Code's format** (PreToolUse/PostToolUse, exit code 2 blocks). This would stop `harness.py` and `commands.py` from growing. | both | M |
-| 11 | Images in `read_file`. (`todos`, structured questions and MCP resources are done.) | crush / pi | S–M |
+| 11 | Images in `read_file`. (Structured questions and MCP resources are done; `todos` was tried and removed.) | crush / pi | S–M |
 | 12 | Forking a session from an earlier message, paired with checkpoints | pi | M–L |
 | 13 | Codemode (the model writes a script that calls tools; only the output enters context). Run evals before building. | pi | L |
 

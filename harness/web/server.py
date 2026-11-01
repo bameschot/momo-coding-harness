@@ -93,7 +93,7 @@ _STATIC_FILES = {
     **{f"/{name}": (name, "text/javascript; charset=utf-8")
        for name in ("app.js", "dom.js", "markdown.js", "highlight.js", "notify.js",
                     "companion.js", "sessions.js", "files.js", "chips.js", "palette.js", "find.js",
-                    "mcp.js", "skills.js", "diff.js", "changes.js", "planview.js", "todos.js")},
+                    "mcp.js", "skills.js", "diff.js", "changes.js", "planview.js")},
 }
 _MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text

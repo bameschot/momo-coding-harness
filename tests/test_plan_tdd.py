@@ -420,13 +420,17 @@ class Harness(_Base):
     def test_deleting_an_assert_during_a_step_is_refused(self):
         handle_command("/plan tdd", self.h)
         active = calc_tests(False, True)
+        # step 1: delete the failing check instead of implementing.  The write drops
+        # the test method, so the edit tools refuse it once; sent again, it lands.
+        deleting = write("tests/test_calc.py",
+                         active.replace("        self.assertEqual(add(2, 3), 5)\n", "        pass\n")
+                         .replace("    def test_adds(self):\n        pass\n", ""))
         ScriptedClient.script = [
             call("create_plan", **CREATE_ARGS),
             write("tests/test_calc.py", calc_tests(True, True)),
             call("complete_step", summary="tests written"),
-            # step 1: delete the failing check instead of implementing
-            write("tests/test_calc.py", active.replace("        self.assertEqual(add(2, 3), 5)\n", "        pass\n")
-                  .replace("    def test_adds(self):\n        pass\n", "")),
+            deleting,
+            deleting,
             call("complete_step", summary="green"),
         ]
         self.h.send("make add work")

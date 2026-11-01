@@ -1,0 +1,734 @@
+{
+ "source": "evals/todos_bench.py rounds 1-3 (Gemma 4 26B, 2026-10-31): edit_file calls that applied, with the file before the edit; anchor_loss = the edit removes a definition and adds a different one (by the tree-sitter definitions)",
+ "edits": [
+  {
+   "run": "numbered-4-guard-0",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Remove the item with this SKU and return it. Raises KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-guard-1",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "new_string": "    def remove(self, sku):\n        \"\"\"The item with this SKU, or raise KeyError.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-guard-1",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n",
+   "new_string": "    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed = inv.remove(\"a1\")\n        self.assertEqual(removed.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"zz\")\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-nudge-0",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        self.items.remove(item)\n        return item",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-nudge-0",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")",
+   "new_string": "    def test_remove(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"zz\")",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-nudge-1",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Remove the item with this SKU and return it, or raise KeyError.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-0",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Removes the item with this SKU and returns it. Raises KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-0",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n",
+   "new_string": "    def test_remove(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        item = inv.remove(\"a1\")\n        self.assertEqual(item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-1",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Remove and return the item with this SKU. Raise KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-2",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"The item with this SKU, or raise KeyError if not found.\"\"\"\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        self.items.remove(item)\n        return item",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-0",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"The item with this SKU, or raises KeyError.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-0",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":",
+   "new_string": "    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item, item)\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"non-existent\")\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Remove the item with this SKU and return it. Raise KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def remove(self, sku):\n        \"\"\"Remove the item with this SKU and return it. Raise KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)\n",
+   "old_string": "    def remove(self, sku):\n        \"\"\"Remove the item with this SKU and return it. Raise KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)",
+   "new_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")",
+   "new_string": "    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")",
+   "new_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-6-off-2",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "new_string": "    def total_value(self):\n        \"\"\"Total value of all items in the inventory.\"\"\"\n        return sum(item.price * item.qty for item in self.items)\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-6-on-1",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def total_value(self):\n        \"\"\"Sum of price * qty for all items.\"\"\"\n        return sum(item.price * item.qty for item in self.items)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-chain-off-1",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)",
+   "new_string": "    def remove(self, sku):\n        original_len = len(self.lines)\n        self.lines = [line for line in self.lines if line[0].sku != sku]\n        return original_len - len(self.lines)\n\n    def item_count(self):\n        return sum(qty for item, qty in self.lines)\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-chain-on-2",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "new_string": "    def item_count(self):\n        return sum(qty for item, qty in self.lines)\n\n    def remove(self, sku):\n        initial_len = len(self.lines)\n        self.lines = [line for line in self.lines if line[0].sku != sku]\n        return initial_len - len(self.lines)\n\n    def summary(self):\n        count = self.item_count()\n        item_str = \"item\" if count == 1 else \"items\"\n        return f\"{count} {item_str}, total {format_price(self.total())}\"\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-0",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"The item with this SKU, or raise KeyError.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-0",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n",
+   "new_string": "    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-1",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Remove the item with this SKU, or raise KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-1",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")",
+   "new_string": "    def test_remove(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        item = inv.remove(\"a1\")\n        self.assertEqual(item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"zz\")",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-2",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Remove the item with this SKU and return it. Raises KeyError if not found.\"\"\"\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        self.items.remove(item)\n        return item",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-2",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_inventory_remove(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        removed = inv.remove(\"a1\")\n        self.assertEqual(removed.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"zz\")\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")",
+   "new_string": "    def test_format_price(self):\n        self.assertEqual(format_price(12.5, \"\u20ac\"), \"\u20ac12.50\")\n        self.assertEqual(format_price(12.5), \"12.50\")\n\n    def test_free_shipping_eu(self):\n        self.assertTrue(free_shipping(100, \"eu\"))\n        self.assertFalse(free_shipping(50, \"eu\"))\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Removes and returns the item with this SKU. Raises KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-6-off-2",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n        self.assertEqual(slug(\"Hello, World!\"), \"hello-world\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n        self.assertEqual(slug(\"Hello, World!\"), \"hello-world\")",
+   "new_string": "    def test_total_value(self):\n        inv = Inventory([\n            Item(\"a1\", \"Apple\", 0.5, 10),\n            Item(\"b2\", \"Banana\", 0.2, 20)\n        ])\n        self.assertEqual(inv.total_value(), 9.0)\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-6-on-0",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def total_value(self):\n        \"\"\"Sum of (price * qty) for all items.\"\"\"\n        return sum(item.price * item.qty for item in self.items)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-chain-on-1",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"",
+   "new_string": "    def item_count(self):\n        return sum(qty for item, qty in self.lines)\n\n    def remove(self, sku):\n        initial_len = len(self.lines)\n        self.lines = [line for line in self.lines if line[0].sku != sku]\n        return initial_len - len(self.lines\n\n    def summary(self):\n        count = self.item_count()\n        item_str = \"item\" if count == 1 else \"items\"\n        return f\"{count} {item_str}, total {format_price(self.total())}\"",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "single-on-1",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "\nclass Basics(unittest.TestCase):\n    def test_find(self):\n",
+   "new_string": "    def test_tax_rates(self):\n        from shop.pricing import calc_tax\n        self.assertEqual(calc_tax(100, \"be\"), 21.0)\n        self.assertEqual(calc_tax(100, \"nl\"), 21.0)\n        self.assertEqual(calc_tax(100, \"de\"), 19.0)\n        self.assertEqual(calc_tax(100, \"uk\"), 20.0)\n        self.assertEqual(calc_tax(100, \"unknown\"), 0.0)\n\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-0",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")",
+   "new_string": "    def test_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-2",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Removes and returns the item with this SKU, or raises KeyError.\"\"\"\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        self.items.remove(item)\n        return item",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-off-2",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")",
+   "new_string": "    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed = inv.remove(\"a1\")\n        self.assertEqual(removed.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-1",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "new_string": "    def remove(self, sku):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        self.items.remove(item)\n        return item\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-1",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "class Basics(unittest.TestCase):\n",
+   "new_string": "\nclass InventoryTest(unittest.TestCase):\n    def test_remove(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        removed = inv.remove(\"a1\")\n        self.assertEqual(removed.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"zz\")\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "new_string": "    def remove(self, sku):\n        \"\"\"Remove the item with this SKU and return it. Raise KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n",
+   "new_string": "    def test_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item, item)\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"zz\")\n\n",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-6-off-0",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def total_value(self):\n        \"\"\"Total value of all items in inventory.\"\"\"\n        return sum(item.price * item.qty for item in self.items)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-6-on-0",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def total_value(self):\n        \"\"\"Total value of all items in the inventory.\"\"\"\n        return sum(item.price * item.qty for item in self.items)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-6-on-1",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def total_value(self):\n        \"\"\"Sum of price * quantity for all items.\"\"\"\n        return sum(item.price * item.qty for item in self.items)",
+   "replace_all": false,
+   "anchor_loss": true
+  },
+  {
+   "run": "prose-chain-nudge-1",
+   "path": "shop/checkout.py",
+   "before": "\"\"\"Turning a cart into an order.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\nDISCOUNTS = {\"WELCOME10\": 0.10, \"HALF\": 0.50}\nFLAT_DISCOUNTS = {\"FIVEOFF\": 5.0, \"TWENTYOFF\": 20.0}\n\n\ndef apply_discount(total, code):\n    \"\"\"The total after a discount code: a percentage or a flat amount off.\"\"\"\n    code = (code or \"\").strip().upper()\n    if code in DISCOUNTS:\n        result = total * (1 - DISCOUNTS[code])\n    elif code in FLAT_DISCOUNTS:\n        result = total - FLAT_DISCOUNTS[code]\n    else:\n        result = total\n    result = round(result, 2)\n    return result\n\n\ndef receipt_line(label, amount, region):\n    tax = calc_tax(amount, region)\n    return f\"{label}: {format_price(amount)} (tax {format_price(tax)})\"\n\n\ndef checkout(cart, code=None):\n    total = apply_discount(cart.total(), code)\n    return {\"total\": total, \"text\": f\"Pay {format_price(total)}\"}\n",
+   "old_string": "def checkout(cart, code=None):\n    total = apply_discount(cart.total(), code)\n    return {\"total\": total, \"text\": f\"Pay {format_price(total)}\"}",
+   "new_string": "def checkout(cart, code=None):\n    total = apply_discount(cart.total(), code)\n    return {\n        \"total\": total,\n        \"items\": cart.item_count(),\n        \"text\": f\"Pay {format_price(total)}\"\n    }",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-off-1",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n\n    def total_value(self):\n        \"\"\"Total value of all items in inventory.\"\"\"\n        return sum(item.price * item.qty for item in self.items)",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-off-0",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")",
+   "new_string": "    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n    def test_inventory_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-off-0",
+   "path": "shop/reports.py",
+   "before": "\"\"\"Reports over orders and the tax ledger.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Ledger:\n    \"\"\"Tax already booked, entry by entry.\"\"\"\n\n    def __init__(self, entries=()):\n        self.entries = list(entries)\n\n    def calc_tax(self):\n        \"\"\"Total tax booked in this ledger (not the pricing function of the same name).\"\"\"\n        return round(sum(tax for _, tax in self.entries), 2)\n\n\ndef tax_report(amounts, region, ledger):\n    owed = round(sum(calc_tax(a, region) for a in amounts), 2)\n    booked = ledger.calc_tax()\n    return {\"owed\": owed, \"booked\": booked, \"open\": round(owed - booked, 2)}\n\n\ndef revenue_line(amounts):\n    return \"Revenue: \" + format_price(sum(amounts))\n",
+   "old_string": "def tax_report(amounts, region, ledger):\n    owed = round(sum(calc_tax(a, region) for a in amounts), 2)\n    booked = ledger.calc_tax()\n    return {\"owed\": owed, \"booked\": booked, \"open\": round(owed - booked, 2)}",
+   "new_string": "def tax_report(amounts, region, ledger):\n    \"\"\"Report of tax owed, booked and open for a region.\"\"\"\n    owed = round(sum(calc_tax(a, region) for a in amounts), 2)\n    booked = ledger.calc_tax()\n    return {\"owed\": owed, \"booked\": booked, \"open\": round(owed - booked, 2), \"region\": region}",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-nudge-0",
+   "path": "shop/shipping.py",
+   "before": "\"\"\"Shipping costs per parcel and zone.\"\"\"\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Parcel:\n    weight: float      # kg\n\n\ndef shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)\n\n\ndef free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "old_string": "def free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50",
+   "new_string": "def free_shipping(subtotal, zone):\n    return (zone == \"domestic\" and subtotal >= 50) or (zone == \"eu\" and subtotal >= 100)",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-off-0",
+   "path": "shop/shipping.py",
+   "before": "\"\"\"Shipping costs per parcel and zone.\"\"\"\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Parcel:\n    weight: float      # kg\n\n\ndef shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)\n\n\ndef free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "old_string": "def free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "new_string": "def free_shipping(subtotal, zone):\n    if zone == \"domestic\":\n        return subtotal >= 50\n    if zone == \"eu\":\n        return subtotal >= 100\n    return False\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-on-2",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "TAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n",
+   "new_string": "TAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20, \"be\": 0.21, \"fr\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    if amount < 0:\n        raise ValueError(\"amount cannot be negative\")\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n\n    def remove(self, sku):\n        \"\"\"Remove the item with this SKU and return it. Raise KeyError if not found.\"\"\"\n        for i, item in enumerate(self.items):\n            if item.sku == sku:\n                return self.items.pop(i)\n        raise KeyError(sku)",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-chain-on-1",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):",
+   "new_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def item_count(self):\n        return sum(qty for item, qty in self.lines)\n\n    def remove(self, sku):\n        initial_count = len(self.lines)\n        self.lines = [line for line in self.lines if line[0].sku != sku]\n        return initial_count - len(self.lines)\n\n    def tax(self):",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-chain-on-2",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"",
+   "new_string": "    def summary(self):\n        count = self.item_count()\n        label = \"item\" if count == 1 else \"items\"\n        return f\"{count} {label}, total {format_price(self.total())}\"",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-nudge-1",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "def format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"",
+   "new_string": "def format_price(amount, currency_symbol=None):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    if currency_symbol:\n        return f\"{currency_symbol}{amount:.2f}\"\n    return f\"{amount:.2f}\"",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-on-0",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "TAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)",
+   "new_string": "TAX_RATES = {\n    \"nl\": 0.21,\n    \"de\": 0.19,\n    \"uk\": 0.20,\n    \"be\": 0.21,\n    \"fr\": 0.20,\n}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    if amount < 0:\n        raise ValueError(\"Amount cannot be negative\")\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)",
+   "replace_all": true,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-on-0",
+   "path": "shop/shipping.py",
+   "before": "\"\"\"Shipping costs per parcel and zone.\"\"\"\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Parcel:\n    weight: float      # kg\n\n\ndef shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)\n\n\ndef free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "old_string": "    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)",
+   "new_string": "    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            elif zone == \"uk\":\n                total += 7.0 + parcel.weight * 1.5\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-guard-1",
+   "path": "shop/shipping.py",
+   "before": "\"\"\"Shipping costs per parcel and zone.\"\"\"\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Parcel:\n    weight: float      # kg\n\n\ndef shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)\n\n\ndef free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "old_string": "def free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "new_string": "def free_shipping(subtotal, zone):\n    if zone == \"eu\" and subtotal >= 100:\n        return True\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "def format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"",
+   "new_string": "def format_price(amount, symbol=\"\"):\n    \"\"\"An amount with two decimals, e.g. '12.50'. Optional symbol prepended.\"\"\"\n    return f\"{symbol}{amount:.2f}\"",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "def format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"",
+   "new_string": "def format_price(amount, symbol=\"\"):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{symbol}{amount:.2f}\"",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-on-0",
+   "path": "shop/inventory.py",
+   "before": "\"\"\"Stock kept in memory, looked up by SKU, tag or level.\"\"\"\nfrom dataclasses import dataclass, field\n\n\n@dataclass\nclass Item:\n    sku: str\n    name: str\n    price: float\n    qty: int = 0\n    tags: list[str] = field(default_factory=list)\n\n\nclass Inventory:\n    def __init__(self, items=()):\n        self.items = list(items)\n\n    def find(self, sku):\n        \"\"\"The item with this SKU, or None.\"\"\"\n        for item in self.items:\n            if item.sku == sku:\n                return item\n        return None\n\n    def cheapest(self):\n        \"\"\"The item with the lowest price, or None for an empty inventory.\"\"\"\n        if not self.items:\n            return None\n        return min(self.items, key=lambda item: item.price)\n\n    def items_with_tag(self, tag):\n        \"\"\"Every item carrying this tag.\"\"\"\n        found = [item for item in self.items if tag in item.tags]\n        if not found:\n            return None\n        return found\n\n    def low_stock(self, threshold=5):\n        \"\"\"Items at or below the threshold, lowest first.\"\"\"\n        low = sorted((item for item in self.items if item.qty <= threshold),\n                     key=lambda item: item.qty)\n        if not low:\n            return None\n        return low\n\n    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n",
+   "old_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty",
+   "new_string": "    def restock(self, sku, qty):\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        item.qty += qty\n        return item.qty\n\n    def remove(self, sku):\n        \"\"\"Remove the item with this SKU and return it. Raises KeyError if not found.\"\"\"\n        item = self.find(sku)\n        if item is None:\n            raise KeyError(sku)\n        self.items.remove(item)\n        return item",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-off-0",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "def format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n",
+   "new_string": "def format_price(amount, currency_symbol=None):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    if currency_symbol:\n        return f\"{currency_symbol}{amount:.2f}\"\n    return f\"{amount:.2f}\"\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-chain-guard-0",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "new_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def item_count(self):\n        return sum(qty for _, qty in self.lines)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def remove(self, sku):\n        initial_len = len(self.lines)\n        self.lines = [line for line in self.lines if line[0].sku != sku]\n        return initial_len - len(self.lines)\n\n    def summary(self):\n        count = self.item_count()\n        item_str = \"item\" if count == 1 else \"items\"\n        return f\"{count} {item_str}, total {format_price(self.total())}\"\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-off-1",
+   "path": "shop/util.py",
+   "before": "\"\"\"Small helpers.\"\"\"\n\n\ndef parse_duration(text):\n    \"\"\"Minutes in a duration like '1h30m', '2h' or '45m'.\"\"\"\n    text = text.strip().lower()\n    minutes = 0\n    number = \"\"\n    i = 0\n    while i < len(text):\n        ch = text[i]\n        if ch.isdigit():\n            number = number + ch\n        elif ch == \"h\":\n            if number == \"\":\n                number = \"0\"\n            minutes = minutes + int(number) * 60\n            number = \"\"\n        elif ch == \"m\":\n            if number == \"\":\n                number = \"0\"\n            minutes = minutes + int(number)\n            number = \"\"\n        elif ch == \" \":\n            pass\n        else:\n            return None\n        i = i + 1\n    if number != \"\":\n        minutes = minutes + int(number)\n    return minutes\n\n\ndef slug(text):\n    import re\n    text = re.sub(r'[^a-zA-Z0-9 ]', '', text).lower()\n    return \"-\".join(text.split())\n",
+   "old_string": "\"\"\"Small helpers.\"\"\"\n\n\ndef parse_duration(text):",
+   "new_string": "import re\n\ndef parse_duration(text):\n...",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-on-2",
+   "path": "shop/shipping.py",
+   "before": "\"\"\"Shipping costs per parcel and zone.\"\"\"\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Parcel:\n    weight: float      # kg\n\n\ndef shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)\n\n\ndef free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "old_string": "             elif zone == \"eu\":\n                 total += 5.0 + parcel.weight * 1.0\n             else:\n                 total += 12.0 + parcel.weight * 2.0\n     return round(total, 2)\n",
+   "new_string": "             elif zone == \"eu\":\n                 total += 5.0 + parcel.weight * 1.0\n             elif zone == \"uk\":\n                 total += 7.0 + parcel.weight * 1.5\n             else:\n                 total += 12.0 + parcel.weight * 2.0\n     return round(total, 2)\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-on-0",
+   "path": "shop/shipping.py",
+   "before": "\"\"\"Shipping costs per parcel and zone.\"\"\"\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Parcel:\n    weight: float      # kg\n\n\ndef shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)\n\n\ndef free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "old_string": "def free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50",
+   "new_string": "def free_shipping(subtotal, zone):\n    if zone == \"domestic\" and subtotal >= 50:\n        return True\n    if zone == \"eu\" and subtotal >= 100:\n        return True\n    return False",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-on-1",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "TAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)",
+   "new_string": "TAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20, \"be\": 0.21, \"fr\": 0.20}\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    if amount < 0:\n        raise ValueError(\"amount must be non-negative\")\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)",
+   "replace_all": true,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-chain-off-1",
+   "path": "tests/test_cart_new.py",
+   "before": "import unittest\nfrom shop.inventory import Item\nfrom shop.cart import Cart\nfrom shop.checkout import checkout\n\nclass TestCartNew(unittest.TestCase):\n    def setUp(self):\n        self.item1 = Item(\"a1\", \"Apple\", 1.0, 10)\n        self.item2 = Item(\"b2\", \"Banana\", 2.0, 10)\n        self.cart = Cart()\n\n    def test_item_count(self):\n        self.cart.add(self.item1, 2)\n        self.cart.add(self.item2, 3)\n        self.assertEqual(self.cart.item_count(), 5)\n\n    def test_remove_sku(self):\n        self.cart.add(self.item1, 2)\n        self.cart.add(self.item1, 3) # Same SKU, multiple lines\n        self.cart.add(self.item2, 1)\n        \n        removed = self.cart.remove(\"a1\")\n        self.assertEqual(removed, 2)\n        self.assertEqual(self.cart.item_count(), 1)\n        self.assertEqual(len(self.cart.lines), 1)\n\n    def test_summary(self):\n        # Using region='nl' which has 21% tax\n        self.cart.add(self.item1, 1)\n        self.assertEqual(self.cart.summary(), \"1 item, total 1.21\")\n        \n        self.cart.add(self.item2, 2)\n        # Total: (1.0 + 2*2.0) = 5.0. Tax: 5.0 * 0.21 = 1.15. Total = 6.15\n        self.assertEqual(self.cart.summary(), \"3 items, total 6.15\")\n\n    def test_checkout_items(self):\n        self.cart.add(self.item1, 5)\n        result = checkout(self.cart)\n        self.assertEqual(result['items'], 5)\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_summary(self):\n        # Using region='nl' which has 21% tax\n        self.cart.add(self.item1, 1)\n        self.assertEqual(self.cart.summary(), \"1 item, total 1.21\")\n        \n        self.cart.add(self.item2, 2)\n        # Total: (1.0 + 2*2.0) = 5.0. Tax: 5.0 * 0.21 = 1.15. Total = 6.15\n        self.assertEqual(self.cart.summary(), \"3 items, total 6.15\")",
+   "new_string": "    def test_summary(self):\n        # Using region='nl' which has 21% tax\n        self.cart.add(self.item1, 1)\n        self.assertEqual(self.cart.summary(), \"1 item, total 1.21\")\n        \n        self.cart.add(self.item2, 2)\n        # Total: (1.0 + 2*2.0) = 5.0. Tax: 5.0 * 0.21 = 1.05. Total = 6.05\n        self.assertEqual(self.cart.summary(), \"3 items, total 6.05\")",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-guard-0",
+   "path": "shop/shipping.py",
+   "before": "\"\"\"Shipping costs per parcel and zone.\"\"\"\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Parcel:\n    weight: float      # kg\n\n\ndef shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)\n\n\ndef free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "old_string": "            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:",
+   "new_string": "            elif zone == \"uk\":\n                total += 7.0 + parcel.weight * 1.5\n            else:",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-on-1",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "TAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}",
+   "new_string": "TAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20, \"be\": 0.21, \"fr\": 0.20}",
+   "replace_all": true,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-on-1",
+   "path": "shop/util.py",
+   "before": "\"\"\"Small helpers.\"\"\"\n\n\ndef parse_duration(text):\n    \"\"\"Minutes in a duration like '1h30m', '2h' or '45m'.\"\"\"\n    text = text.strip().lower()\n    minutes = 0\n    number = \"\"\n    i = 0\n    while i < len(text):\n        ch = text[i]\n        if ch.isdigit():\n            number = number + ch\n        elif ch == \"h\":\n            if number == \"\":\n                number = \"0\"\n            minutes = minutes + int(number) * 60\n            number = \"\"\n        elif ch == \"m\":\n            if number == \"\":\n                number = \"0\"\n            minutes = minutes + int(number)\n            number = \"\"\n        elif ch == \" \":\n            pass\n        else:\n            return None\n        i = i + 1\n    if number != \"\":\n        minutes = minutes + int(number)\n    return minutes\n\n\ndef slug(text):\n    return \"-\".join(text.lower().split())\n",
+   "old_string": "def slug(text):\n    return \"-\".join(text.lower().split())",
+   "new_string": "import re\n\ndef slug(text):\n    \"\"\"Create a URL-friendly slug from text.\"\"\"\n    text = re.sub(r'[^a-z0-9 ]', '', text.lower())\n    return \"-\".join(text.split())",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-on-2",
+   "path": "shop/shipping.py",
+   "before": "\"\"\"Shipping costs per parcel and zone.\"\"\"\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Parcel:\n    weight: float      # kg\n\n\ndef shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)\n\n\ndef free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "old_string": "def free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "new_string": "def free_shipping(subtotal, zone):\n    return (zone == \"domestic\" and subtotal >= 50) or (zone == \"eu\" and subtotal >= 100)\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-chain-off-2",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "new_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def item_count(self):\n        return sum(qty for item, qty in self.lines)\n\n    def remove(self, sku):\n        initial_len = len(self.lines)\n        self.lines = [line for line in self.lines if line[0].sku != sku]\n        return initial_len - len(self.lines)\n\n    def summary(self):\n        count = self.item_count()\n        item_str = \"item\" if count == 1 else \"items\"\n        return f\"{count} {item_str}, total {format_price(self.total())}\"\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-off-1",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\n\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):",
+   "new_string": "    def test_find(self,):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_remove(self):\n        item = Item(\"a1\", \"Apple\", 0.5, 10)\n        inv = Inventory([item])\n        removed_item = inv.remove(\"a1\")\n        self.assertEqual(removed_item.sku, \"a1\")\n        self.assertIsNone(inv.find(\"a1\"))\n        with self.assertRaises(KeyError):\n            inv.remove(\"a1\")\n\n    def test_domestic_shipping(self):",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-chain-off-1",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "new_string": "    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def item_count(self):\n        return sum(qty for item, qty in self.lines)\n\n    def remove(self, sku):\n        initial_len = len(self.lines)\n        self.lines = [line for line in self.lines if line[0].sku != sku]\n        return initial_len - len(self.lines)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        count = self.item_count()\n        label = \"item\" if count == 1 else \"items\"\n        return f\"{count} {label}, total {format_price(self.total())}\"\n",
+   "replace_all": true,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-on-2",
+   "path": "tests/test_shop.py",
+   "before": "import unittest\nfrom shop.inventory import Inventory, Item\nfrom shop.shipping import Parcel, shipping_cost\nfrom shop.util import slug\nfrom shop.pricing import calc_tax\nfrom shop.reports import tax_report, Ledger\n\n\nclass Basics(unittest.TestCase):\n    def test_find(self):\n        inv = Inventory([Item(\"a1\", \"Apple\", 0.5, 10)])\n        self.assertEqual(inv.find(\"a1\").name, \"Apple\")\n        self.assertIsNone(inv.find(\"zz\"))\n\n    def test_domestic_shipping(self):\n        self.assertEqual(shipping_cost([Parcel(2)], \"domestic\"), 3.5)\n\n    def test_slug(self):\n        self.assertEqual(slug(\"Big Red Box\"), \"big-red-box\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+   "old_string": "\nif __name__ == \"__main__\":\n    unittest.main()",
+   "new_string": "\nclass NewFeatures(unittest.TestCase):\n    def test_calc_tax_rates(self):\n        self.assertEqual(calc_tax(100, \"be\"), 21.0)\n        self.assertEqual(calc_tax(100, \"fr\"), 20.0)\n        self.assertEqual(calc_tax(100, \"uk\"), 20.0)\n        with self.assertRaises(ValueError):\n            calc_tax(-10, \"nl\")\n\n    def test_inventory_total_value(self):\n        inv = Inventory([\n            Item(\"1\", \"A\", 10.0, 2),\n            Item(\"2\", \"B\", 5.0, 4)\n        ])\n        self.assertEqual(inv.total_value(), 40.0)\n\n    def test_tax_report_region(self):\n        ledger = Ledger([(100, 21.0)]) # booked 21.0\n        amounts = [100.0]\n        report = tax_report(amounts, \"be\", ledger)\n        self.assertEqual(report[\"region\"], \"be\")\n        self.assertEqual(report[\"owed\"], 21.0)\n        self.assertEqual(report[\"booked\"], 21.0)\n        self.assertEqual(report[\"open\"], 0.0)\n\n    def test_uk_shipping(self):\n        # 7.0 per parcel + 1.5 per kg\n        # 1 parcel, 2kg -> 7.0 + 1.5*2 = 10.0\n        self.assertEqual(shipping_cost([Parcel(2.0)], \"uk\"), 10.0)\n\n    def test_slug_complex(self):\n        self.assertEqual(slug(\"Hello, World!\"), \"hello-world\")\n        self.assertEqual(slug(\"Foo & Bar\"), \"foo-bar\")\n\nif __name__ == \"__main__\":\n    unittest.main()",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-off-2",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "def format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"",
+   "new_string": "def format_price(amount, symbol=None):\n    \"\"\"An amount with two decimals, e.g. '12.50'. Optionally a symbol.\"\"\"\n    if symbol:\n        return f\"{symbol}{amount:.2f}\"\n    return f\"{amount:.2f}\"",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-nudge-0",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "def format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"",
+   "new_string": "def format_price(amount, currency_symbol=None):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    formatted = f\"{amount:.2f}\"\n    if currency_symbol:\n        return f\"{currency_symbol}{formatted}\"\n    return formatted",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-guard-1",
+   "path": "shop/shipping.py",
+   "before": "\"\"\"Shipping costs per parcel and zone.\"\"\"\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Parcel:\n    weight: float      # kg\n\n\ndef shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)\n\n\ndef free_shipping(subtotal, zone):\n    return zone == \"domestic\" and subtotal >= 50\n",
+   "old_string": "def shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)",
+   "new_string": "def shipping_cost(parcels, zone):\n    \"\"\"The cost of sending parcels to a zone: a base fee per parcel plus a rate per kg.\"\"\"\n    total = 0.0\n    for parcel in parcels:\n        if parcel.weight > 0:\n            if zone == \"domestic\":\n                total += 2.5 + parcel.weight * 0.5\n            elif zone == \"eu\":\n                total += 5.0 + parcel.weight * 1.0\n            elif zone == \"uk\":\n                total += 7.0 + parcel.weight * 1.5\n            else:\n                total += 12.0 + parcel.weight * 2.0\n    return round(total, 2)",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-chain-nudge-0",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def item_count(self):\n        return sum(qty for item, qty in self.lines)\n\n    def remove(self, sku):\n        original_len = len(self.lines)\n        self.lines = [line for line in self.lines if line[0].sku != sku]\n        return original_len - len(self.lines)\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "new_string": "    def summary(self):\n        count = self.item_count()\n        count_str = \"item\" if count == 1 else \"items\"\n        return f\"{count} {count_str}, total {format_price(self.total())}\"\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-off-1",
+   "path": "shop/util.py",
+   "before": "\"\"\"Small helpers.\"\"\"\n\n\ndef parse_duration(text):\n    \"\"\"Minutes in a duration like '1h30m', '2h' or '45m'.\"\"\"\n    text = text.strip().lower()\n    minutes = 0\n    number = \"\"\n    i = 0\n    while i < len(text):\n        ch = text[i]\n        if ch.isdigit():\n            number = number + ch\n        elif ch == \"h\":\n            if number == \"\":\n                number = \"0\"\n            minutes = minutes + int(number) * 60\n            number = \"\"\n        elif ch == \"m\":\n            if number == \"\":\n                number = \"0\"\n            minutes = minutes + int(number)\n            number = \"\"\n        elif ch == \" \":\n            pass\n        else:\n            return None\n        i = i + 1\n    if number != \"\":\n        minutes = minutes + int(number)\n    return minutes\n\n\ndef slug(text):\n    return \"-\".join(text.lower().split())\n",
+   "old_string": "def slug(text):\n    return \"-\".join(text.lower().split())",
+   "new_string": "def slug(text):\n    import re\n    text = re.sub(r'[^a-zA-Z0-9 ]', '', text).lower()\n    return \"-\".join(text.split())",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-6-guard-1",
+   "path": "shop/util.py",
+   "before": "\"\"\"Small helpers.\"\"\"\n\n\ndef parse_duration(text):\n    \"\"\"Minutes in a duration like '1h30m', '2h' or '45m'.\"\"\"\n    text = text.strip().lower()\n    minutes = 0\n    number = \"\"\n    i = 0\n    while i < len(text):\n        ch = text[i]\n        if ch.isdigit():\n            number = number + ch\n        elif ch == \"h\":\n            if number == \"\":\n                number = \"0\"\n            minutes = minutes + int(number) * 60\n            number = \"\"\n        elif ch == \"m\":\n            if number == \"\":\n                number = \"0\"\n            minutes = minutes + int(number)\n            number = \"\"\n        elif ch == \" \":\n            pass\n        else:\n            return None\n        i = i + 1\n    if number != \"\":\n        minutes = minutes + int(number)\n    return minutes\n\n\ndef slug(text):\n    return \"-\".join(text.lower().split())\n",
+   "old_string": "def slug(text):\n    return \"-\".join(text.lower().split())",
+   "new_string": "def slug(text):\n    import re\n    text = re.sub(r'[^a-zA-Z0-9\\s]', '', text)\n    return \"-\".join(text.lower().split())",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "numbered-4-on-1",
+   "path": "shop/pricing.py",
+   "before": "\"\"\"Tax and price formatting.\"\"\"\n\nTAX_RATES = {\"nl\": 0.21, \"de\": 0.19, \"uk\": 0.20}\n\n\ndef calc_tax(amount, region):\n    \"\"\"Tax on an amount for a region; unknown regions pay no tax.\"\"\"\n    rate = TAX_RATES.get(region, 0.0)\n    return round(amount * rate, 2)\n\n\ndef format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n\n\ndef gross(amount, region):\n    return round(amount + calc_tax(amount, region), 2)\n",
+   "old_string": "def format_price(amount):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    return f\"{amount:.2f}\"\n",
+   "new_string": "def format_price(amount, symbol=None):\n    \"\"\"An amount with two decimals, e.g. '12.50'.\"\"\"\n    formatted = f\"{amount:.2f}\"\n    if symbol:\n        return f\"{symbol}{formatted}\"\n    return formatted\n",
+   "replace_all": false,
+   "anchor_loss": false
+  },
+  {
+   "run": "prose-chain-nudge-1",
+   "path": "shop/cart.py",
+   "before": "\"\"\"A customer's cart.\"\"\"\nfrom shop.pricing import calc_tax, format_price\n\n\nclass Cart:\n    def __init__(self, region=\"nl\"):\n        self.region = region\n        self.lines = []\n\n    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):\n        return round(sum(item.price * qty for item, qty in self.lines), 2)\n\n    def tax(self):\n        return calc_tax(self.subtotal(), self.region)\n\n    def total(self):\n        return round(self.subtotal() + self.tax(), 2)\n\n    def summary(self):\n        return f\"{len(self.lines)} lines, total {format_price(self.total())}\"\n",
+   "old_string": "    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def subtotal(self):",
+   "new_string": "    def add(self, item, qty=1):\n        self.lines.append((item, qty))\n\n    def remove(self, sku):\n        \"\"\"Removes all lines for the given SKU and returns the number of lines removed.\"\"\"\n        initial_len = len(self.lines)\n        self.lines = [line for line in self.lines if line[0].sku != sku]\n        return initial_len - len(self.lines)\n\n    def item_count(self):\n        \"\"\"Returns the total quantity of all items in the cart.\"\"\"\n        return sum(qty for _, qty in self.lines)\n\n    def subtotal(self):\n",
+   "replace_all": false,
+   "anchor_loss": false
+  }
+ ]
+}

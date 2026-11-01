@@ -383,20 +383,16 @@ def _shorten_path_left(path: str, budget: int) -> str:
 
 _INPUT_H  = 5  # fixed height of the multi-line input area
 _STATUS_H = 3  # top border + text + bottom border
-_TODOS_MAX_H = 4      # rows of the todo strip at most
-_TODOS_MIN_CHAT = 8   # the strip is left out when the chat would get fewer rows
 
-def _compute_layout(rows: int, cols: int, companion_h: int = 0, todos_h: int = 0) -> dict:
+def _compute_layout(rows: int, cols: int, companion_h: int = 0) -> dict:
     # chat_h absorbs all slack.  A terminal too short for the fixed regions is
     # caught by _build_windows, which shows a placeholder instead.
-    chat_h      = max(4, rows - _STATUS_H - _INPUT_H - companion_h - todos_h)
-    todos_y     = chat_h
-    companion_y = chat_h + todos_h
-    status_y    = companion_y + companion_h
+    chat_h      = max(4, rows - _STATUS_H - _INPUT_H - companion_h)
+    companion_y = chat_h
+    status_y    = chat_h + companion_h
     input_y     = status_y + _STATUS_H
     return {
         "chat_y":      0,       "chat_h":      chat_h,
-        "todos_y":     todos_y, "todos_h":     todos_h,
         "companion_y": companion_y, "companion_h": companion_h,
         "status_y":    status_y,
         "input_y":     input_y, "input_h":     _INPUT_H,
@@ -404,50 +400,11 @@ def _compute_layout(rows: int, cols: int, companion_h: int = 0, todos_h: int = 0
     }
 
 
-def _open_todos(items: list) -> list:
-    """The todo items still to do, the one in progress first."""
-    return ([t for t in items if t.get("status") == "in_progress"]
-            + [t for t in items if t.get("status") == "pending"])
-
-
-def _todos_strip_h(items: list, rows: int, companion_h: int = 0) -> int:
-    """Rows for the todo strip: one per open item up to _TODOS_MAX_H, or 0
-    with nothing open or when the chat would drop below _TODOS_MIN_CHAT rows
-    (the status bar's TODO: x/y still shows the count)."""
-    h = min(len(_open_todos(items)), _TODOS_MAX_H)
-    if not h or rows - _STATUS_H - _INPUT_H - companion_h - h < _TODOS_MIN_CHAT:
-        return 0
-    return h
-
-
-def _todos_lines(items: list, width: int, max_rows: int) -> list[str]:
-    """The strip's lines: the open items, in progress first, each cut to the
-    width; the first line ends with the done/all count, and items that do not
-    fit become a "… +N more" line."""
-    open_items = _open_todos(items)
-    if not open_items or max_rows < 1 or width < 10:
-        return []
-    shown = open_items if len(open_items) <= max_rows else open_items[:max_rows - 1]
-    lines = [f" {'[>]' if t['status'] == 'in_progress' else '[ ]'} {t['text']}" for t in shown]
-    if len(shown) < len(open_items):
-        lines.append(f" … +{len(open_items) - len(shown)} more  (/todos)")
-    done = sum(1 for t in items if t.get("status") == "done")
-    count = f" {done}/{len(items)} "
-    for i, line in enumerate(lines):
-        room = width - (len(count) if i == 0 else 0)
-        if len(line) > room:
-            line = line[:max(0, room - 1)] + "…"
-        lines[i] = line.ljust(room) + count if i == 0 else line
-    return lines
-
-
 # View options, keyed like the CommandResult fields that set them.
 _VIEW_DEFAULTS = {"tool_output": True, "think_output": True, "md_render": True,
-                  "diff_output": True, "diff_style": "compact", "companion": True,
-                  "todos": True}
+                  "diff_output": True, "diff_style": "compact", "companion": True}
 # Shift+letter shortcuts (chat focus): the view option each one toggles.
-_VIEW_KEYS = {"T": "think_output", "M": "md_render", "D": "diff_output", "Q": "companion",
-              "L": "todos"}
+_VIEW_KEYS = {"T": "think_output", "M": "md_render", "D": "diff_output", "Q": "companion"}
 
 
 # ── main TUI ──────────────────────────────────────────────────────────────────
@@ -465,10 +422,6 @@ class TUI:
         self._chat_buf    = _LineBuffer()
         self._chat_events: list[tuple] = []  # raw events for toggle rebuild
         self._view = dict(_VIEW_DEFAULTS)
-        # The model's todo list (StatusEvent.todos), drawn in the strip above the companion.
-        self._todos: list = []
-        self._todos_win = None
-        self._todos_drawn = None
         # Follow new output only while the user hasn't scrolled away from it;
         # otherwise the status line says there is more below.
         self._follow = True
@@ -570,7 +523,7 @@ class TUI:
         if cols < 20 or L["chat_h"] < 1 or L["input_y"] + L["input_h"] > rows:
             self._too_small = True
             self._chat_win = self._status_win = self._input_win = None
-            self._companion_win = self._todos_win = None
+            self._companion_win = None
             return
         self._too_small = False
         self._chat_win   = curses.newwin(L["chat_h"],  cols, L["chat_y"],   0)
@@ -586,19 +539,12 @@ class TUI:
             self._companion_win.leaveok(True)
         else:
             self._companion_win = None
-        self._todos_drawn = None       # the new strip window starts blank
-        if L["todos_h"] > 0:
-            self._todos_win = curses.newwin(L["todos_h"], cols, L["todos_y"], 0)
-            self._todos_win.leaveok(True)
-        else:
-            self._todos_win = None
 
     def _rebuild(self):
         """New terminal size (or companion shown/hidden): new windows, and the
         transcript re-wrapped to the new width."""
         rows, cols = self.stdscr.getmaxyx()
-        self._layout = _compute_layout(rows, cols, companion_h=self._companion_h(),
-                                       todos_h=self._todos_h(rows))
+        self._layout = _compute_layout(rows, cols, companion_h=self._companion_h())
         self._build_windows()
         self._rebuild_chat_buf()
         self.stdscr.clear()
@@ -620,7 +566,6 @@ class TUI:
         self._draw_suggest()
         self._draw_picker()
         self._draw_changes()
-        self._draw_todos()
         if self._companion_win is not None:
             self._companion.draw(self._companion_win, L["cols"])
         self._draw_status()
@@ -629,30 +574,6 @@ class TUI:
 
     def _companion_h(self) -> int:
         return _COMPANION_H if self._view["companion"] else 0
-
-    def _todos_h(self, rows: int) -> int:
-        """The todo strip's height for this terminal (0: hidden or no room)."""
-        if not self._view["todos"]:
-            return 0
-        return _todos_strip_h(self._todos, rows, self._companion_h())
-
-    def _draw_todos(self):
-        """The todo strip: the model's open items, repainted only when they change."""
-        win = self._todos_win
-        if win is None:
-            return
-        L = self._layout
-        lines = _todos_lines(self._todos, L["cols"] - 1, L["todos_h"])
-        key = (tuple(lines), L["cols"])
-        if key == self._todos_drawn:
-            return
-        win.erase()
-        for i, line in enumerate(lines):
-            busy = i == 0 and line.startswith(" [>]")
-            _put(win, i, 0, line, L["cols"] - 1,
-                 curses.color_pair(_C_TOOL_NAME if busy else _C_TOOL_RES))
-        self._todos_drawn = key
-        win.noutrefresh()
 
     def _draw_too_small(self):
         """Render a placeholder when the terminal can't fit the layout, instead
@@ -1456,12 +1377,6 @@ class TUI:
             parts.append("LOOP: off")
         elif (ev.loop_guard, ev.loop_resets) != (_LOOP_GUARD, _LOOP_RESETS):
             parts.append(f"LOOP: {ev.loop_guard}×/{ev.loop_resets}")
-        if ev.todos_progress:
-            parts.append(f"TODO: {ev.todos_progress}")
-        self._todos = list(ev.todos)
-        rows, _ = self.stdscr.getmaxyx()
-        if self._todos_h(rows) != self._layout["todos_h"]:
-            self._rebuild()          # the strip appeared, went or changed height
         if ev.undo_count:
             parts.append(f"UNDO: {ev.undo_count}")
         self._st_extra = "".join(f" | {p}" for p in parts)
@@ -1532,7 +1447,7 @@ class TUI:
         if not changes:
             return
         self._view.update(changes)
-        if "companion" in changes or "todos" in changes:
+        if "companion" in changes:
             self._rebuild()          # a new layout, which re-renders and redraws too
         else:
             self._rebuild_chat_buf()

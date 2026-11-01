@@ -210,7 +210,6 @@ The browser and the terminal are two views of **the same session**, not separate
   - A spinner and a **■ Stop** button appear while the model is working.
   - The **paperclip** button attaches files (see [Attaching files](#attaching-files)).
 - **momo companion** walks along the top of the input box, with the same frames and mode-specific speech as in the TUI. It is hidden on narrow screens.
-- **Todo panel** above the input, while the model's [todo list](#todo-list) has an open item. It updates in place and collapses to one line.
 
 The layout adapts to phone-width screens: the status bar collapses to mode, CTX and the view-options button. It follows the system light or dark theme.
 
@@ -337,7 +336,7 @@ Typing the TUI command in the browser (e.g. `/think-output off`) has the same ef
 | @ | input box | Open workspace path autocomplete |
 | Esc | anywhere | Interrupt the running response (as Esc does in the TUI). Also closes menus and drawers, and cancels editing a message |
 | Shift+Tab | anywhere | Cycle mode |
-| Shift+T / M / D / Q / L | outside the input box | Toggle thinking / markdown / diffs / companion / todo strip |
+| Shift+T / M / D / Q | outside the input box | Toggle thinking / markdown / diffs / companion |
 | Shift+P | outside the input box | Toggle `run_command` confirmation |
 | Shift+C | outside the input box | Interrupt the running response |
 
@@ -484,12 +483,10 @@ curl -sN localhost:8765/api/events          # watch the live event stream
 
 - **Chat pane** — conversation history including inline tool calls (yellow), results, and thinking blocks (orange). Scroll with `↑`/`↓` or `PgUp`/`PgDn`.
 - **Streaming** — replies appear as they are generated, ending in a `▍` cursor, and are replaced by the fully rendered message when complete. Disable with `--no-stream`.
-- **Todo strip** — while the model's [todo list](#todo-list) has an open item, up to 4 lines above the companion: the item in progress, then the pending ones, and the done/all count. Shift+L toggles it.
 - **Status bar** — current mode, model, Ollama host, context usage %, and working directory. When the line is too narrow to fit, the working directory is shortened from the front (`…/tail`) so its most specific part stays visible.
   - CTX turns yellow at ≥ 75%, red at ≥ 90%.
   - Shows `THINK: <level>` when the [thinking level](#thinking-level) isn't the default `on`, or `THINK: high→on` when the model gets something other than your choice.
   - Shows `LOOP: off` when the [loop guard](#loop-guard) is off, or `LOOP: 4×/1` (repeats/resets) when it isn't at the default 3 and 2.
-  - Shows `TODO: 2/5` (done/all) while the model keeps a [todo list](#todo-list).
   - Shows `⠋ thinking` (spinner) while the model is working.
   - Shows `? waiting for input` when the model has called `ask_user` and is waiting for your reply. Type your answer and press Enter — the model resumes from where it paused.
   - Top rule turns green when the chat pane has focus; bottom rule turns green when the input pane has focus.
@@ -534,20 +531,11 @@ Available tools: `list_directory`, `file_info`, `find_files`, `read_file`, `grep
 
 The assistant acts as an engineer. It uses the full tool suite to implement changes: reading files, making targeted edits, running commands, and working with git.
 
-Available tools: all design tools + `edit_file`, `edit_files`, `replace_symbol`, `delete_file`, `move_file`, `append_to_file`, `run_command`, `todos`, and the code-navigation tools (`code_outline`, `find_symbol`, `read_symbol`, `find_references`)
+Available tools: all design tools + `edit_file`, `edit_files`, `replace_symbol`, `delete_file`, `move_file`, `append_to_file`, `run_command`, and the code-navigation tools (`code_outline`, `find_symbol`, `read_symbol`, `find_references`)
 
-#### Todo list
+#### Finishing the turn
 
-For a request with several parts ("rename X, add a test for Y, update the README"), the model can keep a checklist with the `todos` tool, in coding and momo modes. It is lighter than [plan mode](#plan-mode): no plan file and no approval step.
-
-- **The whole list on every call.** The model sends `items: [{text, status}]` with status `pending`, `in_progress` (at most one) or `done`, up to 20 items. Each call replaces the list, and the result shows it back (`[x]`, `[>]`, `[ ]`, "2 of 5 done"), so the newest result is the current list. An invalid list returns an `ERROR:` and leaves the old one.
-- **Not in the system prompt.** The plan is, but the list changes every few calls, and a changed system prompt makes llama.cpp process the whole context again.
-- **Kept through compaction:** while an item is open, the list goes into the [compaction summary](#context-management) word for word. It is saved with the session too.
-- **Where you see it,** while an item is open; done items count but take no row, and a finished list leaves only the count:
-  - **TUI:** a strip of up to 4 lines between the chat and the companion: the item in progress first (`[>]`), then the pending ones (`[ ]`), and `1/3` on the right. More items than fit end in `… +N more (/todos)`. Shift+L hides or shows it, and it is left out when the terminal is too short for it. The status bar shows `TODO: 1/3` either way.
-  - **Web UI:** a panel above the input, updated live during the turn: ▸ in progress, ○ pending, ✓ done (struck through). Click its header to collapse it to one line with the current item; the browser remembers which. The `todo 1/3` chip in the header toggles the panel, or prints the list with `/todos` once every item is done.
-  - `/todos` prints the list in both, and `/todos clear` empties it.
-- Not offered in plan mode, while a plan or story runs (they track their own steps), or in design and chat mode. It costs about 130 tokens of tool schema in coding and momo mode; with [`/tools discover all`](#loading-tools-on-demand) it is only listed until the model loads it.
+In coding and momo mode a reply without a tool call ends the turn. A reply that only announces its next step ("My next step is to implement…", "I will begin with the first task", a plan list ending "3. Run the tests") gets a note to take that step now instead, at most twice per turn, and the chat shows a system line saying why the turn went on. A question to you, "let me know…", or a summary in the past tense ("Updated …, added …") ends the turn as before. It doesn't run in plan mode, while a plan or story runs (they end with their own tools), or in design and chat mode. On a 26B, 10 of 12 failed multi-part runs had ended this way; with the note, none did (`evals/multipart_bench.py`).
 
 #### Loop guard
 
@@ -817,7 +805,6 @@ Offered only while internet access is on (`/net on`), so the model never sees a 
 | `run_command` | Run any shell command — scripts, tests, build tools, etc. Times out after 2 minutes (120s) unless the model passes `timeout=` (up to 900s, the hard cap); a command the default stopped is told how to ask for longer. In run mode `new` (the default) the output is saved to a log and the model gets a view of it: `tail=N` for the last N lines, `grep="regex"` for the matching lines, or by default the whole output when it is short and its beginning, end and error/fail/warning lines when it is long. `background=true` (with an optional `wait_for=`) leaves a server running. See [Command output](#command-output). |
 | `command_output` | Search or page through the saved output of an earlier `run_command` without running it again: `grep=`, `tail=`, `start_line=`/`end_line=`. Takes the log path printed at the end of that result. Only in run mode `new`. |
 | `stop_command` | Stop a command `run_command` started with `background=true` (a dev server, a watcher), and everything it started. Only in run mode `new`. |
-| `todos` | The model's checklist for a request with several parts: the whole list on every call, one item `in_progress`. Coding and momo modes only. See [Todo list](#todo-list). |
 
 All file operations are sandboxed to the working directory. Paths that attempt to escape via `..` are rejected. `run_command` is a shell, so it is not confined; turn on `/run-confirm` to approve each command.
 
@@ -831,6 +818,7 @@ A small model copies `old_string` with slips, edits blind, and forgets the other
 - **They undo an escape level too many.** A model often escapes code once more than the tool needs, as if for a string literal: `\"` where the file needs `"`, `\\` for `\`. The backslash lands in the file and breaks it, and every fix goes through the same escaping again. When the text as given adds syntax errors and the same text with one level of escaping removed doesn't, that is what gets written, and the result says so (`edit_file`, `edit_files`, `write_file`, `replace_symbol`). Escapes that parse as given, like a quote inside a string literal, are left alone. Files without a syntax check are written as given.
 - **They find what the model meant.** `old_string` still matches when only indentation, spacing or quote style differs, and when the replacement has a different number of lines. Lines the edit keeps are written back from the file, not from the model's copy. A match must be unique. If the model's text has lost its indentation, the edit is refused rather than guessed. A miss shows the closest block of the file with the first differing line; several matches are listed with the definition each is in.
 - **They point at what else must change.** If an edit removes or renames a definition, or changes its parameter list, the result lists the uses still left. With the code index on, that comes from the index; without it, from a scan of the project's files (1 s / 5,000 files at most, and the result says when it stopped early). A call on another object that only shares the name (`ledger.calc_tax()` after removing the function `calc_tax`) is not counted. An `edit_file` that copied most of a definition to rewrite it points at `replace_symbol`. An `old_string` that is in a different file says which one. A `write_file` that drops definitions the file had says so.
+- **They keep the code next to an edit.** To add code, a model often uses the neighbouring definition as `old_string` to find the place, then leaves it out of `new_string`, which deletes it. In the multi-part bench a 26B did this in 45 of 235 edits, and 20 of 72 runs ended with code missing that nobody asked to remove. An edit that removes a definition while it adds a different one is now refused before anything is written. The error names what would be lost (`restock`, lines 46-51) and what to do: keep the old code in `new_string`, before or after the new code. Sending the same call again applies it, for a deliberate replacement. Renames (the same code under a new name) and plain deletions go through. `edit_file`, `edit_files` (nothing in the batch is written), `replace_symbol`, and a `write_file` over an existing file that drops definitions all check this. With tree-sitter it compares the file's definitions before and after, in any language it parses. Without it, or for a language it doesn't know, it compares the first line of `old_string` and `new_string`: a definition header swapped for a different one at the same place (`def restock(` → `def remove(`, `fn area(` → `fn perimeter(`, `public int total(` → `public int count(`) whose old header is gone from `new_string`. On the bench's edits that rule caught 43 of the 44 the parser found, and nothing else.
 - **They batch.** A small model makes one edit per turn, and each turn is a full model round-trip. `edit_files` takes every edit of a change (any files) in one call and writes all of them or none, and the leftover-use list points at it. In the eval it cut model turns by 19% with the index off and 27% with it on, and a rename from 22 tool calls to 13.
 
 `evals/edit_bench.py` scores the matcher without a model, and `python evals/run_evals.py --suite edit` runs change requests against one. See `evals/README.md`.
@@ -1685,7 +1673,6 @@ Type any command in the input bar:
 | `/undo-max [n\|off]` | How many turns of file checkpoints are kept (default 20, saved; `off` = no cap) |
 | `/loop-guard [n\|off\|on]` | Repeats of one tool call (or one error) that make a [loop](#loop-guard) (default 3, saved; `--loop-guard`) |
 | `/loop-guard resets <n>` | Loop resets per turn before the turn stops (default 2, saved; `0` = stop at the first loop; `--loop-resets`) |
-| `/todos [clear]` | Show the model's [todo list](#todo-list), or empty it |
 | `/cost` | Show token usage for this session, aggregated by mode and model (in/out/total tokens per combination) |
 | `/sessions` | List up to 20 recent sessions with mode and model |
 | `/session` | Show the current session file path |

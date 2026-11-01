@@ -361,9 +361,21 @@ class ChecksWithoutIndex(Base):
         self.assertEqual((uses, complete, checked), ([], False, 0))
 
     def test_write_file_that_drops_definitions_warns(self):
+        # Without "keep" the write lands and the result warns.
+        self.features = frozenset(self.features) - {"keep"}
         out = self.run_tool("write_file", path="inv.py", content="def calc_tax(amount):\n    return 0\n")
         self.assertIn("WARNING: this write removed 1 definition the file had: Inventory.", out)
         self.assertNotIn("find_all", out)
+
+    def test_write_file_that_drops_definitions_is_refused_until_sent_again(self):
+        content = "def calc_tax(amount):\n    return 0\n"
+        out = self.run_tool("write_file", path="inv.py", content=content)
+        self.assertTrue(out.startswith("ERROR: not written"), out)
+        self.assertIn("`Inventory`", out)
+        self.assertNotEqual((self.root / "inv.py").read_text(), content)
+        out = self.run_tool("write_file", path="inv.py", content=content)
+        self.assertTrue(out.startswith("Applied as sent (repeated): `Inventory` removed."), out)
+        self.assertEqual((self.root / "inv.py").read_text(), content)
 
 
 @NAV

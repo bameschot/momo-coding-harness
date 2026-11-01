@@ -433,6 +433,34 @@ def _has_write_intent(text: str) -> bool:
     return any(p in t for p in _WRITE_INTENT)
 
 
+# A final reply that only says what comes next ("My next step is to implement the
+# changes in shop/pricing.py.", "I will begin with the first task", or a plan list
+# ending "4. Verify all changes by running the tests."): 10 of 12 failed coding
+# runs of a 26B ended like this (evals/multipart_bench.py), since a reply without a
+# tool call ends the turn.  A finished summary is in the past tense ("Updated …").
+_RX_NEXT_INTENT = re.compile(
+    r"\b(?:I will|I'll|I am going to|I'm going to|let me(?! know)|let's|my next steps?(?: is| are)?"
+    r"|next,? I|now I|my plan is)\b", re.IGNORECASE)
+_NEXT_VERBS = ("update|add|modify|implement|fix|create|run|verify|write|change|refactor|remove|"
+               "restore|test|edit|make|rename|replace|delete|move|check")
+# A list item, then optionally a bold or code label ("**`shop/util.py`**:"), then the verb.
+_RX_PLAN_STEP = re.compile(r"^\s*(?:\d+[.)]|[-*])\s+(?:\*\*)?`?(?:[^\s:*`]+`?(?:\*\*)?:\s*(?:\*\*)?)?"
+                           r"(?:" + _NEXT_VERBS + r")\b", re.IGNORECASE)
+_NEXT_TAIL = 400       # characters at the end of the reply that count
+
+
+def announces_next_step(text: str) -> bool:
+    """Whether a reply without a tool call ends by announcing work it has not
+    done yet (and is not a question to the user)."""
+    t = (text or "").strip()
+    if not t or t.endswith("?"):
+        return False
+    if _RX_NEXT_INTENT.search(t[-_NEXT_TAIL:]):
+        return True
+    last = [ln for ln in t.splitlines() if ln.strip()][-1]
+    return bool(_RX_PLAN_STEP.match(last))
+
+
 def _extract_and_strip_thinking(raw_content: str) -> tuple[str, str]:
     """Return (content_without_think_tags, thinking_text).
 

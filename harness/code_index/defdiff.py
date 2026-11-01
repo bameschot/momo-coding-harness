@@ -3,6 +3,8 @@ whose parameters changed.  Shared by the edit tools' follow-up checks
 (editing.py) and index_changes."""
 from __future__ import annotations
 
+import re
+
 from .. import code_nav
 from .records import DATA_LANGS
 
@@ -26,6 +28,38 @@ def _gone(b: dict, a: dict) -> list:
     gone = [v[0] for name, v in b.items() if name not in a]
     quals = {s.qualname for s in gone}
     return [s for s in gone if s.qualname.rsplit(".", 1)[0] not in quals or "." not in s.qualname]
+
+
+def _source(parsed, s) -> str:
+    return "\n".join(parsed.lines[s.start - 1:s.end])
+
+
+def _renamed(before, after, gone, new) -> bool:
+    """Whether `new` is `gone` under another name: the same source once the
+    name is swapped, whitespace aside."""
+    swapped = re.sub(rf"(?<![\w$]){re.escape(gone.name)}(?![\w$])", new.name, _source(before, gone))
+    return "".join(swapped.split()) == "".join(_source(after, new).split())
+
+
+def anchor_loss(before, after, need_added: bool = True) -> list:
+    """Definitions a change removes while it adds others: the anchor mistake,
+    where the old code was used to find the place for new code and left out of
+    the replacement.  [] when nothing is removed, when nothing is added (a plain
+    deletion; with need_added=False any removal counts), or for a rename."""
+    if before is None or after is None:
+        return []
+    b, a = _defs(before), _defs(after)
+    gone = _gone(b, a)
+    added = [v[0] for name, v in a.items() if name not in b]
+    if not gone or (need_added and not added):
+        return []
+    return [g for g in gone if not any(_renamed(before, after, g, n) for n in added)]
+
+
+def added_names(before, after) -> list[str]:
+    """Definition names a change adds, in file order."""
+    b = _defs(before)
+    return [name for name in _defs(after) if name not in b]
 
 
 _MAX_PARAM_LINES = 20       # a parameter list longer than this is compared by its start

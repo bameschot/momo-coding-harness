@@ -23,6 +23,7 @@ With every group off the tools behave exactly as before they existed.
 """
 import ast
 import difflib
+import hashlib
 import json
 import re
 import time
@@ -30,10 +31,12 @@ import warnings
 from pathlib import Path
 
 from . import code_index, code_nav
-from .code_index.defdiff import _DEF_KINDS, _defs, _gone, _params, _same
+from collections import OrderedDict
+
+from .code_index.defdiff import _DEF_KINDS, _defs, _gone, _params, _same, added_names, anchor_loss
 from .paths import safe_path, split_lines
 
-EDIT_FEATURES = frozenset({"feedback", "match", "symbol", "checks", "batch"})
+EDIT_FEATURES = frozenset({"feedback", "match", "symbol", "checks", "batch", "keep"})
 
 _CONTEXT = 3              # unchanged lines shown around an edit
 _SNIPPET_MAX = 40         # a longer change shows its two ends
@@ -981,6 +984,138 @@ def _after_edit(f: _File, path: str, head: str, before_text: str, after_text: st
     return out
 
 
+# ── keeping the anchor ───────────────────────────────────────────────────────
+# A model adding code uses a neighbouring definition as old_string to find the
+# place, then leaves it out of new_string: the neighbour is deleted.  In the
+# multi-part bench (Gemma 4 26B, 2026-10-31) 45 of 235 edits did this and 20 of 72 runs ended
+# with code missing that nobody asked to remove.  Such an edit is refused before
+# anything is written ("keep" feature); the same call sent again is applied, so a
+# deliberate replacement costs one repeat.  With a parser (any language
+# code_nav knows) it compares the definitions before and after; without one, the
+# first line of old_string and new_string (_header_swap).
+
+_REFUSED: OrderedDict = OrderedDict()     # (path, tool, digest of the call) -> what it removes
+_REFUSED_MAX = 32
+_SKIP_FIRST = ("#", "//", "/*", "*", "@", "--", ";")
+_RX_NAMED_BLOCK = re.compile(r"^\s*(?:[\w@]+\s+)*?(?:class|struct|interface|enum|trait|impl|object|"
+                             r"type|module|namespace)\s+([A-Za-z_$][\w$]*)")
+_RX_CALLED = re.compile(r"([A-Za-z_$][\w$]*)\s*(?:<[^>()]*>)?\s*\(")
+_NOT_NAMES = {"if", "for", "while", "switch", "return", "catch", "print", "elif", "with", "match"}
+
+
+def _call_key(p: Path, tool: str, *parts) -> tuple:
+    digest = hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
+    return (str(p), tool, digest)
+
+
+def _forget_refusals(p: Path) -> None:
+    """A write to the file: earlier refusals for it no longer describe it."""
+    for k in [k for k in _REFUSED if k[0] == str(p)]:
+        del _REFUSED[k]
+
+
+def _first_line(text: str) -> str:
+    return next((ln for ln in text.split("\n")
+                 if ln.strip() and not ln.strip().startswith(_SKIP_FIRST)), "")
+
+
+def _header(line: str) -> tuple[str, str, str] | None:
+    """(indent, first word, name) when the line looks like a definition header
+    in most languages: a name before "(" (def, fn, func, function, methods) or
+    after class/struct/interface/…; None otherwise."""
+    m = re.match(r"^(\s*)(\S+)", line)
+    if not m:
+        return None
+    block = _RX_NAMED_BLOCK.match(line)
+    called = _RX_CALLED.search(line)
+    name = block.group(1) if block else called.group(1) if called else None
+    if not name or name in _NOT_NAMES or m.group(2).rstrip(":(") in _NOT_NAMES:
+        return None
+    return m.group(1), m.group(2), name
+
+
+def _header_swap(old_string: str, new_string: str) -> tuple[str, str] | None:
+    """(old header, new header) when new_string starts with a different
+    definition than old_string at the same place and the old header is gone
+    from it — the anchor mistake, seen without a parser.  None for a rename
+    (old_string with the name swapped is new_string)."""
+    first_old, first_new = _first_line(old_string), _first_line(new_string)
+    ho, hn = _header(first_old), _header(first_new)
+    if not ho or not hn or ho[:2] != hn[:2] or ho[2] == hn[2]:
+        return None
+    if first_old.strip() in {ln.strip() for ln in new_string.split("\n")}:
+        return None
+    renamed = re.sub(rf"(?<![\w$]){re.escape(ho[2])}(?![\w$])", hn[2], old_string)
+    if "".join(renamed.split()) == "".join(new_string.split()):
+        return None
+    return first_old.strip(), first_new.strip()
+
+
+def _names(items: list[str], more: int = 3) -> str:
+    shown = ", ".join(items[:more])
+    return shown + (f" and {len(items) - more} more" if len(items) > more else "")
+
+
+def _anchor_message(rel: str, before_text: str, after_text: str, lang: str | None,
+                    old_string: str | None, new_string: str | None, what: str) -> tuple[str, str] | None:
+    """(the refusal's reason, a short name of what it removes), or None when the
+    change keeps every definition it does not rename."""
+    before, after = _parse(lang, before_text), _parse(lang, after_text)
+    if before is not None and after is not None and _defs(before):
+        lost = anchor_loss(before, after)
+        if not lost:
+            return None
+        gone = [f"`{g.name}` (lines {g.start}-{g.end})" for g in lost]
+        added = [f"`{n}`" for n in added_names(before, after)]
+        first = f"`{lost[0].name}`"
+        return (f"this edit would remove {_names(gone)} in {rel} and add {_names(added)}: "
+                f"{what} does not contain {first}. To add {_names(added)} next to it, keep the "
+                f"old code: put it in {what} unchanged, before or after the new code. If "
+                f"replacing {first} is what you want, send the same call again.",
+                _names([f"`{g.name}`" for g in lost]))
+    if old_string is None or new_string is None:
+        return None
+    swap = _header_swap(old_string, new_string)
+    if swap is None:
+        return None
+    return (f"this edit replaces `{swap[0]}` with `{swap[1]}` in {rel}, and {what} no longer "
+            f"contains the old line. To add the new code next to it, keep the old code: put it "
+            f"in {what} unchanged, before or after the new code. If replacing it is what you "
+            f"want, send the same call again.", f"`{swap[0]}`")
+
+
+def _remember(key: tuple, removed: str) -> None:
+    _REFUSED[key] = removed
+    while len(_REFUSED) > _REFUSED_MAX:
+        _REFUSED.popitem(last=False)
+
+
+def _has_defs(lang: str | None, text: str) -> bool:
+    """Whether the parser can say what the file defines (else: _header_swap)."""
+    parsed = _parse(lang, text)
+    return parsed is not None and bool(_defs(parsed))
+
+
+def _keep_check(p: Path, key: tuple, rel: str, before_text: str, after_text: str,
+                lang: str | None, old_string: str | None, new_string: str | None,
+                what: str = "new_string") -> tuple[str | None, str]:
+    """(refusal, note): the refusal to return instead of writing, or "" and a
+    note for the result when this exact call was refused before and is now
+    sent again on purpose."""
+    if key in _REFUSED:
+        removed = _REFUSED.pop(key)
+        return None, f"Applied as sent (repeated): {removed} removed. "
+    try:
+        found = _anchor_message(rel, before_text, after_text, lang, old_string, new_string, what)
+    except Exception:
+        return None, ""       # a check must never block a write it cannot judge
+    if found is None:
+        return None, ""
+    reason, removed = found
+    _remember(key, removed)
+    return f"ERROR: not written — {reason}", ""
+
+
 def _rel_of(p: Path, workdir: Path, path: str) -> str:
     try:
         return p.relative_to(workdir.resolve()).as_posix()
@@ -1047,15 +1182,24 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
         if fix:
             new_string, repaired = fix
             found = _find_edit(content, old_string, new_string, replace_all, match)
+    kept = ""
+    if "keep" in features:
+        refusal, kept = _keep_check(f.p, _call_key(f.p, "edit_file", old_string, new_string,
+                                                   replace_all),
+                                    _rel_of(f.p, workdir, path), content, found.text, lang,
+                                    old_string, new_string)
+        if refusal:
+            return refusal
     err = f.save(found.text)
     if err:
         return err
+    _forget_refusals(f.p)
     if replace_all:
-        head = f"Replaced {found.count} occurrence(s)" + repaired
+        head = kept + f"Replaced {found.count} occurrence(s)" + repaired
         if "feedback" in features:
             head += _replaced_lines(content, found.old, found.new)
     else:
-        head = "OK — 1 change applied" + found.note + repaired
+        head = kept + "OK — 1 change applied" + found.note + repaired
     nudge = ""
     if "symbol" in features and not replace_all:
         nudge = _rewrite_nudge(path, content, found.text, old_string, _parse(lang, content))
@@ -1129,11 +1273,19 @@ def replace_symbol(path: str, name: str, new_source: str, *, workdir: Path, inde
     if new_content == content:
         return (f"No change: {sym.kind} {sym.qualname} in {path} already reads exactly like "
                 f"new_source.")
+    kept = ""
+    if "keep" in features:
+        refusal, kept = _keep_check(f.p, _call_key(f.p, "replace_symbol", name, new_source),
+                                    _rel_of(f.p, workdir, path), content, new_content, lang,
+                                    None, None, what="new_source")
+        if refusal:
+            return refusal
     err = f.save(new_content)
     if err:
         return err
+    _forget_refusals(f.p)
     verb = "replaced" if new_lines else "deleted"
-    head = f"OK — {verb} {sym.kind} {sym.qualname} (was L{sym.start}-{sym.end})" + repaired
+    head = kept + f"OK — {verb} {sym.kind} {sym.qualname} (was L{sym.start}-{sym.end})" + repaired
     return _after_edit(f, path, head, content, new_content, lang, features, index, cancel,
                        workdir, before_parsed=before)
 
@@ -1224,6 +1376,7 @@ def edit_files(edits, *, workdir: Path, index=None, cancel=None,
     n = len(parsed_edits)
     match = "match" in features
     files: dict[Path, list] = {}           # resolved path -> [_File, text now, shown path]
+    per_file: dict[Path, list] = {}        # resolved path -> its (old, new) pairs
     notes = []
     for i, e in enumerate(parsed_edits, 1):
         where = f"edit {i} of {n} ({e['path']})"
@@ -1237,6 +1390,7 @@ def edit_files(edits, *, workdir: Path, index=None, cancel=None,
             files[p] = [f, f.text, e["path"]]
         f, text, _shown = files[p]
         old, new = f.lf(e["old_string"]), f.lf(e["new_string"])
+        per_file.setdefault(p, []).append((old, new))
         if not old and text:
             return f"ERROR: {where}: old_string is empty. Nothing was written."
         found = _find_edit(text, old, new, e["replace_all"], match)
@@ -1271,13 +1425,34 @@ def edit_files(edits, *, workdir: Path, index=None, cancel=None,
     changed = [(p, f, text, shown) for p, (f, text, shown) in files.items() if text != f.text]
     if not changed:
         return "No change: none of the edits changed anything.\n" + "\n".join(notes)
+    kept = ""
+    if "keep" in features:
+        key = _call_key(workdir.resolve(), "edit_files", parsed_edits)
+        if key in _REFUSED:
+            kept = f"Applied as sent (repeated): {_REFUSED.pop(key)} removed. "
+        else:
+            for p, f, text, shown in changed:
+                rel, lang = _rel_of(p, workdir, shown), _lang(p)
+                try:
+                    pairs = ([(None, None)] if _has_defs(lang, f.text) else per_file.get(p, []))
+                    found = next((m for old, new in pairs
+                                  if (m := _anchor_message(rel, f.text, text, lang, old, new,
+                                                           "new_string"))), None)
+                except Exception:
+                    found = None
+                if found:
+                    _remember(key, found[1])
+                    return (f"ERROR: not written — {found[0]}\nNothing was written — no file "
+                            f"was changed. Fix that edit and send all {n} edits again.")
     err = _write_all([(p, _encode(f, text), _encode(f, f.text)) for p, f, text, _s in changed])
     if err:
         return err
+    for p, *_rest in changed:
+        _forget_refusals(p)
     if index is not None:
         index.invalidate([str(p) for p, *_rest in changed])
     applied = n - len(notes)
-    out = [f"OK — {applied} edit{'s' if applied != 1 else ''} applied in {len(changed)} "
+    out = [kept + f"OK — {applied} edit{'s' if applied != 1 else ''} applied in {len(changed)} "
            f"file{'s' if len(changed) != 1 else ''}. Changed lines, as the files read now:"]
     tail = []
     for p, f, text, shown in changed:
@@ -1324,14 +1499,38 @@ def write_file(path: str, content: str, *, workdir: Path, index=None, cancel=Non
         fix = _escape_repair(p, _lang(p), old_text or "", content, lambda n: n)
         if fix:
             content, repaired = fix
+    kept = ""
+    if "keep" in features and old_text is None and p.is_file():
+        try:
+            old_text = p.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            old_text = None
+    if "keep" in features and old_text is not None:
+        key = _call_key(p, "write_file", content)
+        if key in _REFUSED:
+            kept = f"Applied as sent (repeated): {_REFUSED.pop(key)} removed. "
+        else:
+            try:
+                lang = _lang(p)
+                lost = anchor_loss(_parse(lang, old_text), _parse(lang, content), need_added=False)
+            except Exception:
+                lost = []
+            if lost:
+                names = _names([f"`{g.name}`" for g in lost], 6)
+                _remember(key, names)
+                return (f"ERROR: not written — the new content of {_rel_of(p, workdir, path)} drops "
+                        f"{names}, which the file defines now. Keep them in content, or change only "
+                        f"part of the file with edit_file. If dropping them is what you want, send "
+                        f"the same call again.")
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
     except OSError as e:
         return f"ERROR: {e}"
+    _forget_refusals(p)
     # The harness inspects last_tool by name (not return value), but the model
     # uses this confirmation — with concrete size — to know the write landed.
-    out = f"Written: {path} ({_size_note(content)})" + repaired
+    out = kept + f"Written: {path} ({_size_note(content)})" + repaired
     lang = _lang(p) if {"feedback", "checks"} & features else None
     if lang is None and not ("feedback" in features and p.suffix.lower() in (".py", ".pyi")):
         return out
@@ -1345,7 +1544,7 @@ def write_file(path: str, content: str, *, workdir: Path, index=None, cancel=Non
                                 1, len(a_lines))
         if "checks" in features and before is not None:
             gone = [s.name for s in _gone(_defs(before), _defs(after))]
-            if gone:
+            if gone and not kept:
                 names = ", ".join(gone[:10]) + (f" and {len(gone) - 10} more" if len(gone) > 10 else "")
                 out += (f"\nWARNING: this write removed {len(gone)} definition"
                         f"{'s' if len(gone) != 1 else ''} the file had: {names}. write_file "

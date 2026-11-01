@@ -88,7 +88,7 @@ def _in_momo_dir(args) -> bool:
 # Tools that read a file back: after a successful edit of that file, a re-read
 # is what post-edit feedback is meant to save.
 _READ_BACK = {"read_file", "read_symbol", "grep_file", "code_outline", "index_file"}
-_EDIT_FEATURE_NAMES = ("feedback", "match", "symbol", "checks", "batch")
+_EDIT_FEATURE_NAMES = ("feedback", "match", "symbol", "checks", "batch", "keep")
 # A command filtered through the shell: the model trimming output itself, which
 # /run-mode new's tail=/grep= are meant to replace (a pipe also hides the exit code).
 _SELF_PIPED = re.compile(r"\|\s*(tail|head|grep|rg|sed|awk|wc)\b|>\s*\S+\s*$")

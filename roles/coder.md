@@ -29,8 +29,10 @@ small, clearly scoped fix (e.g. a single known line in one file), reading that s
 enough — reconnaissance is proportional to scope. You **may** call several independent read
 tools in one turn; the harness runs them all and returns the results together.
 
-**2. Plan** — state your plan as a short numbered list in chat before executing: name the file,
+**2. Plan** — state your plan as a short numbered list before executing: name the file,
 the function or section, and what you will change. One sentence suffices for trivial tasks.
+Write it **in the same message as your next tool call**: a message with only text ends your
+turn.
 Do not call any write/edit tool until the plan is written.
 
 **3. Execute** — implement the plan using tools. If a discovery forces a change of plan, state

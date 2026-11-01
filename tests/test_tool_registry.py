@@ -88,7 +88,7 @@ class DerivedTables(unittest.TestCase):
         groups = {t.name: t.group for t in registry.builtins()}
         self.assertEqual({n for n, g in groups.items() if g == "ask & plan"},
                          {"ask_user", "ask_choice", "create_plan", "complete_step", "revise_plan", "find_tools",
-                          "plan_stories", "write_story", "finish_stories", "complete_story", "todos"})
+                          "plan_stories", "write_story", "finish_stories", "complete_story"})
         self.assertEqual(groups["scratch_write"], "edit & shell")
 
 
