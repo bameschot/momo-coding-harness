@@ -626,7 +626,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     </div>
     <div class="card" style="--c: var(--ok)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg>Plan, approve, execute</h3>
-      <p>Plan mode investigates, writes a step-by-step plan and changes nothing until you approve it. Then it runs one step at a time.</p>
+      <p>Plan mode investigates the options, asks you about the decisions that matter, writes a step-by-step plan and changes nothing until you approve it. Then it runs one step at a time.</p>
       <a class="more" href="#plan">Plan mode →</a>
     </div>
     <div class="card" style="--c: var(--tool)">
@@ -656,7 +656,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
     </div>
     <div class="card" style="--c: var(--user)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg>Sessions &amp; context</h3>
-      <p>Sessions save after every reply. When the context fills up, old tool output goes first and the rest is summarised.</p>
+      <p>Sessions save after every reply, and the next launch reopens the last one in its workspace. When the context fills up, old tool output goes first and the rest is summarised.</p>
       <a class="more" href="#context">Context →</a>
     </div>
     <div class="card" style="--c: var(--system)">
@@ -679,7 +679,7 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
   <div class="modes" aria-label="Modes at a glance">
     <div class="mode-card"><div class="name">design</div><p>Explores the code, asks grounded questions and writes the spec. Doesn't touch code.</p></div>
     <div class="mode-card"><div class="name">chat</div><p>A read-only conversation partner for understanding code and documents.</p></div>
-    <div class="mode-card"><div class="name">plan</div><p>Investigate → plan → approve → execute, one step at a time. Test-first with <code>/plan tdd</code>, phases of small stories with <code>/plan stories</code>.</p></div>
+    <div class="mode-card"><div class="name">plan</div><p>Investigate → ask → plan → approve → execute, one step at a time. Test-first with <code>/plan tdd</code>, phases of small stories with <code>/plan stories</code>.</p></div>
     <div class="mode-card"><div class="name">coding</div><p>The full tool suite: edit, move, delete, run commands and use git.</p></div>
     <div class="mode-card"><div class="name">momo</div><p>Talk to the cat. It's a companion first, but it still has every tool.</p></div>
   </div>
@@ -729,7 +729,7 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
       <li><strong>Check the startup line.</strong> It shows the model, its context window and the web UI address. <code>offline</code> means momo can't reach the server: check <code>--host</code>.</li>
       <li><strong>Describe what you want.</strong> momo starts in <code>design</code> mode, which reads code and asks questions but doesn't change it.</li>
       <li><strong>Switch mode to act on it.</strong> <kbd>Shift+Tab</kbd> or <code>/code</code> for a direct change, <code>/plan</code> to plan it first. See <a href="#modes">Modes</a>.</li>
-      <li><strong>Pick it up later.</strong> The next launch restores your session. <code>--fresh</code> or <code>/new</code> starts over.</li>
+      <li><strong>Pick it up later.</strong> The next launch reopens your last session in its workspace, wherever you start momo from. <code>--fresh</code> or <code>/new</code> starts over. See <a href="#sessions">Sessions</a>.</li>
     </ol>
   </section>
 
@@ -886,14 +886,14 @@ ollama serve</code></pre></div>
 
   <section id="plan" data-voice="plan">
     <h2>Plan mode</h2>
-    <p>momo investigates, writes a step-by-step plan to <code>.momo/plan.md</code>, and changes nothing until you approve it. There are three kinds:</p>
+    <p>momo investigates the code and the options for the change, asks you about the decisions that shape it, writes a step-by-step plan to <code>.momo/plan.md</code>, and changes nothing until you approve it. There are three kinds:</p>
     <ul>
       <li><strong>Normal</strong> (<code>/plan</code>, the default): the model says when each step is done.</li>
       <li><strong>Test-driven</strong> (<code>/plan tdd</code>): tests are written first, and momo runs them to check each step. See <a href="#plan-tdd">Test-driven plans</a>.</li>
       <li><strong>Stories</strong> (<code>/plan stories</code>): the steps are phases, each broken into small, checked stories when it starts. See <a href="#plan-stories">Story plans</a>.</li>
     </ul>
     <figure class="flow" aria-label="Plan mode lifecycle">
-      <div class="flow-row"><div class="box model">1 Investigate<small>read the code, reproduce, <code>ask_user</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">2 Plan<small><code>create_plan</code> writes <code>.momo/plan.md</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">3 Confirm<small><code>y</code> runs it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">4 Execute<small>one step at a time, ▶ in the prompt</small></div><span class="arrow" aria-hidden="true">→</span><div class="box end">Done<small>the plan file is deleted</small></div></div>
+      <div class="flow-row"><div class="box model">1 Investigate<small>read the code, reproduce, weigh the options</small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">2 Ask<small>2–5 <code>ask_choice</code> questions, a recommendation first</small></div><span class="arrow" aria-hidden="true">→</span><div class="box model">3 Plan<small><code>create_plan</code> writes <code>.momo/plan.md</code></small></div><span class="arrow" aria-hidden="true">→</span><div class="box you">4 Confirm<small><code>y</code> runs it</small></div><span class="arrow" aria-hidden="true">→</span><div class="box harness">5 Execute<small>one step at a time, ▶ in the prompt</small></div><span class="arrow" aria-hidden="true">→</span><div class="box end">Done<small>the plan file is deleted</small></div></div>
       <ul class="flow-edges">
         <li><span class="from">Confirm</span><span class="via">— any other reply (feedback) →</span><span class="to">Plan, revised</span></li>
         <li><span class="from">Confirm</span><span class="via">— <code>n</code> →</span><span class="to">Kept — <code>/plan run</code> → Execute</span></li>
@@ -904,6 +904,8 @@ ollama serve</code></pre></div>
       <figcaption>Step checkboxes in <code>.momo/plan.md</code>: <code>[ ]</code> pending · <code>[~]</code> in progress · <code>[x]</code> done · <code>[-]</code> skipped.</figcaption>
     </figure>
     <ul>
+      <li><strong>Questions come first.</strong> For each decision that shapes the plan (the approach, the scope, edge cases and errors, compatibility, how to verify it), the model looks for 2–3 real options in the code and asks you with <code>ask_choice</code>, its recommendation first and marked "(recommended)". Usually 2–5 questions, fewer for a small fix. It doesn't ask what the code answers or what you already said, and the plan's goal records what you chose.</li>
+      <li><strong>A plan made before any question is sent back once</strong> with a note to ask first. Sent again, it goes through: a small, fully specified fix may need no question. Revising a plan you've seen never is. <code>/plan questions off</code> turns this off.</li>
       <li><strong>Before approving,</strong> you can edit <code>.momo/plan.md</code> by hand: reword, reorder, add or delete steps, or mark one <code>[-]</code> to skip it.</li>
       <li><strong>Approving</strong> switches to coding mode and runs the plan one step at a time. The plan stays in the system prompt, so the model keeps its place.</li>
       <li><strong>A paused plan</strong> carries on with <code>/plan resume</code> or any message, even after a restart.</li>
@@ -916,6 +918,7 @@ ollama serve</code></pre></div>
       <tr><td><code>/plan run</code></td><td class="wrap">Approve a kept plan and execute it (re-reads the file)</td></tr>
       <tr><td><code>/plan resume</code></td><td class="wrap">Continue a paused plan from its current step</td></tr>
       <tr><td><code>/plan cancel</code></td><td class="wrap">Discard the plan and delete <code>.momo/plan.md</code></td></tr>
+      <tr><td><code>/plan questions [on|off]</code></td><td class="wrap">Send back a first plan made before any question to you (default on, remembered; in the web UI under Settings → Context)</td></tr>
     </table></div>
   </section>
 
@@ -1212,6 +1215,7 @@ ollama serve</code></pre></div>
       <li><strong>Calls that can't run say why.</strong> A call the output limit cut off, arguments that aren't valid JSON, or the rest of a batch after you press Esc: none of them run. Each gets an <code>ERROR: not run</code> result that names the cause and what to change, such as "write the file in parts: write_file, then append_to_file". A call written as text and cut off gets the same note instead of ending the turn as the reply.</li>
       <li><strong>Repeated failures are flagged:</strong> making the exact same failing call again adds a note to change the arguments.</li>
       <li><strong>Silent loops get a nudge:</strong> after 10 rounds of tool calls without any text (20 with <a href="#cavecat">cavecat</a>), the model is asked for a short progress update.</li>
+      <li><strong>Calls that change nothing get a note:</strong> narrated or not, 15 tool calls in a row with no file written, no question to you and no plan tool (12 in momo mode, 25 while planning) get a note asking the model to act on what it has found; a second at twice that, then none. <code>/progress-note off</code> turns it off.</li>
       <li><strong>Loops are cut out:</strong> the same call made 3 times with nothing changed, or the same error 3 times, rewinds the conversation. See <a href="#loop-guard">Loop guard</a>.</li>
     </ul>
 
@@ -1846,7 +1850,7 @@ modified: shop/pricing.py
 
   <section id="thinking" data-voice="thinking">
     <h2>Thinking &amp; reply length</h2>
-    <p>Three settings shape how a reasoning model works: how much it thinks, how long a reply may be, and how much of its earlier reasoning it sees. All are remembered and sit under the web UI's <code>THINK</code> badge.</p>
+    <p>These settings shape how a reasoning model works: how much it thinks, how long a reply and its reasoning may be, and how much of its earlier reasoning it sees. All are remembered and sit under the web UI's <code>THINK</code> badge.</p>
 
     <h3 id="think-level">Thinking level</h3>
     <p><code>/think off|on|low|medium|high|xhigh</code> (or <code>--think</code>) sets how much the model reasons. If the model doesn't support your level, momo sends the nearest one and shows it (<code>THINK: high→xhigh</code>). <code>on</code> uses the model's own default.</p>
@@ -1857,6 +1861,13 @@ modified: shop/pricing.py
       <li><strong>Why:</strong> a model stuck in a repetition loop would otherwise run until the context is full.</li>
       <li><strong>At the cap:</strong> if the reasoning used up the whole reply, momo retries once with thinking off.</li>
     </ul>
+
+    <h3 id="reasoning-watch">Reasoning watch</h3>
+    <p>While a reply streams, momo watches its reasoning and stops the reply when it runs past <code>/think-budget</code> tokens (default <strong>8,000</strong>), or when one line keeps coming back (3 times within the last 6,000 characters). Nothing in the stopped reply runs. The model gets a note to decide from what it already knows and act: it carries where the reasoning had got to, or the line it kept repeating, and the next request runs without thinking. At most 2 replies per turn are stopped; after that the reply cap applies as before.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">commands</span></div><pre><code>/think-budget 6000       <span class="com"># stop reasoning after 6,000 tokens (at least 1,000)</span>
+/think-budget off        <span class="com"># only the reply cap limits it</span>
+/think-budget repeat off <span class="com"># let repeating reasoning run</span></code></pre></div>
+    <p>A local model spends minutes on 20,000 tokens of reasoning, and telling it in the prompt to think less didn't work, so the harness watches instead. Replies with <code>--no-stream</code> aren't watched.</p>
 
     <h3 id="think-history">Sending reasoning back</h3>
     <p><code>/think-history off|turn|all</code> decides whether the model sees its own earlier reasoning. <code>turn</code> (default) sends it back since your last message, <code>all</code> also for earlier turns, <code>off</code> never. Without it, the model tends to re-plan from scratch after every tool result. Sent reasoning does use context.</p>
@@ -2101,17 +2112,20 @@ modified: shop/pricing.py
       <tr><td><code>--provider</code></td><td>last used / <code>ollama</code></td><td class="wrap"><code>ollama</code> or <code>llamacpp</code></td></tr>
       <tr><td><code>--host</code></td><td>:11434 / :8080</td><td class="wrap">Backend base URL, including the scheme</td></tr>
       <tr><td><code>--model</code></td><td><code>qwen3.5:9b</code></td><td class="wrap">Model name (Ollama only)</td></tr>
-      <tr><td><code>--workdir</code></td><td><code>.</code></td><td class="wrap">Root for all file operations (alias <code>--workspace</code>)</td></tr>
+      <tr><td><code>--workdir</code></td><td>last session's / <code>.</code></td><td class="wrap">Root for all file operations (alias <code>--workspace</code>). Given a path, momo reopens the last session used there, or starts an empty one. See <a href="#sessions">Sessions</a>.</td></tr>
       <tr><td><code>--context</code></td><td>auto</td><td class="wrap">Context limit; default half the model's window</td></tr>
       <tr><td><code>--mode</code></td><td><code>design</code></td><td class="wrap">Starting mode: <code>design</code>, <code>chat</code>, <code>plan</code>, <code>coding</code> or <code>momo</code></td></tr>
       <tr><td><code>--max-tool-result</code></td><td><code>0</code></td><td class="wrap">Max characters per tool result (0 = unlimited)</td></tr>
       <tr><td><code>--run-mode</code></td><td>last used / <code>new</code></td><td class="wrap"><code>new</code> or <code>classic</code>. See <a href="#run-output">Command output</a>.</td></tr>
-      <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session instead of restoring the last one</td></tr>
+      <tr><td><code>--fresh</code></td><td>off</td><td class="wrap">Start a new session (in <code>--workdir</code> or the current folder) instead of restoring the last one</td></tr>
       <tr><td><code>--think</code></td><td>last used / <code>on</code></td><td class="wrap">Thinking level. See <a href="#think-level">Thinking level</a>.</td></tr>
       <tr><td><code>--think-history</code></td><td>last used / <code>turn</code></td><td class="wrap"><code>off</code>, <code>turn</code> or <code>all</code>. See <a href="#think-history">Sending reasoning back</a>.</td></tr>
       <tr><td><code>--think-keep</code></td><td>last used / <code>off</code></td><td class="wrap"><code>off</code>, <code>lean</code>, <code>more</code> or <code>most</code>. See <a href="#think-keep">Trimming</a>.</td></tr>
       <tr><td><code>--cavecat</code></td><td>last used / <code>off</code></td><td class="wrap">See <a href="#cavecat">Cavecat mode</a></td></tr>
       <tr><td><code>--max-output-tokens</code></td><td>last used / <code>25000</code></td><td class="wrap">See <a href="#reply-cap">Reply cap</a>; <code>0</code> = no cap</td></tr>
+      <tr><td><code>--think-budget</code></td><td>last used / <code>8000</code></td><td class="wrap">See <a href="#reasoning-watch">Reasoning watch</a>; <code>0</code> = off</td></tr>
+      <tr><td><code>--progress-note</code></td><td>last used / <code>on</code></td><td class="wrap">Note after many tool calls that changed nothing, or <code>off</code></td></tr>
+      <tr><td><code>--plan-questions</code></td><td>last used / <code>on</code></td><td class="wrap">Plan mode: <a href="#plan">ask before planning</a>, or <code>off</code></td></tr>
       <tr><td><code>--loop-guard</code></td><td>last used / <code>3</code></td><td class="wrap">Repeats that make a <a href="#loop-guard">loop</a>, or <code>off</code></td></tr>
       <tr><td><code>--loop-resets</code></td><td>last used / <code>2</code></td><td class="wrap">Loop resets per turn before the turn stops; <code>0</code> = stop at the first loop</td></tr>
       <tr><td><code>--undo-max</code></td><td>last used / <code>20</code></td><td class="wrap">Turns of file checkpoints <code>/undo</code> can go back; <code>0</code> = no cap</td></tr>
@@ -2269,7 +2283,7 @@ python momo-coding-harness.py --web-host 0.0.0.0 --web-cert momo.pem --web-key m
     <h3>Conversation &amp; context</h3>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Description</th></tr>
-      <tr><td><code>/clear</code></td><td class="wrap">Clear the history and discard any plan</td></tr>
+      <tr><td><code>/clear</code></td><td class="wrap">Clear the history and discard any plan and compaction summary; a restart opens it empty</td></tr>
       <tr><td><code>/new</code></td><td class="wrap">Save this session and start an empty one</td></tr>
       <tr><td><code>/retry</code></td><td class="wrap">Re-send your last message, replacing the reply it got (asks whether the files it changed go back too)</td></tr>
       <tr><td><code>/changes</code></td><td class="wrap">What momo changed since the last <code>/keep</code>, per turn, with diffs, undo and keep (a drawer in the web UI, an overlay in the TUI)</td></tr>
@@ -2283,6 +2297,9 @@ python momo-coding-harness.py --web-host 0.0.0.0 --web-cert momo.pem --web-key m
       <tr><td><code>/run-mode new|classic</code></td><td class="wrap">How <a href="#run-output">command output</a> is returned</td></tr>
       <tr><td><code>/run-output-limit [n]</code></td><td class="wrap">Characters in <code>run_command</code>'s default view</td></tr>
       <tr><td><code>/max-output-tokens [n|off]</code></td><td class="wrap">The <a href="#reply-cap">reply cap</a> (remembered)</td></tr>
+      <tr><td><code>/think-budget [n|off]</code>, <code>/think-budget repeat [on|off]</code></td><td class="wrap">The <a href="#reasoning-watch">reasoning watch</a> (default 8000 and on, remembered)</td></tr>
+      <tr><td><code>/progress-note [on|off]</code></td><td class="wrap">A note after many tool calls that changed nothing (default on, remembered)</td></tr>
+      <tr><td><code>/plan questions [on|off]</code></td><td class="wrap"><a href="#plan">Ask before planning</a> (default on, remembered)</td></tr>
       <tr><td><code>/loop-guard [n|off|on]</code></td><td class="wrap">Repeats that make a <a href="#loop-guard">loop</a> (default 3, remembered)</td></tr>
       <tr><td><code>/loop-guard resets &lt;n&gt;</code></td><td class="wrap">Loop resets per turn before the turn stops (default 2; 0 = stop at the first loop)</td></tr>
       <tr><td><code>/cost</code></td><td class="wrap">Token usage by mode and model</td></tr>
@@ -2385,7 +2402,13 @@ curl -sN localhost:8765/api/events</code></pre></div>
       <tr><td><code>tls/</code></td><td class="wrap">momo's own certificates. See <a href="#https">HTTPS &amp; certificates</a>.</td></tr>
     </table></div>
     <h3 id="sessions">Sessions</h3>
-    <p>A session (messages, mode, model, skills, plan and settings) is saved after every reply and restored on the next launch. Tokens are never saved. <code>/sessions</code> lists recent ones and <code>/session &lt;name&gt;</code> loads one; in the web UI, the session drawer also deletes them.</p>
+    <p>A session (messages, mode, model, skills, plan and settings) is saved after every reply. Tokens are never saved. <code>/sessions</code> lists recent ones and <code>/session &lt;name&gt;</code> loads one; in the web UI, the session drawer also deletes them.</p>
+    <ul>
+      <li><strong>No <code>--workdir</code>:</strong> the next launch reopens the session you were last in, in the workspace you were last in, whatever folder you start momo from. A <code>/workspace</code> change is remembered even before you send a message.</li>
+      <li><strong><code>--workdir PATH</code>:</strong> reopens the last session you used in that workspace, or starts an empty one there.</li>
+      <li><strong>Cleared stays cleared.</strong> <code>/clear</code> deletes the saved conversation along with its plan and compaction summary, and a session started with <code>/new</code> and never used opens empty. A launch never falls back to an older session and its plan.</li>
+      <li><strong>Other flags</strong> (<code>--model</code>, <code>--host</code>, <code>--mode</code>, …) only override their setting on the reopened session. <code>--fresh</code> reopens nothing.</li>
+    </ul>
     <p class="note">Keep <code>~/.momo-harness/</code> private: sessions and logs contain your conversations and output from your code.</p>
   </section>
 
