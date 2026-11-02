@@ -34,7 +34,7 @@ TOOL = Tool(
     # Design mode revises the spec it wrote: edit_file changes a section
     # without rewriting a long document (which a small context can truncate).
     suggests=("replace_symbol",),
-    run=editing.edit_file, order=440, group="edit & shell", modes=WRITE_ROLES | {"design"},
+    run=editing.edit_file, order=440, group="edit & shell", modes=WRITE_ROLES | {"design", "story-verifier"},
     inject=("index", "cancel", "edit_features"), writes=("path",), body_arg="new_string",
     diff=True,
     example={"path": "main.py", "old_string": "existing line", "new_string": "replacement line"})

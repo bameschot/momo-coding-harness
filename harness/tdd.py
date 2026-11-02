@@ -17,6 +17,7 @@ from pathlib import Path
 from .paths import BINARY_SNIFF_BYTES, MAX_SCAN_FILE_BYTES, split_lines, walk_files
 from .plan import LEGACY_PLAN_FILENAME, Plan
 from . import tools
+from . import run_store as run_store_mod
 
 TAG_RE = re.compile(r"\btdd-(?:step-\d+|acceptance)\b")
 
@@ -333,6 +334,10 @@ def run_tests(command: str, workdir: Path, cancel=None) -> tuple[bool, str]:
         proc, stopped = tools.exec_command(command, timeout, workdir, cancel, out, subprocess.STDOUT)
         if proc is None:
             return False, stopped
+        # A check or acceptance test that left a server behind (`server.py &`,
+        # a test that never stops what it started) must not hold its port for
+        # the next one: what it started goes with it.
+        run_store_mod.kill_group(proc)
         text = tools.output_tail(out)
     if len(text) > _OUTPUT_CHARS:
         text = "…" + text[-_OUTPUT_CHARS:]

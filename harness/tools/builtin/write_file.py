@@ -14,6 +14,6 @@ TOOL = Tool(
         ["path", "content"]),
     # Design mode writes one spec and revises it, so it has write_file too.
     suggests=("replace_symbol",),
-    run=editing.write_file, order=400, group="edit & shell", modes=WRITE_ROLES | {"design"},
+    run=editing.write_file, order=400, group="edit & shell", modes=WRITE_ROLES | {"design", "story-verifier"},
     inject=("index", "cancel", "edit_features"), writes=("path",), body_arg="content", diff=True,
     example={"path": "hello.py", "content": "print('hello!')"})

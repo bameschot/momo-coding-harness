@@ -75,6 +75,19 @@ def _story_writer_prompt(workdir: str) -> str:
     )
 
 
+def _story_verifier_prompt(workdir: str) -> str:
+    raw = _load_role("story-verifier")
+    if raw:
+        return raw.replace("{workdir}", workdir)
+    return (
+        "You are the verifier of one story of a phased plan. For each expectation, write a small "
+        "black-box test in tests/acceptance/ that exercises the product through its interface "
+        "and checks the examples' exact expected values, run it, save it with "
+        "save_acceptance_test, then call finish_verification. Never edit product code. "
+        f"Working directory: {workdir}"
+    )
+
+
 # The planner role's closing-verification rule, which a TDD plan replaces: its
 # acceptance stage runs the suite, and with the rule in place the 9B added a
 # "run the full test suite" step in 3 of 3 runs.
@@ -112,6 +125,8 @@ _NAV_FIRST = {
                     "for anything a story changes.",
     "story-exec": "Start with read_symbol of the definitions the story names; before changing "
                   "a definition, find_references.",
+    "story-verifier": "Find how the product is used: code_outline its entry points and "
+                      "read_symbol the command handlers or routes the expectations touch.",
     "plan":      "Trace the code path the change touches by structure. For a rename, signature "
                  "change or removal, find_references lists every place your steps must cover.",
     "momo":      "Map an unfamiliar tree with code_outline on a directory; jump to a named "
@@ -133,6 +148,8 @@ _INDEX_FIRST = {
                     "not list_directory + read_file or grep; read_symbol reads one definition.",
     "story-exec": "Start with index_search / read_symbol for the definitions the story names; "
                   "before changing a definition, index_callers.",
+    "story-verifier": "Find the entry points and handlers the expectations touch with "
+                      "index_search and read_symbol.",
     "plan":      "Investigate with index_map, index_search, index_file and index_callers — not "
                  "list_directory + read_file or grep; read_symbol reads one definition.",
     "momo":      "Start with index_map (unfamiliar code) or index_search (a named thing), not "
@@ -411,27 +428,32 @@ _PLAN_STORIES_RULES = """## This plan is phased (stories)
 
 The user chose a stories plan. After approval the harness runs it one phase at a time: when a
 phase starts, a story writer looks at the code as it is then and breaks the phase into small
-stories, a model implements them one by one, and the harness runs the phase's checks before the
-next phase begins. Later phases are broken down only after earlier ones are built, so they can
-build on what was actually delivered.
+stories, a model implements them one by one, an independent verifier tests each story's expected
+behaviour, and the harness checks the phase's own expected behaviour before the next phase begins.
+Later phases are broken down only after earlier ones are built, so they can build on what was
+actually delivered.
 
 For this plan, these replace rules 1, 3 and 6 of "What makes a good plan" above:
-- **Each step is a phase**: a coherent milestone (a module, a feature, a layer), usually 2-7 of
-  them. Name the files and components it covers and the design decisions it carries out, but
-  leave the step-by-step detail to the stories.
+- **`interfaces`**: how the product is used, one line per way in — a command line ("CLI: `python3
+  tool.py <file>`"), a service with its start command, address and protocol ("Service: `python3
+  server.py`, HTTP on localhost:8000"), a library ("Library: `import pager`"), files it produces.
+  Take them from the request. Every expected behaviour is observed through one of them.
+- **Each step is a phase, and a vertical slice**: a thin path through the product that the user
+  can already exercise through its interface, growing phase by phase (phase 1 of a game server is
+  the server, the world and one command end to end — not "the data model"). Usually 2-7 phases.
+  Name the files and components it covers and its design decisions; leave the steps to stories.
 - **Each phase has an `outcome`**: what exists and works when it is done, seen from outside.
-- **Each phase has `checks`**: commands that prove the outcome and exit non-zero otherwise (a test
-  module, a smoke script). The harness runs them, so a phase that creates tests should check them.
-  Each phase checks its own outcome: not a command an earlier phase already passes (the whole suite
-  passes on the first phase's tests alone), and not only that a file exists. A user interface can
-  be checked by a test that fetches the page and finds its key elements. Do not add a phase that
-  only runs the tests.
+- **Each phase has `acceptance`**: the behaviour that closes it, in plain words, each with at
+  least one example — what is done through an interface → what must come out, with the exact
+  values (`quoted` text, status or exit codes, counts, JSON fields, hashes). Never code, class or
+  function names, test files or commands that only run tests: a verifier writes and runs the tests
+  against the code as it turns out.
 - **Cover the request with `requirements`**: split the user's request into one line per thing they
   named (each command, endpoint, message, behaviour; "look, go/n/s/e/w, say" is one requirement per
-  command), ids R1, R2, …, each with the phase that delivers it. Story writers must prove each one
-  with a check, and the harness reports any without a passing check as a gap.
+  command), ids R1, R2, …, each with the phase that delivers it. Each is proven by an expected
+  behaviour whose `covers` names it; the harness reports any without a passing test as a gap.
 - **The user's own command**: a command the request says must pass (e.g. `python -m unittest`) is
-  a check of the last phase, exactly as written. The harness runs it at the end in any case.
+  run by the harness at the last phase, exactly as written.
 - **Untrusted input** (HTTP paths, names, commands typed by users) gets handled in the phase that
   reads it: e.g. a static file server serves only files inside its folder."""
 
@@ -450,13 +472,22 @@ These rules replace "To finish" in "How the loop works" above: a story ends with
   done otherwise, and say why in your summary.
 - What the story **provides** is a contract later stories are written against: match it exactly,
   or say in the summary how and why you differ.
-- Run the acceptance checks yourself before calling complete_story. The harness runs them again
-  and refuses the story while one fails, and also runs any test file you add that no check runs.
-- When a check fails because of a bug in code an earlier story wrote, fixing it is part of this
+- The acceptance criteria are expected behaviour with examples: what is done through the
+  product's interface → what must come out. Build the product so that each example gives exactly
+  that output; try the examples yourself (run the command, send the request) before you finish.
+- Write unit tests for your own code in the tests folder and run them; the harness runs any test
+  file you add. Do not leave scripts or test files in the project root.
+- complete_story submits the story to an independent verifier, which writes and runs its own
+  tests of the examples. If one is not met you get its report back: fix the product, not the
+  tests, and call complete_story again.
+- When something fails because of a bug in code an earlier story wrote, fixing it is part of this
   story: fix a small bug (a few lines) with a regression test and name it in your summary. If the
   fix is bigger, call report_defect with the file, the problem and the failing output: the harness
   has a story written that fixes it, then runs this story again.
-- Put new tests in the tests folder; do not leave scripts or test files in the project root.
+- Never shape code around a test (an attribute, a special case or data that exists for the test
+  alone). If an acceptance criterion cannot be right — it asks for something the story is not
+  about, contradicts another, or no correct product can meet it — call report_defect with
+  `criterion` set to its text.
 - If you need the user's input, use ask_user. A plain-text reply without a tool call also ends
   the story, as not done."""
 

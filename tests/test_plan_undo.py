@@ -9,7 +9,7 @@ import unittest
 from harness.commands import handle as handle_command
 from harness.llm.base import ChatResponse
 from harness.plan import PLAN_FILENAME
-from test_story_plan import (ADD_OK, CALC_RIGHT, CALC_WRONG, FIX_ADD, PLAN_ARGS, Base,
+from test_story_plan import (CALC_RIGHT, CALC_WRONG, FIX_ADD, PLAN_ARGS, Base,
                              ScriptedClient, call, criterion, write_set)
 from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
@@ -18,7 +18,7 @@ NORMAL = {"title": "Calc", "goal": "Fix add().",
                     {"title": "Say so", "details": "Nothing to change."}]}
 CHECK_ADD = {"id": "S2", "title": "Check add()", "description": "add() adds.",
              "technical_details": "nothing to change", "depends_on": ["S1"],
-             "acceptance": [criterion("add(2, 3) → 5", ADD_OK)]}
+             "acceptance": [criterion("big numbers add too", "add(20, 30)", 50)]}
 
 
 class _Undo(Base):
@@ -110,7 +110,8 @@ class StoriesPlan(_Undo):
         self.assertEqual([s.status for s in plan.steps], ["pending", "pending"])
         self.assertEqual(plan.steps[0].report, "")
         self.assertEqual(plan.current_index(), 0)
-        self.assertIn("Plan progress back to pending: P1 S1, S2", report)
+        self.assertRegex(report, r"Plan progress back to pending: P1 (S1, S2|S2, S1)")
+        self.assertIn("tests/acceptance/p1_s1_c1_auto.py", report)   # its verifier's test goes too
         story_file = (self.wd / plan.stories_dir / "phase-1.md").read_text()
         self.assertIn("## [ ] S1 — Make add() add", story_file)
 

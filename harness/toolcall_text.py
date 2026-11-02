@@ -126,6 +126,42 @@ def _nameless_call(obj: dict, tools: list[dict]) -> dict | None:
     return {"name": fits[0], "arguments": dict(obj)} if len(fits) == 1 else None
 
 
+# name="value", or an unquoted list or dict: options=["a", "b"] (run 5's planner)
+_ATTR_VALUE = r'"(?:[^"\\]|\\.)*"|\[(?:[^\[\]"]|"(?:[^"\\]|\\.)*")*\]|\{(?:[^{}"]|"(?:[^"\\]|\\.)*")*\}'
+_RX_ATTR = re.compile(r'(\w+)\s*=\s*(' + _ATTR_VALUE + r')')
+
+
+def _attribute_calls(text: str, known: set[str]):
+    """(tool, arguments, start, end) for each `<tool attr="value" …/>` tag in
+    text naming a known tool; a value that looks like a list or a dict is
+    decoded."""
+    if not known:
+        return
+    pat = re.compile(r'<(' + '|'.join(re.escape(n) for n in sorted(known, key=len, reverse=True))
+                     + r')((?:\s+\w+\s*=\s*(?:' + _ATTR_VALUE + r'))+)\s*/?>')
+    for m in pat.finditer(text):
+        args = {k: _attribute_value(v[1:-1] if v.startswith('"') else v)
+                for k, v in _RX_ATTR.findall(m.group(2))}
+        yield m.group(1), args, m.start(), m.end()
+
+
+def _attribute_value(v: str):
+    v = v.strip()
+    if v[:1] in "[{":
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                return parse(v)
+            except Exception:
+                pass
+        # ['Include 'name' in every request', 'Use cookies'] — quotes inside
+        # the items: split on the item separators instead
+        inner = v[1:-1].strip()
+        if v.endswith("]") and inner[:1] in "'\"" and inner.endswith(inner[:1]):
+            q = inner[0]
+            return [x.strip() for x in inner[1:-1].split(f"{q}, {q}")]
+    return v
+
+
 def _cut_spans(text: str, spans: list[tuple[int, int]]) -> str:
     for start, end in sorted(spans, reverse=True):
         text = text[:start] + text[end:]
@@ -404,6 +440,12 @@ def recover_text_calls(text: str, tools: list[dict]) -> tuple[list[dict], str]:
             if (wrap := _RX_PRINT_OPEN.search(text, 0, start)) and \
                     (close := re.compile(r"\s*\)").match(text, end)):
                 start, end = wrap.start(), close.end()
+            cands.append((hit, (start, end)))
+
+    # <ask_choice question="…" options="[…]" />: a call written as a tag with
+    # attributes (run 4a's planner asked its question this way).
+    for fn, call_args, start, end in _attribute_calls(text, known):
+        if call_args and (hit := _accept_args(fn, call_args)):
             cands.append((hit, (start, end)))
 
     if not cands and known:

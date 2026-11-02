@@ -125,6 +125,14 @@ class PlanQuestions(unittest.TestCase):
         self.assertEqual(len(self.refusals()), 1)
         self.assertEqual(self.h.plan.request, "fix paging")
 
+    def test_planning_does_not_write_project_files_through_the_shell(self):
+        self.client.script = [("Prototyping.", [ToolCall("run_command",
+                                                         {"command": "cat > game.py <<EOF\nx = 1\nEOF"})]),
+                              choice_call(), plan_call()]
+        self.h.send("fix paging")
+        self.assertFalse((self.work / "game.py").exists())
+        self.assertTrue(any("ERROR: not run: it writes game.py" in r for r in self.client.results))
+
     def test_off_asks_nothing_first(self):
         self.cmd("/plan questions off")
         self.client.script = [plan_call()]

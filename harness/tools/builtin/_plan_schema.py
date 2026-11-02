@@ -34,30 +34,44 @@ def tdd_variant(ctx) -> str:
 # is done and the commands that close it.  Its stories come later, written per
 # phase by the story writer (plan_stories, write_story, finish_stories) against
 # the code as it is then.
-PHASE = {
+# An expected behaviour, as the user meets it, with examples: what is done
+# through the product's interface and what must come out.  No code: an
+# independent verifier writes and runs the test after the story is built.
+EXAMPLE = {
     "type": "object",
     "properties": {
-        "title":   {"type": "string", "description": "Short name for the phase, e.g. 'Frame encoding module'"},
-        "details": {"type": "string", "description": "What the phase covers: files, components, the design decisions it carries out"},
-        "outcome": {"type": "string", "description": "What exists and works when the phase is done, seen from outside"},
-        "checks":  {"type": "array", "items": {"type": "string"},
-                    "description": "Commands that prove the phase is done and exit non-zero otherwise, e.g. "
-                                   "'python3 -m unittest tests.test_frames'; the harness runs them before the next phase"},
-        "files":   {"type": "array", "items": {"type": "string"}, "description": "Files this phase creates or changes (workdir-relative)"},
+        "given":  {"type": "string", "description": "What is done, through the product's interface: a command typed, "
+                                                    "a request sent, a file given, a call made"},
+        "expect": {"type": "string", "description": "What must come out, with the exact values: `quoted` text, codes, "
+                                                    "counts, fields, hashes"},
     },
-    "required": ["title", "details", "outcome", "checks"],
+    "required": ["given", "expect"],
 }
 
 CRITERION = {
     "type": "object",
     "properties": {
-        "text":   {"type": "string", "description": "What must be true, concretely: '<input or action> → <expected result>'"},
-        "check":  {"type": "string", "description": "A command that proves it and exits non-zero otherwise; the harness "
-                                                    "runs it. Leave it out only for what no command can show."},
-        "covers": {"type": "array", "items": {"type": "string"},
-                   "description": "The plan's requirement ids this criterion's check proves, e.g. ['R3']"},
+        "behaviour": {"type": "string", "description": "The expected behaviour in plain words, as the user sees it"},
+        "examples":  {"type": "array", "items": EXAMPLE,
+                      "description": "At least one concrete example; never code, classes or methods"},
+        "covers":    {"type": "array", "items": {"type": "string"},
+                      "description": "The plan's requirement ids these examples prove, e.g. ['R3']"},
     },
-    "required": ["text"],
+    "required": ["behaviour", "examples"],
+}
+
+PHASE = {
+    "type": "object",
+    "properties": {
+        "title":      {"type": "string", "description": "Short name for the phase, e.g. 'Look around the world'"},
+        "details":    {"type": "string", "description": "What the phase covers: files, components, the design decisions it carries out"},
+        "outcome":    {"type": "string", "description": "What exists and works when the phase is done, seen from outside"},
+        "acceptance": {"type": "array", "items": CRITERION,
+                       "description": "The behaviour that closes the phase, observed through the product's "
+                                      "interfaces; a verifier tests it before the next phase"},
+        "files":      {"type": "array", "items": {"type": "string"}, "description": "Files this phase creates or changes (workdir-relative)"},
+    },
+    "required": ["title", "details", "outcome", "acceptance"],
 }
 
 # Stories plans: the user's request, one requirement per line, each delivered
@@ -86,7 +100,8 @@ STORY = {
                               "description": "Ids of stories that must be done first: S<n> in this phase, P<n>.S<m> for an earlier phase's"},
         "provides":          {"type": "array", "items": {"type": "string"},
                               "description": "What later stories may rely on once this is done: exact signatures and behaviour"},
-        "acceptance":        {"type": "array", "items": CRITERION, "description": "When the story is done; at least one, with check commands wherever possible"},
+        "acceptance":        {"type": "array", "items": CRITERION,
+                              "description": "When the story is done: expected behaviour with examples, at least one"},
     },
     "required": ["id", "title", "description", "technical_details", "acceptance"],
 }

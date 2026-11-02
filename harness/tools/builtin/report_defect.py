@@ -10,14 +10,19 @@ TOOL = Tool(
     tool_schema("report_defect",
         "Use when this story's checks fail because of a bug in code an EARLIER story wrote, and "
         "the fix is more than a few lines (fix a small one yourself and say so in complete_story's "
-        "summary). The harness has a separate story written that fixes the bug, then runs this "
-        "story again from the start. This ends the story: other tool calls after it in the same "
-        "turn are not run.",
+        "summary), or when one of this story's own acceptance criteria is wrong (pass 'criterion'). The "
+        "harness has a separate story written that fixes the bug (or a corrected story), then runs "
+        "it. This ends the story: other tool calls after it in the same turn are not run.",
         {"file":     {"type": "string", "description": "The file with the bug (workdir-relative)"},
          "problem":  {"type": "string",
                       "description": "What is wrong there and what it breaks, e.g. 'add_player() never "
                                      "puts the player in a room, so say reaches no one'"},
-         "evidence": {"type": "string", "description": "The failing check output that shows it"}},
+         "evidence": {"type": "string", "description": "The failing check output that shows it"},
+         "criterion": {"type": "string",
+                       "description": "Only when the defect is in one of THIS story's acceptance "
+                                      "criteria (it asks for something the story is not about, "
+                                      "contradicts another, or no correct product can meet it): that "
+                                      "criterion's text. The story writer then corrects it"}},
         ["problem"]),
     harness=True, locked=True, order=706, group="ask & plan", modes=frozenset({"story-exec"}),
     keeps_green=True,

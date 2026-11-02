@@ -11,7 +11,7 @@ from . import tdd as tdd_mod
 from . import tools as tools_mod
 from .tools import registry
 from .events import ChatEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
-from .stories import exists_only
+from .stories import check_problems, criterion_problems, exists_only
 from .plan import (ACCEPTANCE_TAG, PLAN_FILENAME, Plan, Step, delete_plan_file, read_plan_file,
                    request_commands, requirement_list,
                    str_list, write_plan_file)
@@ -77,6 +77,8 @@ def _phase_check_notes(steps) -> str:
     notes, seen = [], {}
     for i, s in enumerate(steps, 1):
         key = tuple(sorted(s.checks))
+        if not key:                     # a phase closed by expectations, not commands
+            continue
         if key in seen:
             notes.append(f"phases {seen[key]} and {i} have the same checks")
         seen.setdefault(key, i)
@@ -111,15 +113,84 @@ def _requirement_problems(plan: Plan, raw) -> str:
             errors.append(f"{r['id']} lists several things — one requirement per item")
     if isinstance(raw, list) and len(raw) != len(reqs):
         errors.append("every requirement needs an id and a text")
+    listed = _request_list_items(plan.request)
+    said = " ".join(r["text"] for r in reqs)
+    missing = [x for x in listed if not re.search(rf"(?i)(?<![\w-]){re.escape(x)}(?![\w-])", said)]
+    if missing:
+        # run 4a/4b: "Core game engine and parser" stood for nine commands
+        errors.append(f"the request lists {', '.join(listed)}; give each its own requirement — "
+                      f"none names {', '.join(missing)}")
+    if (_RX_SERVES_FILES.search(plan.request)
+            and not any(_RX_HOSTILE.search(r["text"]) for r in reqs)):
+        # run 2's server returned its own source for GET /../server.py; a
+        # prompt rule asking for that criterion did not land in run 3.
+        errors.append("the request has a server that serves files: add a requirement that it "
+                      "serves only files inside its folder (GET /../server.py → 404), in the "
+                      "phase that builds the server")
     return ("ERROR: fix the requirements: " + "; ".join(errors) + ". Call create_plan again "
             "with the complete plan.") if errors else ""
+
+
+# A request for a server that serves files (pages, static files) …
+_RX_SERVES_FILES = re.compile(
+    r"(?is)(?:http\.server|HTTPServer|web\s*server|\bserver\b).{0,200}?"
+    r"(?:serves?|serving)\b.{0,60}?(?:\.html|page|static|files?)\b"
+    r"|(?:serves?|serving)\b.{0,60}?(?:\.html|page|static|files?)\b.{0,200}?"
+    r"(?:http\.server|HTTPServer|web\s*server)")
+# … needs a requirement for the hostile path.
+_RX_HOSTILE = re.compile(r"(?i)\.\./|travers|outside (?:the|its)|only files (?:in|inside|under|from)"
+                         r"|only serves?|serves? only|untrusted|hostile|escap")
+
+
+# "Commands: look, go/n/s/e/w, say (to players in the room), who, …": a list in
+# the request, every item of which is a requirement.
+_RX_REQUEST_LIST = re.compile(r"(?:^|(?<=[.;:\n]))\s*([A-Z][\w -]{1,30}):\s*([^.\n]+)")
+
+
+def _request_list_items(request: str) -> list[str]:
+    """The first word of each item of a list of 3 or more in the request."""
+    items: list[str] = []
+    for m in _RX_REQUEST_LIST.finditer(request or ""):
+        parts = [p.strip() for p in m.group(2).split(",")]
+        if len(parts) < 3:
+            continue
+        for part in parts:
+            words = re.sub(r"\([^)]*\)", "", part).strip().split()
+            if words and words[0].lower() in ("and", "or"):
+                words = words[1:]
+            head = re.split(r"/", words[0])[0].strip("`'\"").lower() if words else ""
+            if head and head not in items:
+                items.append(head)
+    return items
+
+
+_RX_HTTP_ACTION = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+/")
+
+
+def acts_through_interface(given: str, interfaces: list[str]) -> bool:
+    """Whether an example's action goes through one of the declared interfaces:
+    an HTTP request, a command line in backticks, a path or command an interface
+    names, or a call of a declared library."""
+    if _RX_HTTP_ACTION.search(given) or re.search(r"`[^`\s]+\s[^`]+`", given):
+        return True
+    for x in interfaces:
+        if x.lower().startswith("library") and re.search(r"\w\(", given):
+            return True
+        for code in re.findall(r"`([^`]+)`", x):
+            if any(t in given for t in re.findall(r"[\w./:-]+", code)
+                   if len(t) > 2 and ("/" in t or "." in t)):
+                return True
+    return False
 
 
 def _request_command_note(plan: Plan) -> str:
     """A note when a command the request says must pass is not a check of the
     last phase as written (the harness runs it at the last gate anyway)."""
-    last = plan.steps[-1].checks if plan.steps else []
-    missing = [c for c in request_commands(plan.request) if c not in last]
+    step = plan.steps[-1] if plan.steps else None
+    said = " ".join((step.checks if step else [])
+                    + [f"{e['given']} {e['expect']}" for c in (step.acceptance if step else [])
+                       for e in c.examples])
+    missing = [c for c in request_commands(plan.request) if c not in said]
     if not missing:
         return ""
     return ("Note: the request says " + ", ".join(f"`{c}`" for c in missing)
@@ -361,11 +432,46 @@ class PlanRunnerMixin:
                 return err
             approve_note = f" Approving also lets the harness run `{plan.test_command}` after every step."
         if self.plan_kind == "stories":
-            incomplete = [s.title for s in steps if not s.outcome or not s.checks]
+            incomplete = [s.title for s in steps if not s.outcome or not s.acceptance]
             if incomplete:
-                return ("ERROR: every phase needs an 'outcome' and at least one command in "
-                        f"'checks'; missing in: {', '.join(incomplete)}. Call create_plan again "
+                return ("ERROR: every phase needs an 'outcome' and 'acceptance': the expected "
+                        "behaviour that closes it, each with examples (an action through the "
+                        "product's interface → the output it must give); missing in: "
+                        f"{', '.join(incomplete)}. Call create_plan again with the complete plan.")
+            plan.interfaces = str_list(args.get("interfaces"))
+            if not plan.interfaces:
+                return ("ERROR: name how the product is used in 'interfaces' — one line per way "
+                        "in, e.g. \"CLI: `python3 tool.py <file>`\", \"Service: `python3 "
+                        "server.py`, HTTP on localhost:8000\", \"Library: `import pager`\". "
+                        "The acceptance examples act through these. Call create_plan again "
                         "with the complete plan.")
+            from .story_runner import MAX_COVERS
+            wrong = [f"phase {i}: {e}" for i, st in enumerate(steps, 1) for c in st.acceptance
+                     for e in criterion_problems(c)]
+            first = [e["given"] for c in steps[0].acceptance for e in c.examples] if steps else []
+            if first and not any(acts_through_interface(g, plan.interfaces) for g in first):
+                # run 4a/4b's first plans built the engine first, with parser
+                # return values as examples
+                wrong.append("phase 1: make it a thin end-to-end slice the user can try through "
+                             "an interface — at least one example acts through one (a request "
+                             "such as `POST /api/command …`, a command line, a library call)")
+            wrong += [f"phase {i}: \"{c.text[:60]}\" covers {len(c.covers)} requirements — name only "
+                      f"what its own examples show (at most {MAX_COVERS})"
+                      for i, st in enumerate(steps, 1) for c in st.acceptance
+                      if len(c.covers) > MAX_COVERS]
+            if wrong:
+                return ("ERROR: fix these phase expectations:\n" + "\n".join(f"- {w}" for w in wrong)
+                        + "\nCall create_plan again with the complete plan.")
+            planned = {f for st in steps for f in st.files}
+            bad = [f"phase {i}: `{c}` {e}" for i, st in enumerate(steps, 1) for c in st.checks
+                   for e in check_problems(c, self.workdir, planned)]
+            if bad:
+                # run 3's first plan: a print-only check, `server.py & … curl`
+                # left running, and `ls static/index.html` — the story rules
+                # refused such checks, but phase checks were never read.
+                return ("ERROR: these phase checks cannot prove their phase:\n"
+                        + "\n".join(f"- {b}" for b in bad)
+                        + "\nCall create_plan again with the complete plan.")
             plan.requirements = requirement_list(args.get("requirements"))
             err = _requirement_problems(plan, args.get("requirements"))
             if err:

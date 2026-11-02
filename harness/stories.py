@@ -60,22 +60,77 @@ def _ids(v) -> list[str]:
 
 @dataclass
 class Criterion:
+    """One acceptance criterion: an expected behaviour in plain language
+    (`text`) with concrete examples — an action through the product's
+    interface and the output it must give.  An independent verifier pass
+    writes and runs a test for it after the story is implemented; the harness
+    keeps that test (`test`) and its verdict.  `check` is the older form, a
+    shell command the writer gave up front; it still loads and runs."""
     text: str
-    check: str | None = None   # a command the harness runs; None: the model backs it with evidence
+    check: str | None = None   # legacy: a command the harness runs
     covers: list[str] = field(default_factory=list)   # the plan's requirement ids (R1, …) it proves
+    examples: list[dict] = field(default_factory=list)  # [{"given": …, "expect": …}]
+    test: dict | None = None   # the verifier's saved test: {"path", "command"}
+    verdict: dict | None = None  # {"passed": bool, "evidence": str, "at": iso}
 
     @classmethod
     def from_dict(cls, d) -> "Criterion":
         if isinstance(d, str):
             return cls(text=d.strip())
         check = d.get("check")
-        return cls(text=str(d.get("text", "") or "").strip(),
+        test = d.get("test") if isinstance(d.get("test"), dict) else None
+        verdict = d.get("verdict") if isinstance(d.get("verdict"), dict) else None
+        return cls(text=str(d.get("behaviour") or d.get("text") or "").strip(),
                    check=None if check is None else str(check).strip(),
-                   covers=_requirement_ids(d.get("covers")))
+                   covers=_requirement_ids(d.get("covers")),
+                   examples=_examples(d.get("examples")),
+                   test=({"path": str(test.get("path") or ""), "command": str(test.get("command") or "")}
+                         if test and test.get("command") else None),
+                   verdict=verdict)
 
     def to_dict(self) -> dict:
         return {"text": self.text, **({"check": self.check} if self.check is not None else {}),
-                **({"covers": self.covers} if self.covers else {})}
+                **({"covers": self.covers} if self.covers else {}),
+                **({"examples": self.examples} if self.examples else {}),
+                **({"test": self.test} if self.test else {}),
+                **({"verdict": self.verdict} if self.verdict else {})}
+
+    def to_markdown(self, indent: str = "  ") -> list[str]:
+        """The lines under the criterion's own `- text` line."""
+        lines = [f"{indent}Example: {e['given']} → {e['expect']}" for e in self.examples]
+        if self.check is not None:
+            lines.append(f"{indent}Check: `{self.check}`")
+        if self.covers:
+            lines.append(f"{indent}Covers: {', '.join(self.covers)}")
+        if self.test:
+            lines.append(f"{indent}Test: `{self.test['command']}`"
+                         + (f" ({self.test['path']})" if self.test.get("path") else ""))
+        return lines
+
+    @property
+    def proven(self) -> bool:
+        """The verifier's test for it passed (or, legacy, its check did)."""
+        return bool(self.verdict and self.verdict.get("passed"))
+
+
+def _examples(v) -> list[dict]:
+    """[{"given", "expect"}] from a list of dicts or of "given → expect" strings."""
+    out = []
+    for e in v if isinstance(v, list) else []:
+        if isinstance(e, dict):
+            given = " ".join(str(e.get("given") or "").split())
+            expect = " ".join(str(e.get("expect") or "").split())
+        elif isinstance(e, str) and _RX_ARROW.search(e):
+            given, expect = (x.strip() for x in _RX_ARROW.split(e, 1))
+        else:
+            continue
+        if given or expect:
+            out.append({"given": given, "expect": expect})
+    return out
+
+
+_RX_ARROW = re.compile(r"\s+(?:→|->|=>)\s+")
+_RX_TEST_LINE = re.compile(r"^`(.+)`\s*(?:\((.+)\))?$")
 
 
 @dataclass
@@ -159,11 +214,10 @@ class Story:
         if not self.description:
             errors.append(f"{where}: no description")
         if not self.acceptance:
-            errors.append(f"{where}: no acceptance criteria — add at least one, with a "
-                          "check command where it can be checked by running something")
+            errors.append(f"{where}: no acceptance criteria — add at least one expected "
+                          "behaviour with examples (an action → the output it must give)")
         for c in self.acceptance:
-            if not c.text:
-                errors.append(f"{where}: an acceptance criterion has no text")
+            errors += [f"{where}: {e}" for e in criterion_problems(c)]
             if c.check is not None and not c.check:
                 errors.append(f"{where}: empty check for \"{c.text}\" — give the command, "
                               "or leave check out for a criterion backed by evidence")
@@ -205,10 +259,7 @@ class Story:
         lines += ["", "### Acceptance"]
         for c in self.acceptance:
             lines.append(f"- {c.text}")
-            if c.check is not None:
-                lines.append(f"  Check: `{c.check}`")
-            if c.covers:
-                lines.append(f"  Covers: {', '.join(c.covers)}")
+            lines += c.to_markdown()
         if self.delivered or self.facts:
             lines += ["", "### Delivered"]
             if self.delivered:
@@ -326,8 +377,10 @@ class StorySet:
         parts = [head, "", f"Status: {state} · {self.progress()} done", "",
                  "<!-- One story per '## [ ] S<n> — title' heading. Legend: [ ] pending · "
                  "[~] in progress · [x] done · [!] failed · [-] replaced. 'Depends:' lists "
-                 "story ids (P<n>.S<m> for earlier phases); 'Check:' under an acceptance "
-                 "criterion is a command the harness runs. -->"]
+                 "story ids (P<n>.S<m> for earlier phases). Under an acceptance criterion, "
+                 "'Example:' is an action → the output it must give, 'Test:' the acceptance "
+                 "test the verifier saved for it, and 'Check:' (older plans) a command the "
+                 "harness runs. -->"]
         for s in self.stories:
             parts += ["", s.to_markdown()]
         if self.report:
@@ -436,6 +489,12 @@ class StorySet:
                     old.defect)
                 if [c.check for c in s.acceptance] == [c.check for c in old.acceptance]:
                     s.check_results = old.check_results
+                for c in s.acceptance:          # a verdict belongs to an unchanged expectation
+                    same = next((o for o in old.acceptance if o.text == c.text
+                                 and o.examples == c.examples), None)
+                    if same is not None:
+                        c.test = c.test or same.test
+                        c.verdict = same.verdict
             merged.append(s)
         merged += kept.values()
         merged.sort(key=lambda s: s.number)
@@ -460,20 +519,83 @@ def _count(v) -> int:
         return 0
 
 
+# Code in an expectation: run 2–3's criteria named classes and methods
+# (`Room.__issubclass__`, `parse_command('go north')`), which tied them to code
+# the writer had not seen.  A plain `name(args)` stays allowed: a library's
+# public call is how its user meets it.
+_RX_CODE = re.compile(r"\bimport\s+\w|\bassert\b|\bdef\s+\w|\blambda\b|__\w+__"
+                      r"|\b[A-Za-z_]\w*\.[A-Za-z_]\w*\s*\(")
+# Running the test suite is not a behaviour the user sees (run 4b's phase 1:
+# "python3 -m unittest test_game.py → exit code 0" claimed all nine commands);
+# the harness runs the request's own test command at the end anyway.
+_RX_TEST_RUN = re.compile(r"^\W*(?:python3?\s+-m\s+(?:unittest|pytest)|pytest|npm\s+(?:run\s+)?test"
+                          r"|yarn\s+test|go\s+test|cargo\s+test|make\s+(?:test|check))\b")
+# A value the verifier can check: `quoted`, "quoted", 'quoted', or a number.
+_RX_CONCRETE = re.compile(r"`[^`]+`|\"[^\"]+\"|'[^']+'|\b\d+\b")
+
+
+def criterion_problems(c: Criterion) -> list[str]:
+    """What is wrong with one acceptance criterion as an expectation ([] when
+    nothing): it needs the behaviour, at least one example with a concrete
+    expected value, and no code.  A legacy criterion (a `check` and no
+    examples) is left to check_problems."""
+    shown = c.text if len(c.text) <= 60 else c.text[:57] + "…"
+    if not c.text:
+        return ["an acceptance criterion has no behaviour"]
+    if c.check is not None and not c.examples:
+        return []
+    errors = []
+    if not c.examples:
+        errors.append(f"\"{shown}\" needs at least one example: an action through the "
+                      "product's interface → the output it must give")
+    for e in c.examples:
+        if not e.get("given") or not e.get("expect"):
+            errors.append(f"\"{shown}\": an example needs both what is done (given) and "
+                          "what must come out (expect)")
+        elif not _RX_CONCRETE.search(e["expect"]):
+            errors.append(f"\"{shown}\": the verifier cannot check \"{e['expect'][:60]}\" — "
+                          "give the expected value in backticks or as a number, e.g. exit code "
+                          "`0`, status `200`, the reply contains `Great Hall`, `3` items")
+    if c.examples and all(_RX_TEST_RUN.match(e.get("given", "")) for e in c.examples):
+        errors.append(f"\"{shown}\": running the tests is not a behaviour the user sees (the "
+                      "harness runs the request's test command itself) — give what the user does "
+                      "through the product's interface and what comes out")
+    code = next((t for t in [c.text] + [x for e in c.examples for x in e.values()]
+                 if _RX_CODE.search(t)), "")
+    if code:
+        errors.append(f"\"{shown}\" contains code ({_RX_CODE.search(code).group(0).strip()}…) — "
+                      "describe what the user does and observes, not classes, methods or test "
+                      "code")
+    return errors
+
+
+def criterion_line(c: Criterion, line: str) -> bool:
+    """Apply an `Example:` / `Covers:` / `Test:` / `Check:` line to criterion c;
+    False when the line is none of these."""
+    m = re.match(r"^(check|covers|example|test):\s*(.*)$", line.strip(), re.I)
+    if not m:
+        return False
+    key, val = m.group(1).lower(), m.group(2).strip()
+    if key == "check":
+        c.check = val.strip("`").strip()
+    elif key == "covers":
+        c.covers = _requirement_ids(val)
+    elif key == "example":
+        c.examples += _examples([val])
+    else:
+        t = _RX_TEST_LINE.match(val)
+        if t:
+            c.test = {"command": t.group(1).strip(), "path": (t.group(2) or "").strip()}
+    return True
+
+
 def _parse_acceptance(lines: list[str]) -> list[Criterion]:
     out: list[Criterion] = []
     for line in lines:
         s = line.strip()
-        if not s:
+        if not s or (out and criterion_line(out[-1], s)):
             continue
-        m = re.match(r"^check:\s*(.*)$", s, re.I)
-        if m and out:
-            out[-1].check = m.group(1).strip().strip("`").strip()
-            continue
-        m = re.match(r"^covers:\s*(.*)$", s, re.I)
-        if m and out:
-            out[-1].covers = _requirement_ids(m.group(1))
-        elif s.startswith(("-", "*")):
+        if s.startswith(("-", "*")):
             out.append(Criterion(text=s.lstrip("-* ").strip()))
         elif out:
             out[-1].text = f"{out[-1].text} {s}".strip()
@@ -494,7 +616,10 @@ _RX_TEMP = re.compile(r"tmp|temp", re.I)
 # localhost:8000 with nothing listening, so it could never pass.
 _RX_KILL = re.compile(r"(?:^|[\s;&|(])(?:pkill|killall|kill)\s|\bos\.kill(?:pg)?\s*\(")
 _RX_LOCAL_URL = re.compile(r"\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b")
-_RX_STARTS = re.compile(r"Popen|subprocess|Thread|serve_forever|HTTPServer|&\s*(?:$|[^&])")
+_RX_STARTS = re.compile(r"Popen|subprocess|Thread|serve_forever|HTTPServer")
+# `server.py & sleep 2 && curl …`: a lone & leaves the process running after the
+# check (run 3's phase 3 check; a story's background server held :8000).
+_RX_BACKGROUND = re.compile(r"(?<![&>|])&(?![&>])")
 _RX_EXISTS_ONLY = re.compile(r"^(?:\s*(?:&&|;)?\s*(?:ls\s+\S+|test\s+-[efsd]\s+\S+|\[\s+-[efsd]\s+\S+\s+\]))+\s*$")
 _EXISTS_CALLS = {"exists", "isfile", "isdir", "is_file", "is_dir"}
 _EXIT_CALLS = {"exit", "_exit", "main", "fail"}     # sys.exit, os._exit, unittest.main, self.fail
@@ -518,6 +643,10 @@ def check_problems(cmd: str, workdir: Path | None = None, planned=()) -> list[st
     if _RX_KILL.search(cmd):
         errors.append("stops processes — a check must not kill what it did not start (a test "
                       "that starts a server stops it itself, in tearDown)")
+    if _RX_BACKGROUND.search(cmd):
+        errors.append("starts a process in the background (&) and leaves it running; write a "
+                      "unittest that starts the server in setUpClass and stops it in "
+                      "tearDownClass")
     if _RX_LOCAL_URL.search(cmd) and not _RX_STARTS.search(cmd):
         errors.append("talks to a local server it does not start, so it fails when nothing is "
                       "running; write a unittest that starts the server in setUpClass and "
@@ -528,7 +657,54 @@ def check_problems(cmd: str, workdir: Path | None = None, planned=()) -> list[st
     for i, a in enumerate(argv[:-2]):
         if _RX_PYTHON.match(a) and argv[i + 1] == "-c":
             errors += _python_problems(argv[i + 2], workdir, planned)
+    for f in check_files(cmd):
+        if workdir is not None and f not in planned and not (workdir / f).exists():
+            errors.append(f"runs {f}, which does not exist and is not among the files to be "
+                          "written — add it to the files of the story (or phase) that writes it")
     return errors
+
+
+def check_files(cmd: str) -> list[str]:
+    """The test files a check command runs, as workdir-relative paths:
+    `python3 tests/x.py`, `-m unittest tests/x.py` or `tests.x[.Class.test]`,
+    `pytest tests/x.py::name`.  A check whose file nobody writes can never
+    pass (run 3's P3.S5 wrote its tests elsewhere and used up two stories'
+    turns on them)."""
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return []
+    out: list[str] = []
+
+    def add(path: str) -> None:
+        if path and path not in out:
+            out.append(path)
+
+    for i, a in enumerate(argv):
+        if _RX_PYTHON.match(a) and i + 1 < len(argv) and argv[i + 1].endswith(".py"):
+            add(argv[i + 1])
+        runner = (a == "-m" and i + 1 < len(argv) and argv[i + 1] in ("unittest", "pytest")) \
+            or PurePosixPath(a).name in ("pytest", "py.test")
+        if not runner:
+            continue
+        for x in argv[i + (2 if a == "-m" else 1):]:
+            if x.startswith("-") or x in ("discover",) or any(c in x for c in ";&|"):
+                if any(c in x for c in ";&|"):
+                    break
+                continue
+            x = x.split("::")[0]
+            if x.endswith(".py"):
+                add(x)
+            elif re.fullmatch(r"[A-Za-z_][\w.]*", x) and "." in x:
+                parts = []
+                for part in x.split("."):
+                    if part[:1].isupper():
+                        break             # tests.test_game.TestGame.test_look
+                    parts.append(part)
+                if len(parts) > 1:
+                    add("/".join(parts) + ".py")
+        break
+    return out
 
 
 def exists_only(cmd: str) -> bool:
@@ -716,14 +892,15 @@ def validate_outline(outline: list[dict], kept: list[Story] | None = None,
 
 def _duplicates(live: list[Story]) -> list[str]:
     """Unfinished stories that are the same story twice: the same title, or the
-    same files and checks (a re-split in the story-mud run wrote S2-S4 again as
+    same files and checks or examples (a re-split in the story-mud run wrote S2-S4 again as
     S5-S7 and S8-S10 while the originals stayed pending)."""
     errors, seen = [], {}
     for s in live:
         if s.finished or s.status == "in_progress":
             continue
         title = re.sub(r"[\W_]+", " ", s.title.lower()).strip()
-        checks = frozenset(c.check for c in s.acceptance if c.check)
+        checks = frozenset([c.check for c in s.acceptance if c.check]
+                           + [f"{e['given']} → {e['expect']}" for c in s.acceptance for e in c.examples])
         keys = []
         if title and title != "untitled story":
             keys.append(("title", title))

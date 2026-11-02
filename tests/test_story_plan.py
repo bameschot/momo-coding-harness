@@ -1,10 +1,12 @@
 """Stories plans (/plan stories) run end to end: the planner's phases, a story
-writer per phase, each story in a fresh context and accepted only when its
-checks pass, the phase checks and report, re-splitting a failed story, and
-the commands and settings.
+writer per phase, each story in a fresh context and accepted only when an
+independent verifier pass finds its expected behaviour, the phase gate and
+report, re-splitting a failed story, and the commands and settings.
 
 Run with HOME pointed at a scratch dir — the harness writes prefs and sessions.
 """
+import json
+import re
 import shlex
 import sys
 import tempfile
@@ -52,34 +54,81 @@ def write_set(*stories, revision=None):
             + [call("finish_stories", **({"phase_revision": revision} if revision else {}))])
 
 
-def criterion(text, check, covers=None):
+def criterion(text, given, value, covers=None):
+    """An expected behaviour with one example: `given` is a call of calc's
+    public functions, `value` the result it must give."""
+    return {"behaviour": text, "examples": [{"given": given, "expect": f"`{value}`"}],
+            **({"covers": covers} if covers else {})}
+
+
+def legacy(text, check, covers=None):
+    """A criterion of an older plan: a shell check, no examples."""
     return {"text": text, "check": check, **({"covers": covers} if covers else {})}
 
 
+ADD = criterion("add() adds", "add(2, 3)", 5, ["R1"])
+SUB = criterion("sub() subtracts", "sub(5, 3)", 2, ["R2"])
+
 PLAN_ARGS = {
     "title": "Calc", "goal": "add() returns 0; also add sub().",
+    "interfaces": ["Library: `import calc`"],
     "steps": [
         {"title": "Fix add", "details": "calc.py add()", "outcome": "add(2, 3) == 5",
-         "checks": [ADD_OK], "files": ["calc.py"]},
+         "acceptance": [criterion("adding works", "add(1, 1)", 2)], "files": ["calc.py"]},
         {"title": "Add sub", "details": "calc.py sub()", "outcome": "sub(5, 3) == 2",
-         "checks": [SUB_OK], "files": ["calc.py"]}],
+         "acceptance": [criterion("subtracting works", "sub(3, 1)", 2)], "files": ["calc.py"]}],
     "requirements": [{"id": "R1", "text": "add(2, 3) returns 5", "phase": 1},
                      {"id": "R2", "text": "sub(5, 3) returns 2", "phase": 2}]}
 
 FIX_ADD = {"id": "S1", "title": "Make add() add", "description": "add() returns 0.",
            "technical_details": "def add(a, b) -> a + b", "files": ["calc.py"],
-           "provides": ["add(a, b) -> a + b in calc.py"],
-           "acceptance": [criterion("add(2, 3) → 5", ADD_OK, ["R1"])]}
+           "provides": ["add(a, b) -> a + b in calc.py"], "acceptance": [ADD]}
 ADD_SUB = {"id": "S1", "title": "Add sub()", "description": "Subtract.",
            "technical_details": "def sub(a, b) -> a - b", "files": ["calc.py"],
-           "depends_on": ["P1.S1"], "acceptance": [criterion("sub(5, 3) → 2", SUB_OK, ["R2"])]}
+           "depends_on": ["P1.S1"], "acceptance": [SUB]}
+
+# The verifier's test the fake model writes for an example: it calls calc's
+# public function the example gives and compares the result with the value it
+# expects, so a wrong add() really fails verification.
+TEST_PY = """import sys
+sys.path.insert(0, ".")
+from calc import *
+sys.exit(0 if repr(eval({given!r})) == {value!r} else 1)
+"""
+_RX_EXPECTATION = re.compile(r"### Expectation (\d+): .*\n- Example: (.+?) → `([^`]+)`\n"
+                             r"(?:- Example: .*\n)*- Save its test as `([^`]+)`")
+
+
+def auto_verify(messages):
+    """The fake verifier: first turn, write and save a test per expectation;
+    then the verdicts, read from what saving them reported."""
+    saved = [m for m in messages if m.get("role") == "tool" and m.get("name") == "save_acceptance_test"]
+    found = _RX_EXPECTATION.findall(messages[1]["content"])
+    if not saved:
+        calls = []
+        for num, given, value, name in found:
+            path = name.replace("<short-name>.<ext>", "auto.py")
+            calls += [ToolCall("write_file", {"path": path,
+                                              "content": TEST_PY.format(given=given, value=value)}),
+                      ToolCall("save_acceptance_test", {"expectation": int(num), "path": path,
+                                                        "command": f"{PY} {path}"})]
+        return ChatResponse(content="", tool_calls=calls, done_reason="stop")
+    results = [{"expectation": int(num),
+                "verdict": "pass" if "it passes" in m["content"] else "fail",
+                "evidence": "" if "it passes" in m["content"] else "the call gave another value"}
+               for (num, *_), m in zip(found, saved[-len(found):])]
+    return ChatResponse(content="", tool_calls=[ToolCall("finish_verification", {"results": results})],
+                        done_reason="stop")
 
 
 class ScriptedClient(LLMClient):
     """Replies with `script`, one per tool-loop turn, then "Done.".  A call
-    without tools (the phase report) gets REPORT.  Every request is kept."""
+    without tools (the phase report) gets REPORT; the verifier role gets
+    `verifier` replies if any are queued, else auto_verify.  Every request is
+    kept."""
     provider_name = "fake"
     script: list = []
+    verifier: list = []
     requests: list = []
 
     def chat(self, messages, tools, think=None, num_ctx=None, on_delta=None):
@@ -87,6 +136,10 @@ class ScriptedClient(LLMClient):
         ScriptedClient.requests.append({"messages": [dict(m) for m in messages], "tools": names})
         if not tools:
             return ChatResponse(content=REPORT, done_reason="stop")
+        if "finish_verification" in names:
+            if ScriptedClient.verifier:
+                return ScriptedClient.verifier.pop(0)
+            return auto_verify(messages)
         if ScriptedClient.script:
             return ScriptedClient.script.pop(0)
         return ChatResponse(content="Done.", done_reason="stop")
@@ -108,7 +161,7 @@ class Base(unittest.TestCase):
         (self.wd / "calc.py").write_text(CALC_WRONG)
         self._orig = hmod.make_client
         hmod.make_client = lambda *a, **k: ScriptedClient("http://fake", "fake")
-        ScriptedClient.script, ScriptedClient.requests = [], []
+        ScriptedClient.script, ScriptedClient.requests, ScriptedClient.verifier = [], [], []
         self.h = hmod.Harness(host="http://fake", model="fake", workdir=self.wd)
         self.h.plan_questions = False   # scripts plan without asking; see test_plan_questions
         self.h.stream = False
@@ -127,17 +180,21 @@ class Base(unittest.TestCase):
         self.questions.append(question)
         return self.answers.pop(0) if self.answers else "y"
 
-    def run_plan(self, script):
+    def run_plan(self, script, plan=None, request="make calc work"):
         """Plan mode with a stories plan: create_plan, approval, execution."""
         self.h.set_mode("plan")
         self.assertEqual(self.h.set_plan_kind("stories"), "")
-        ScriptedClient.script = [call("create_plan", **PLAN_ARGS)] + script
-        self.h.send("make calc work")
+        ScriptedClient.script = [call("create_plan", **(plan or PLAN_ARGS))] + script
+        self.h.send(request)
 
     def story_requests(self):
         """The first request of each story: its fresh context."""
         return [r for r in ScriptedClient.requests
                 if "complete_story" in r["tools"] and len(r["messages"]) == 2]
+
+    def verifier_requests(self):
+        return [r for r in ScriptedClient.requests
+                if "finish_verification" in r["tools"] and len(r["messages"]) == 2]
 
     def writer_requests(self):
         return [r for r in ScriptedClient.requests
@@ -187,7 +244,8 @@ class Run(Base):
         self.assertEqual(len(writers), 2)
         brief = stories[0]["messages"][1]["content"]
         self.assertIn("# Story S1 of phase 1: Make add() add", brief)
-        self.assertIn(ADD_OK, brief)
+        self.assertIn("- add() adds\n  Example: add(2, 3) → `5`", brief)
+        self.assertIn("- Library: `import calc`", brief)
         self.assertIn("## Implementing one story", stories[0]["messages"][0]["content"])
         self.assertIn("story writer", writers[0]["messages"][0]["content"])
         self.assertTrue(any(r.get("by") == "story" for r in self.h.compacted))
@@ -214,23 +272,50 @@ class Run(Base):
         s1 = self.h.plan.story_sets[1].get("S1")
         self.assertEqual(s1.status, "done")
         self.assertEqual(s1.facts["files"], ["calc.py"])
-        self.assertEqual(s1.facts["checks"], [ADD_OK])
+        self.assertEqual(s1.facts["checks"], [f"{PY} tests/acceptance/p1_s1_c1_auto.py"])
         report = self.h.plan.steps[0].report
         self.assertTrue(report.startswith(REPORT))
-        self.assertIn(f"## Requirements\n- ✓ R1 add(2, 3) returns 5 — P1.S1: `{ADD_OK}`", report)
+        self.assertIn(f"## Requirements\n- ✓ R1 add(2, 3) returns 5 — P1.S1: "
+                      f"`{PY} tests/acceptance/p1_s1_c1_auto.py`", report)
 
-    def test_a_failing_check_refuses_the_story(self):
+    def test_an_unmet_expectation_goes_back_to_the_implementer(self):
         self.run_plan([
             *write_set(FIX_ADD),
             call("complete_story", summary="done?"),               # calc.py still wrong
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="fixed"),
             ChatResponse(content="stop", done_reason="stop")])
+        reports = {m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                   if m.get("role") == "user" and "[Verifier report" in (m.get("content") or "")}
+        self.assertEqual(len(reports), 1)
+        report = reports.pop()
+        self.assertIn("✗ add() adds\n  example: add(2, 3) → `5`", report)
+        self.assertIn(f"run its test: `{PY} tests/acceptance/p1_s1_c1_auto.py`", report)
+        s1 = self.h.plan.story_sets[1].get("S1")
+        self.assertEqual((s1.status, s1.refusals), ("done", 1))
+        self.assertTrue(s1.acceptance[0].proven)
+        # the implementer went on in its own context, after its complete_story
+        impl = [r for r in ScriptedClient.requests if "complete_story" in r["tools"]]
+        self.assertTrue(any("[Verifier report" in (m.get("content") or "") for m in impl[-1]["messages"]))
+        self.assertEqual(len(self.verifier_requests()), 3)   # S1 twice, then phase 1's gate
+
+    def test_the_verifier_cannot_touch_product_code_or_cheat(self):
+        ScriptedClient.verifier = [
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("write_file", path="tests/acceptance/p1_s1_c1_x.py", content="import sys\nsys.exit(0)\n"),
+            call("save_acceptance_test", expectation=1, path="tests/acceptance/p1_s1_c1_x.py",
+                 command=f"{PY} tests/acceptance/p1_s1_c1_x.py"),
+            call("finish_verification", results=[{"expectation": 1, "verdict": "pass"}]),
+        ]
+        self.run_plan([*write_set(FIX_ADD), call("complete_story", summary="done?"),
+                       ChatResponse(content="stop", done_reason="stop")])
         results = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
-                   if m.get("role") == "tool" and "story not complete" in (m.get("content") or "")]
-        self.assertTrue(results)
-        self.assertIn("✗ add(2, 3) → 5", results[0])
-        self.assertEqual(self.h.plan.story_sets[1].get("S1").status, "done")
+                   if m.get("role") == "tool"]
+        self.assertTrue(any("the verifier writes only in tests/acceptance/" in x for x in results))
+        self.assertEqual((self.wd / "calc.py").read_text(), CALC_WRONG)
+        self.assertTrue(any("does not check the example's expected value `5`" in x for x in results))
+        self.assertTrue(any("'pass' needs a saved test that passes — none is saved" in x
+                            for x in results))
 
 
 class Progress(Base):
@@ -241,7 +326,7 @@ class Progress(Base):
         s1 = self.h.plan.story_sets[1].get("S1")
         self.assertTrue(s1.started_at and s1.finished_at)
         self.assertEqual(s1.turns, 2)                          # write_file, complete_story
-        self.assertEqual(s1.check_results[0]["passed"], True)
+        self.assertEqual(s1.acceptance[0].verdict["passed"], True)
         self.assertEqual(self.h.plan.story_sets[1].gate["passed"], True)
         self.assertTrue(any(s.startswith("▶ P1.S1 — Make add() add") for s in self.system_lines()))
 
@@ -254,7 +339,7 @@ class Progress(Base):
             ChatResponse(content="stop", done_reason="stop")])
         s1 = self.h.plan.story_sets[1].get("S1")
         self.assertEqual(s1.refusals, 1)
-        self.assertEqual(s1.check_results[0]["passed"], True)  # the later pass replaced the ✗
+        self.assertEqual(s1.acceptance[0].verdict["passed"], True)  # the later pass replaced the ✗
 
     def test_the_status_line_counts_turns(self):
         seen = []
@@ -265,7 +350,7 @@ class Progress(Base):
             seen.append(self.h._plan_progress())
         self.h._story_tick = tick
         self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
-        self.assertIn("phase 1/2 · S1 (0/1) · turn 2/30", seen)
+        self.assertIn("phase 1/2 · S1 (0/1) · turn 2/40", seen)
         self.assertIn("phase 1/2 · writing stories", seen)
 
     def test_the_view(self):
@@ -281,10 +366,12 @@ class Progress(Base):
         s1, s2 = p1["stories"]
         self.assertEqual(s1["dependents"], ["S2"])
         self.assertEqual(s2["depends_on"], ["S1"])
-        self.assertEqual(s1["criteria"][0]["check"], ADD_OK)
+        self.assertEqual(s1["criteria"][0]["text"], "add() adds\n  e.g. add(2, 3) → `5`")
+        self.assertEqual(s1["criteria"][0]["check"], f"{PY} tests/acceptance/p1_s1_c1_auto.py")
+        self.assertEqual(s1["criteria"][0]["result"]["passed"], False)   # calc.py is still wrong
         self.assertEqual(s1["technical_details"], "def add(a, b) -> a + b")
         self.assertEqual(s1["provides"], ["add(a, b) -> a + b in calc.py"])
-        self.assertEqual(view["cap"], 30)
+        self.assertEqual(view["cap"], 40)
         self.assertEqual(view["current"], {"step": 1, "turns": 0})   # paused, writer gone
         self.assertEqual(view["steps"][1]["stories"], [])
         self.assertTrue(p1["started_at"])
@@ -376,20 +463,20 @@ class Failure(Base):
         self.assertEqual(s1.attempts, 0)
         self.assertEqual(s1.delivered, "add() now adds.")
         self.assertIn("calc.py", s1.facts["files"])
-        self.assertTrue(any("S1 ended without complete_story; its checks pass — accepted" in t
-                            for t in self.system_lines()))
+        self.assertTrue(any("S1 ended without complete_story; its expectations are verified — "
+                            "accepted" in t for t in self.system_lines()))
         self.assertEqual(len(self.writer_requests()), 2)     # phase 2's writer, no re-split
 
-    def test_a_story_backed_by_evidence_still_needs_complete_story(self):
-        story = {**FIX_ADD, "acceptance": [criterion("add(2, 3) → 5", ADD_OK, ["R1"]),
-                                           {"text": "the docstring explains add()"}]}
+    def test_a_story_that_ends_in_text_with_an_unmet_expectation_fails(self):
         self.run_plan([
-            *write_set(story),
-            call("write_file", path="calc.py", content=CALC_RIGHT),
-            *give_up(),
+            *write_set(FIX_ADD),
+            *[ChatResponse(content="add() now adds.", done_reason="stop")] * (STORY_NUDGES + 1),
             *write_set({**FIX_ADD, "id": "S2"}),
             ChatResponse(content="stop", done_reason="stop")])
         self.assertEqual(self.h.plan.story_sets[1].get("S1").status, "replaced")
+        resplit = self.writer_requests()[1]["messages"][1]["content"]
+        self.assertIn("It ended without complete_story, and the verifier found:", resplit)
+        self.assertIn("✗ add() adds", resplit)
 
     def test_a_story_the_loop_guard_stops_is_re_split(self):
         self.h.loop_resets = 0
@@ -414,7 +501,7 @@ class Failure(Base):
 
 
 DOC_ADD = {"id": "S2", "title": "Document add()", "description": "Add a docstring.",
-           "files": ["calc.py"], "acceptance": [criterion("calc imports", f"{PY} -c \"import calc\"")]}
+           "files": ["calc.py"], "acceptance": [criterion("adding zero keeps the number", "add(7, 0)", 7)]}
 
 
 class Retire(Base):
@@ -512,7 +599,7 @@ class Requirements(Base):
         self.assertIn("R1 lists several things", self.h._handle_create_plan(bundled))
 
     def test_an_uncovered_requirement_refuses_the_stories(self):
-        uncovered = {**FIX_ADD, "acceptance": [criterion("add(2, 3) → 5", ADD_OK)]}
+        uncovered = {**FIX_ADD, "acceptance": [criterion("add() adds", "add(2, 3)", 5)]}
         self.run_plan([*write_set(uncovered),
                        call("write_story", story=FIX_ADD), call("finish_stories"),
                        call("write_file", path="calc.py", content=CALC_RIGHT),
@@ -525,13 +612,24 @@ class Requirements(Base):
         self.assertNotIn("R2", brief.split("## Phases")[0])
         self.assertEqual(self.h.plan.story_sets[1].get("S1").status, "done")
 
+    def test_a_criterion_cannot_cover_everything(self):
+        self.h.plan = Plan(title="t", request="r", kind="stories", steps=[Step(title="a")],
+                           requirements=[{"id": f"R{i}", "text": f"cmd {i}", "phase": 1}
+                                         for i in range(1, 6)])
+        from harness.stories import Criterion, Story, StorySet
+        blanket = Story(id="S1", title="t", acceptance=[
+            Criterion("parse 'go north'", "true", [f"R{i}" for i in range(1, 6)])])
+        errors = self.h._coverage_problems(1, StorySet(phase=1, stories=[blanket]))
+        self.assertTrue(any("covers 5 requirements" in e for e in errors))
+
     def test_the_last_gate_fails_on_a_requirement_without_a_passing_check(self):
         self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
         sset = self.h.plan.story_sets[1]
         passed, report = self.h._phase_checks(self.h.plan.steps[0], sset, last=True)
         self.assertFalse(passed)
-        self.assertIn("no passing check:\n- R2: sub(5, 3) returns 2", report)
-        self.assertEqual(self.h._phase_checks(self.h.plan.steps[0], sset), (True, f"`{ADD_OK}` passes"))
+        self.assertIn("not proven by a passing acceptance test:\n- R2: sub(5, 3) returns 2", report)
+        self.assertEqual(self.h._phase_checks(self.h.plan.steps[0], sset),
+                         (True, "1 expectation(s) verified\n2 acceptance test(s) still pass"))
 
     def test_the_last_gate_runs_the_requests_command(self):
         self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
@@ -548,8 +646,7 @@ class Defects(Base):
     took fixing it to be out of its scope and used up its 30 turns."""
 
     FIX = {**FIX_ADD, "id": "S2", "title": "Fix add() in calc.py",
-           "acceptance": [criterion("add(1, 1) → 2",
-                                    f"{PY} -c \"from calc import add; assert add(1, 1) == 2\"", ["R1"])]}
+           "acceptance": [criterion("one and one make two", "add(1, 1)", 2, ["R1"])]}
 
     def test_a_reported_defect_gets_a_fix_story_and_the_story_runs_again(self):
         self.run_plan([
@@ -622,7 +719,7 @@ class OwnTests(Base):
         self.assertIn("the story's own tests in tests/test_calc_more.py pass", refusal)
         s1 = self.h.plan.story_sets[1].get("S1")
         self.assertEqual(s1.status, "done")
-        self.assertIn(f"{PY} -m unittest tests/test_calc_more.py", s1.facts["checks"])
+        self.assertIn("python3 -m unittest tests/test_calc_more.py", s1.facts["checks"])
 
     def test_a_stray_test_file_in_the_root_is_refused(self):
         self.run_plan([
@@ -634,6 +731,304 @@ class OwnTests(Base):
         self.assertIn("test_server.py: a test file outside the story's files", self.results()[0])
 
 
+
+class Run3(Base):
+    """What run 3 ran into: a check that ran a test file nobody wrote, a server
+    left running after its story, a check no code could pass, a failed story's
+    edits, weak phase checks, and no hostile-path requirement."""
+
+    def tool_results(self, name):
+        seen, out = set(), []
+        for r in ScriptedClient.requests:
+            for m in r["messages"]:
+                if m.get("role") == "tool" and m.get("name") == name and id(m) not in seen:
+                    if m["content"] not in out:
+                        out.append(m["content"])
+        return out
+
+    def test_a_legacy_check_file_that_does_not_exist_is_named(self):
+        # an older plan's criterion: a check command that runs a test file
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
+        from harness.stories import Story
+        story = Story.from_dict({**FIX_ADD, "id": "S9", "files": ["calc.py", "tests/test_more.py"],
+                                 "acceptance": [legacy("more tests pass",
+                                                       f"{PY} -m unittest tests/test_more.py")]})
+        brief = self.h._story_brief(1, story)
+        self.assertIn("Its checks run tests/test_more.py, which does not exist yet", brief)
+        self.assertIn("run its acceptance checks, then call complete_story", brief)
+        failures, _passed, _results = self.h._run_story_checks(story, [])
+        self.assertIn("tests/test_more.py does not exist — this check runs it", failures[0])
+
+    def test_a_storys_background_command_is_stopped_when_it_ends(self):
+        self.run_plan([*write_set(FIX_ADD),
+                       call("run_command", command="sleep 30", background=True),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")])
+        self.assertTrue(any("Stopped the background command P1.S1 left running" in t
+                            for t in self.system_lines()), self.system_lines())
+        self.assertEqual(self.h.run_store.running(), [])
+
+    def test_a_wrong_expectation_gets_a_corrected_story(self):
+        wrong = {**FIX_ADD, "acceptance": [criterion("add() adds", "add(2, 3)", 6, ["R1"])]}
+        doc = {**DOC_ADD, "depends_on": ["S1"]}
+        fixed = {**FIX_ADD, "id": "S3", "title": "Make add() add (corrected)"}
+        self.run_plan([
+            *write_set(wrong, doc),
+            call("report_defect", problem="2 + 3 is 5, not 6", criterion="add() adds"),
+            *write_set(fixed),                                       # the correction pass
+            call("write_file", path="calc.py", content=CALC_RIGHT),   # S3
+            call("complete_story", summary="add works"),
+            call("complete_story", summary="documented"),            # S2
+            ChatResponse(content="stop", done_reason="stop")])
+        sset = self.h.plan.story_sets[1]
+        self.assertEqual([(s.id, s.status) for s in sset.stories],
+                         [("S1", "replaced"), ("S2", "done"), ("S3", "done")])
+        self.assertEqual(sset.get("S2").depends_on, ["S3"])
+        self.assertEqual(sset.get("S3").attempts, 0)
+        brief = self.writer_requests()[1]["messages"][1]["content"]
+        self.assertIn("reports that one of its acceptance criteria is wrong", brief)
+        self.assertIn("The acceptance criterion \"add() adds\" is wrong: 2 + 3 is 5, not 6", brief)
+
+    def test_the_resplit_brief_names_what_the_failed_story_changed(self):
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_WRONG + "# wip\n"),
+                       *give_up(),
+                       *write_set({**FIX_ADD, "id": "S2"}),
+                       ChatResponse(content="stop", done_reason="stop")])
+        brief = self.writer_requests()[1]["messages"][1]["content"]
+        self.assertIn("Its changes are still in the code: calc.py.", brief)
+        self.assertIn("undo what is wrong", brief)
+
+    def test_weak_phase_checks_are_refused(self):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        weak = {**PLAN_ARGS, "steps": [
+            {**PLAN_ARGS["steps"][0], "checks": ["python3 -c \"print(open('calc.py').read())\""]},
+            {**PLAN_ARGS["steps"][1], "checks": ["python3 server.py & sleep 2 && curl localhost:8000"]}]}
+        err = self.h._handle_create_plan(weak)
+        self.assertIn("these phase checks cannot prove their phase", err)
+        self.assertIn("phase 1:", err)
+        self.assertIn("only prints", err)
+        self.assertIn("in the background (&)", err)
+
+    def test_a_file_server_needs_a_hostile_path_requirement(self):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = RUN2_REQUEST.replace(
+            "Build a small MUD", "server.py serves one HTML page via http.server. Build a small MUD")
+        err = self.h._handle_create_plan(dict(PLAN_ARGS))
+        self.assertIn("GET /../server.py → 404", err)
+        ok = {**PLAN_ARGS, "requirements": PLAN_ARGS["requirements"] + [
+            {"id": "R3", "text": "the server serves only files inside static/ (GET /../server.py → 404)",
+             "phase": 2}]}
+        self.assertNotIn("ERROR", self.h._handle_create_plan(ok))
+
+
+class Verifier(Base):
+    """The independent verifier pass: verdicts held against saved tests, an
+    unclear expectation corrected by the writer, the gate's regression run."""
+
+    def test_an_unclear_expectation_is_corrected_by_the_writer(self):
+        ScriptedClient.verifier = [call("finish_verification", results=[
+            {"expectation": 1, "verdict": "unclear",
+             "evidence": "the story asks for add() but the example calls plus()"}])]
+        fixed = {**FIX_ADD, "id": "S2", "title": "Make add() add (clear)"}
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       *write_set(fixed),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")])
+        sset = self.h.plan.story_sets[1]
+        self.assertEqual([(s.id, s.status) for s in sset.stories], [("S1", "replaced"), ("S2", "done")])
+        brief = self.writer_requests()[1]["messages"][1]["content"]
+        self.assertIn("cannot be verified as written: the story asks for add() but the example "
+                      "calls plus()", brief)
+
+    # Run 4: the verifier of the engine story ran out of turns (the server it
+    # had to test through came in a later story), and the harness had a good
+    # story rewritten twice as "unclear".
+    def test_a_verifier_that_gets_nowhere_defers_to_the_gate(self):
+        idle = [ChatResponse(content="Looking around.", done_reason="stop")] * (STORY_NUDGES + 1)
+        ScriptedClient.verifier = idle * 2            # two passes, no test saved
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")])
+        s1 = self.h.plan.story_sets[1].get("S1")
+        self.assertEqual(s1.status, "done")
+        self.assertTrue(any("1 deferred to the phase gate" in t for t in self.system_lines()))
+        self.assertTrue(any("(second pass)" in t for t in self.system_lines()))
+        self.assertTrue(s1.acceptance[0].proven)             # the gate verified it
+        self.assertIn("2 expectation(s) verified, 1 of them deferred by stories",
+                      self.h.plan.story_sets[1].gate["output"])
+        self.assertEqual(len(self.writer_requests()), 2)     # phase 2's writer: no rewrite
+
+    def test_not_yet_defers_and_the_gate_insists(self):
+        not_yet = call("finish_verification", results=[
+            {"expectation": 1, "verdict": "not_yet", "evidence": "the command line comes in S2"}])
+        gate_not_yet = call("finish_verification", results=[
+            {"expectation": k, "verdict": "not_yet", "evidence": "the command line comes in S2"}
+            for k in (1, 2)])                                  # the phase's own, then S1's
+        ScriptedClient.verifier = [not_yet, gate_not_yet]
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")])
+        s1 = self.h.plan.story_sets[1].get("S1")
+        self.assertEqual(s1.status, "done")
+        self.assertTrue(any("P1.S1: expectations 1 deferred to the phase gate" in t
+                            for t in self.system_lines()))
+        gate = self.h.plan.story_sets[1].gate
+        self.assertFalse(gate["passed"])
+        self.assertIn("found no way to exercise it through the product's interfaces: the command "
+                      "line comes in S2", gate["output"])
+
+    def test_the_gate_reruns_earlier_acceptance_tests(self):
+        broken = CALC_SUB.replace("return a + b", "return a * b")      # phase 2 breaks add()
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       *write_set(ADD_SUB),
+                       call("write_file", path="calc.py", content=broken),
+                       call("complete_story", summary="sub added"),
+                       ChatResponse(content="stop", done_reason="stop")])
+        gate = self.h.plan.story_sets[2].gate
+        self.assertFalse(gate["passed"])
+        fix = self.writer_requests()[-1]["messages"][1]["content"]
+        self.assertIn("An acceptance test that passed before fails now (P1.S1: add() adds)", fix)
+        self.assertIn("tests/acceptance/p1_s1_c1_auto.py", fix)
+
+    def test_the_phase_expectations_are_verified_at_the_gate(self):
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
+        phase = self.h.plan.steps[0].acceptance[0]
+        self.assertTrue(phase.proven)
+        self.assertEqual(phase.test["path"], "tests/acceptance/phase_1_c1_auto.py")
+        self.assertTrue((self.wd / "tests/acceptance/phase_1_c1_auto.py").exists())
+        self.assertTrue(any("🔎 phase 1: expectations all met." in t for t in self.system_lines()))
+
+    def test_create_plan_wants_interfaces_and_expectations(self):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        no_ui = {k: v for k, v in PLAN_ARGS.items() if k != "interfaces"}
+        self.assertIn("name how the product is used in 'interfaces'", self.h._handle_create_plan(no_ui))
+        vague = {**PLAN_ARGS, "steps": [
+            {**PLAN_ARGS["steps"][0], "acceptance": [
+                {"behaviour": "adding works", "examples": [{"given": "add two numbers",
+                                                            "expect": "the sum comes back"}]}]},
+            PLAN_ARGS["steps"][1]]}
+        self.assertIn("the verifier cannot check \"the sum comes back\"",
+                      self.h._handle_create_plan(vague))
+        checks_only = {**PLAN_ARGS, "steps": [{**PLAN_ARGS["steps"][0], "acceptance": [],
+                                               "checks": ["true"]}, PLAN_ARGS["steps"][1]]}
+        self.assertIn("needs an 'outcome' and 'acceptance'", self.h._handle_create_plan(checks_only))
+
+    def test_a_story_with_check_commands_is_refused(self):
+        self.run_plan([*write_set({**FIX_ADD, "acceptance": [legacy("adds", "true", ["R1"])]}),
+                       ChatResponse(content="stop", done_reason="stop")])
+        results = {m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                   if m.get("role") == "tool" and m.get("name") == "write_story"}
+        self.assertTrue(any("acceptance criteria are expected behaviour with examples, not "
+                            "commands" in x for x in results))
+
+
+class Run4Fixes(Base):
+    """What run 4 ran into: verifier tests of internals, finished work failed at
+    the turn cap, test suites that find no tests, engine-first plans and lists
+    folded into one requirement, and verifier passes with nothing to test."""
+
+    def verifying(self, interfaces):
+        """A finished phase 1, and the harness set up as if verifying P1.S1."""
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
+        self.h.plan.interfaces = interfaces
+        c = self.h.plan.story_sets[1].get("S1").acceptance[0]
+        self.h.story_role = "story-verifier"
+        self.h._verifying = {"criteria": [c], "todo": [0], "saved": {}, "results": None}
+        test = self.wd / "tests/acceptance/p1_s1_c1_x.py"
+        test.write_text("import sys\nsys.path.insert(0, '.')\nfrom calc import add\n"
+                        "sys.exit(0 if add(2, 3) == 5 else 1)\n")
+        return {"expectation": 1, "path": "tests/acceptance/p1_s1_c1_x.py",
+                "command": f"{PY} tests/acceptance/p1_s1_c1_x.py"}
+
+    def test_a_verifier_test_may_not_import_the_project(self):
+        args = self.verifying(["CLI: `python3 calc.py add <a> <b>`"])
+        self.assertIn("the test imports calc", self.h._handle_save_acceptance_test(args))
+        self.h.plan.interfaces = ["Library: `import calc`"]
+        self.assertIn("it passes", self.h._handle_save_acceptance_test(args))
+
+    def test_unsaved_verifier_files_are_removed(self):
+        ScriptedClient.verifier = [call("write_file", path="tests/acceptance/p1_s1_c1_draft.py",
+                                        content="print('draft')\n")]
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
+        self.assertFalse((self.wd / "tests/acceptance/p1_s1_c1_draft.py").exists())
+        self.assertTrue((self.wd / "tests/acceptance/p1_s1_c1_auto.py").exists())
+
+    def test_finished_work_at_the_turn_cap_is_verified(self):
+        # run 4b's P2.S9: code and test done, out of turns before complete_story
+        self.h.stories_cap = 3
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       *[call("read_file", path="calc.py")] * 4,
+                       ChatResponse(content="stop", done_reason="stop")])
+        s1 = self.h.plan.story_sets[1].get("S1")
+        self.assertEqual((s1.status, s1.attempts), ("done", 0))
+        self.assertTrue(any("S1 reached the turn limit; its expectations are verified — accepted" in t
+                            for t in self.system_lines()))
+
+    def test_the_users_test_command_must_find_the_tests(self):
+        test = ("import unittest\nfrom calc import add\n\nclass T(unittest.TestCase):\n"
+                "    def test_add(self):\n        self.assertEqual(add(2, 3), 5)\n")
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("write_file", path="tests/test_calc.py", content=test),
+                       call("complete_story", summary="add works"),
+                       call("write_file", path="tests/__init__.py", content=""),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")],
+                      request="make calc work; `python3 -m unittest` must pass")
+        brief = self.story_requests()[0]["messages"][1]["content"]
+        self.assertIn("## How the project's tests run\nThe user runs `python3 -m unittest`", brief)
+        refusals = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                    if m.get("role") == "tool" and "finds no tests" in (m.get("content") or "")]
+        self.assertTrue(refusals)
+        self.assertIn("tests/ has an __init__.py", refusals[0])
+        self.assertEqual(self.h.plan.story_sets[1].get("S1").status, "done")
+
+    def test_an_import_error_of_a_project_module_gets_a_hint(self):
+        self.assertIn("calc is the project's own module",
+                      self.h._import_hint("ModuleNotFoundError: No module named 'calc'"))
+        self.assertEqual(self.h._import_hint("ModuleNotFoundError: No module named 'requests'"), "")
+
+    def test_phase_one_is_a_slice_and_request_lists_are_split(self):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        engine_first = {**PLAN_ARGS, "interfaces": ["CLI: `python3 calc.py add <a> <b>`"]}
+        self.assertIn("phase 1: make it a thin end-to-end slice", self.h._handle_create_plan(engine_first))
+        self.h._plan_first_request = "make calc work. Functions: add, sub, mul."
+        err = self.h._handle_create_plan(dict(PLAN_ARGS))
+        self.assertIn("the request lists add, sub, mul; give each its own requirement — none names mul",
+                      err)
+
+    def test_no_verifier_pass_while_the_interface_does_not_exist(self):
+        cli = criterion("adding works", "`python3 calc_cli.py add 1 1`", 2)
+        plan = {**PLAN_ARGS, "interfaces": ["CLI: `python3 calc_cli.py add <a> <b>`"],
+                "steps": [{**PLAN_ARGS["steps"][0], "acceptance": [cli]}, PLAN_ARGS["steps"][1]]}
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")], plan=plan)
+        self.assertTrue(any("P1.S1: 1 expectation deferred to the phase gate — calc_cli.py does not "
+                            "exist yet" in t for t in self.system_lines()))
+        story_passes = [r for r in self.verifier_requests() if "Verify P1.S1" in r["messages"][1]["content"]]
+        self.assertEqual(story_passes, [])
+
+    def test_the_verifier_cap_scales_with_the_expectations(self):
+        from harness.story_runner import DEFAULT_STORIES_CAP, verify_cap
+        self.assertEqual([verify_cap(n) for n in (1, 2, 3, 8)], [13, 18, 23, 40])
+        self.assertEqual(DEFAULT_STORIES_CAP, 40)
+
 class PhaseChecks(unittest.TestCase):
     def test_weak_phase_checks_get_a_note(self):
         suite = "python3 -m unittest discover tests"
@@ -644,6 +1039,8 @@ class PhaseChecks(unittest.TestCase):
         self.assertIn("phase 3's checks only test that files exist", note)
         self.assertEqual(_phase_check_notes([Step(title="a", checks=["python3 -m unittest t.a"]),
                                              Step(title="b", checks=["python3 -m unittest t.b"])]), "")
+        # run 4: phases closed by expectations have no checks, so none are "the same"
+        self.assertEqual(_phase_check_notes([Step(title="a"), Step(title="b")]), "")
 
     def test_the_requests_own_command(self):
         self.assertEqual(request_commands(RUN2_REQUEST), ["python -m unittest"])
@@ -881,7 +1278,7 @@ class Recovery(Base):
 
     def test_a_re_split_that_resends_finished_stories_is_accepted(self):
         two = [FIX_ADD, {**ADD_SUB, "id": "S2", "depends_on": ["S1"], "files": ["calc.py"],
-                         "acceptance": [criterion("sub(5, 3) → 2", SUB_OK)]}]
+                         "acceptance": [criterion("sub() subtracts", "sub(5, 3)", 2)]}]
         self.run_plan([
             *write_set(*two),
             call("write_file", path="calc.py", content=CALC_RIGHT),

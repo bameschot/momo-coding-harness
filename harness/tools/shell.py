@@ -40,13 +40,25 @@ def web_client_in(command: str) -> str | None:
     return m.group(1) if m else None
 
 
+_RX_LOCAL_HOST = re.compile(r"(?<![\w.-])(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?![\w.-])")
+_RX_URL_HOST = re.compile(r"\b[a-z][a-z0-9+.-]*://([^/\s:'\"?#]+)", re.I)
+
+
+def _local_only(command: str) -> bool:
+    """curl/wget aimed only at this machine (a story testing the server it just
+    wrote): not the internet, so /net off does not apply (run 3's P3.S2 was
+    refused `curl http://localhost:8000/api/poll`)."""
+    hosts = _RX_URL_HOST.findall(command)
+    return bool(_RX_LOCAL_HOST.search(command)) and all(_RX_LOCAL_HOST.fullmatch(h) for h in hosts)
+
+
 def web_refusal(command: str, net_access: str) -> tuple[str | None, str]:
     """(refusal, note): steer page reads and API calls to fetch_url; downloads to
     disk still need curl/wget.  With /net off, running curl would quietly bypass
     the user's setting (observed: a 9B model with no fetch_url fell back to 50
     curl calls over two sessions), so refuse and say what to do instead."""
     client = web_client_in(command)
-    if not client:
+    if not client or _local_only(command):
         return None, ""
     if net_access == "off":
         return (f"ERROR: this command was not run: it uses {client} to reach the "
@@ -57,6 +69,30 @@ def web_refusal(command: str, net_access: str) -> tuple[str | None, str]:
     return None, (f"(note: to read a page or call an API, use the fetch_url tool instead "
                   f"of {client} — it returns cleaner text. {client} is fine for "
                   "downloading files to disk.)\n")
+
+
+# Files a shell command writes, read from its text: redirection targets (`>`,
+# `>>`, heredocs into a file), `tee`, `sed -i`, and `cp`/`mv`/`touch`/`rm`.
+# Like the web-client check, this steers the roles that must not change the
+# project (run 3 and 4's planners wrote game.py with `cat <<EOF > game.py`); it
+# is not a sandbox.
+_RX_REDIRECT = re.compile(r"(?<![0-9&])>>?\s*(?!&)([^\s;&|<>()`]+)")
+_RX_FILE_CMD = re.compile(r"(?:^|[;&|(`\n]|\$\()\s*(tee(?:\s+-a)?|sed\s+-i(?:\s*''|\s+\S+)?|touch|rm(?:\s+-\w+)*|"
+                          r"cp(?:\s+-\w+)*|mv(?:\s+-\w+)*)\s+([^;&|`\n]+)")
+
+
+def shell_writes(command: str) -> list[str]:
+    """The paths a shell command writes or deletes, as far as its text shows."""
+    out = [t for t in _RX_REDIRECT.findall(command) if t not in ("/dev/null", "/dev/stderr", "/dev/stdout")]
+    for verb, rest in _RX_FILE_CMD.findall(command):
+        args = [a for a in rest.split() if not a.startswith("-")]
+        if verb.startswith("sed"):
+            args = args[1:] if args and not args[0].startswith(("'", '"')) else args
+            args = [a for a in args if not a.startswith(("'", '"', "s/", "/"))]
+        if verb.startswith(("cp", "mv")):
+            args = args[-1:]
+        out += [a.strip("'\"") for a in args]
+    return out
 
 
 def clean_output(text: str) -> str:

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from harness.plan import Plan, Step
 from harness.stories import (MAX_STORIES, Criterion, Story, StorySet, check_problems,
+                             criterion_problems,
                              new_stories_dir, outline_entries, read_story_file, slug,
                              validate_outline, write_story_file)
 
@@ -27,7 +28,12 @@ FULL = Story(
     provides=["encode_frame(opcode: int, payload: bytes, mask_key: bytes | None = None) -> bytes"],
     acceptance=[Criterion("RFC 6455 §5.7 'Hello' encodes to 81 05 48 65 6c 6c 6f",
                           "python3 -m unittest tests.test_ws.Encode", ["R2", "R4"]),
-                Criterion("the docstring names the RFC section")],
+                Criterion("the docstring names the RFC section"),
+                Criterion("a short message is one frame", covers=["R1"],
+                          examples=[{"given": "the client sends `hi`",
+                                     "expect": "the server reads bytes `81 02 68 69`"}],
+                          test={"path": "tests/acceptance/p1_s2_c3_frame.sh",
+                                "command": "sh tests/acceptance/p1_s2_c3_frame.sh"})],
     status="done", attempts=1, delivered="Added encode_frame(); kept masking in a helper.",
     facts={"files": ["mud/ws.py"], "definitions": ["encode_frame", "_mask"], "checks": ["passed 1"]})
 
@@ -178,6 +184,49 @@ RUN2_STARTS_SERVER = ("python3 -c \"import subprocess, time; proc = subprocess.P
                       "proc.wait()\"")
 
 
+class Expectations(unittest.TestCase):
+    """Acceptance criteria are behaviour with examples, never code (run 3's
+    `assert Room.__issubclass__`, `parse_command('go north')` proving quit)."""
+
+    def test_a_good_expectation(self):
+        c = Criterion("look describes the room", examples=[
+            {"given": "Ann in the Great Hall sends `look`",
+             "expect": "the reply names `Great Hall` and the exits `north`, `east`"}])
+        self.assertEqual(criterion_problems(c), [])
+        http = Criterion("paths outside the folder are refused",
+                         examples=[{"given": "GET /../server.py", "expect": "status 404"}])
+        self.assertEqual(criterion_problems(http), [])
+        lib = Criterion("pages of 5", examples=[{"given": "paginate(range(11), 5)",
+                                                 "expect": "3 pages, the last `[10]`"}])
+        self.assertEqual(criterion_problems(lib), [])
+
+    def test_what_is_refused(self):
+        cases = {
+            "needs at least one example": Criterion("look works"),
+            "the verifier cannot check": Criterion("look works", examples=[
+                {"given": "Ann sends look", "expect": "the room is described"}]),
+            "needs both what is done": Criterion("look works", examples=[{"given": "", "expect": "`x`"}]),
+            "contains code": Criterion("models exist", examples=[
+                {"given": "import models", "expect": "`True`"}]),
+        }
+        for why, c in cases.items():
+            with self.subTest(why):
+                self.assertTrue(any(why in e for e in criterion_problems(c)), criterion_problems(c))
+        suite = Criterion("commands work", examples=[{"given": "python3 -m unittest test_game.py",
+                                                      "expect": "exit code `0`"}])
+        self.assertTrue(any("running the tests is not a behaviour" in e for e in criterion_problems(suite)))
+        dotted = Criterion("rooms", examples=[{"given": "Room.__init__(x)", "expect": "`1`"}])
+        self.assertTrue(any("contains code" in e for e in criterion_problems(dotted)))
+
+    def test_a_legacy_check_is_left_to_the_check_rules(self):
+        self.assertEqual(criterion_problems(Criterion("adds", check="true")), [])
+
+    def test_examples_from_strings_and_markdown(self):
+        c = Criterion.from_dict({"behaviour": "b", "examples": ["`look` → names `Hall`"]})
+        self.assertEqual(c.examples, [{"given": "`look`", "expect": "names `Hall`"}])
+        self.assertEqual(c.text, "b")
+
+
 class CheckCommands(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -187,7 +236,7 @@ class CheckCommands(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def problems(self, cmd, planned=("server.py",)):
+    def problems(self, cmd, planned=("server.py", "tests/test_game.py", "tests/test_kill_switch.py")):
         return check_problems(cmd, self.wd, set(planned))
 
     def test_the_story_mud_checks_are_refused(self):
@@ -221,6 +270,17 @@ class CheckCommands(unittest.TestCase):
                     "python3 -c \"import tempfile, shutil; d = tempfile.mkdtemp(); shutil.rmtree(d)\"",
                     RUN2_STARTS_SERVER, "python3 -m unittest tests.test_kill_switch"):
             self.assertEqual(self.problems(cmd), [], cmd)
+
+    def test_run3s_checks_that_could_not_pass(self):
+        # phase 3: `server.py & sleep 2 && curl …` left the server running;
+        # P3.S5: its check ran a test file nobody wrote.
+        bg = self.problems("python3 server.py & sleep 2 && curl http://localhost:8000/api/poll")
+        self.assertTrue(any("in the background (&)" in e for e in bg))
+        self.assertIn("runs tests/test_server_command_integration.py, which does not exist",
+                      self.problems("python3 tests/test_server_command_integration.py")[0])
+        self.assertEqual(self.problems("python3 -m unittest tests.test_game.TestGame.test_look"), [])
+        self.assertEqual(self.problems("python3 -m unittest t.py",
+                                       planned=("t.py",)), [])
 
     def test_the_run2_checks_that_could_not_pass(self):
         # P2.S3 stopped the server with pkill; P2.S4 fetched localhost:8000 with

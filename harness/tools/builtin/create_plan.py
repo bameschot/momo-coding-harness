@@ -40,31 +40,42 @@ _STORIES = tool_schema("create_plan",
     "with the complete new plan.",
     {"title": {"type": "string", "description": "Short name for the feature or project"},
      "goal":  {"type": "string", "description": "What the change achieves and why, including key findings, decisions and the user's answers"},
+     "interfaces": {"type": "array", "items": {"type": "string"},
+                    "description": "How the product is used, one line per way in, e.g. "
+                                   "\"CLI: `python3 tool.py <file>`\", \"Service: `python3 server.py`, HTTP on "
+                                   "localhost:8000\", \"Library: `import pager`\", \"Output files in `build/`\""},
      "steps": {"type": "array", "items": PHASE, "description": "The phases, in order (usually 2-7)"},
      "requirements": {"type": "array", "items": REQUIREMENT,
                       "description": "The user's request split into one requirement per line — every "
                                      "command, endpoint and behaviour they named, one per item of a "
                                      "list — each with the phase that delivers it"}},
-    ["title", "goal", "steps", "requirements"])
+    ["title", "goal", "interfaces", "steps", "requirements"])
 
 _EXAMPLE_STORIES = {
     "title": "Paginated search API",
     "goal": "Add /search with paging; results come from the existing index in src/index.py.",
+    "interfaces": ["Service: `python3 -m src.api`, HTTP on localhost:8080"],
     "steps": [
-        {"title": "Paging helper",
-         "details": "src/pager.py: a paginate() that splits any sequence into pages, with tests.",
-         "outcome": "paginate(range(11), size=5) gives pages of 5, 5 and 1",
-         "checks": ["python -m pytest -q tests/test_pager.py"],
-         "files": ["src/pager.py", "tests/test_pager.py"]},
-        {"title": "Search endpoint",
-         "details": "src/api.py: GET /search?q=&page= using paginate() and Index.query().",
-         "outcome": "GET /search?q=a&page=2 returns the second page as JSON",
-         "checks": ["python -m pytest -q tests/test_api.py"],
-         "files": ["src/api.py", "tests/test_api.py"]}],
+        {"title": "Search returns results",
+         "details": "src/api.py: GET /search?q= using Index.query(), with its tests.",
+         "outcome": "GET /search?q=a returns the matches as JSON",
+         "acceptance": [{"behaviour": "a search returns the matching documents",
+                         "examples": [{"given": "GET /search?q=apple",
+                                       "expect": "status 200, JSON list with `apple pie` first"}],
+                         "covers": ["R1"]}],
+         "files": ["src/api.py", "tests/test_api.py"]},
+        {"title": "Pages of results",
+         "details": "src/pager.py: paginate(); /search takes &page=.",
+         "outcome": "GET /search?q=a&page=2 returns the second page of 5",
+         "acceptance": [{"behaviour": "results come in pages of 5",
+                         "examples": [{"given": "GET /search?q=a&page=3 with 11 matches",
+                                       "expect": "status 200, exactly 1 result"}],
+                         "covers": ["R2", "R3"]}],
+         "files": ["src/pager.py", "src/api.py", "tests/test_pager.py"]}],
     "requirements": [
-        {"id": "R1", "text": "GET /search?q= returns matching results as JSON", "phase": 2},
+        {"id": "R1", "text": "GET /search?q= returns matching results as JSON", "phase": 1},
         {"id": "R2", "text": "?page=N returns the Nth page of 5 results", "phase": 2},
-        {"id": "R3", "text": "the last page holds the remainder, nothing lost", "phase": 1}]}
+        {"id": "R3", "text": "the last page holds the remainder, nothing lost", "phase": 2}]}
 
 _EXAMPLE = {"title": "Fix off-by-one in paginate()",
             "goal": "Last page is dropped because paginate() uses < instead of <=.",

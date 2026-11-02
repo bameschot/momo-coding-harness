@@ -48,6 +48,7 @@ from .prompts import (_index_banner, MODES,
                       _PLAN_TDD_RULES, _STORY_EXECUTION_RULES,
                       _ROLE_LOADERS, _coding_prompt, _environment,
                       _cavecat_rules, _load_role, _nav_rules, _net_rules, _story_writer_prompt,
+                      _story_verifier_prompt,
                       planner_for_tdd)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls,
@@ -364,12 +365,13 @@ _REPLY_REPEAT_TAIL = ("\n\nNever write code or tool calls out as text in your re
 # with every call, while some edit-suite runs used up the time cap without
 # making an edit (evals/README.md, multipart round 4).
 _IDLE_AFTER = {"coding": 15, "plan-exec": 15, "story-exec": 15, "momo": 12, "chat": 15,
-               "design": 15, "plan": 25, "story-writer": 25}
+               "design": 15, "plan": 25, "story-writer": 25, "story-verifier": 15}
 _IDLE_NOTES = 2
 # Calls that move the work on even though they write no file.
 _PROGRESS_TOOLS = frozenset({"ask_user", "ask_choice", "create_plan", "revise_plan",
                              "complete_step", "plan_stories", "write_story", "finish_stories",
-                             "complete_story", "report_defect"})
+                             "complete_story", "report_defect", "save_acceptance_test",
+                             "finish_verification"})
 _IDLE_NOTE = "[Note from the harness, not the user] {n} tool calls in a row without {since}. {act}"
 _IDLE_ACT = {
     "coding": ("a change", "If the user asked a question, answer it now. If they asked for a "
@@ -390,6 +392,9 @@ _IDLE_ACT = {
     "story-exec": ("a change", "Make the story's change now if you know enough, or get the one "
                    "fact you still need in one call. Once its acceptance checks pass, call "
                    "complete_story."),
+    "story-verifier": ("a saved test", "Write the test for the next expectation now, run it and "
+                       "save it with save_acceptance_test; once every expectation has one, call "
+                       "finish_verification."),
 }
 # What the analysis lists under "What I repeated", per kind of loop.
 _LOOP_REPEATED = {
@@ -542,6 +547,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.stories_approve: str = "each"
         self.stories_cap: int = DEFAULT_STORIES_CAP
         self._writing: dict | None = None    # a story-writing pass: its phase and mode
+        self._verifying: dict | None = None  # a verifier pass: the story, its expectations, tests
         self._story: dict | None = None      # the story running: phase, id, refusals, …
         self._story_failure: str = ""
         # A running TDD stage: test files as the stage started (audited at the
@@ -1396,7 +1402,11 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.event_queue.put(ChatEvent("system", f"Waiting for the code index{prog}…"))
 
     def _dispatch(self, name: str, args: dict) -> str:
-        err = self._wait_index(name) or template_leak(name, args)
+        err = (self._wait_index(name) or template_leak(name, args)
+               or (getattr(self, "story_role", None) == "story-verifier"
+                   and self._verifier_guard(name, args))
+               or (name == "run_command" and hasattr(self, "_read_only_shell_guard")
+                   and self._read_only_shell_guard(name, args)))
         if err:
             return err
         # A tool that raises must still produce a result: the assistant turn with
@@ -1420,6 +1430,29 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         finally:
             # The real exit code of a run_command (None: stopped, or not one).
             self._last_run_exit = run_exit.get("code")
+
+    def _read_only_shell_guard(self, name: str, args: dict) -> str:
+        """Planning, writing stories and verifying change no project files, and
+        run_command must not do it for them through the shell: the scratch
+        folder (and, for the verifier, its acceptance tests) only."""
+        role = getattr(self, "story_role", None)
+        planning = getattr(self, "mode", "") == "plan" and not role and not self._plan_executing()
+        if name != "run_command" or not isinstance(args, dict) or not (
+                planning or role in ("story-writer", "story-verifier")):
+            return ""
+        from .tools.shell import shell_writes
+        allowed = (".momo/scratch/", "$MOMO_SCRATCH", "/tmp/", "/private/tmp/", "/dev/") + (
+            ("tests/acceptance/",) if role == "story-verifier" else ())
+        bad = [p for p in shell_writes(str(args.get("command") or ""))
+               if not p.lstrip("./").startswith(tuple(a.lstrip("./") for a in allowed))]
+        if not bad:
+            return ""
+        what = {"story-writer": "while writing stories", "story-verifier": "while verifying"}.get(
+            role, "while planning")
+        return (f"ERROR: not run: it writes {', '.join(bad[:4])}, and {what} you change no project "
+                "files — the stories do that once the plan is approved. Put drafts and notes in "
+                "the scratch folder (scratch_write)."
+                + (" The verifier writes only its tests in tests/acceptance/." if role == "story-verifier" else ""))
 
     @property
     def run_store(self) -> "run_store_mod.RunStore":
@@ -1569,6 +1602,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         if self.story_role == "story-writer":
             role = _story_writer_prompt(str(self.workdir))
             label = "Role: story writer"
+        elif self.story_role == "story-verifier":
+            role = _story_verifier_prompt(str(self.workdir))
+            label = "Role: story verifier"
         elif self.story_role == "story-exec":
             # One story runs with the coding agent's prompt; the story itself is
             # the first user message of its fresh context.
@@ -2165,7 +2201,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     self._append_user(text)
                 guard.bump()                 # the user said something: a new epoch
                 idle_calls = 0
-            if self._story or self._writing:
+            if self._story or self._writing or self._verifying:
                 self._story_tick(iteration)     # the plan view counts turns
             elif executing and self.plan is not None and not self.plan.stories:
                 self._step_tick()
@@ -2460,7 +2496,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 # write_stories as Python source with a stray quote; in the story-mud
                 # run a looping reply used up the only note, and the story's next
                 # text reply failed it).
-                run = self._story or self._writing
+                run = self._story or self._writing or self._verifying
                 if (run is not None and run.get("nudges", 0) < STORY_NUDGES
                         and (content or "").strip()):
                     run["nudges"] = run.get("nudges", 0) + 1
@@ -2639,6 +2675,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     result = self._handle_complete_story(args if isinstance(args, dict) else {})
                 elif name == "report_defect":
                     result = self._handle_report_defect(args if isinstance(args, dict) else {})
+                elif name == "save_acceptance_test":
+                    result = self._handle_save_acceptance_test(args if isinstance(args, dict) else {})
+                elif name == "finish_verification":
+                    result = self._handle_finish_verification(args if isinstance(args, dict) else {})
                 else:
                     # run_command confirmation: when enabled, block on a y/N prompt
                     # (reusing the ask_user input plumbing) before executing.
@@ -2829,6 +2869,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     nudge = ("You have been calling tools for several turns. Once the story is "
                              "implemented and its acceptance checks pass, call complete_story with "
                              "a short summary.")
+                elif self.story_role == "story-verifier":
+                    nudge = ("You have been calling tools for several turns. "
+                             + _IDLE_ACT["story-verifier"][1])
                 self.messages.append({"role": "user", "content": nudge})
                 tool_only_turns = 0
 
@@ -3019,6 +3062,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                    "once the decisions are settled with the user.")
         elif self.story_role == "story-exec":
             act = "Call the tool for your next step now; once the acceptance checks pass, call complete_story."
+        elif self.story_role == "story-verifier":
+            act = _IDLE_ACT["story-verifier"][1]
         elif self._plan_executing():
             act = "Call the tool for your next step now; once the step is verified, call complete_step."
         else:
@@ -3069,7 +3114,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         momo and chat mode (chat: "Let me read X." with no lookup).  A plan step and a story
         end with their own tools."""
         return (self.mode in ("coding", "momo", "chat") and not self.story_role
-                and not self._plan_executing() and not (self._story or self._writing))
+                and not self._plan_executing()
+                and not (self._story or self._writing or self._verifying))
 
     def _ask_choice(self, args: dict) -> str:
         """ask_choice: ask until the user picks an option.  Anything else they type is

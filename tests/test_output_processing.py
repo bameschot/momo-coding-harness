@@ -124,6 +124,17 @@ class SloppyToolCallJson(unittest.TestCase):
         self.assertEqual([c["name"] for c in calls], ["create_plan"])
         self.assertEqual(len(calls[0]["arguments"]["requirements"]), 6)
 
+    def test_a_call_written_as_a_tag_with_attributes(self):
+        # run 4a's planner: <ask_choice question="…" options="['Include 'name' …', …]" />
+        calls, rest = recover_text_calls(STORY_MUD["attribute_calls"][0], tools.PLAN_INVESTIGATE_TOOLS)
+        self.assertEqual([c["name"] for c in calls], ["ask_choice"])
+        self.assertEqual(len(calls[0]["arguments"]["options"]), 3)
+        self.assertTrue(calls[0]["arguments"]["options"][0].startswith("Include 'name' in every"))
+        self.assertNotIn("<ask_choice", rest)
+        # run 5: two of them, options=[…] without quotes
+        calls, _ = recover_text_calls(STORY_MUD["attribute_calls"][1], tools.PLAN_INVESTIGATE_TOOLS)
+        self.assertEqual([len(c["arguments"]["options"]) for c in calls], [3, 2])
+
     def test_unreadable_stays_unread(self):
         text = '<tool_call>{"name": "write_file", "arguments": {"path": "a", content: x}}</tool_call>'
         self.assertEqual(recover_text_calls(text, tools.ALL_TOOLS)[0], [])

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from harness import tools
 from harness.tools import dispatch
-from harness.tools.shell import web_client_in as _web_client_in
+from harness.tools.shell import shell_writes, web_client_in as _web_client_in
 
 
 class Matcher(unittest.TestCase):
@@ -51,6 +51,22 @@ class Matcher(unittest.TestCase):
                 self.assertIsNone(_web_client_in(cmd))
 
 
+class ShellWrites(unittest.TestCase):
+    """What a command writes, for the roles that must not change the project
+    (run 3 and 4's planners wrote game.py with `cat <<EOF > game.py`)."""
+
+    def test_writes_are_found(self):
+        self.assertEqual(shell_writes("cat <<EOF > game.py\nx = 1\nEOF"), ["game.py"])
+        self.assertEqual(shell_writes("python3 -m unittest 2>&1 | tee log.txt"), ["log.txt"])
+        self.assertEqual(shell_writes('sed -i "" s/a/b/ server.py'), ["server.py"])
+        self.assertEqual(shell_writes("cp a.py b.py; rm -rf build"), ["b.py", "build"])
+
+    def test_reads_and_discarded_output_are_not_writes(self):
+        for cmd in ("python3 server.py > /dev/null 2>&1", "cat .momo/scratch/x", "ls -la",
+                    "grep -rn foo . 2>/dev/null", "python3 -m unittest 2>&1"):
+            self.assertEqual(shell_writes(cmd), [], cmd)
+
+
 class Dispatch(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -81,6 +97,14 @@ class Dispatch(unittest.TestCase):
                 self.assertTrue(out.startswith("(note: to read a page or call an API, use the fetch_url tool"), out)
                 self.assertIn("fine for downloading files", out)
                 self.assertIn("curl", out.splitlines()[1])
+
+    def test_this_machine_is_not_the_internet(self):
+        # run 3: a story testing the server it wrote was refused curl localhost
+        out = self.run_cmd("curl -s --max-time 1 http://127.0.0.1:9/api/poll; echo done", "off")
+        self.assertNotIn("not run", out)
+        self.assertTrue(out.endswith("done"), out)
+        out = self.run_cmd("curl -s http://localhost:9/ https://example.com/", "off")
+        self.assertTrue(out.startswith("ERROR: this command was not run"), out)
 
     def test_other_commands_unaffected(self):
         out = self.run_cmd("echo hello", "off")

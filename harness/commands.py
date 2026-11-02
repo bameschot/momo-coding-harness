@@ -1923,7 +1923,7 @@ Available commands:
                       stories when it starts, written against the code as it is then
   /plan stories approve each|once  Review every phase's stories before they run (default
                       each), or let them run (saved)
-  /plan stories cap N  Turns one story may take before it counts as stuck (default 30, saved)
+  /plan stories cap N  Turns one story may take before it counts as stuck (default 40, saved)
   /plan questions [on|off]  Ask before planning: a first create_plan made without a
                       question to you is refused once (default on, saved)
   /plan show          Show the current plan and its progress

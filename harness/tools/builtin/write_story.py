@@ -25,5 +25,7 @@ TOOL = Tool(
         "pitfalls": ["the last page may be shorter; it must not be dropped"],
         "files": ["src/pager.py", "tests/test_pager.py"],
         "provides": ["paginate(items, size) -> list[list] in src/pager.py"],
-        "acceptance": [{"text": "paginate(range(11), 5) → pages of 5, 5 and 1",
-                        "check": "python -m pytest -q tests/test_pager.py"}]}})
+        "acceptance": [{"behaviour": "pages split the results evenly, the last holds the rest",
+                        "examples": [{"given": "paginate(range(11), 5)",
+                                      "expect": "3 pages: `[0, 1, 2, 3, 4]`, `[5, 6, 7, 8, 9]`, `[10]`"}],
+                        "covers": ["R3"]}]}})

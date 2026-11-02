@@ -994,17 +994,17 @@ ollama serve</code></pre></div>
 
     <figure class="flow" aria-label="How a story plan runs">
       <div class="flow-col">
-        <div class="box model"><div class="flow-who">model</div>1 Plan the phases<small><code>create_plan</code>: each phase has an <code>outcome</code> and <code>checks</code>, commands that prove it; the request is split into <code>requirements</code>, each assigned to a phase</small></div>
+        <div class="box model"><div class="flow-who">model</div>1 Plan the phases<small><code>create_plan</code>: the product's <code>interfaces</code>; each phase a vertical slice with an <code>outcome</code> and <code>acceptance</code>, expected behaviour with examples; the request split into <code>requirements</code>, each assigned to a phase</small></div>
         <div class="side"><b>you</b> approve the plan</div>
         <div class="down" aria-hidden="true">↓</div>
         <div class="box model"><div class="flow-who">story writer</div>2 Write the phase's stories<small>reads the code and what earlier phases delivered; outlines up to 12 stories with <code>plan_stories</code>, writes them one per turn with <code>write_story</code>, then <code>finish_stories</code> (<a href="#story-writer">sequence</a>)</small></div>
-        <div class="side"><b>check</b>: ids, dependencies (no cycles, nothing undelivered), a check per criterion, every requirement of the phase covered by a check · <b>you</b> approve the stories</div>
+        <div class="side"><b>check</b>: ids, dependencies (no cycles, nothing undelivered), every criterion an expectation with concrete examples and no code, every requirement of the phase covered · <b>you</b> approve the stories</div>
         <div class="down" aria-hidden="true">↓</div>
         <div class="box model"><div class="flow-who">model</div>3 One story at a time, each in a fresh context<small>sees the story, and what the stories it depends on provide and delivered, with the current outline of their files</small></div>
-        <div class="side"><b>gate</b>: <code>complete_story</code> runs every acceptance check and any new test file no check runs; a failure is refused with its output</div>
+        <div class="side"><b>verify</b>: after <code>complete_story</code> a separate verifier writes and runs a black-box test per expectation in <code>tests/acceptance/</code>; the harness runs each test itself; an unmet expectation goes back to the story</div>
         <div class="back">↺ next ready story</div>
         <div class="down" aria-hidden="true">↓</div>
-        <div class="box harness"><div class="flow-who">harness</div>4 Phase gate and report<small>runs the phase's <code>checks</code> (the last phase also runs the command the request says must pass, and needs every requirement proven), then writes the phase report the next writer starts from, with a table of what proves each requirement</small></div>
+        <div class="box harness"><div class="flow-who">harness</div>4 Phase gate and report<small>verifies the phase's own expectations, re-runs every acceptance test saved so far (the last phase also runs the command the request says must pass, and needs every requirement proven), then writes the phase report the next writer starts from, with a table of what proves each requirement</small></div>
         <div class="back">↺ next phase: back to 2</div>
       </div>
       <div class="flow-legend"><span class="you">you</span><span class="model">model</span><span class="harness">harness</span></div>
@@ -1094,7 +1094,7 @@ ollama serve</code></pre></div>
 
     <h3>When a story gets stuck</h3>
     <ul>
-      <li><strong>It counts as failed</strong> after 3 refused <code>complete_story</code> calls, running out of turns (<code>/plan stories cap N</code>, default 30), the <a href="#loop-guard">loop guard</a> stopping it, or ending without <code>complete_story</code>. A reply without any tool call first gets one reminder.</li>
+      <li><strong>It counts as failed</strong> after the verifier reports unmet expectations 3 times, running out of turns (<code>/plan stories cap N</code>, default 40), the <a href="#loop-guard">loop guard</a> stopping it, or ending without <code>complete_story</code>. A reply without any tool call first gets one reminder.</li>
       <li><strong>The writer re-splits it</strong>, using what went wrong: the story and those waiting on it are replaced by smaller or corrected stories. It outlines and writes only the replacements, with new ids, one per turn as above.</li>
       <li><strong>A second failure pauses the plan.</strong> Edit the story in its file, mark it <code>[ ]</code> to retry, then <code>/plan resume</code>. A re-split that never got written is tried again on resume.</li>
       <li><strong>Failing phase checks</strong> get one pass of fix stories before the plan pauses.</li>
@@ -1112,7 +1112,7 @@ ollama serve</code></pre></div>
       <tr><th>Command</th><th>Effect</th></tr>
       <tr><td><code>/plan stories</code></td><td class="wrap">Plan mode with a story plan</td></tr>
       <tr><td><code>/plan stories approve each</code> · <code>once</code></td><td class="wrap">Review every phase's stories before they run (the default), or let them run; a change to later phases always asks</td></tr>
-      <tr><td><code>/plan stories cap N</code></td><td class="wrap">Turns one story may take before it counts as stuck (default 30)</td></tr>
+      <tr><td><code>/plan stories cap N</code></td><td class="wrap">Turns one story may take before it counts as stuck (default 40)</td></tr>
       <tr><td><code>/plan show stories [N]</code></td><td class="wrap">A phase's stories, the current phase by default</td></tr>
     </table></div>
   </section>

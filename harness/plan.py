@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import momo_dir
-from .stories import StorySet
+from .stories import Criterion, StorySet, criterion_line
 
 # The plan is mirrored to this file in the working directory while it exists.
 # It is re-parsed when the user approves the plan (so hand edits are honoured)
@@ -53,7 +53,10 @@ class Step:
     # Stories plans only: a step is a phase, with what exists when it is done,
     # the commands that close it, and the report written when they pass.
     outcome: str = ""
-    checks: list[str] = field(default_factory=list)
+    checks: list[str] = field(default_factory=list)      # legacy: commands the harness runs
+    # the expected behaviour with examples that closes the phase, verified like
+    # a story's criteria (stories.Criterion)
+    acceptance: list[Criterion] = field(default_factory=list)
     report: str = ""
     # How its run went, for the plan view (session only, not the plan file).
     started_at: str = ""
@@ -82,6 +85,8 @@ class Step:
             stage=stage if stage in STAGES else "impl",
             outcome=str(d.get("outcome", "") or "").strip(),
             checks=str_list(d.get("checks")),
+            acceptance=[Criterion.from_dict(c) for c in (d.get("acceptance") or [])
+                        if isinstance(c, (dict, str))],
             report=str(d.get("report", "") or "").strip(),
             started_at=str(d.get("started_at", "") or ""),
             finished_at=str(d.get("finished_at", "") or ""),
@@ -93,8 +98,10 @@ class Step:
              "status": self.status, "note": self.note}
         if self.tests or self.tag or self.stage != "impl":
             d.update(tests=self.tests, tag=self.tag, stage=self.stage)
-        if self.outcome or self.checks or self.report:
+        if self.outcome or self.checks or self.report or self.acceptance:
             d.update(outcome=self.outcome, checks=self.checks, report=self.report)
+        if self.acceptance:
+            d["acceptance"] = [c.to_dict() for c in self.acceptance]
         if self.started_at or self.finished_at or self.turns:
             d.update(started_at=self.started_at, finished_at=self.finished_at, turns=self.turns)
         return d
@@ -113,6 +120,10 @@ class Plan:
     # [{"id": "R1", "text": …, "phase": 1}].  Story criteria cover them (covers:),
     # so the writer, the gate and the report can tell which ones a check proves.
     requirements: list[dict] = field(default_factory=list)
+    # stories: how the product is used, in plain words ("CLI: `python3 mud.py
+    # <command>`", "Service: `python3 server.py`, HTTP on localhost:8000"): the
+    # verifier exercises the expectations through these
+    interfaces: list[str] = field(default_factory=list)
     test_command: str = ""    # tdd: the full suite the harness runs at every gate
     # tdd, optional: a template that runs only some test files ({files}, {dirs},
     # {stems}), for the red check and the model's own runs (tdd.step_command)
@@ -146,6 +157,7 @@ class Plan:
             goal=str(d.get("goal", "") or "").strip(),
             request=str(d.get("request", "") or "").strip(),
             requirements=requirement_list(d.get("requirements")),
+            interfaces=str_list(d.get("interfaces")),
             steps=[Step.from_dict(s) for s in (d.get("steps") or []) if isinstance(s, dict)],
             kind=d.get("kind") if d.get("kind") in ("tdd", "stories") else "normal",
             test_command=str(d.get("test_command", "") or "").strip(),
@@ -165,6 +177,8 @@ class Plan:
             d["request"] = self.request
         if self.requirements:
             d["requirements"] = self.requirements
+        if self.interfaces:
+            d["interfaces"] = self.interfaces
         if self.tdd:
             d.update(kind=self.kind, test_command=self.test_command,
                      step_test_command=self.step_test_command, test_owners=self.test_owners)
@@ -184,6 +198,8 @@ class Plan:
             lines += ["## Goal", "", self.goal, ""]
         if self.request:
             lines += ["## Request", "", self.request, ""]
+        if self.interfaces:
+            lines += ["## Interfaces", ""] + [f"- {x}" for x in self.interfaces] + [""]
         if self.requirements:
             lines += ["## Requirements", ""] + [
                 f"- {r['id']} (phase {r['phase']}): {r['text']}" for r in self.requirements] + [""]
@@ -208,6 +224,9 @@ class Plan:
                 lines.append(f"  Outcome: {s.outcome}")
             for c in s.checks:
                 lines.append(f"  Check: `{c}`")
+            for c in s.acceptance:
+                lines.append(f"  Accept: {c.text}")
+                lines += c.to_markdown("    ")
             sset = self.story_sets.get(i) if self.stories else None
             if sset is not None:
                 lines.append(f"  Stories: {sset.progress()} done (phase-{i}.md)")
@@ -225,6 +244,7 @@ class Plan:
         lines split out."""
         title, goal_lines, request_lines, steps = "", [], [], []
         requirement_lines: list[str] = []
+        interface_lines: list[str] = []
         kind, command_lines, step_command_lines = "normal", [], []
         stories_dir = ""
         section = ""
@@ -260,7 +280,7 @@ class Plan:
                         line.strip().strip("`").strip())
                 continue
             m = _RX_STEP.match(line)
-            if m and section not in ("goal", "request", "requirements"):
+            if m and section not in ("goal", "request", "requirements", "interfaces"):
                 _flush()
                 step_title = m.group(2).strip()
                 if step_title.startswith("**") and step_title.endswith("**") and len(step_title) > 4:
@@ -271,7 +291,12 @@ class Plan:
                 continue
             if cur is not None:
                 s = line.strip()
-                if s.lower().startswith("files:"):
+                if s.lower().startswith("accept:"):
+                    cur.acceptance.append(Criterion(text=s[7:].strip()))
+                elif (cur.acceptance and line.startswith("    ")
+                      and criterion_line(cur.acceptance[-1], s)):
+                    pass                # an Accept: block's Example / Covers / Test line
+                elif s.lower().startswith("files:"):
                     cur.files = [f.strip().strip("`") for f in s[6:].split(",") if f.strip()]
                 elif s.lower().startswith("note:"):
                     cur.note = s[5:].strip()
@@ -297,10 +322,14 @@ class Plan:
                 request_lines.append(line)
             elif section == "requirements":
                 requirement_lines.append(line)
+            elif section == "interfaces":
+                if line.strip().lstrip("-* ").strip():
+                    interface_lines.append(line.strip().lstrip("-* ").strip())
         _flush()
         return cls(title=title or "Implementation plan",
                    goal="\n".join(goal_lines).strip(), request="\n".join(request_lines).strip(),
                    requirements=_parse_requirements(requirement_lines),
+                   interfaces=interface_lines,
                    steps=steps, kind=kind,
                    test_command=" ".join(command_lines),
                    step_test_command=" ".join(step_command_lines),

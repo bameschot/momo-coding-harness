@@ -623,3 +623,25 @@ class Harness(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunTestsCleanup(unittest.TestCase):
+    """A check or acceptance test that leaves a process behind (run 3's
+    `server.py & sleep 2 && curl …`) must not hold its port for the next."""
+
+    def test_what_a_test_command_left_running_is_stopped(self):
+        import time
+        from harness import tdd as tdd_mod
+        with tempfile.TemporaryDirectory() as d:
+            ok, _out = tdd_mod.run_tests("sleep 30 & echo $! > pid.txt; echo started", Path(d))
+            self.assertTrue(ok)
+            pid = int((Path(d) / "pid.txt").read_text())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(pid, 9)
+            self.fail("the background sleep outlived its test command")
