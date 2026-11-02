@@ -422,7 +422,18 @@ For this plan, these replace rules 1, 3 and 6 of "What makes a good plan" above:
 - **Each phase has an `outcome`**: what exists and works when it is done, seen from outside.
 - **Each phase has `checks`**: commands that prove the outcome and exit non-zero otherwise (a test
   module, a smoke script). The harness runs them, so a phase that creates tests should check them.
-  Do not add a phase that only runs the tests."""
+  Each phase checks its own outcome: not a command an earlier phase already passes (the whole suite
+  passes on the first phase's tests alone), and not only that a file exists. A user interface can
+  be checked by a test that fetches the page and finds its key elements. Do not add a phase that
+  only runs the tests.
+- **Cover the request with `requirements`**: split the user's request into one line per thing they
+  named (each command, endpoint, message, behaviour; "look, go/n/s/e/w, say" is one requirement per
+  command), ids R1, R2, …, each with the phase that delivers it. Story writers must prove each one
+  with a check, and the harness reports any without a passing check as a gap.
+- **The user's own command**: a command the request says must pass (e.g. `python -m unittest`) is
+  a check of the last phase, exactly as written. The harness runs it at the end in any case.
+- **Untrusted input** (HTTP paths, names, commands typed by users) gets handled in the phase that
+  reads it: e.g. a static file server serves only files inside its folder."""
 
 _STORY_EXECUTION_RULES = """## Implementing one story
 
@@ -440,7 +451,12 @@ These rules replace "To finish" in "How the loop works" above: a story ends with
 - What the story **provides** is a contract later stories are written against: match it exactly,
   or say in the summary how and why you differ.
 - Run the acceptance checks yourself before calling complete_story. The harness runs them again
-  and refuses the story while one fails.
+  and refuses the story while one fails, and also runs any test file you add that no check runs.
+- When a check fails because of a bug in code an earlier story wrote, fixing it is part of this
+  story: fix a small bug (a few lines) with a regression test and name it in your summary. If the
+  fix is bigger, call report_defect with the file, the problem and the failing output: the harness
+  has a story written that fixes it, then runs this story again.
+- Put new tests in the tests folder; do not leave scripts or test files in the project root.
 - If you need the user's input, use ask_user. A plain-text reply without a tool call also ends
   the story, as not done."""
 

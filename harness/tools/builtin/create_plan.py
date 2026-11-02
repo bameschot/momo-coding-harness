@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..registry import Tool, tool_schema
-from ._plan_schema import PHASE, STEP, STEP_TDD, plan_variant
+from ._plan_schema import PHASE, REQUIREMENT, STEP, STEP_TDD, plan_variant
 
 _TDD = tool_schema("create_plan",
     "Submit the test-driven implementation plan once investigation is complete. The harness "
@@ -40,8 +40,12 @@ _STORIES = tool_schema("create_plan",
     "with the complete new plan.",
     {"title": {"type": "string", "description": "Short name for the feature or project"},
      "goal":  {"type": "string", "description": "What the change achieves and why, including key findings, decisions and the user's answers"},
-     "steps": {"type": "array", "items": PHASE, "description": "The phases, in order (usually 2-7)"}},
-    ["title", "goal", "steps"])
+     "steps": {"type": "array", "items": PHASE, "description": "The phases, in order (usually 2-7)"},
+     "requirements": {"type": "array", "items": REQUIREMENT,
+                      "description": "The user's request split into one requirement per line — every "
+                                     "command, endpoint and behaviour they named, one per item of a "
+                                     "list — each with the phase that delivers it"}},
+    ["title", "goal", "steps", "requirements"])
 
 _EXAMPLE_STORIES = {
     "title": "Paginated search API",
@@ -56,7 +60,11 @@ _EXAMPLE_STORIES = {
          "details": "src/api.py: GET /search?q=&page= using paginate() and Index.query().",
          "outcome": "GET /search?q=a&page=2 returns the second page as JSON",
          "checks": ["python -m pytest -q tests/test_api.py"],
-         "files": ["src/api.py", "tests/test_api.py"]}]}
+         "files": ["src/api.py", "tests/test_api.py"]}],
+    "requirements": [
+        {"id": "R1", "text": "GET /search?q= returns matching results as JSON", "phase": 2},
+        {"id": "R2", "text": "?page=N returns the Nth page of 5 results", "phase": 2},
+        {"id": "R3", "text": "the last page holds the remainder, nothing lost", "phase": 1}]}
 
 _EXAMPLE = {"title": "Fix off-by-one in paginate()",
             "goal": "Last page is dropped because paginate() uses < instead of <=.",

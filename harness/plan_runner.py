@@ -11,7 +11,9 @@ from . import tdd as tdd_mod
 from . import tools as tools_mod
 from .tools import registry
 from .events import ChatEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
+from .stories import exists_only
 from .plan import (ACCEPTANCE_TAG, PLAN_FILENAME, Plan, Step, delete_plan_file, read_plan_file,
+                   request_commands, requirement_list,
                    str_list, write_plan_file)
 
 
@@ -24,6 +26,9 @@ def _now() -> str:
 _TDD_TEXT_RETRIES = 2
 
 TDD_MAX_REFUSALS = 3   # gate refusals in a row before the user is asked
+
+_REQUEST_CHARS = 4_000     # the user's request kept on a plan (Plan.request)
+# A check made only of file tests (ls, test -f/-s, [ -s … ]) proves no behaviour.
 
 # /plan questions: the answer to a first create_plan made before any question.
 _ASK_FIRST = (
@@ -63,6 +68,63 @@ def _no_work(step: Step, test_command: str, last: bool) -> bool:
         return False
     return bool(_RUNS_TESTS.search(step.title) or _ACCEPTANCE_TITLE.search(step.title)
                 or (last and test_command in f"{step.title}\n{step.details}"))
+
+
+def _phase_check_notes(steps) -> str:
+    """A note on phase checks that prove little (shown with the plan, not a
+    refusal): two phases with the same checks (the story-mud plan's phase 2 could
+    pass on phase 1's tests alone), or a check that only tests that files exist."""
+    notes, seen = [], {}
+    for i, s in enumerate(steps, 1):
+        key = tuple(sorted(s.checks))
+        if key in seen:
+            notes.append(f"phases {seen[key]} and {i} have the same checks")
+        seen.setdefault(key, i)
+        if s.checks and all(exists_only(c) for c in s.checks):
+            notes.append(f"phase {i}'s checks only test that files exist")
+    return ("Note on the phase checks: " + "; ".join(notes)
+            + " — a phase passes these without doing its work.") if notes else ""
+
+
+def _requirement_problems(plan: Plan, raw) -> str:
+    """Why a stories plan's requirements are not usable ("" when they are): the
+    request must be split into requirements R1, R2, …, each assigned to a phase."""
+    reqs, n = plan.requirements, len(plan.steps)
+    if not plan.request:
+        return ""
+    if not reqs:
+        return ("ERROR: a stories plan needs 'requirements': the user's request split into one "
+                "line each (every command, endpoint and behaviour they named — a list such as "
+                "'look, go/n/s/e/w, say' is one requirement per item), each with an id R1, R2, … "
+                "and the phase that delivers it. Call create_plan again with the complete plan.")
+    errors, seen = [], set()
+    for r in reqs:
+        if not re.fullmatch(r"R\d+", r["id"]):
+            errors.append(f"{r['id']}: ids are R1, R2, …")
+        elif r["id"] in seen:
+            errors.append(f"{r['id']} appears twice")
+        seen.add(r["id"])
+        if not 1 <= r["phase"] <= n:
+            errors.append(f"{r['id']}: phase must be 1–{n}")
+        if r["text"].count(",") >= 3:
+            # run 3's first R4: "Commands: look, go/n/s/e/w, say, who, take, …"
+            errors.append(f"{r['id']} lists several things — one requirement per item")
+    if isinstance(raw, list) and len(raw) != len(reqs):
+        errors.append("every requirement needs an id and a text")
+    return ("ERROR: fix the requirements: " + "; ".join(errors) + ". Call create_plan again "
+            "with the complete plan.") if errors else ""
+
+
+def _request_command_note(plan: Plan) -> str:
+    """A note when a command the request says must pass is not a check of the
+    last phase as written (the harness runs it at the last gate anyway)."""
+    last = plan.steps[-1].checks if plan.steps else []
+    missing = [c for c in request_commands(plan.request) if c not in last]
+    if not missing:
+        return ""
+    return ("Note: the request says " + ", ".join(f"`{c}`" for c in missing)
+            + " must pass, and the last phase does not check it as written; the harness runs it "
+            "at the last phase's gate.")
 
 
 class PlanRunnerMixin:
@@ -228,11 +290,12 @@ class PlanRunnerMixin:
                 reports = {s.title: s.report for s in self.plan.steps if s.report}
                 for s in edited.steps:
                     s.report = s.report or reports.get(s.title, "")
+            edited.request = edited.request or self.plan.request
             self.plan = edited
         if not self.plan.steps:
             return "The plan has no steps."
         self.plan_phase = "executing"
-        self._plan_asked, self._plan_gate_refused = 0, False   # the next plan asks afresh
+        self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""   # the next plan asks afresh
         self._sync_plan_file()
         # The plan runs in coding mode (set_mode rebuilds the prompt and emits status).
         self.set_mode("coding")
@@ -244,11 +307,37 @@ class PlanRunnerMixin:
         title = self.plan.title
         self.plan = None
         self.plan_phase = "investigating"
-        self._plan_asked, self._plan_gate_refused = 0, False
+        self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
         delete_plan_file(self.workdir)
         self.rebuild_system_prompt()
         self.emit_status()
         return f"Plan discarded: {title} ({PLAN_FILENAME} removed)"
+
+    def _note_planning_message(self, text: str) -> None:
+        """A message sent in plan mode before there is a plan.  The first one is
+        the request the plan answers.  A later one that follows a question the
+        model wrote in its reply is an answer, so it counts for the ask-first
+        gate like an ask_user answer (run 3's planner asked three questions as
+        text; its plan was refused for asking nothing)."""
+        if not self._plan_first_request:
+            self._plan_first_request = text.strip()[:_REQUEST_CHARS]
+            return
+        last = next((m.get("content") or "" for m in reversed(self.messages)
+                     if m.get("role") == "assistant"), "")
+        if "?" in str(last):
+            self._plan_asked += 1
+
+    def _plan_request(self) -> str:
+        """The user's request a new plan answers: a revised plan keeps the one
+        it revises; a first plan takes the message that started planning, else
+        the one that started this turn."""
+        if self.plan is not None and self.plan.request:
+            return self.plan.request
+        if self._plan_first_request:
+            return self._plan_first_request
+        msg = getattr(self, "_turn_user", None) or {}
+        text = msg.get("content") if isinstance(msg, dict) else ""
+        return text.strip()[:_REQUEST_CHARS] if isinstance(text, str) else ""
 
     def _handle_create_plan(self, args: dict) -> str:
         # Ask before planning (roles/planner.md, step 4): a first plan made without
@@ -263,7 +352,8 @@ class PlanRunnerMixin:
             return ("ERROR: create_plan needs a non-empty 'steps' list of "
                     "{title, details, files} objects. Call it again with the steps.")
         plan = Plan(title=str(args.get("title") or "Implementation plan").strip(),
-                    goal=str(args.get("goal") or "").strip(), steps=steps)
+                    goal=str(args.get("goal") or "").strip(), steps=steps,
+                    request=self._plan_request())
         approve_note = ""
         if self.plan_kind == "tdd":
             err = self._make_tdd_plan(plan, args)
@@ -276,7 +366,14 @@ class PlanRunnerMixin:
                 return ("ERROR: every phase needs an 'outcome' and at least one command in "
                         f"'checks'; missing in: {', '.join(incomplete)}. Call create_plan again "
                         "with the complete plan.")
+            plan.requirements = requirement_list(args.get("requirements"))
+            err = _requirement_problems(plan, args.get("requirements"))
+            if err:
+                return err
             plan.kind = "stories"
+            notes = " ".join(x for x in (_phase_check_notes(steps), _request_command_note(plan)) if x)
+            if notes:
+                self.event_queue.put(ChatEvent("system", notes))
             approve_note = (" On approval each phase is broken into stories when it starts"
                             + (", which you approve before they run." if self.stories_approve == "each"
                                else ", which run without asking (/plan stories approve each to review them)."))

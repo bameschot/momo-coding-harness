@@ -106,6 +106,25 @@ class PlanQuestions(unittest.TestCase):
         self.assertEqual(self.asked[0], CHOICE["question"])
         self.assertIsNotNone(self.h.plan)
 
+    # Run 3: the planner asked its questions in its reply, the user answered in
+    # the next message, and the plan was refused for asking nothing; its
+    # request was the answer, not the request.
+    def test_questions_asked_in_text_count_and_the_request_stays_the_first_message(self):
+        self.client.script = [("Where should the fix go: paginate() or the callers?", [])]
+        self.h.send("fix paging")
+        self.client.script = [plan_call()]
+        self.h.send("In paginate(), please.")
+        self.assertEqual(self.refusals(), [])
+        self.assertEqual(self.h.plan.request, "fix paging")
+
+    def test_a_follow_up_without_a_question_does_not_count(self):
+        self.client.script = [("I looked at pager.py.", [])]
+        self.h.send("fix paging")
+        self.client.script = [plan_call(), plan_call()]
+        self.h.send("go on")
+        self.assertEqual(len(self.refusals()), 1)
+        self.assertEqual(self.h.plan.request, "fix paging")
+
     def test_off_asks_nothing_first(self):
         self.cmd("/plan questions off")
         self.client.script = [plan_call()]

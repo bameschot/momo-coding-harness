@@ -104,6 +104,12 @@ class Stub(BaseHTTPRequestHandler):
             if body["model"] == "broken":
                 self._json({"error": "model runner crashed"}, 500)
                 return
+            # A Qwen template that parses message content as XML.
+            if body["model"] == "qwen-xml" and any("<" in str(m.get("content", ""))
+                                                   for m in body["messages"]):
+                self._json({"error": "XML syntax error on line 3: element <function> closed by "
+                                     "</parameter>"}, 500)
+                return
             if not body.get("stream"):
                 final = dict(OLLAMA_STREAM[-1])
                 final["message"] = {"role": "assistant", "content": "Hello", "thinking": "hmm",
@@ -240,9 +246,25 @@ class Ollama(_Base):
                                    "tool_calls": [{"function": {"name": "f", "arguments": {"a": 1}}}]})
         self.assertEqual(msgs[2]["content"], "<ok>")       # not a qwen model: no escaping
 
-    def test_qwen_escaping_still_applies(self):
+    def test_qwen_is_not_escaped_by_default(self):
+        # The model reads what is sent: escaped, it copied `&lt;` into its edits.
         self.client("qwen3.5:9b").chat([{"role": "tool", "content": "a<b"}], [])
-        self.assertEqual(Stub.requests[-1]["body"]["messages"][0]["content"], "a&lt;b")
+        self.assertEqual(Stub.requests[-1]["body"]["messages"][0]["content"], "a<b")
+
+    def test_qwen_is_escaped_once_its_server_rejects_the_xml(self):
+        c = self.client("qwen-xml")
+        n = len(Stub.requests)
+        r = c.chat([{"role": "tool", "content": "a<b"}], [])
+        self.assertEqual(r.content, "Hello")
+        sent = [q["body"]["messages"][0]["content"] for q in Stub.requests[n:]]
+        self.assertEqual(sent, ["a<b", "a&lt;b"])          # rejected, then sent escaped
+        c.chat([{"role": "tool", "content": "c<d"}], [])
+        self.assertEqual(Stub.requests[-1]["body"]["messages"][0]["content"], "c&lt;d")
+        self.assertEqual(len(Stub.requests), n + 3)        # escaped from the start now
+
+    def test_other_errors_are_not_retried_escaped(self):
+        with self.assertRaises(Exception):
+            self.client("broken").chat([{"role": "tool", "content": "a<b"}], [])
 
     def test_context_length_and_models(self):
         c = self.client()

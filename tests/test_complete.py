@@ -92,8 +92,9 @@ class Levels(Base):
         self.assertEqual(self.values("/tools discover "), ["all", "extensions", "off"])
 
     def test_reasoning_watch_and_progress_note(self):
-        self.assertEqual(self.values("/think-budget "), ["off", "repeat "])
+        self.assertEqual(self.values("/think-budget "), ["off", "repeat ", "reply-repeat "])
         self.assertEqual(self.values("/think-budget repeat "), ["off", "on"])
+        self.assertEqual(self.values("/think-budget reply-repeat "), ["off", "on"])
         self.assertEqual(self.values("/progress-note "), ["off", "on"])
         self.assertEqual(self.values("/plan questions "), ["off", "on"])
 

@@ -32,6 +32,8 @@ The implementer is a small model. It does well with exact names, signatures and 
 
 **5. Submit** — once every story is written, call `finish_stories`.
 
+When you re-split a failed story or rework the set after feedback, the stories already in the phase stay in it: retire the ones that must go (duplicates, work your new stories cover) with `plan_stories`' `replaces`. Never write a second copy of a story that is still pending.
+
 ---
 
 ## What makes a good story
@@ -42,9 +44,10 @@ The implementer is a small model. It does well with exact names, signatures and 
 4. **`depends_on` is real** — list a story only when this one needs what it provides. Stories of earlier phases are `P<n>.S<m>` and are already done; never redo or rewrite them — if their work must change, write a new story that says so.
 5. **`technical_details` removes guesswork** — data formats, byte layouts, protocol fields, edge cases, error behaviour. For anything spec-heavy (protocols, file formats, algorithms) give a concrete example input with its exact expected output, from the spec or a known example — not from memory of how the code might do it.
 6. **`hints` and `pitfalls` are concrete** — "reuse `read_header()` in src/io.py" and "the length field is big-endian and comes before the mask key", not "be careful with lengths".
-7. **Acceptance the harness can check** — every criterion is concrete (`<input or action> → <expected result>`) and has a `check` command whenever running something can show it: a test file or test name, or a `python3 -c "…"` assertion. The harness runs these commands and refuses the story while one fails, so each must exit non-zero on failure and finish in seconds.
-8. **Tests travel with code** — a story that adds a definition adds or extends its tests, or a story that depends on it does. The phase's own checks must pass once all stories are done.
-9. **Ordered and few** — at most 12 stories per phase, decided in the outline; dependencies first. Ids are S1, S2, … in a sensible order.
+7. **Acceptance the harness can check** — every criterion is concrete (`<input or action> → <expected result>`) and has a `check` command whenever running something can show it. Prefer a test file the story adds or extends, run with `python3 -m unittest <file>`; use `python3 -c "…"` only for a one-line assertion (no `with`, `try`, `def` or `class` after a `;`: that is a SyntaxError). The harness runs these commands and refuses the story while one fails, so each must exit non-zero on failure, must not catch and print its own errors, must not delete project files or stop processes, and must finish in seconds. A check that talks to a server starts it itself: a unittest that starts the server in `setUpClass` and stops it in `tearDownClass`, not a command that expects one to be running. A check that only tests that a file exists proves nothing; check what it contains or does. Use only modules the project has (and only the standard library when the request says so).
+8. **Requirements are proven** — the first message lists the requirements this phase must cover (R1, R2, …). Give each at least one criterion whose check proves it, with its id in `covers`; `finish_stories` refuses the set while one is uncovered. Test a requirement the way the user meets it: the page's command box sends `take rusty sword` as the page splits it, a quit command must actually remove the player and tell the others, an arrival message must reach the others. Code that handles untrusted input (HTTP paths, names, typed commands) gets a pitfall and a criterion for the hostile case (`GET /../server.py` → 404). Where a reply goes back to the sender and other events are queued for polling, say which channel carries what, so nothing is shown twice.
+9. **Tests travel with code** — a story that adds a definition adds or extends its tests, or a story that depends on it does. The phase's own checks must pass once all stories are done.
+10. **Ordered and few** — at most 12 stories per phase, decided in the outline; dependencies first. Ids are S1, S2, … in a sensible order.
 
 If the code shows that the **later** phases of the plan are wrong (an interface they assume does not exist, two phases overlap), you may pass a `phase_revision` to `finish_stories` with the complete new list of later phases and the reason. The user decides on it; never use it for the current phase.
 

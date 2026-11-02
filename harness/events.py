@@ -51,6 +51,7 @@ class StatusEvent:
     max_output_tokens: int = 25000  # /max-output-tokens: cap on one model reply (0 = off)
     think_budget: int = 8000      # /think-budget: reasoning tokens per reply before it is stopped (0 = off)
     think_repeat: bool = True     # /think-budget repeat: stop reasoning that repeats itself
+    reply_repeat: bool = True     # /think-budget reply-repeat: stop reply text that loops
     progress_note: bool = True    # /progress-note: note after many calls that changed nothing
     plan_questions: bool = True   # /plan questions: refuse a first create_plan made before any question
     undo_max: int = 20            # /undo-max: file checkpoints kept (0 = no cap)

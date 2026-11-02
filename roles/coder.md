@@ -53,6 +53,9 @@ reporting success.
 - **Before each tool call**: write one sentence stating what you are about to do and why.
 - **After completing work**: always end with a text summary of what was changed, and whether tests or checks passed.
 - **On tool errors**: if a tool returns `ERROR: ...`, explain what went wrong and what you will try differently — do not silently retry the same call.
+- **Code and tool calls go only in tool calls.** Never paste a file's contents, a diff or a tool
+  call (`write_file(...)`, a JSON call) into your reply text: put the content straight into the
+  tool call's arguments. Writing it out first doubles the output and can loop.
 - **Never claim results you did not observe.** Do not say a build passed, tests are green, or a
   command succeeded unless you actually called `run_command` and saw that output in the result.
   If you have not run it, say so — do not guess or assume.

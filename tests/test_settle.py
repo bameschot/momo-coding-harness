@@ -115,6 +115,27 @@ class Wording(unittest.TestCase):
     def test_a_cut_off_edit_asks_for_smaller_edits(self):
         self.assertIn("smaller edits", settle.retry_advice("edit_file", ()))
 
+    # The story-mud run: two looping replies were cut off "while writing" a call
+    # and told to split it, which was the wrong advice.
+    def test_a_looping_reply_is_told_to_call_the_tool_not_to_split(self):
+        loop = "append_to_file(path='game.py', content='...')\n" * 400
+        cause = settle.cut_off_cause(25000, 25000, loop)
+        self.assertEqual(cause, settle.LOOP_CAUSE)
+        text = settle.settled_result("truncated", "write_file", {"write_file", "append_to_file"},
+                                     cause=cause)
+        self.assertIn("do not write code or tool calls out as text", text)
+        self.assertNotIn("about 150 lines per call", text)
+        note = settle.cut_off_text_note("run_command", {"run_command"}, cause)
+        self.assertIn("Call the tool once", note)
+        self.assertIn("output limit", settle.cut_off_cause(25000, 25000, "short reply"))
+
+    def test_a_capped_reply_is_trimmed_to_its_head(self):
+        self.assertEqual(settle.trim_capped_reply("short"), "short")
+        long = "x" * 5000
+        trimmed = settle.trim_capped_reply(long)
+        self.assertTrue(trimmed.startswith("x" * 1000))
+        self.assertIn("3,500 more characters not kept", trimmed)
+
 
 class PartialTextCall(unittest.TestCase):
     tools = [{"function": {"name": n, "parameters": {"properties": {}}}}
@@ -138,6 +159,25 @@ class PartialTextCall(unittest.TestCase):
     def test_prose_is_not_a_call(self):
         self.assertIsNone(partial_text_call("I read the file and it looks fine. The next", self.tools))
         self.assertIsNone(partial_text_call("Call read_file(path) to see it.", self.tools))
+
+
+class StoryMudTextCalls(unittest.TestCase):
+    """Calls the story-mud run's model wrote as Python source in a markdown block."""
+    tools = [{"function": {"name": n, "parameters": {"properties": {}}}}
+             for n in ("append_to_file", "write_file", "run_command")]
+    APPEND = ('I will append the `Game` class to `game.py`.\n\n```python\nappend_to_file('
+              'path="game.py", content="""\n\nclass Game:\n    def __init__(self, world):\n'
+              '        self.world = world\n""")\n```\n')
+
+    def test_a_python_call_in_a_code_block_is_recovered(self):
+        from harness.toolcall_text import recover_text_calls
+        calls, rest = recover_text_calls(self.APPEND, self.tools)
+        self.assertEqual([c["name"] for c in calls], ["append_to_file"])
+        self.assertIn("class Game:", calls[0]["arguments"]["content"])
+        self.assertEqual(rest.strip(), "I will append the `Game` class to `game.py`.")
+
+    def test_a_cut_off_python_call_is_found(self):
+        self.assertEqual(partial_text_call(self.APPEND[:150], self.tools)[0], "append_to_file")
 
 
 class Loop(unittest.TestCase):

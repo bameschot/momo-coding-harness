@@ -72,14 +72,14 @@ class DerivedTables(unittest.TestCase):
             {t["function"]["name"] for t in tools.READ_ONLY_TOOLS + tools.CODE_NAV_TOOLS}
             | tools.INDEX_TOOL_NAMES
             | {"command_output", "stop_command", "ask_user", "ask_choice", "complete_step", "scratch_write",
-               "find_tools", "complete_story"}))
+               "find_tools", "complete_story", "report_defect"}))
 
     def test_diff_locked_and_index_tables(self):
         self.assertEqual(tools.DIFF_TOOLS, {"edit_file", "append_to_file", "replace_symbol",
                                             "write_file", "delete_file", "move_file", "edit_files"})
         self.assertEqual(tools.LOCKED_TOOLS, {"create_plan", "complete_step", "revise_plan",
                                               "plan_stories", "write_story", "finish_stories",
-                                              "complete_story"})
+                                              "complete_story", "report_defect"})
         self.assertEqual(tools.INDEX_REPLACES, {"find_references", "file_dependencies"})
         self.assertEqual(tools.NET_TOOL_NAMES, {"fetch_url", "web_search", "add_search_source"})
         self.assertEqual(tools.RUN_STORE_TOOLS, {"run_command", "command_output", "stop_command"})
@@ -88,7 +88,8 @@ class DerivedTables(unittest.TestCase):
         groups = {t.name: t.group for t in registry.builtins()}
         self.assertEqual({n for n, g in groups.items() if g == "ask & plan"},
                          {"ask_user", "ask_choice", "create_plan", "complete_step", "revise_plan", "find_tools",
-                          "plan_stories", "write_story", "finish_stories", "complete_story"})
+                          "plan_stories", "write_story", "finish_stories", "complete_story",
+                      "report_defect"})
         self.assertEqual(groups["scratch_write"], "edit & shell")
 
 

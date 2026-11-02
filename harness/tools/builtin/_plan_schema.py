@@ -51,11 +51,25 @@ PHASE = {
 CRITERION = {
     "type": "object",
     "properties": {
-        "text":  {"type": "string", "description": "What must be true, concretely: '<input or action> → <expected result>'"},
-        "check": {"type": "string", "description": "A command that proves it and exits non-zero otherwise; the harness "
-                                                   "runs it. Leave it out only for what no command can show."},
+        "text":   {"type": "string", "description": "What must be true, concretely: '<input or action> → <expected result>'"},
+        "check":  {"type": "string", "description": "A command that proves it and exits non-zero otherwise; the harness "
+                                                    "runs it. Leave it out only for what no command can show."},
+        "covers": {"type": "array", "items": {"type": "string"},
+                   "description": "The plan's requirement ids this criterion's check proves, e.g. ['R3']"},
     },
     "required": ["text"],
+}
+
+# Stories plans: the user's request, one requirement per line, each delivered
+# by a phase.  Story criteria name the ones they prove (CRITERION.covers).
+REQUIREMENT = {
+    "type": "object",
+    "properties": {
+        "id":    {"type": "string", "description": "R1, R2, …"},
+        "text":  {"type": "string", "description": "One thing the user asked for: a command, endpoint or behaviour"},
+        "phase": {"type": "integer", "description": "The phase (1-based) that delivers it"},
+    },
+    "required": ["id", "text", "phase"],
 }
 
 STORY = {

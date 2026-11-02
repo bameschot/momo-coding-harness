@@ -17,6 +17,9 @@ from harness.commands import handle as handle_command
 from harness.events import ChatEvent
 from harness.llm.base import ChatResponse, LLMClient, ToolCall
 from harness.plan import PLAN_FILENAME
+from harness.plan import Plan, Step, request_commands
+from harness.plan_runner import _phase_check_notes, _request_command_note
+from harness.story_runner import STORY_NUDGES
 from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 PY = shlex.quote(sys.executable)
@@ -26,6 +29,12 @@ CALC_SUB = CALC_RIGHT + "\n\ndef sub(a, b):\n    return a - b\n"
 ADD_OK = f"{PY} -c \"from calc import add; assert add(2, 3) == 5\""
 SUB_OK = f"{PY} -c \"from calc import sub; assert sub(5, 3) == 2\""
 REPORT = "## What exists now\ncalc.add(a, b) adds."
+
+
+def give_up(last="no"):
+    """Text replies that fail a story: one per note it gets, then the last."""
+    return ([ChatResponse(content="no", done_reason="stop")] * STORY_NUDGES
+            + [ChatResponse(content=last, done_reason="stop")])
 
 
 def call(name, **args):
@@ -43,8 +52,8 @@ def write_set(*stories, revision=None):
             + [call("finish_stories", **({"phase_revision": revision} if revision else {}))])
 
 
-def criterion(text, check):
-    return {"text": text, "check": check}
+def criterion(text, check, covers=None):
+    return {"text": text, "check": check, **({"covers": covers} if covers else {})}
 
 
 PLAN_ARGS = {
@@ -53,15 +62,17 @@ PLAN_ARGS = {
         {"title": "Fix add", "details": "calc.py add()", "outcome": "add(2, 3) == 5",
          "checks": [ADD_OK], "files": ["calc.py"]},
         {"title": "Add sub", "details": "calc.py sub()", "outcome": "sub(5, 3) == 2",
-         "checks": [SUB_OK], "files": ["calc.py"]}]}
+         "checks": [SUB_OK], "files": ["calc.py"]}],
+    "requirements": [{"id": "R1", "text": "add(2, 3) returns 5", "phase": 1},
+                     {"id": "R2", "text": "sub(5, 3) returns 2", "phase": 2}]}
 
 FIX_ADD = {"id": "S1", "title": "Make add() add", "description": "add() returns 0.",
            "technical_details": "def add(a, b) -> a + b", "files": ["calc.py"],
            "provides": ["add(a, b) -> a + b in calc.py"],
-           "acceptance": [criterion("add(2, 3) → 5", ADD_OK)]}
+           "acceptance": [criterion("add(2, 3) → 5", ADD_OK, ["R1"])]}
 ADD_SUB = {"id": "S1", "title": "Add sub()", "description": "Subtract.",
            "technical_details": "def sub(a, b) -> a - b", "files": ["calc.py"],
-           "depends_on": ["P1.S1"], "acceptance": [criterion("sub(5, 3) → 2", SUB_OK)]}
+           "depends_on": ["P1.S1"], "acceptance": [criterion("sub(5, 3) → 2", SUB_OK, ["R2"])]}
 
 
 class ScriptedClient(LLMClient):
@@ -159,6 +170,16 @@ class Run(Base):
         self.assertIn("## [x] S1 — Make add() add", (folders[0] / "phase-1.md").read_text())
         self.assertTrue(any("Plan complete: Calc" in s for s in self.system_lines()))
 
+    def test_the_request_reaches_the_writer_and_the_report_is_shown(self):
+        self.run_plan(list(HAPPY))
+        brief = self.writer_requests()[0]["messages"][1]["content"]
+        self.assertIn("## The user's request\nmake calc work", brief)
+        self.assertIn("Cover every requirement of the request", brief)
+        self.assertTrue(any(t.startswith("Phase 1 report:\n" + REPORT) for t in self.system_lines()))
+        folder = next((self.wd / ".momo" / "stories").iterdir())
+        self.assertIn("## Report\n\n" + REPORT, (folder / "phase-1.md").read_text())
+        self.assertIn("## Request\n\nmake calc work", (folder / "plan.md").read_text())
+
     def test_each_story_and_writer_starts_fresh(self):
         self.run_plan(list(HAPPY))
         stories, writers = self.story_requests(), self.writer_requests()
@@ -194,7 +215,9 @@ class Run(Base):
         self.assertEqual(s1.status, "done")
         self.assertEqual(s1.facts["files"], ["calc.py"])
         self.assertEqual(s1.facts["checks"], [ADD_OK])
-        self.assertEqual(self.h.plan.steps[0].report, REPORT)
+        report = self.h.plan.steps[0].report
+        self.assertTrue(report.startswith(REPORT))
+        self.assertIn(f"## Requirements\n- ✓ R1 add(2, 3) returns 5 — P1.S1: `{ADD_OK}`", report)
 
     def test_a_failing_check_refuses_the_story(self):
         self.run_plan([
@@ -328,8 +351,7 @@ class Failure(Base):
     def test_a_failed_story_is_re_split(self):
         self.run_plan([
             *write_set(FIX_ADD),
-            ChatResponse(content="I give up.", done_reason="stop"),         # nudged once
-            ChatResponse(content="Still no.", done_reason="stop"),          # S1 fails
+            *give_up("Still no."),                                          # S1 fails
             *write_set({**FIX_ADD, "id": "S2"}),
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="add works"),
@@ -340,6 +362,34 @@ class Failure(Base):
         resplit = self.writer_requests()[1]["messages"][1]["content"]
         self.assertIn("Story S1 (Make add() add) failed", resplit)
         self.assertIn("Still no.", resplit)
+
+    # The story-mud run: S1 wrote the code, ran its check (it passed), then summed
+    # up in text instead of calling complete_story, and was failed and re-split.
+    def test_a_story_that_ends_in_text_with_passing_checks_is_accepted(self):
+        self.run_plan([
+            *write_set(FIX_ADD),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            *[ChatResponse(content="add() now adds.", done_reason="stop")] * (STORY_NUDGES + 1),
+            ChatResponse(content="stop", done_reason="stop")])
+        s1 = self.h.plan.story_sets[1].get("S1")
+        self.assertEqual(s1.status, "done")
+        self.assertEqual(s1.attempts, 0)
+        self.assertEqual(s1.delivered, "add() now adds.")
+        self.assertIn("calc.py", s1.facts["files"])
+        self.assertTrue(any("S1 ended without complete_story; its checks pass — accepted" in t
+                            for t in self.system_lines()))
+        self.assertEqual(len(self.writer_requests()), 2)     # phase 2's writer, no re-split
+
+    def test_a_story_backed_by_evidence_still_needs_complete_story(self):
+        story = {**FIX_ADD, "acceptance": [criterion("add(2, 3) → 5", ADD_OK, ["R1"]),
+                                           {"text": "the docstring explains add()"}]}
+        self.run_plan([
+            *write_set(story),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            *give_up(),
+            *write_set({**FIX_ADD, "id": "S2"}),
+            ChatResponse(content="stop", done_reason="stop")])
+        self.assertEqual(self.h.plan.story_sets[1].get("S1").status, "replaced")
 
     def test_a_story_the_loop_guard_stops_is_re_split(self):
         self.h.loop_resets = 0
@@ -354,15 +404,266 @@ class Failure(Base):
     def test_failing_again_pauses_the_plan(self):
         self.run_plan([
             *write_set(FIX_ADD),
-            ChatResponse(content="no", done_reason="stop"),
-            ChatResponse(content="no", done_reason="stop"),
+            *give_up(),
             *write_set({**FIX_ADD, "id": "S2"}),
-            ChatResponse(content="still no", done_reason="stop"),
-            ChatResponse(content="still no", done_reason="stop")])
+            *give_up("still no")])
         self.assertIsNotNone(self.h.plan)
         self.assertEqual(self.h.plan.story_sets[1].get("S2").status, "failed")
         self.assertTrue(any("failed again" in s for s in self.system_lines()))
         self.assertTrue(any("Plan paused in phase 1/2" in s for s in self.system_lines()))
+
+
+DOC_ADD = {"id": "S2", "title": "Document add()", "description": "Add a docstring.",
+           "files": ["calc.py"], "acceptance": [criterion("calc imports", f"{PY} -c \"import calc\"")]}
+
+
+class Retire(Base):
+    """A re-split or a reworked set retires stories with plan_stories' replaces,
+    and duplicates of pending stories are refused (the story-mud run ended up
+    with the same three stories three times)."""
+
+    def tool_results(self, needle):
+        return [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                if m.get("role") == "tool" and needle in (m.get("content") or "")]
+
+    def ids(self):
+        return [(s.id, s.status) for s in self.h.plan.story_sets[1].stories]
+
+    def test_a_duplicate_of_a_pending_story_is_refused_and_replaces_retires_it(self):
+        fix = {**FIX_ADD, "id": "S4", "title": "Make add() add, smaller"}
+        self.run_plan([
+            *write_set(FIX_ADD, DOC_ADD),
+            *give_up(),                                             # S1 fails: re-split
+            *write_set({**DOC_ADD, "id": "S3"}, fix),               # S3 copies pending S2
+            call("plan_stories", outline=[{"id": "S3", "title": "Document add()"},
+                                          {"id": "S4", "title": fix["title"]}],
+                 replaces=["S2"]),
+            call("write_story", story={**DOC_ADD, "id": "S3"}),
+            call("write_story", story=fix),
+            call("finish_stories"),
+            call("complete_story", summary="documented"),           # S3
+            call("write_file", path="calc.py", content=CALC_RIGHT),  # S4
+            call("complete_story", summary="add works"),
+            ChatResponse(content="stop", done_reason="stop")])
+        refusal = self.tool_results("S3 duplicates S2")[0]
+        self.assertIn("replaces=[S2]", refusal)
+        self.assertTrue(self.tool_results("Retired S2 (marked replaced)"))
+        self.assertEqual(self.ids(), [("S1", "replaced"), ("S2", "replaced"),
+                                      ("S3", "done"), ("S4", "done")])
+
+    def test_feedback_on_a_re_split_does_not_keep_its_drafts(self):
+        self.answers = ["y", "y", "call it 'Fix add()'", "y"]
+        fix = {**FIX_ADD, "id": "S2"}
+        self.run_plan([
+            *write_set(FIX_ADD),
+            *give_up(),                                             # S1 fails: re-split
+            *write_set(fix),                                        # sent back with feedback
+            call("plan_stories", outline=[{"id": "S2", "title": "Fix add()"}]),
+            call("write_story", story={**fix, "title": "Fix add()"}),
+            call("finish_stories"),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("complete_story", summary="add works"),
+            ChatResponse(content="stop", done_reason="stop")])
+        self.assertEqual(self.ids(), [("S1", "replaced"), ("S2", "done")])
+        self.assertEqual(self.h.plan.story_sets[1].get("S2").title, "Fix add()")
+        self.assertIn("User feedback to address: call it 'Fix add()'",
+                      self.tool_results("Outline stored (1 story)")[-1])
+
+    def test_replaces_takes_only_pending_stories_of_an_adding_pass(self):
+        self.run_plan([
+            call("plan_stories", outline=[{"id": "S1", "title": "x"}], replaces=["S1"]),
+            *write_set(FIX_ADD),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("complete_story", summary="add works"),
+            ChatResponse(content="stop", done_reason="stop")])
+        self.assertTrue(self.tool_results("nothing to retire: this pass writes the phase's whole set"))
+        # an unknown or finished story cannot be retired by a later pass
+        self.h._writing = {"phase": 1, "adds": True, "replaces": [], "append": True,
+                           "base": self.h.plan.story_sets[1].stories if self.h.plan else []}
+        if self.h.plan:
+            self.assertIn("only pending or failed", self.h._take_replaces(self.h._writing, ["S1"]))
+            self.assertIn("not a story of this phase", self.h._take_replaces(self.h._writing, ["S9"]))
+        self.h._writing = None
+
+
+RUN2_REQUEST = ("Build a small MUD in Python 3, stdlib only. … Commands: look, go/n/s/e/w, say, who, "
+                "take, drop, inventory, help, quit. … Unit tests with unittest for the command "
+                "parser and game logic; python -m unittest must pass.")
+
+
+class Requirements(Base):
+    """Run 2's phase report said n/s/e/w worked; nothing had checked them.  Each
+    requirement of the request now needs a check that proves it."""
+
+    def tool_results(self, needle):
+        return [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                if m.get("role") == "tool" and needle in (m.get("content") or "")]
+
+    def test_create_plan_needs_requirements(self):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._turn_user = {"role": "user", "content": "make calc work"}
+        args = {k: v for k, v in PLAN_ARGS.items() if k != "requirements"}
+        self.assertIn("needs 'requirements'", self.h._handle_create_plan(args))
+        bad = {**PLAN_ARGS, "requirements": [{"id": "R1", "text": "x", "phase": 3}]}
+        self.assertIn("R1: phase must be 1–2", self.h._handle_create_plan(bad))
+        bundled = {**PLAN_ARGS, "requirements": [
+            {"id": "R1", "text": "Commands: look, go/n/s/e/w, say, who, take, drop", "phase": 1}]}
+        self.assertIn("R1 lists several things", self.h._handle_create_plan(bundled))
+
+    def test_an_uncovered_requirement_refuses_the_stories(self):
+        uncovered = {**FIX_ADD, "acceptance": [criterion("add(2, 3) → 5", ADD_OK)]}
+        self.run_plan([*write_set(uncovered),
+                       call("write_story", story=FIX_ADD), call("finish_stories"),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")])
+        [refusal] = set(self.tool_results("is not covered"))
+        self.assertIn("R1 (add(2, 3) returns 5) is not covered", refusal)
+        brief = self.writer_requests()[0]["messages"][1]["content"]
+        self.assertIn("## Requirements this phase must cover\n- R1: add(2, 3) returns 5", brief)
+        self.assertNotIn("R2", brief.split("## Phases")[0])
+        self.assertEqual(self.h.plan.story_sets[1].get("S1").status, "done")
+
+    def test_the_last_gate_fails_on_a_requirement_without_a_passing_check(self):
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
+        sset = self.h.plan.story_sets[1]
+        passed, report = self.h._phase_checks(self.h.plan.steps[0], sset, last=True)
+        self.assertFalse(passed)
+        self.assertIn("no passing check:\n- R2: sub(5, 3) returns 2", report)
+        self.assertEqual(self.h._phase_checks(self.h.plan.steps[0], sset), (True, f"`{ADD_OK}` passes"))
+
+    def test_the_last_gate_runs_the_requests_command(self):
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
+        self.h.plan.request = "make calc work; `python3 -m unittest` must pass."
+        passed, report = self.h._phase_checks(self.h.plan.steps[0], self.h.plan.story_sets[1],
+                                              last=True)
+        self.assertFalse(passed)
+        self.assertIn("`python3 -m unittest` failed", report)
+        self.assertIn("no tests ran", report)
+
+
+class Defects(Base):
+    """Run 2's P2.S9: its test found a bug in an earlier story's engine.py; it
+    took fixing it to be out of its scope and used up its 30 turns."""
+
+    FIX = {**FIX_ADD, "id": "S2", "title": "Fix add() in calc.py",
+           "acceptance": [criterion("add(1, 1) → 2",
+                                    f"{PY} -c \"from calc import add; assert add(1, 1) == 2\"", ["R1"])]}
+
+    def test_a_reported_defect_gets_a_fix_story_and_the_story_runs_again(self):
+        self.run_plan([
+            *write_set(FIX_ADD),
+            call("report_defect", file="calc.py", problem="add() returns 0",
+                 evidence="AssertionError"),
+            *write_set(self.FIX),                                   # the fix pass
+            call("write_file", path="calc.py", content=CALC_RIGHT),  # S2
+            call("complete_story", summary="add() fixed"),
+            call("complete_story", summary="add() works now"),       # S1 again
+            ChatResponse(content="stop", done_reason="stop")])
+        sset = self.h.plan.story_sets[1]
+        s1 = sset.get("S1")
+        self.assertEqual((s1.status, s1.attempts), ("done", 0))
+        self.assertIn("S2", s1.depends_on)
+        self.assertEqual(s1.defect, "calc.py: add() returns 0\nEvidence:\nAssertionError")
+        fix_brief = self.writer_requests()[1]["messages"][1]["content"]
+        self.assertIn("Story S1 (Make add() add) is blocked by a defect", fix_brief)
+        self.assertIn("write ONE story, S2", fix_brief)
+        self.assertTrue(any("S1 is blocked by a defect" in t for t in self.system_lines()))
+
+    def test_a_second_defect_fails_the_story(self):
+        self.run_plan([
+            *write_set(FIX_ADD),
+            call("report_defect", problem="add() returns 0"),
+            *write_set(self.FIX),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("complete_story", summary="fixed"),
+            call("report_defect", problem="still broken"),            # S1 again
+            ChatResponse(content="stop", done_reason="stop")])
+        s1 = self.h.plan.story_sets[1].get("S1")
+        self.assertEqual(s1.status, "failed")
+        self.assertIn("second defect", s1.failure)
+
+    def test_a_story_is_told_when_its_turns_run_low(self):
+        self.h.stories_cap = 6
+        self.run_plan([
+            *write_set(FIX_ADD),
+            *[call("read_file", path=f"x{i}.py") for i in range(3)],
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("complete_story", summary="done"),
+            ChatResponse(content="stop", done_reason="stop")])
+        notes = {m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                 if m.get("role") == "tool" and "turns left for this story" in (m.get("content") or "")}
+        self.assertEqual(len(notes), 1)
+        self.assertIn("report_defect", notes.pop())
+
+
+class OwnTests(Base):
+    """Run 2's P2.S1 put its tests in a file its check never ran, and a stray
+    root test_server.py stayed behind."""
+
+    FAILING = "import unittest\n\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.fail('no')\n"
+    PASSING = "import unittest\n\nclass T(unittest.TestCase):\n    def test_x(self):\n        pass\n"
+
+    def results(self):
+        return [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                if m.get("role") == "tool" and m.get("name") == "complete_story"]
+
+    def test_a_new_test_file_no_check_runs_is_run_too(self):
+        self.run_plan([
+            *write_set(FIX_ADD),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("write_file", path="tests/test_calc_more.py", content=self.FAILING),
+            call("complete_story", summary="done"),
+            call("write_file", path="tests/test_calc_more.py", content=self.PASSING),
+            call("complete_story", summary="done"),
+            ChatResponse(content="stop", done_reason="stop")])
+        refusal = next(r for r in self.results() if "story not complete" in r)
+        self.assertIn("the story's own tests in tests/test_calc_more.py pass", refusal)
+        s1 = self.h.plan.story_sets[1].get("S1")
+        self.assertEqual(s1.status, "done")
+        self.assertIn(f"{PY} -m unittest tests/test_calc_more.py", s1.facts["checks"])
+
+    def test_a_stray_test_file_in_the_root_is_refused(self):
+        self.run_plan([
+            *write_set(FIX_ADD),
+            call("write_file", path="calc.py", content=CALC_RIGHT),
+            call("write_file", path="test_server.py", content=self.PASSING),
+            call("complete_story", summary="done"),
+            ChatResponse(content="stop", done_reason="stop")])
+        self.assertIn("test_server.py: a test file outside the story's files", self.results()[0])
+
+
+class PhaseChecks(unittest.TestCase):
+    def test_weak_phase_checks_get_a_note(self):
+        suite = "python3 -m unittest discover tests"
+        steps = [Step(title="Engine", checks=[suite]), Step(title="Server", checks=[suite]),
+                 Step(title="Page", checks=["ls static/index.html && [ -s static/index.html ]"])]
+        note = _phase_check_notes(steps)
+        self.assertIn("phases 1 and 2 have the same checks", note)
+        self.assertIn("phase 3's checks only test that files exist", note)
+        self.assertEqual(_phase_check_notes([Step(title="a", checks=["python3 -m unittest t.a"]),
+                                             Step(title="b", checks=["python3 -m unittest t.b"])]), "")
+
+    def test_the_requests_own_command(self):
+        self.assertEqual(request_commands(RUN2_REQUEST), ["python -m unittest"])
+        self.assertEqual(request_commands("tests with pytest; `go test ./...` passes"), ["go test ./..."])
+        plan = Plan(title="MUD", request=RUN2_REQUEST,
+                    steps=[Step(title="a", checks=["python3 -m unittest tests/test_game.py"])])
+        self.assertIn("`python -m unittest` must pass", _request_command_note(plan))
+        plan.steps[0].checks.append("python -m unittest")
+        self.assertEqual(_request_command_note(plan), "")
+
+    def test_requirements_round_trip(self):
+        plan = Plan(title="MUD", request="r", steps=[Step(title="a"), Step(title="b")],
+                    requirements=[{"id": "R1", "text": "look shows the room", "phase": 1},
+                                  {"id": "R2", "text": "n moves north", "phase": 2}])
+        md = plan.to_markdown()
+        self.assertIn("## Requirements\n\n- R1 (phase 1): look shows the room\n", md)
+        back = Plan.from_markdown(md)
+        self.assertEqual(back.requirements, plan.requirements)
+        self.assertEqual([s.title for s in back.steps], ["a", "b"])
+        self.assertEqual(Plan.from_dict(plan.to_dict()).requirements, plan.requirements)
 
 
 class OneStoryAtATime(Base):
@@ -421,13 +722,26 @@ class OneStoryAtATime(Base):
         self.assertEqual(self.h.plan.story_sets[1].get("S1").title, "Make add() add, for sub()")
         self.assertIn("✎ P1.S1 rewritten — Make add() add, for sub() (2/2)", self.system_lines())
 
+    # The story-mud run: the outline said "S2 depends on S1", the stories came
+    # without dependencies or titles, and ran untitled and unordered.
+    def test_a_story_without_title_or_dependencies_keeps_the_outlines(self):
+        bare = {k: v for k, v in self.TWO[1].items() if k not in ("title", "depends_on")}
+        self.run_plan([call("plan_stories", outline=self.OUTLINE),
+                       call("write_story", story=self.TWO[0]),
+                       call("write_story", story=bare),
+                       call("finish_stories")] + self.STOP)
+        s2 = self.h.plan.story_sets[1].get("S2")
+        self.assertEqual((s2.title, s2.depends_on), ("Add sub()", ["S1"]))
+        self.assertIn("Kept the outline's title and dependencies (S1) for S2",
+                      self.tool_results("Stored S2")[0])
+
     def test_a_new_outline_drops_the_drafts_left_out(self):
         self.run_plan([call("plan_stories", outline=self.OUTLINE),
                        call("write_story", story=self.TWO[0]),
                        call("write_story", story=self.TWO[1]),
                        call("plan_stories", outline=self.OUTLINE[:1]),
                        call("finish_stories")] + self.STOP)
-        self.assertTrue(self.tool_results("Dropped the drafts of S2"))
+        self.assertTrue(self.tool_results("Dropped your unsaved drafts of S2"))
         self.assertEqual([s.id for s in self.h.plan.story_sets[1].stories], ["S1"])
 
     def test_a_story_outside_the_outline_is_added_to_it(self):
@@ -545,10 +859,9 @@ class Recovery(Base):
     def test_resuming_retries_a_re_split_that_was_never_written(self):
         self.run_plan([
             *write_set(FIX_ADD),
-            ChatResponse(content="no", done_reason="stop"),
-            ChatResponse(content="no", done_reason="stop"),            # S1 fails
-            ChatResponse(content=BROKEN_TEXT_CALL, done_reason="stop"),
-            ChatResponse(content=BROKEN_TEXT_CALL, done_reason="stop")])   # re-split: no stories
+            *give_up(),                                                 # S1 fails
+            *[ChatResponse(content=BROKEN_TEXT_CALL, done_reason="stop")]
+            * (STORY_NUDGES + 1)])                                      # re-split: no stories
         self.assertTrue(any("stopped without stories for phase 1: it replied with text" in s
                             for s in self.system_lines()))
         ScriptedClient.script = [
@@ -573,8 +886,7 @@ class Recovery(Base):
             *write_set(*two),
             call("write_file", path="calc.py", content=CALC_RIGHT),
             call("complete_story", summary="add works"),
-            ChatResponse(content="no", done_reason="stop"),
-            ChatResponse(content="no", done_reason="stop"),            # S2 fails
+            *give_up(),                                                 # S2 fails
             *write_set(FIX_ADD, {**two[1], "id": "S3"}),            # S1 sent again
             call("write_file", path="calc.py", content=CALC_SUB),
             call("complete_story", summary="sub works"),

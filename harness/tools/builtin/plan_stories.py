@@ -12,9 +12,13 @@ TOOL = Tool(
         "Outline the current phase's stories once you know the code they build on: one short line "
         "per story (id, title, depends_on, what it provides). Decide the split and the order here, "
         "not the details: those come one story at a time with write_story. Call it again to change "
-        "the outline; drafts of stories left out are dropped.",
+        "the outline; drafts of stories left out are dropped. Stories already in the phase's set "
+        "(from an earlier pass) stay until you retire them with replaces.",
         {"outline": {"type": "array", "items": OUTLINE_ITEM,
-                     "description": "The phase's stories in order (or, when asked to re-split or fix, only the new ones)"}},
+                     "description": "The phase's stories in order (or, when asked to re-split or fix, only the new ones)"},
+         "replaces": {"type": "array", "items": {"type": "string"},
+                      "description": "Ids of this phase's pending or failed stories to retire "
+                                     "(marked replaced): duplicates, or work the new stories cover"}},
         ["outline"]),
     harness=True, locked=True, order=718, group="ask & plan", modes=frozenset({"story-writer"}),
     example={"outline": [

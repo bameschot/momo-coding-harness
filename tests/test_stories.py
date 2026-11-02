@@ -6,9 +6,9 @@ from datetime import datetime
 from pathlib import Path
 
 from harness.plan import Plan, Step
-from harness.stories import (MAX_STORIES, Criterion, Story, StorySet, new_stories_dir,
-                             outline_entries, read_story_file, slug, validate_outline,
-                             write_story_file)
+from harness.stories import (MAX_STORIES, Criterion, Story, StorySet, check_problems,
+                             new_stories_dir, outline_entries, read_story_file, slug,
+                             validate_outline, write_story_file)
 
 
 def story(sid, deps=(), status="pending", **kw):
@@ -26,7 +26,7 @@ FULL = Story(
     files=["mud/ws.py"], depends_on=["S1", "P1.S3"],
     provides=["encode_frame(opcode: int, payload: bytes, mask_key: bytes | None = None) -> bytes"],
     acceptance=[Criterion("RFC 6455 §5.7 'Hello' encodes to 81 05 48 65 6c 6c 6f",
-                          "python3 -m unittest tests.test_ws.Encode"),
+                          "python3 -m unittest tests.test_ws.Encode", ["R2", "R4"]),
                 Criterion("the docstring names the RFC section")],
     status="done", attempts=1, delivered="Added encode_frame(); kept masking in a helper.",
     facts={"files": ["mud/ws.py"], "definitions": ["encode_frame", "_mask"], "checks": ["passed 1"]})
@@ -57,6 +57,7 @@ class Markdown(unittest.TestCase):
                   "depends_on", "provides", "acceptance", "status", "attempts", "delivered"):
             self.assertEqual(getattr(b, f), getattr(FULL, f), f)
         self.assertEqual(b.facts, {})        # facts live in the session, not the file
+        self.assertIn("  Covers: R2, R4", sset.to_markdown())
 
     def test_hand_edits(self):
         text = StorySet(phase=1, stories=[story("S1"), story("S2", ["S1"])]).to_markdown()
@@ -156,6 +157,96 @@ class Validate(unittest.TestCase):
         self.assertEqual(self.errors(), ["no stories: write at least one"])
         self.assertEqual(self.errors(story("S1", status="replaced")),
                          ["no stories: write at least one"])
+
+
+# Checks the story-mud run's story writer produced (phase 2), as written.
+MUD_S1 = ("python3 -c \"import os, threading, time, http.server, urllib.request; "
+          "os.makedirs('static', exist_ok=True); f=open('static/test.txt', 'w'); f.write('hello'); "
+          "f.close(); from server import MUDServer; server = MUDServer(('127.0.0.1', 0)); "
+          "t = threading.Thread(target=server.serve_forever); t.daemon=True; t.start(); "
+          "port = server.server_address[1]; time.sleep(0.5); try: r = urllib.request.urlopen("
+          "f'http://127.0.0.1:{port}/test.txt'); assert r.read().decode() == 'hello'; "
+          "print('S1 passed'); finally: server.shutdown(); t.join(); os.remove('static/test.txt'); "
+          "os.rmdir('static')\"")
+MUD_S2 = ("python3 -c \"import json, urllib.request, threading, time, os, uuid; from server import "
+          "MUDServer; from game import Game, World; import unittest; class TestAPI(unittest.TestCase): "
+          "def test_flow(self): ... \"")
+MUD_P1 = ("python3 -c \"from game import Player, CommandParser; p = Player('1', 'Alice', 'start'); "
+          "print(p.name); cmd, arg = CommandParser().parse('go north'); print(cmd, arg)\"")
+RUN2_STARTS_SERVER = ("python3 -c \"import subprocess, time; proc = subprocess.Popen(['python3', "
+                      "'server.py']); time.sleep(1); assert proc.poll() is None; proc.terminate(); "
+                      "proc.wait()\"")
+
+
+class CheckCommands(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.wd = Path(self.tmp.name)
+        (self.wd / "game.py").write_text("")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def problems(self, cmd, planned=("server.py",)):
+        return check_problems(cmd, self.wd, set(planned))
+
+    def test_the_story_mud_checks_are_refused(self):
+        s1 = self.problems(MUD_S1)
+        self.assertTrue(any("is not valid Python" in e and "cannot follow ';'" in e for e in s1))
+        self.assertTrue(any("deletes files" in e for e in s1))
+        self.assertTrue(any("is not valid Python" in e for e in self.problems(MUD_S2)))
+        self.assertEqual(self.problems(MUD_P1), ["only prints, so it exits 0 whatever the "
+                                                 "result; assert the expected value (assert x == …)"])
+
+    def test_a_module_the_project_cannot_have(self):
+        bad = self.problems("python3 -c \"import requests; assert requests.get('x').ok\"")
+        self.assertIn("imports requests", bad[0])
+        (self.wd / "requirements.txt").write_text("requests>=2\n")
+        self.assertEqual(self.problems("python3 -c \"import requests; assert requests\""), [])
+        # stdlib, a project module, and a file this phase's stories will write
+        self.assertEqual(self.problems("python3 -c \"import json, game, server; assert game\""), [])
+
+    def test_a_check_that_swallows_its_errors(self):
+        cmd = "python3 -c \"import game\ntry:\n    assert game.x\nexcept Exception as e:\n    print(e)\""
+        self.assertTrue(any("without re-raising" in e for e in self.problems(cmd)))
+        ok = "python3 -c \"import sys\ntry:\n    assert 1\nexcept Exception:\n    sys.exit(1)\""
+        self.assertEqual(self.problems(ok), [])
+
+    def test_good_checks_pass(self):
+        for cmd in ("python3 -m unittest tests/test_game.py",
+                    "python3 -c \"from game import add; assert add(2, 3) == 5\"",
+                    "/usr/bin/python3.14 -c 'import game'",
+                    "grep -q '<input' static/index.html",
+                    "python3 -c \"assert '<input' in open('static/index.html').read()\"",
+                    "python3 -c \"import tempfile, shutil; d = tempfile.mkdtemp(); shutil.rmtree(d)\"",
+                    RUN2_STARTS_SERVER, "python3 -m unittest tests.test_kill_switch"):
+            self.assertEqual(self.problems(cmd), [], cmd)
+
+    def test_the_run2_checks_that_could_not_pass(self):
+        # P2.S3 stopped the server with pkill; P2.S4 fetched localhost:8000 with
+        # nothing running, then was rewritten to only test that the page exists.
+        self.assertIn("stops processes", self.problems("pkill -f 'python3 server.py'; true")[0])
+        self.assertIn("does not start", self.problems(
+            "python3 -c \"import urllib.request; assert urllib.request.urlopen("
+            "'http://localhost:8000/').status == 200\"")[0])
+        for cmd in ("python3 -c \"import os; assert os.path.exists('static/index.html')\"",
+                    "ls static/index.html && [ -s static/index.html ]"):
+            self.assertIn("only tests that a file exists", self.problems(cmd)[0], cmd)
+
+    def test_a_story_with_a_broken_check_is_not_valid_but_a_done_one_is_kept(self):
+        bad = story("S1", acceptance=[Criterion("parses", MUD_P1)], files=["game.py"])
+        self.assertTrue(any("only prints" in e for e in StorySet(phase=1, stories=[bad]).validate({}, self.wd)))
+        bad.status = "done"
+        self.assertEqual(StorySet(phase=1, stories=[bad]).validate({}, self.wd), [])
+
+    def test_duplicates_are_refused(self):
+        a = story("S2", files=["game.py"])
+        b = story("S5", files=["game.py"])
+        b.title = a.title.upper() + "!"
+        errors = StorySet(phase=1, stories=[a, b]).validate({})
+        self.assertTrue(any(e.startswith("S5 duplicates S2") for e in errors))
+        b.title, b.acceptance = "Something else", [Criterion("x", "python3 -c 'import game'")]
+        self.assertEqual(StorySet(phase=1, stories=[a, b]).validate({}), [])
 
 
 class Outline(unittest.TestCase):
@@ -278,6 +369,19 @@ class PlanPhases(unittest.TestCase):
         back = Plan.from_dict(p.to_dict())
         self.assertEqual(back, p)
         self.assertTrue(back.stories)
+
+    def test_the_request_and_the_report_round_trip(self):
+        p = self.plan()
+        p.request = "Build a MUD.\n- [ ] players enter a name"   # a checkbox is not a step
+        p.story_sets[1].report = "## What exists now\nmud/ws.py"
+        self.assertEqual(Plan.from_dict(p.to_dict()), p)
+        back = Plan.from_markdown(p.to_markdown())
+        self.assertEqual(back.request, p.request)
+        self.assertEqual(len(back.steps), 2)
+        sset = StorySet.from_markdown(p.story_sets[1].to_markdown(), 1)
+        self.assertEqual(sset.report, "## What exists now\nmud/ws.py")
+        self.assertEqual([x.id for x in sset.stories], ["S1"])
+        self.assertNotIn("What exists", sset.stories[0].description)
 
     def test_markdown_keeps_the_phase_fields(self):
         p = self.plan()

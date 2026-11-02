@@ -1381,6 +1381,8 @@ class TUI:
         if ev.think_budget != _THINK_BUDGET or not ev.think_repeat:
             cap = f"{ev.think_budget:,}" if ev.think_budget else "off"
             parts.append(f"THINK-CAP: {cap}" + ("" if ev.think_repeat else ", repeats ok"))
+        if not ev.reply_repeat:
+            parts.append("REPLY-REPEAT: ok")
         if not ev.progress_note:
             parts.append("PROGRESS: off")
         if ev.undo_count:

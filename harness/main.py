@@ -78,6 +78,9 @@ def main():
                         help="reasoning tokens one streamed reply may take before it is stopped "
                              "and the model asked to act, 0 = off (default: last /think-budget "
                              f"setting, else {think_watch_mod.DEFAULT_BUDGET})")
+    parser.add_argument("--reply-repeat", choices=("on", "off"), default=None,
+                        help="stop a streamed reply whose text keeps repeating itself and ask the "
+                             "model to act (default: last /think-budget reply-repeat setting, else on)")
     parser.add_argument("--progress-note", choices=("on", "off"), default=None,
                         help="note to the model after many tool calls in a row with no change, "
                              "question or plan (default: last /progress-note setting, else on)")
@@ -331,6 +334,10 @@ def main():
     harness.think_budget = budget
     if isinstance(prefs.get("think_repeat"), bool):
         harness.think_repeat = prefs["think_repeat"]
+    if args.reply_repeat:
+        harness.reply_repeat = args.reply_repeat == "on"
+    elif isinstance(prefs.get("reply_repeat"), bool):
+        harness.reply_repeat = prefs["reply_repeat"]
     note = args.progress_note or prefs.get("progress_note")
     if isinstance(note, bool):
         harness.progress_note = note

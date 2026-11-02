@@ -994,17 +994,17 @@ ollama serve</code></pre></div>
 
     <figure class="flow" aria-label="How a story plan runs">
       <div class="flow-col">
-        <div class="box model"><div class="flow-who">model</div>1 Plan the phases<small><code>create_plan</code>: each phase has an <code>outcome</code> and <code>checks</code>, commands that prove it</small></div>
+        <div class="box model"><div class="flow-who">model</div>1 Plan the phases<small><code>create_plan</code>: each phase has an <code>outcome</code> and <code>checks</code>, commands that prove it; the request is split into <code>requirements</code>, each assigned to a phase</small></div>
         <div class="side"><b>you</b> approve the plan</div>
         <div class="down" aria-hidden="true">↓</div>
         <div class="box model"><div class="flow-who">story writer</div>2 Write the phase's stories<small>reads the code and what earlier phases delivered; outlines up to 12 stories with <code>plan_stories</code>, writes them one per turn with <code>write_story</code>, then <code>finish_stories</code> (<a href="#story-writer">sequence</a>)</small></div>
-        <div class="side"><b>check</b>: ids, dependencies (no cycles, nothing undelivered), a check per criterion · <b>you</b> approve the stories</div>
+        <div class="side"><b>check</b>: ids, dependencies (no cycles, nothing undelivered), a check per criterion, every requirement of the phase covered by a check · <b>you</b> approve the stories</div>
         <div class="down" aria-hidden="true">↓</div>
         <div class="box model"><div class="flow-who">model</div>3 One story at a time, each in a fresh context<small>sees the story, and what the stories it depends on provide and delivered, with the current outline of their files</small></div>
-        <div class="side"><b>gate</b>: <code>complete_story</code> runs every acceptance check; a failure is refused with its output</div>
+        <div class="side"><b>gate</b>: <code>complete_story</code> runs every acceptance check and any new test file no check runs; a failure is refused with its output</div>
         <div class="back">↺ next ready story</div>
         <div class="down" aria-hidden="true">↓</div>
-        <div class="box harness"><div class="flow-who">harness</div>4 Phase gate and report<small>runs the phase's <code>checks</code>, then writes the phase report the next writer starts from</small></div>
+        <div class="box harness"><div class="flow-who">harness</div>4 Phase gate and report<small>runs the phase's <code>checks</code> (the last phase also runs the command the request says must pass, and needs every requirement proven), then writes the phase report the next writer starts from, with a table of what proves each requirement</small></div>
         <div class="back">↺ next phase: back to 2</div>
       </div>
       <div class="flow-legend"><span class="you">you</span><span class="model">model</span><span class="harness">harness</span></div>
@@ -1098,6 +1098,7 @@ ollama serve</code></pre></div>
       <li><strong>The writer re-splits it</strong>, using what went wrong: the story and those waiting on it are replaced by smaller or corrected stories. It outlines and writes only the replacements, with new ids, one per turn as above.</li>
       <li><strong>A second failure pauses the plan.</strong> Edit the story in its file, mark it <code>[ ]</code> to retry, then <code>/plan resume</code>. A re-split that never got written is tried again on resume.</li>
       <li><strong>Failing phase checks</strong> get one pass of fix stories before the plan pauses.</li>
+      <li><strong>A bug in earlier code</strong> is not the story's failure: it fixes a small one itself, or calls <code>report_defect</code>. The writer then adds one fix story, and the blocked story runs again after it, without counting as an attempt.</li>
     </ul>
 
     <h3>Files and tracking</h3>
@@ -1207,7 +1208,7 @@ ollama serve</code></pre></div>
     </figure>
     <p>Small models make predictable mistakes with tools. momo catches the common ones:</p>
     <ul>
-      <li><strong>Calls written as text</strong> (<code>&lt;tool_call&gt;{…}&lt;/tool_call&gt;</code> and the formats of Hermes, Mistral, Phi, DeepSeek and others) are recovered and run like native calls.</li>
+      <li><strong>Calls written as text</strong> (<code>&lt;tool_call&gt;{…}&lt;/tool_call&gt;</code> and the formats of Hermes, Mistral, Phi, DeepSeek and others) are recovered and run like native calls, and what the model wrote around them is kept. A call written as plain code (<code>read_file(path='a.py')</code>) counts only when it ends the reply, so a call mentioned in an answer or a code example is never run.</li>
       <li><strong>Wrong types are fixed:</strong> <code>"40"</code> and <code>"true"</code> become a number and a boolean when the schema asks for one.</li>
       <li><strong>Bad calls get useful errors.</strong> An unknown, missing or extra argument returns an <code>ERROR:</code> that lists the valid arguments, often with a hint such as "to change part of a file, use edit_file".</li>
       <li><strong>Obvious mix-ups are routed:</strong> <code>write_file</code> with <code>old_string</code>/<code>new_string</code> runs as <code>edit_file</code>.</li>
@@ -1866,10 +1867,11 @@ modified: shop/pricing.py
     </ul>
 
     <h3 id="reasoning-watch">Reasoning watch</h3>
-    <p>While a reply streams, momo watches its reasoning and stops the reply when it runs past <code>/think-budget</code> tokens (default <strong>8,000</strong>), or when one line keeps coming back (3 times within the last 6,000 characters). Nothing in the stopped reply runs. The model gets a note to decide from what it already knows and act: it carries where the reasoning had got to, or the line it kept repeating, and the next request runs without thinking. At most 2 replies per turn are stopped; after that the reply cap applies as before.</p>
+    <p>While a reply streams, momo watches its reasoning and stops the reply when it runs past <code>/think-budget</code> tokens (default <strong>8,000</strong>), when one line keeps coming back (3 times within the last 6,000 characters), or when the recent text compresses to under a tenth of its size (a loop of short sentences or of a whole code block). The reply text is watched for that last kind of loop too, and a looping reply is dropped from the history. Nothing in the stopped reply runs. The model gets a note to decide from what it already knows and act: it carries where the reasoning had got to, or the line it kept repeating, and the next request runs without thinking. At most 2 replies in a row are stopped; a tool call in between re-arms the watch.</p>
 <div class="code-block"><div class="code-bar"><span class="code-lang">commands</span></div><pre><code>/think-budget 6000       <span class="com"># stop reasoning after 6,000 tokens (at least 1,000)</span>
 /think-budget off        <span class="com"># only the reply cap limits it</span>
-/think-budget repeat off <span class="com"># let repeating reasoning run</span></code></pre></div>
+/think-budget repeat off <span class="com"># let repeating reasoning run</span>
+/think-budget reply-repeat off <span class="com"># let a looping reply run</span></code></pre></div>
     <p>A local model spends minutes on 20,000 tokens of reasoning, and telling it in the prompt to think less didn't work, so the harness watches instead. Replies with <code>--no-stream</code> aren't watched.</p>
 
     <h3 id="think-history">Sending reasoning back</h3>
@@ -2127,6 +2129,7 @@ modified: shop/pricing.py
       <tr><td><code>--cavecat</code></td><td>last used / <code>off</code></td><td class="wrap">See <a href="#cavecat">Cavecat mode</a></td></tr>
       <tr><td><code>--max-output-tokens</code></td><td>last used / <code>25000</code></td><td class="wrap">See <a href="#reply-cap">Reply cap</a>; <code>0</code> = no cap</td></tr>
       <tr><td><code>--think-budget</code></td><td>last used / <code>8000</code></td><td class="wrap">See <a href="#reasoning-watch">Reasoning watch</a>; <code>0</code> = off</td></tr>
+      <tr><td><code>--reply-repeat</code></td><td>last used / <code>on</code></td><td class="wrap">Stop a reply whose text keeps repeating itself; see <a href="#reasoning-watch">Reasoning watch</a></td></tr>
       <tr><td><code>--progress-note</code></td><td>last used / <code>on</code></td><td class="wrap">Note after many tool calls that changed nothing, or <code>off</code></td></tr>
       <tr><td><code>--plan-questions</code></td><td>last used / <code>on</code></td><td class="wrap">Plan mode: <a href="#plan">ask before planning</a>, or <code>off</code></td></tr>
       <tr><td><code>--loop-guard</code></td><td>last used / <code>3</code></td><td class="wrap">Repeats that make a <a href="#loop-guard">loop</a>, or <code>off</code></td></tr>

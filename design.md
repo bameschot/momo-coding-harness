@@ -99,14 +99,27 @@ Thinking is disabled for one turn after: (a) the context window was cut off (`do
 
 ### Text tool-call recovery
 
-Some models emit tool calls as plain text rather than using the API's structured tool-call field. `_extract_text_tool_calls` applies successive fallbacks before giving up (each later tier only runs when the earlier ones found nothing):
+Some models emit tool calls as plain text rather than using the API's structured tool-call field. `recover_text_calls` (and `_extract_text_tool_calls`, its calls only) applies successive fallbacks before giving up (each later tier only runs when the earlier ones found nothing):
 
 1. **Tagged / structured formats**: Recognises model-specific wrappers — Qwen3/Hermes `<tool_call>`, Functionary `<functioncall>` / `<function_call>`, Phi `<|tool_call|>`, DeepSeek `<｜tool▁call▁begin｜>`, Mistral `[TOOL_CALLS]` array, Command-R `Action:/Action Input:`.
-2. **Nameless `<tool_call>` payloads**: some models (notably gemma) put the argument object directly inside the tag with no `{"name":…,"arguments":…}` wrapper. A payload carrying a `content` key is attributed to `write_file`; `raw_decode` reads the full object so braces inside `content` do not truncate parsing.
+2. **`<tool_call>` payloads**, read in the order written, up to `</tool_call>`, gemma's `<tool_call|>` or the next call. `_lenient_json` reads the JSON slips gemma makes there: raw newlines in strings, a backslash before a line break, and (only when a closing tag shows the model ended the call, never for a reply cut off by the output limit) a dropped closing brace. Story-mud run 2 lost a story to four such `write_file` calls. Some models put the argument object directly inside the tag with no `{"name":…,"arguments":…}` wrapper: a payload with a `content` key is attributed to `write_file`, any other to the one offered tool whose parameters it fits (`{"command": …}` → `run_command`); an ambiguous one is dropped.
 3. **Python-call syntax**: gemma-family models often emit calls as Python source — `edit_file(path='a.py', old_string='x', new_string='y')` or positionally `edit_file("a.py", "x", "y")`, sometimes wrapped in `print(...)`. `_match_paren` carves out the balanced `name(...)` (skipping quoted strings), then `ast` parses it and `ast.literal_eval` recovers each argument. Positional args are mapped to the tool's declared parameter order; keyword args override. Bare mentions in prose are rejected because their values are not literals.
-4. **Bare JSON anchored to tool names**: pattern built dynamically from the current tool set; scans for `{"name": "<known_tool>", "arguments": {…}}` or `known_tool({…})` anywhere in the response.
+4. **Bare JSON anchored to tool names**: pattern built dynamically from the current tool set; scans for `{"name": "<known_tool>", "arguments": {…}}` or `known_tool({…})`.
+
+Tiers 3 and 4 count a call only when it **ends the reply**. Walking back from the end, each call may be followed only by closing syntax (`)`, `;`, backticks, a code fence, leaked turn markers) or by another accepted call (`_trailing`). A model that writes a call as text stops after it. An answer that mentions one goes on: a code example in a chat answer, or "used as `write_file('out.txt', 'hi')` in main.py" in a summary. Recovering that mention ran the call (writing the file) and dropped the answer. Other details:
+- A `print(…)` around a call belongs to it.
+- A single dict-literal argument (`write_file({...})`) is the arguments object.
+- Tagged formats (tiers 1–2) are unambiguous and count anywhere.
+
+`recover_text_calls` also returns the text left around the calls: the markup cut out, and an emptied code fence removed. `_run_loop` keeps it as the call's preamble, as with a native call, rather than dropping it.
 
 If a text tool call is recovered it is executed normally; if every tier fails the text is treated as a regular assistant response, unless the reply was cut off in the middle of it (see below).
+
+A call (native or recovered) whose path, command or other short argument contains gemma's chat-template tokens (`<|tool_call>`, `<tool_call|>`, `<|channel>`, …) is not run (`template_leak`, in `Harness._dispatch`). When gemma's call goes wrong, llama.cpp's parser can end a string argument only at the next quote, so the argument carries the rest of the turn: story-mud run 2 listed the directory `.}<tool_call|><tool_call|>ep<|channel>thought…`. File text and prose arguments (`content`, `new_string`, …) may quote the tokens on purpose and are not checked.
+
+Reasoning in the content (`_extract_and_strip_thinking`): every `<think>…</think>` block, an unclosed `<think>…` at the end, and text before a `</think>` with no opening tag. Templates that open the block in the prompt (Qwen3 thinking models, llama.cpp `--reasoning-format none`) produce that last form; it used to be shown as the answer, tag and all.
+
+A `write_file` / `append_to_file` with `content` but no `path` gets a name only for a Markdown document (its first H1, not in code) or `design.md` in design mode (`_derive_write_path`). Otherwise the required-argument error goes back to the model; code used to land in `untitled.md`.
 
 ### Keeping the anchor (`editing._keep_check`, edit feature `keep`)
 
@@ -120,15 +133,24 @@ Both frontends complete the input box with the same code: the TUI calls `complet
 
 In coding and momo mode (`Harness._run_loop`, `_ends_turn_checked`: no plan step or story running), a reply without a tool call that only announces its next step (`toolcall_text.announces_next_step`: first-person intent in the last 400 characters, or a last line that is an imperative plan step; not a question) gets `_NEXT_STEP_NOTE`, at most `_NEXT_STEP_NOTES` (2) per turn. The reply and the note are appended as a user turn and the loop continues, like the design-mode write-intent nudge. The detector is checked against labelled final replies from the multi-part bench (`evals/multipart_bench.py`, `tests/golden/next_step_replies.json`). A `todos` checklist tool with an open-items note was tried alongside it and removed: a 26B called it once in 27 runs, and this note alone stopped the early endings it was meant for (`evals/README.md`, "The todo list").
 
+The detector looks at the sentences in the last 400 characters. One counts when it has an intent ("I will", "let me", "my next step is", …) followed within six words by an action verb, and isn't an offer or deferral ("if you", "let me know", "would you like", "next time", …). Without that last rule, finished summaries such as "Let me know if you want more, and I'll add them." got the note and the model went on with work nobody asked for. A last line that is a list item starting with a verb still counts.
+
 ### Reasoning watch (`/think-budget`)
 
-`Harness._delta_sink(watch)` feeds every streamed reasoning delta (the adapter's reasoning field, or `<think>` text in the content stream) to a `think_watch.ThinkWatch`. It raises `think_watch.Overrun` out of the adapter's stream when the reasoning passes `think_budget` tokens (chars / 4), or when one line of `MIN_LINE`+ characters, after case and whitespace normalisation, appears `REPEATS` (3) times in the last `WINDOW` (6,000) characters. `_run_loop` catches it at the chat call, and `_think_overrun` handles it:
+`Harness._delta_sink(watch, reply_watch)` feeds every streamed reasoning delta (the adapter's reasoning field, or `<think>` text in the content stream) to a `think_watch.ThinkWatch`, and every reply-text delta to a second one (`stream="reply"`). The reasoning watch raises `think_watch.Overrun` out of the adapter's stream when:
+- the reasoning passes `think_budget` tokens (chars / 4);
+- one line of `MIN_LINE`+ characters, after case and whitespace normalisation, appears `REPEATS` (3) times in the last `WINDOW` (6,000) characters;
+- the last `RATIO_WINDOW` (24,000) characters compress below `MIN_RATIO` (0.10) once `RATIO_MIN_CHARS` (8,000) have streamed. This is checked every `RATIO_STEP` characters with `think_watch.looping`.
+
+The reply watch has only the compression trip, since code repeats lines legitimately. `_run_loop` catches the overrun at the chat call, and `_think_overrun` handles it:
 - `client.abort()` closes the stream, so the server stops generating;
-- the reasoning is stored as `thinking` marked `unsent`, followed by an empty assistant turn (role alternation);
-- `_THINK_NOTE` follows as a user turn, with the role's next action and either `think_trim.trim(..., "lean")` of the reasoning or the repeated line;
+- the reasoning is stored as `thinking` marked `unsent`, followed by an empty assistant turn (role alternation). A reply overrun stores nothing of the looping text;
+- `_THINK_NOTE` follows as a user turn, with the role's next action and either `think_trim.trim(..., "lean")` of the reasoning, the repeated line, or (for a reply) `_REPLY_REPEAT_TAIL`;
 - the next request runs with thinking suppressed.
 
-At most `STOPS_PER_TURN` (2) per `_run_loop`; later replies get no watch. Without streaming there are no deltas, so only `/max-output-tokens` applies. `/think-budget repeat off` turns the repetition trip off; `/think-budget off` turns the budget off.
+At most `STOPS_PER_TURN` (2) in a row: `think_stops` resets when a reply has a tool call. After 2 stops without progress, later replies get no watch until the next call. Without streaming there are no deltas, so only `/max-output-tokens` applies.
+
+A reply the cap cuts off without a call keeps only `settle.trim_capped_reply` (its first 1,500 characters) in the history. `settle.cut_off_cause(..., text)` returns `LOOP_CAUSE` for looping text, and `retry_advice` then says to call the tool directly instead of splitting the call. `/think-budget repeat off` turns the line and compression trips off for reasoning, `/think-budget reply-repeat off` turns off the reply watch, and `/think-budget off` turns the budget off.
 
 ### Progress note (`/progress-note`)
 
@@ -191,7 +213,7 @@ Which tools are on demand is `Tool.on_demand(mode)` (`tools/registry.py`): off b
 
 Qwen3 uses an XML chat template that wraps tool results in `<tool_response>…</tool_response>`. Special handling applied when a Qwen model is active:
 
-- **Tool result escaping** — `&`, `<`, `>` in tool result content are HTML-escaped before the API call (unescaped content is stored in messages; escaping happens only in the API payload copy).
+- **Tool result escaping, on demand** — `&`, `<`, `>` in tool results and past tool-call arguments are HTML-escaped in the API payload copy (stored messages keep the real text). This happens only for a model whose Ollama server answered a request with an "XML" error: the first such error resends the request escaped, and later requests for that model are escaped from the start (`OllamaClient._xml_escape_models`). The model reads the escaped copy and copied `&lt;` into its edits, so unescaped is the default.
 - **Tool call markup stripping** — `<tool_call>…</tool_call>` XML left in the assistant content field is stripped before storage.
 - **Gap bridging** — if a `role: "tool"` message appears in history with no preceding assistant, a dummy `{"role": "assistant", "content": ""}` is inserted to satisfy Qwen3's strict alternation requirement.
 
@@ -347,10 +369,14 @@ The system prompt is built from `roles/<mode>.md` plus any active skill files fr
 | Mode | Role file | Tools | Purpose |
 |------|-----------|-------|---------|
 | `design` | `roles/designer.md` | read-only + code nav + `write_file` + `ask_user` | Interview-based design partner; explores codebase, writes specs |
-| `plan` | `roles/planner.md`, then `roles/coder.md` + plan state | investigating: read-only + code nav + `run_command` + `ask_user` + `create_plan`; executing: all tools + `complete_step` + `revise_plan` | Investigates, asks, writes `.momo-plan.md`; after approval executes it step by step (`Harness._execute_plan`), deleting the file when done. A stories plan (`/plan stories`, `harness/story_runner.py`) runs each phase as a story-writer pass (`roles/story-writer.md`, role `story-writer`: read-only + `run_command` + `plan_stories` / `write_story` (one per turn) / `finish_stories`) and then one story at a time in a fresh context (role `story-exec`: coding tools + `complete_story`) |
+| `plan` | `roles/planner.md`, then `roles/coder.md` + plan state | investigating: read-only + code nav + `run_command` + `ask_user` + `create_plan`; executing: all tools + `complete_step` + `revise_plan` | Investigates, asks, writes `.momo-plan.md`; after approval executes it step by step (`Harness._execute_plan`), deleting the file when done. A stories plan (`/plan stories`, `harness/story_runner.py`) runs each phase as a story-writer pass (`roles/story-writer.md`, role `story-writer`: read-only + `run_command` + `plan_stories` / `write_story` (one per turn) / `finish_stories`) and then one story at a time in a fresh context (role `story-exec`: coding tools + `complete_story` / `report_defect`) |
 | `coding` | `roles/coder.md` | all tools | Engineer; full read/write/exec/git access |
 | `chat` | `roles/chat.md` | read-only + code nav + `ask_user` | Conversational Q&A over code and documents; never writes files |
 | `momo` | `roles/momo.md` | all tools | Cat companion; full tool access with a warm, curious persona |
+
+A stories plan traces the request to checks. `create_plan` splits it into `requirements` (R1, R2, … each with a phase), and story criteria name the ones their check proves (`covers`). `StoryRunnerMixin._coverage` maps each requirement to its covering criteria and whether their checks passed. The writer must cover its phase's requirements, plus earlier ones still unproven (`_due_requirements`), before `finish_stories` stores the set. The last phase's gate fails on any requirement without a passing check, and on a command the request says must pass (`plan.request_commands`), run as written. Story-mud run 2 ended "complete" while plain `python -m unittest` found no tests and the phase report claimed `n/s/e/w`, which nothing had checked; the report's `## Requirements` table is now written by the harness, not the model.
+
+A story whose checks expose a bug in an earlier story's code calls `report_defect` (or fixes a small one itself). `_run_story` returns `"blocked"`, the story goes back to pending without counting as an attempt, `_fix_defect` has the writer add one fix story, and the blocked story depends on it. Run 2's P2.S9 used up its 30 turns on such a bug, treating the fix as out of its scope.
 
 `read_file`'s trailer is deliberately load-bearing: on a file `code_nav` can parse it names the
 definition a ranged read landed in, and on a whole-file read it points at `code_outline`. Measured

@@ -286,15 +286,18 @@ def _loop_guard(harness: Harness, arg: str) -> CommandResult:
 
 
 def _think_budget(harness: Harness, arg: str) -> CommandResult:
-    """/think-budget [n|off] · /think-budget repeat [on|off]"""
+    """/think-budget [n|off] · /think-budget repeat [on|off] · /think-budget reply-repeat [on|off]"""
     def _state() -> str:
         n = harness.think_budget
         cap = (f"a reply's reasoning is stopped after {n:,} tokens" if n
                else "no reasoning budget (only /max-output-tokens caps a reply)")
         rep = ("reasoning that repeats itself is stopped" if harness.think_repeat
                else "repeating reasoning is not stopped")
-        return (f"reasoning watch: {cap} · {rep}; the model is then asked to act "
-                f"(at most {think_watch_mod.STOPS_PER_TURN} per turn, streaming replies only)")
+        reply = ("reply text that repeats itself is stopped" if harness.reply_repeat
+                 else "repeating reply text is not stopped")
+        return (f"reasoning watch: {cap} · {rep} · {reply}; the model is then asked to act "
+                f"(at most {think_watch_mod.STOPS_PER_TURN} in a row without a tool call, "
+                "streaming replies only)")
     words = arg.lower().split()
     if not words:
         return CommandResult(handled=True, output=_state())
@@ -305,10 +308,19 @@ def _think_budget(harness: Harness, arg: str) -> CommandResult:
             return CommandResult(handled=True, output="ERROR: usage: /think-budget repeat [on|off]")
         harness.think_repeat = words[1] == "on"
         session_mod.save_prefs(think_repeat=harness.think_repeat)
+    elif words[0] == "reply-repeat":
+        if len(words) == 1:
+            return CommandResult(handled=True, output=_state())
+        if len(words) > 2 or words[1] not in ("on", "off"):
+            return CommandResult(handled=True,
+                                 output="ERROR: usage: /think-budget reply-repeat [on|off]")
+        harness.reply_repeat = words[1] == "on"
+        session_mod.save_prefs(reply_repeat=harness.reply_repeat)
     else:
         if len(words) > 1:
-            return CommandResult(handled=True, output="ERROR: usage: /think-budget [n|off] "
-                                                      "or /think-budget repeat [on|off]")
+            return CommandResult(handled=True, output="ERROR: usage: /think-budget [n|off], "
+                                                      "/think-budget repeat [on|off] or "
+                                                      "/think-budget reply-repeat [on|off]")
         if words[0] in ("off", "0", "none"):
             n = 0
         elif words[0] == "on":
@@ -1976,6 +1988,8 @@ Available commands:
                       is stopped and the model asked to act (default 8000, saved)
   /think-budget repeat [on|off]  Also stop reasoning that keeps repeating one
                       line (default on, saved)
+  /think-budget reply-repeat [on|off]  Also stop a reply whose text keeps
+                      repeating itself (default on, saved)
   /progress-note [on|off]  Note to the model after many tool calls in a row with
                       no change, question or plan (default on, saved)
   /loop-guard [n|off|on]  Repeats that make a tool-call loop: the same call n times with

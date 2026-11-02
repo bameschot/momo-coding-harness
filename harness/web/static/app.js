@@ -767,8 +767,8 @@ function applyLoopStatus(s) {
 }
 
 // The reasoning watch, the progress note and plan questions, in the thinking menu
-// and Settings → Context: /think-budget, /think-budget repeat, /progress-note and
-// /plan questions.
+// and Settings → Context: /think-budget, /think-budget repeat, /think-budget
+// reply-repeat, /progress-note and /plan questions.
 function applyWatchStatus(s) {
   const n = s.think_budget ?? 8000;
   for (const f of document.querySelectorAll('input[data-cmd="/think-budget"]')) {
@@ -776,6 +776,9 @@ function applyWatchStatus(s) {
   }
   for (const f of document.querySelectorAll('input[data-cmd="/think-budget repeat"]')) {
     f.checked = s.think_repeat ?? true;
+  }
+  for (const f of document.querySelectorAll('input[data-cmd="/think-budget reply-repeat"]')) {
+    f.checked = s.reply_repeat ?? true;
   }
   for (const f of document.querySelectorAll('input[data-cmd="/progress-note"]')) {
     f.checked = s.progress_note ?? true;

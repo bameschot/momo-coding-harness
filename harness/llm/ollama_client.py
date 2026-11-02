@@ -34,8 +34,10 @@ def _xml_escape_for_ollama(messages: list[dict]) -> list[dict]:
 
     Qwen3's Ollama template wraps tool results in <tool_response>…</tool_response> XML and
     embeds past tool-call arguments in XML-like structure.  Unescaped < > & in either location
-    break the XML parser and produce a 500.  We escape only the copy sent to the API —
-    the caller's stored messages keep the correct, unescaped content so history is accurate."""
+    broke the XML parser of one such template and produced a 500.  We escape only the copy sent
+    to the API — the caller's stored messages keep the correct, unescaped content so history is
+    accurate.  Only for a model whose server answered that 500 (OllamaClient.chat): the escaped
+    copy is what the model reads, and it copied `&lt;` from tool results into its edits."""
     result = []
     for m in messages:
         role = m.get("role")
@@ -129,10 +131,22 @@ class OllamaClient(LLMClient):
     def chat(self, messages: list[dict], tools: list[dict],
              think=None, num_ctx: int | None = None,
              on_delta=None) -> ChatResponse:
-        # Qwen3's Ollama chat template embeds message content into XML; escape the
-        # copy we send so tool results/args with < > & don't break its parser.
-        if _is_qwen(self.model):
-            messages = _xml_escape_for_ollama(messages)
+        # One Qwen3 Ollama template parsed message content as XML and failed (a
+        # 500) on < > & in tool results and arguments.  Escaping the copy sent
+        # avoids that, but the model then reads `&lt;` in code and copies it, so
+        # it is done only for a model whose server answered with that error.
+        escaped = self.__dict__.setdefault("_xml_escape_models", set())
+        if self.model in escaped:
+            return self._chat(_xml_escape_for_ollama(messages), tools, think, num_ctx, on_delta)
+        try:
+            return self._chat(messages, tools, think, num_ctx, on_delta)
+        except LLMHTTPError as e:
+            if not _is_qwen(self.model) or "xml" not in str(e).lower():
+                raise
+            escaped.add(self.model)
+            return self._chat(_xml_escape_for_ollama(messages), tools, think, num_ctx, on_delta)
+
+    def _chat(self, messages: list[dict], tools: list[dict], think, num_ctx, on_delta) -> ChatResponse:
         body: dict = {"model": self.model, "messages": self._wire_messages(messages),
                       "stream": on_delta is not None}
         if tools:

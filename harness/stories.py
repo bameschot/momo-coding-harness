@@ -17,7 +17,10 @@ is kept when the plan completes.
 """
 from __future__ import annotations
 
+import ast
 import re
+import shlex
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -59,6 +62,7 @@ def _ids(v) -> list[str]:
 class Criterion:
     text: str
     check: str | None = None   # a command the harness runs; None: the model backs it with evidence
+    covers: list[str] = field(default_factory=list)   # the plan's requirement ids (R1, …) it proves
 
     @classmethod
     def from_dict(cls, d) -> "Criterion":
@@ -66,10 +70,12 @@ class Criterion:
             return cls(text=d.strip())
         check = d.get("check")
         return cls(text=str(d.get("text", "") or "").strip(),
-                   check=None if check is None else str(check).strip())
+                   check=None if check is None else str(check).strip(),
+                   covers=_requirement_ids(d.get("covers")))
 
     def to_dict(self) -> dict:
-        return {"text": self.text, **({"check": self.check} if self.check is not None else {})}
+        return {"text": self.text, **({"check": self.check} if self.check is not None else {}),
+                **({"covers": self.covers} if self.covers else {})}
 
 
 @dataclass
@@ -97,6 +103,7 @@ class Story:
     refusals: int = 0
     check_results: list = field(default_factory=list)
     failure: str = ""          # why its last run failed: the re-split (also on resume) uses it
+    defect: str = ""           # the defect in earlier code it reported (report_defect), once
 
     @property
     def number(self) -> int:
@@ -135,13 +142,17 @@ class Story:
             check_results=[r if isinstance(r, dict) else {} for r in (d.get("check_results") or [])]
                           if isinstance(d.get("check_results"), list) else [],
             failure=str(d.get("failure", "") or ""),
+            defect=str(d.get("defect", "") or ""),
         )
 
     def problems(self, ids: set[str], earlier: dict[str, "Story"] | None = None,
-                 workdir: Path | None = None) -> list[str]:
+                 workdir: Path | None = None, planned: set[str] | None = None,
+                 checks: bool = True) -> list[str]:
         """What is wrong with this story on its own ([] when nothing).  ids: the
         stories of this phase it may depend on; earlier: those of finished
-        phases by "P<n>.S<m>"."""
+        phases by "P<n>.S<m>"; planned: the files this phase's stories will
+        write (a check may import what they create); checks=False skips
+        reading the check commands (check_problems)."""
         earlier = earlier or {}
         errors: list[str] = []
         where = f"{self.id} ({self.title})"
@@ -156,6 +167,10 @@ class Story:
             if c.check is not None and not c.check:
                 errors.append(f"{where}: empty check for \"{c.text}\" — give the command, "
                               "or leave check out for a criterion backed by evidence")
+            elif c.check and checks:
+                shown = c.check if len(c.check) <= 80 else c.check[:77] + "…"
+                errors += [f"{where}: check `{shown}` {e}"
+                           for e in check_problems(c.check, workdir, planned or set(self.files))]
         errors += _dependency_problems(where, self.id, self.depends_on, ids, earlier)
         for f in self.files:
             if _bad_path(f, workdir):
@@ -170,7 +185,7 @@ class Story:
                 "status": self.status, "attempts": self.attempts, "delivered": self.delivered,
                 "facts": self.facts, "started_at": self.started_at, "finished_at": self.finished_at,
                 "turns": self.turns, "refusals": self.refusals, "check_results": self.check_results,
-                "failure": self.failure}
+                "failure": self.failure, "defect": self.defect}
 
     def to_markdown(self) -> str:
         lines = [f"## [{_STATUS_MARK[self.status]}] {self.id} — {self.title}",
@@ -192,6 +207,8 @@ class Story:
             lines.append(f"- {c.text}")
             if c.check is not None:
                 lines.append(f"  Check: `{c.check}`")
+            if c.covers:
+                lines.append(f"  Covers: {', '.join(c.covers)}")
         if self.delivered or self.facts:
             lines += ["", "### Delivered"]
             if self.delivered:
@@ -210,6 +227,7 @@ class StorySet:
     stories: list[Story] = field(default_factory=list)
     approved: bool = False
     gate: dict = field(default_factory=dict)   # the phase checks' last result: passed, output, at
+    report: str = ""            # the phase report, once the phase is done (a copy of Step.report)
 
     def get(self, story_id: str) -> Story | None:
         return next((s for s in self.stories if s.id == story_id.upper()), None)
@@ -274,8 +292,11 @@ class StorySet:
                 errors.append(f"{s.id}: id used twice")
             seen.add(s.id)
         ids = {s.id for s in live}
+        planned = {f for s in live for f in s.files}
         for s in live:
-            errors += s.problems(ids, earlier, workdir)
+            # a done story's checks have passed: newer rules do not reopen it
+            errors += s.problems(ids, earlier, workdir, planned, checks=not s.finished)
+        errors += _duplicates(live)
         cycle = _cycle(live)
         if cycle:
             errors.append("dependency cycle: " + " → ".join(cycle))
@@ -289,11 +310,15 @@ class StorySet:
                    stories=[Story.from_dict(s) for s in (d.get("stories") or [])
                             if isinstance(s, dict)],
                    approved=bool(d.get("approved")),
-                   gate=d.get("gate") if isinstance(d.get("gate"), dict) else {})
+                   gate=d.get("gate") if isinstance(d.get("gate"), dict) else {},
+                   report=str(d.get("report", "") or ""))
 
     def to_dict(self) -> dict:
-        return {"phase": self.phase, "title": self.title, "approved": self.approved,
-                "gate": self.gate, "stories": [s.to_dict() for s in self.stories]}
+        d = {"phase": self.phase, "title": self.title, "approved": self.approved,
+             "gate": self.gate, "stories": [s.to_dict() for s in self.stories]}
+        if self.report:
+            d["report"] = self.report
+        return d
 
     def to_markdown(self) -> str:
         head = f"# Stories: phase {self.phase}" + (f" — {self.title}" if self.title else "")
@@ -305,6 +330,8 @@ class StorySet:
                  "criterion is a command the harness runs. -->"]
         for s in self.stories:
             parts += ["", s.to_markdown()]
+        if self.report:
+            parts += ["", "## Report", "", self.report]
         return "\n".join(parts) + "\n"
 
     @classmethod
@@ -316,6 +343,7 @@ class StorySet:
         cur: Story | None = None
         section = ""
         buf: list[str] = []
+        in_report, report = False, []
 
         def flush_section():
             nonlocal buf
@@ -356,6 +384,14 @@ class StorySet:
                 stories.append(cur)
                 section = ""
                 continue
+            if in_report:                   # the report comes last; its own headings stay in it
+                report.append(line)
+                continue
+            if line.startswith("## ") and not line.startswith("### "):
+                flush_section()             # a heading that is not a story ends the last one
+                cur, section = None, ""
+                in_report = line[3:].strip().lower() == "report"
+                continue
             if cur is None:
                 continue
             if line.startswith("### "):
@@ -378,7 +414,8 @@ class StorySet:
                 continue
             buf.append(line)
         flush_section()
-        return cls(phase=phase, title=title, stories=stories, approved=approved)
+        return cls(phase=phase, title=title, stories=stories, approved=approved,
+                   report="\n".join(report).strip())
 
     def merge_from_file(self, edited: "StorySet") -> None:
         """Take the user's edits from the file: every story that has not been
@@ -394,14 +431,26 @@ class StorySet:
                 continue
             old = before.get(s.id)
             if old is not None:          # how its last run went is not in the file
-                s.started_at, s.finished_at, s.turns, s.refusals, s.failure = (
-                    old.started_at, old.finished_at, old.turns, old.refusals, old.failure)
+                s.started_at, s.finished_at, s.turns, s.refusals, s.failure, s.defect = (
+                    old.started_at, old.finished_at, old.turns, old.refusals, old.failure,
+                    old.defect)
                 if [c.check for c in s.acceptance] == [c.check for c in old.acceptance]:
                     s.check_results = old.check_results
             merged.append(s)
         merged += kept.values()
         merged.sort(key=lambda s: s.number)
         self.stories = merged
+
+
+def _requirement_ids(v) -> list[str]:
+    """R1, R2, … from a list or a comma-separated string, upper-cased, in order."""
+    items = v if isinstance(v, list) else str(v or "").split(",")
+    out = []
+    for x in items:
+        x = str(x).strip().strip("`").upper()
+        if x and x not in out:
+            out.append(x)
+    return out
 
 
 def _count(v) -> int:
@@ -420,11 +469,164 @@ def _parse_acceptance(lines: list[str]) -> list[Criterion]:
         m = re.match(r"^check:\s*(.*)$", s, re.I)
         if m and out:
             out[-1].check = m.group(1).strip().strip("`").strip()
+            continue
+        m = re.match(r"^covers:\s*(.*)$", s, re.I)
+        if m and out:
+            out[-1].covers = _requirement_ids(m.group(1))
         elif s.startswith(("-", "*")):
             out.append(Criterion(text=s.lstrip("-* ").strip()))
         elif out:
             out[-1].text = f"{out[-1].text} {s}".strip()
     return out
+
+
+# ── check commands ────────────────────────────────────────────────────────────
+# A story's checks are read, never run, before the story is stored: the
+# story-mud run approved python -c checks that were SyntaxErrors (`...; try:`),
+# imported requests in a stdlib-only project, printed their own exceptions and
+# rmdir'ed the project's static/ folder.
+
+_RX_PYTHON = re.compile(r"^(?:\S*/)?python(?:3(?:\.\d+)?)?$")
+_RX_COMPOUND = re.compile(r";\s*(with|try|def|class|for|while|if|elif|else|except|finally)\b")
+_RX_DELETE = re.compile(r"\brm\s+-\w*[rR]|\brmdir\b|shutil\.rmtree|os\.(?:remove|unlink|rmdir)\s*\(")
+_RX_TEMP = re.compile(r"tmp|temp", re.I)
+# run 2: a check pkill'ed the server another check needed, and one fetched
+# localhost:8000 with nothing listening, so it could never pass.
+_RX_KILL = re.compile(r"(?:^|[\s;&|(])(?:pkill|killall|kill)\s|\bos\.kill(?:pg)?\s*\(")
+_RX_LOCAL_URL = re.compile(r"\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b")
+_RX_STARTS = re.compile(r"Popen|subprocess|Thread|serve_forever|HTTPServer|&\s*(?:$|[^&])")
+_RX_EXISTS_ONLY = re.compile(r"^(?:\s*(?:&&|;)?\s*(?:ls\s+\S+|test\s+-[efsd]\s+\S+|\[\s+-[efsd]\s+\S+\s+\]))+\s*$")
+_EXISTS_CALLS = {"exists", "isfile", "isdir", "is_file", "is_dir"}
+_EXIT_CALLS = {"exit", "_exit", "main", "fail"}     # sys.exit, os._exit, unittest.main, self.fail
+_DEP_FILES = ("requirements.txt", "requirements-dev.txt", "pyproject.toml", "setup.cfg",
+              "setup.py", "Pipfile")
+
+
+def check_problems(cmd: str, workdir: Path | None = None, planned=()) -> list[str]:
+    """What is wrong with a check command, read without running it ([] when
+    nothing seen): a python -c body that does not compile, imports a module the
+    project cannot have, swallows its exceptions or only prints; a command that
+    deletes files outside a temp dir.  planned: files the phase's stories write."""
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as e:
+        return [f"does not parse as a command ({e})"]
+    errors = []
+    if _RX_DELETE.search(cmd) and not _RX_TEMP.search(cmd):
+        errors.append("deletes files — a check must not delete project files (put scratch "
+                      "files in a tempfile.TemporaryDirectory())")
+    if _RX_KILL.search(cmd):
+        errors.append("stops processes — a check must not kill what it did not start (a test "
+                      "that starts a server stops it itself, in tearDown)")
+    if _RX_LOCAL_URL.search(cmd) and not _RX_STARTS.search(cmd):
+        errors.append("talks to a local server it does not start, so it fails when nothing is "
+                      "running; write a unittest that starts the server in setUpClass and "
+                      "stops it in tearDownClass")
+    if exists_only(cmd):
+        errors.append("only tests that a file exists, which passes without the work; check "
+                      "what the file contains or what the code does")
+    for i, a in enumerate(argv[:-2]):
+        if _RX_PYTHON.match(a) and argv[i + 1] == "-c":
+            errors += _python_problems(argv[i + 2], workdir, planned)
+    return errors
+
+
+def exists_only(cmd: str) -> bool:
+    """A check that only tests that files exist: `ls f`, `test -f f`, or a
+    python -c whose every assertion is os.path.exists(…) or Path(…).is_file()."""
+    if _RX_EXISTS_ONLY.match(cmd):
+        return True
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return False
+    if len(argv) != 3 or not _RX_PYTHON.match(argv[0]) or argv[1] != "-c":
+        return False
+    try:
+        tree = ast.parse(argv[2])
+    except SyntaxError:
+        return False
+    asserts = [n for n in ast.walk(tree) if isinstance(n, ast.Assert)]
+    return bool(asserts) and all(
+        all(_call_name(c) in _EXISTS_CALLS for c in ast.walk(a.test) if isinstance(c, ast.Call))
+        and any(isinstance(c, ast.Call) for c in ast.walk(a.test)) for a in asserts)
+
+
+def _python_problems(src: str, workdir: Path | None, planned) -> list[str]:
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        hint = (" — with/try/def/class/for/if cannot follow ';' on one line"
+                if _RX_COMPOUND.search(src) else "")
+        return [f"is not valid Python ({e.msg}{hint}); put the check in a test file (e.g. "
+                "tests/test_<name>.py) and run it with python3 -m unittest"]
+    errors = []
+    for top in sorted(_imports(tree)):
+        if not _importable(top, workdir, planned):
+            errors.append(f"imports {top}, which is neither in the standard library nor in the "
+                          "project; use what the project has (the standard library if the "
+                          "request says so)")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler) and _broad(node) and not _reraises(node):
+            errors.append("catches exceptions without re-raising them, so it passes when it "
+                          "fails; let the error propagate")
+            break
+    if (not any(isinstance(n, (ast.Assert, ast.Raise)) or _exit_call(n) for n in ast.walk(tree))
+            and any(_call_name(n) == "print" for n in ast.walk(tree))):
+        errors.append("only prints, so it exits 0 whatever the result; assert the expected "
+                      "value (assert x == …)")
+    return errors
+
+
+def _imports(tree: ast.AST) -> set[str]:
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            out |= {a.name.split(".")[0] for a in n.names}
+        elif isinstance(n, ast.ImportFrom) and not n.level and n.module:
+            out.add(n.module.split(".")[0])
+    return out
+
+
+def _importable(top: str, workdir: Path | None, planned) -> bool:
+    if top in sys.stdlib_module_names or top == "__future__":
+        return True
+    stems = {PurePosixPath(f).parts[0].removesuffix(".py") for f in planned if f}
+    if top in stems:
+        return True
+    if workdir is None:
+        return True                     # nothing to look in: do not guess
+    if (workdir / f"{top}.py").exists() or (workdir / top).is_dir() \
+            or (workdir / "src" / f"{top}.py").exists() or (workdir / "src" / top).is_dir():
+        return True
+    for name in _DEP_FILES:             # a declared dependency (installed or not)
+        try:
+            if re.search(rf"(?i)\b{re.escape(top)}\b", (workdir / name).read_text(errors="replace")):
+                return True
+        except OSError:
+            pass
+    return any(workdir.glob(f".venv/lib/python*/site-packages/{top}*")) \
+        or any(workdir.glob(f"venv/lib/python*/site-packages/{top}*"))
+
+
+def _broad(handler: ast.ExceptHandler) -> bool:
+    t = handler.type
+    return t is None or (isinstance(t, ast.Name) and t.id in ("Exception", "BaseException"))
+
+
+def _reraises(handler: ast.ExceptHandler) -> bool:
+    return any(isinstance(n, ast.Raise) or _exit_call(n) for b in handler.body for n in ast.walk(b))
+
+
+def _call_name(node: ast.AST) -> str:
+    if not isinstance(node, ast.Call):
+        return ""
+    f = node.func
+    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+
+
+def _exit_call(node: ast.AST) -> bool:
+    return _call_name(node) in _EXIT_CALLS
 
 
 def _bad_path(path: str, workdir: Path | None) -> bool:
@@ -509,6 +711,31 @@ def validate_outline(outline: list[dict], kept: list[Story] | None = None,
     cycle = _cycle(stubs)
     if cycle:
         errors.append("dependency cycle: " + " → ".join(cycle))
+    return errors
+
+
+def _duplicates(live: list[Story]) -> list[str]:
+    """Unfinished stories that are the same story twice: the same title, or the
+    same files and checks (a re-split in the story-mud run wrote S2-S4 again as
+    S5-S7 and S8-S10 while the originals stayed pending)."""
+    errors, seen = [], {}
+    for s in live:
+        if s.finished or s.status == "in_progress":
+            continue
+        title = re.sub(r"[\W_]+", " ", s.title.lower()).strip()
+        checks = frozenset(c.check for c in s.acceptance if c.check)
+        keys = []
+        if title and title != "untitled story":
+            keys.append(("title", title))
+        if checks and s.files:
+            keys.append(("work", frozenset(s.files), checks))
+        first = next((seen[k] for k in keys if k in seen), None)
+        if first is not None:
+            errors.append(f"{s.id} duplicates {first} (same title, or same files and checks) — "
+                          f"keep one: retire the other with plan_stories replaces=[{first}], or "
+                          f"drop {s.id} from the outline")
+        for k in keys:
+            seen.setdefault(k, s.id)
     return errors
 
 

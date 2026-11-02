@@ -17,9 +17,9 @@ from harness.llm.base import ChatResponse, LLMClient, ToolCall
 from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
 
-def _varied(n_chars: int) -> str:
-    """Long reasoning that never repeats a line."""
-    out, i = [], 0
+def _varied(n_chars: int, start: int = 0) -> str:
+    """Long reasoning that never repeats a line (from step `start` on)."""
+    out, i = [], start
     while sum(map(len, out)) < n_chars:
         out.append(f"Step {i}: the value of item {i} depends on item {i + 1}, so check it next.\n")
         i += 1
@@ -57,13 +57,56 @@ class Watch(unittest.TestCase):
     def test_a_repeat_outside_the_window_does_not_count(self):
         w = think_watch.ThinkWatch(budget=0)
         line = "I should check whether the cache is cleared before the second request.\n"
-        for _ in range(think_watch.REPEATS - 1):
+        for k in range(think_watch.REPEATS - 1):
             w.feed(line)
-            w.feed(_varied(think_watch.WINDOW + 100))
+            # different steps each time: the same block twice would be a loop itself
+            w.feed(_varied(think_watch.WINDOW + 100, start=k * 1000))
         w.feed(line)
 
     def test_off(self):
         self.assertFalse(think_watch.ThinkWatch(budget=0, repeat=False).active)
+
+    # The story-mud run: "Actually, I'll do it." 2,400 times is shorter than
+    # MIN_LINE, so only the compression check can see the loop.
+    def test_a_loop_of_short_sentences_trips_by_compression(self):
+        w = think_watch.ThinkWatch(budget=0)
+        w.feed(_varied(3000))
+        loop = "Actually, I'll do it.\n" * 2000
+        with self.assertRaises(think_watch.Overrun) as cm:
+            for i in range(0, len(loop), 100):
+                w.feed(loop[i:i + 100])
+        self.assertEqual(cm.exception.kind, "repeat")
+        self.assertEqual(cm.exception.line, "Actually, I'll do it.")
+        self.assertLess(len(cm.exception.reasoning), 13_000)
+
+    def test_a_long_block_written_out_again_and_again_trips(self):
+        block = Path(think_watch.__file__).read_text()[:3000]   # varied code, no line repeats
+        w = think_watch.ThinkWatch(budget=0, stream="reply")
+        with self.assertRaises(think_watch.Overrun) as cm:
+            for _ in range(30):
+                w.feed(block)
+        self.assertEqual(cm.exception.stream, "reply")
+        self.assertLess(len(cm.exception.reasoning), 40_000)
+        self.assertEqual(cm.exception.describe(), "Reply stopped: it kept repeating itself")
+
+    def test_real_code_does_not_trip_the_reply_watch(self):
+        w = think_watch.ThinkWatch(budget=0, stream="reply")
+        root = Path(think_watch.__file__).parent
+        for name in ("story_runner.py", "stories.py", "settle.py"):
+            text = (root / name).read_text()
+            for i in range(0, len(text), 200):
+                w.feed(text[i:i + 200])
+
+    def test_the_reply_watch_has_no_line_trip(self):
+        w = think_watch.ThinkWatch(budget=0, stream="reply")
+        line = "        self.assertEqual(response.status, 200, response.read())\n"
+        w.feed((line + "x = 1\n") * 5)       # code repeats lines legitimately
+
+    def test_looping_and_ratio(self):
+        self.assertFalse(think_watch.looping("Actually, I'll do it.\n" * 100))   # too short
+        self.assertTrue(think_watch.looping("Actually, I'll do it.\n" * 1000))
+        self.assertFalse(think_watch.looping(_varied(30_000)))
+        self.assertEqual(think_watch.compress_ratio(""), 1.0)
 
 
 class StreamingClient(LLMClient):
@@ -77,14 +120,15 @@ class StreamingClient(LLMClient):
 
     def chat(self, messages, tools, think=None, num_ctx=None, on_delta=None):
         self.requests.append({"think": think, "messages": list(messages)})
-        thinking, content, calls = (self.script.pop(0) if self.script else ("", "done", []))
+        entry = self.script.pop(0) if self.script else ("", "done", [])
+        thinking, content, calls = entry[:3]
         if on_delta is not None:
             for i in range(0, len(thinking), 100):
                 on_delta("thinking", thinking[i:i + 100])
-            if content:
-                on_delta("content", content)
+            for i in range(0, len(content), 100):
+                on_delta("content", content[i:i + 100])
         return ChatResponse(content=content, thinking=thinking, tool_calls=calls,
-                            done_reason="stop")
+                            done_reason=entry[3] if len(entry) > 3 else "stop")
 
     def context_length(self):
         return 32768
@@ -162,6 +206,50 @@ class Overrun(Base):
         self.assertEqual(len(self.notes("[Note from the harness")), 2)
         # the third long reply was let through and ended the turn
         self.assertEqual(len(self.client.requests), 3)
+
+    def test_a_tool_call_between_stops_rearms_the_watch(self):
+        self.h.think_budget = 1000
+        (self.work / "a.txt").write_text("hello\n")
+        read = ("", "Reading a.txt.", [ToolCall("read_file", {"path": "a.txt"})])
+        self.client.script = ([(_varied(8000), "", [])] * 2 + [read]
+                              + [(_varied(8000), "", [])] * 2 + [("", "done", [])])
+        self.h.send("fix it")
+        self.assertEqual(self.client.aborts, 4)
+        self.assertEqual(self.h.messages[-1]["content"], "done")
+
+    def test_a_looping_reply_is_stopped_and_not_kept(self):
+        loop = "I will write the file now.\n" + "Actually, I'll do it.\n" * 3000
+        self.client.script = [("", loop, []), ("", "done", [])]
+        self.h.send("fix it")
+        self.assertEqual(self.client.aborts, 1)
+        note = self.notes("Your reply kept repeating itself")
+        self.assertEqual(len(note), 1)
+        self.assertIn("> Actually, I'll do it.", note[0]["content"])
+        self.assertIn("Never write code or tool calls out as text", note[0]["content"])
+        sent = "".join(str(m.get("content") or "") for m in self.client.requests[1]["messages"])
+        self.assertLess(sent.count("Actually, I'll do it."), 3)
+        self.assertEqual(self.h.messages[-1]["content"], "done")
+
+    def test_reply_repeat_off_lets_a_looping_reply_through(self):
+        out = self.cmd("/think-budget reply-repeat off")
+        self.assertIn("repeating reply text is not stopped", out)
+        self.assertFalse(self.h.status_event().reply_repeat)
+        self.assertFalse(session_mod.load_prefs()["reply_repeat"])
+        self.client.script = [("", "Actually, I'll do it.\n" * 3000, [])]
+        self.h.send("fix it")
+        self.assertEqual(self.client.aborts, 0)
+        self.assertIn("error", self.cmd("/think-budget reply-repeat maybe").lower())
+
+    def test_a_capped_reply_keeps_only_its_head(self):
+        self.h.stream = False
+        self.client.script = [("", "Here is my plan.\n" + "Actually, I'll do it.\n" * 3000, [],
+                               "length")]
+        self.h.send("fix it")
+        replies = [m["content"] for m in self.h.messages if m.get("role") == "assistant"
+                   and "Actually" in (m.get("content") or "")]
+        self.assertTrue(replies)
+        self.assertLess(max(map(len, replies)), 2_000)
+        self.assertIn("[… reply cut off", replies[-1])
 
     def test_off_and_without_streaming_nothing_is_stopped(self):
         for setup in (lambda: self.cmd("/think-budget off") and self.cmd("/think-budget repeat off"),

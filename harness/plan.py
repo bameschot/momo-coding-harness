@@ -106,6 +106,13 @@ class Plan:
     goal: str = ""
     steps: list[Step] = field(default_factory=list)
     kind: str = "normal"      # "normal" | "tdd" | "stories"
+    # the user's request the plan answers, as they typed it (the story writer
+    # checks each phase against it, not only against the planner's goal)
+    request: str = ""
+    # stories: the request split into requirements, each assigned to a phase:
+    # [{"id": "R1", "text": …, "phase": 1}].  Story criteria cover them (covers:),
+    # so the writer, the gate and the report can tell which ones a check proves.
+    requirements: list[dict] = field(default_factory=list)
     test_command: str = ""    # tdd: the full suite the harness runs at every gate
     # tdd, optional: a template that runs only some test files ({files}, {dirs},
     # {stems}), for the red check and the model's own runs (tdd.step_command)
@@ -137,6 +144,8 @@ class Plan:
         return cls(
             title=str(d.get("title", "")).strip() or "Implementation plan",
             goal=str(d.get("goal", "") or "").strip(),
+            request=str(d.get("request", "") or "").strip(),
+            requirements=requirement_list(d.get("requirements")),
             steps=[Step.from_dict(s) for s in (d.get("steps") or []) if isinstance(s, dict)],
             kind=d.get("kind") if d.get("kind") in ("tdd", "stories") else "normal",
             test_command=str(d.get("test_command", "") or "").strip(),
@@ -152,6 +161,10 @@ class Plan:
     def to_dict(self) -> dict:
         d = {"title": self.title, "goal": self.goal,
              "steps": [s.to_dict() for s in self.steps]}
+        if self.request:
+            d["request"] = self.request
+        if self.requirements:
+            d["requirements"] = self.requirements
         if self.tdd:
             d.update(kind=self.kind, test_command=self.test_command,
                      step_test_command=self.step_test_command, test_owners=self.test_owners)
@@ -169,6 +182,11 @@ class Plan:
                                           else []) + [""]
         if self.goal:
             lines += ["## Goal", "", self.goal, ""]
+        if self.request:
+            lines += ["## Request", "", self.request, ""]
+        if self.requirements:
+            lines += ["## Requirements", ""] + [
+                f"- {r['id']} (phase {r['phase']}): {r['text']}" for r in self.requirements] + [""]
         if self.tdd:
             lines += ["## Test command", "", f"`{self.test_command}`", ""]
             if self.step_test_command:
@@ -205,7 +223,8 @@ class Plan:
         any checkbox list item starts a step, and the lines that follow it (up to
         the next step or heading) become its details, with 'Files:' and 'Note:'
         lines split out."""
-        title, goal_lines, steps = "", [], []
+        title, goal_lines, request_lines, steps = "", [], [], []
+        requirement_lines: list[str] = []
         kind, command_lines, step_command_lines = "normal", [], []
         stories_dir = ""
         section = ""
@@ -241,7 +260,7 @@ class Plan:
                         line.strip().strip("`").strip())
                 continue
             m = _RX_STEP.match(line)
-            if m and section != "goal":
+            if m and section not in ("goal", "request", "requirements"):
                 _flush()
                 step_title = m.group(2).strip()
                 if step_title.startswith("**") and step_title.endswith("**") and len(step_title) > 4:
@@ -274,9 +293,15 @@ class Plan:
                     detail_lines.append(line[2:] if line.startswith("  ") else line)
             elif section == "goal":
                 goal_lines.append(line)
+            elif section == "request":
+                request_lines.append(line)
+            elif section == "requirements":
+                requirement_lines.append(line)
         _flush()
         return cls(title=title or "Implementation plan",
-                   goal="\n".join(goal_lines).strip(), steps=steps, kind=kind,
+                   goal="\n".join(goal_lines).strip(), request="\n".join(request_lines).strip(),
+                   requirements=_parse_requirements(requirement_lines),
+                   steps=steps, kind=kind,
                    test_command=" ".join(command_lines),
                    step_test_command=" ".join(step_command_lines),
                    stories_dir=stories_dir)
@@ -408,3 +433,66 @@ def delete_plan_file(workdir: Path):
     except OSError:
         pass  # already gone (or unremovable) — nothing more to do
     _drop_legacy(workdir)
+
+
+# ── requirements and the request's own commands ──────────────────────────────
+
+_RX_REQUIREMENT = re.compile(r"^\s*[-*]\s*(R\d+)\s*(?:\(\s*phase\s*(\d+)\s*\))?\s*[:.\-–—]?\s*(.*)$", re.I)
+
+
+def requirement_list(raw) -> list[dict]:
+    """[{id, text, phase}] from create_plan's 'requirements' or a saved plan:
+    ids upper-cased, phases as ints (0 when missing), entries without an id or
+    text dropped."""
+    out = []
+    for r in raw if isinstance(raw, list) else []:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id") or "").strip().upper()
+        text = " ".join(str(r.get("text") or "").split())
+        try:
+            phase = int(r.get("phase") or 0)
+        except (TypeError, ValueError):
+            phase = 0
+        if rid and text:
+            out.append({"id": rid, "text": text, "phase": phase})
+    return out
+
+
+def _parse_requirements(lines: list[str]) -> list[dict]:
+    out = []
+    for line in lines:
+        m = _RX_REQUIREMENT.match(line)
+        if m and m.group(3).strip():
+            out.append({"id": m.group(1).upper(), "text": m.group(3).strip(),
+                        "phase": int(m.group(2) or 0)})
+    return out
+
+
+# A command the user's request says must pass ("python -m unittest must pass"),
+# run verbatim at the last phase's gate: run 2's checks all named test files,
+# and plain `python -m unittest` found no tests at all.  Only a command in
+# backticks or followed by "must pass" (and the like) counts: "tests with
+# pytest" names a tool, not a command to run.
+_RX_REQUEST_COMMAND = re.compile(
+    r"(?<![\w/.-])(?:"
+    r"python(?:3(?:\.\d+)?)?\s+-m\s+(?:unittest|pytest)"
+    r"|pytest|npm\s+(?:run\s+)?test|yarn\s+test|make\s+(?:test|check)|go\s+test|cargo\s+test"
+    r")(?![\w-])(?:[ \t]+(?!(?:must|should|passes|pass|and|or|to|has|have|needs|is|are|will)\b)"
+    r"[^\s,;`'\"]+)*")
+_RX_MUST_PASS = re.compile(r"^\s*(?:must|should|has to|needs to|have to|will)?\s*"
+                           r"(?:pass|passes|succeed|succeeds|be green|is green|run green|exit 0)\b", re.I)
+
+
+def request_commands(request: str) -> list[str]:
+    """The test commands the request says must pass, as written (a closing
+    full stop dropped), in order and once each."""
+    out, text = [], request or ""
+    for m in _RX_REQUEST_COMMAND.finditer(text):
+        cmd = m.group(0)
+        if cmd.endswith(".") and not cmd.endswith(".."):
+            cmd = cmd[:-1]
+        quoted = m.start() > 0 and text[m.start() - 1] == "`"
+        if (quoted or _RX_MUST_PASS.match(text[m.end():m.end() + 40])) and cmd not in out:
+            out.append(cmd)
+    return out
