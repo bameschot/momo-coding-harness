@@ -549,6 +549,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self._plan_restart = ""
         self._plan_restarts = 0
         self._plan_qa: list[tuple[str, str]] = []
+        # The user's message that resumed a paused stories plan: the next story
+        # writer's or story's brief takes it (_take_resume_note).
+        self._resume_note = ""
         # A stories plan's phase at work: "story-writer" while its stories are
         # written, "story-exec" while one runs; None otherwise.  It replaces the
         # role (tools and prompt) for that while.
@@ -1434,7 +1437,11 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                             run_output_limit=self.run_output_limit,
                             search_sources=self.search_sources,
                             edit_features=self.edit_features, run_exit=run_exit,
-                            run_compact=self.cavecat != "off", checkpoints=self.checkpoints)
+                            run_compact=self.cavecat != "off",
+                            # a story leaves no server behind for the next one (run 6:
+                            # 17 "Address already in use" from `python3 server.py &`)
+                            run_reap=getattr(self, "story_role", None) is not None,
+                            checkpoints=self.checkpoints)
         except Exception as e:
             return f"ERROR: {name} failed: {type(e).__name__}: {e}"
         finally:
@@ -2119,8 +2126,14 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             self._mcp_before_turn()
             if self._plan_executing():
                 # A paused plan: the user's message is extra context for the step
-                # being resumed, and execution continues where it stopped.
-                self._append_user(text)
+                # being resumed, and execution continues where it stopped.  Story
+                # roles start from a fresh context, so a stories plan hands it to
+                # the next story writer or story instead (run 6's "remove that
+                # test" never reached anyone, and the writer did the opposite).
+                if self.plan.stories:
+                    self._resume_note = text.strip()
+                else:
+                    self._append_user(text)
                 self._execute_plan()
                 return
             if self.mode == "plan" and self.plan is None:
@@ -2514,6 +2527,22 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     run["nudges"] = run.get("nudges", 0) + 1
                     self.messages.append({"role": "assistant", "content": content})
                     self.messages.append({"role": "user", "content": self._story_nudge(content, tools)})
+                    continue
+                # A stories plan written phase by phase: a reply without a tool call
+                # between the outline and finish_plan ends nothing (run 7's planner
+                # stored the outline, then wrote "I'm ready to start with Phase 1"
+                # and the turn ended).  A question to the user still ends the turn.
+                draft = getattr(self, "_plan_draft", None)
+                if (draft is not None and self.mode == "plan" and self.plan is None
+                        and draft.get("nudges", 0) < STORY_NUDGES
+                        and (content or "").strip() and not content.rstrip().endswith("?")):
+                    draft["nudges"] = draft.get("nudges", 0) + 1
+                    self.event_queue.put(ChatEvent(
+                        "system", "The plan is not finished — asked the planner to go on."))
+                    self.messages.append({"role": "assistant", "content": content})
+                    self.messages.append({"role": "user", "content":
+                        "[Note from the harness, not the user] The plan is not finished, and a "
+                        "reply without a tool call does nothing. " + self._plan_next()})
                     continue
                 # Coding and momo: a reply without a tool call ends the turn, so one
                 # that only announces its next step gets a note and the loop goes on
@@ -3599,6 +3628,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.plan_kind = "normal"
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
         self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
+        self._resume_note = ""
         self._plan_heuristics = {}
         self.messages = [self.messages[0]]
         self.compacted = []
@@ -3633,6 +3663,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.plan_kind = "normal"
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
         self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
+        self._resume_note = ""
         self._plan_heuristics = {}
         self.momo_lines = []
         self._momo_recap_turn = 0

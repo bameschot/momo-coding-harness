@@ -19,7 +19,16 @@ TOOL = Tool(
                                            "description": "The complete new list of phases after this one"}},
                             "required": ["reason", "phases"],
                             "description": "Optional: a change to the LATER phases, shown to the user with the stories "
-                                           "and applied only if they approve it"}},
+                                           "and applied only if they approve it"},
+         "retire": {"type": "array",
+                    "items": {"type": "object",
+                              "properties": {
+                                  "expectation": {"type": "string", "description": "The saved test's id, e.g. P1.S1.4 (story S1 of phase 1, expectation 4)"},
+                                  "why": {"type": "string", "description": "What replaced the behaviour it tests"}},
+                              "required": ["expectation", "why"]},
+                    "description": "Optional: earlier acceptance tests of behaviour this phase replaces on purpose "
+                                   "(a placeholder reply): they stop running at the gates. Never for behaviour that "
+                                   "should still work"}},
         []),
     harness=True, locked=True, order=722, group="ask & plan", modes=frozenset({"story-writer"}),
     example={})

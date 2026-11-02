@@ -453,7 +453,9 @@ For this plan, these replace rules 1, 3 and 6 of "What makes a good plan" above:
   least one example — what is done through an interface → what must come out, with the exact
   values (`quoted` text, status or exit codes, counts, JSON fields, hashes). Never code, class or
   function names, test files or commands that only run tests: a verifier writes and runs the tests
-  against the code as it turns out.
+  against the code as it turns out. Never expect a placeholder reply a later phase replaces (a
+  dummy `{"status": "ok"}`): its test fails as a regression once the real thing is there. State
+  what lasts (the page loads, the endpoint answers status `200` with JSON).
 - **Cover the request with `requirements`**: split the user's request into one line per thing they
   named (each command, endpoint, message, behaviour; "look, go/n/s/e/w, say" is one requirement per
   command), ids R1, R2, …, each with the phase that delivers it. Each is proven by an expected

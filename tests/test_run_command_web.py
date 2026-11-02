@@ -60,6 +60,8 @@ class ShellWrites(unittest.TestCase):
         self.assertEqual(shell_writes("python3 -m unittest 2>&1 | tee log.txt"), ["log.txt"])
         self.assertEqual(shell_writes('sed -i "" s/a/b/ server.py'), ["server.py"])
         self.assertEqual(shell_writes("cp a.py b.py; rm -rf build"), ["b.py", "build"])
+        # run 7's planner made the project's folders while planning
+        self.assertEqual(shell_writes("mkdir -p static game tests"), ["static", "game", "tests"])
 
     def test_reads_and_discarded_output_are_not_writes(self):
         for cmd in ("python3 server.py > /dev/null 2>&1", "cat .momo/scratch/x", "ls -la",

@@ -72,6 +72,9 @@ class Criterion:
     examples: list[dict] = field(default_factory=list)  # [{"given": …, "expect": …}]
     test: dict | None = None   # the verifier's saved test: {"path", "command"}
     verdict: dict | None = None  # {"passed": bool, "evidence": str, "at": iso}
+    # A later phase replaced the behaviour on purpose (a placeholder reply): its
+    # test no longer runs at the gates, and it proves nothing.  {"by", "why", "at"}
+    retired: dict | None = None
 
     @classmethod
     def from_dict(cls, d) -> "Criterion":
@@ -80,20 +83,22 @@ class Criterion:
         check = d.get("check")
         test = d.get("test") if isinstance(d.get("test"), dict) else None
         verdict = d.get("verdict") if isinstance(d.get("verdict"), dict) else None
+        retired = d.get("retired") if isinstance(d.get("retired"), dict) else None
         return cls(text=str(d.get("behaviour") or d.get("text") or "").strip(),
                    check=None if check is None else str(check).strip(),
                    covers=_requirement_ids(d.get("covers")),
                    examples=_examples(d.get("examples")),
                    test=({"path": str(test.get("path") or ""), "command": str(test.get("command") or "")}
                          if test and test.get("command") else None),
-                   verdict=verdict)
+                   verdict=verdict, retired=retired)
 
     def to_dict(self) -> dict:
         return {"text": self.text, **({"check": self.check} if self.check is not None else {}),
                 **({"covers": self.covers} if self.covers else {}),
                 **({"examples": self.examples} if self.examples else {}),
                 **({"test": self.test} if self.test else {}),
-                **({"verdict": self.verdict} if self.verdict else {})}
+                **({"verdict": self.verdict} if self.verdict else {}),
+                **({"retired": self.retired} if self.retired else {})}
 
     def to_markdown(self, indent: str = "  ") -> list[str]:
         """The lines under the criterion's own `- text` line."""
@@ -105,6 +110,8 @@ class Criterion:
         if self.test:
             lines.append(f"{indent}Test: `{self.test['command']}`"
                          + (f" ({self.test['path']})" if self.test.get("path") else ""))
+        if self.retired:
+            lines.append(f"{indent}Retired ({self.retired.get('by', '')}): {self.retired.get('why', '')}")
         return lines
 
     @property
@@ -379,8 +386,8 @@ class StorySet:
                  "[~] in progress · [x] done · [!] failed · [-] replaced. 'Depends:' lists "
                  "story ids (P<n>.S<m> for earlier phases). Under an acceptance criterion, "
                  "'Example:' is an action → the output it must give, 'Test:' the acceptance "
-                 "test the verifier saved for it, and 'Check:' (older plans) a command the "
-                 "harness runs. -->"]
+                 "test the verifier saved for it, 'Retired' a test a later phase replaced on "
+                 "purpose, and 'Check:' (older plans) a command the harness runs. -->"]
         for s in self.stories:
             parts += ["", s.to_markdown()]
         if self.report:
@@ -572,6 +579,10 @@ def criterion_problems(c: Criterion) -> list[str]:
 def criterion_line(c: Criterion, line: str) -> bool:
     """Apply an `Example:` / `Covers:` / `Test:` / `Check:` line to criterion c;
     False when the line is none of these."""
+    r = re.match(r"^retired\s*\(([^)]*)\):\s*(.*)$", line.strip(), re.I)
+    if r:
+        c.retired = {"by": r.group(1).strip(), "why": r.group(2).strip()}
+        return True
     m = re.match(r"^(check|covers|example|test):\s*(.*)$", line.strip(), re.I)
     if not m:
         return False

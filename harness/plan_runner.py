@@ -417,6 +417,7 @@ class PlanRunnerMixin:
         self.plan_phase = "executing"
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
         self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
+        self._resume_note = ""
         self._plan_heuristics = {}   # the next plan asks afresh
         self._sync_plan_file()
         # The plan runs in coding mode (set_mode rebuilds the prompt and emits status).
@@ -431,6 +432,7 @@ class PlanRunnerMixin:
         self.plan_phase = "investigating"
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
         self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
+        self._resume_note = ""
         self._plan_heuristics = {}
         delete_plan_file(self.workdir)
         self.rebuild_system_prompt()

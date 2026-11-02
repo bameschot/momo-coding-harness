@@ -78,6 +78,7 @@ def web_refusal(command: str, net_access: str) -> tuple[str | None, str]:
 # is not a sandbox.
 _RX_REDIRECT = re.compile(r"(?<![0-9&])>>?\s*(?!&)([^\s;&|<>()`]+)")
 _RX_FILE_CMD = re.compile(r"(?:^|[;&|(`\n]|\$\()\s*(tee(?:\s+-a)?|sed\s+-i(?:\s*''|\s+\S+)?|touch|rm(?:\s+-\w+)*|"
+                          r"mkdir(?:\s+-\w+)*|"
                           r"cp(?:\s+-\w+)*|mv(?:\s+-\w+)*)\s+([^;&|`\n]+)")
 
 

@@ -899,8 +899,11 @@ class Verifier(Base):
         gate = self.h.plan.story_sets[2].gate
         self.assertFalse(gate["passed"])
         fix = self.writer_requests()[-1]["messages"][1]["content"]
-        self.assertIn("An acceptance test that passed before fails now (P1.S1: add() adds)", fix)
+        # every broken one, with the id finish_stories' retire takes
+        self.assertIn("An acceptance test that passed before fails now (P1.S1.1: add() adds)", fix)
+        self.assertIn("An acceptance test that passed before fails now (phase 1.1: adding works)", fix)
         self.assertIn("tests/acceptance/p1_s1_c1_auto.py", fix)
+        self.assertIn("retire it with finish_stories' `retire`", fix)
 
     def test_the_phase_expectations_are_verified_at_the_gate(self):
         self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
@@ -939,6 +942,114 @@ class Verifier(Base):
                    if m.get("role") == "tool" and m.get("name") == "write_story"}
         self.assertTrue(any("acceptance criteria are expected behaviour with examples, not "
                             "commands" in x for x in results))
+
+
+BROKEN_ADD = CALC_SUB.replace("return a + b", "return a * b")      # phase 2 changes add()
+REGRESSION = [*write_set(FIX_ADD),
+              call("write_file", path="calc.py", content=CALC_RIGHT),
+              call("complete_story", summary="add works"),
+              *write_set(ADD_SUB),
+              call("write_file", path="calc.py", content=BROKEN_ADD),
+              call("complete_story", summary="sub added")]
+KEEP_SUB = {"id": "S2", "title": "Keep sub()", "description": "sub() stays.",
+            "technical_details": "nothing to change", "files": ["calc.py"],
+            "depends_on": ["S1"], "acceptance": [criterion("sub still subtracts", "sub(9, 4)", 5, ["R2"])]}
+
+
+class Run6Fixes(Base):
+    """What run 6 ran into: a message at a pause that reached no one, a test of
+    replaced behaviour that could not be retired, and a gate verifier pass
+    with too many expectations whose running out sent the writer off."""
+
+    def tool_results(self, name):
+        return [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                if m.get("role") == "tool" and m.get("name") == name]
+
+    def test_a_message_at_a_pause_reaches_the_next_writer(self):
+        self.run_plan(list(REGRESSION))                  # the fix pass writes nothing: paused
+        self.assertTrue(any(t.startswith("Plan paused in phase 2/2") and "send a message" in t
+                            for t in self.system_lines()))
+        before = len(self.writer_requests())
+        self.h.send("P1.S1.1 tested a placeholder: retire it")
+        briefs = [r["messages"][1]["content"] for r in self.writer_requests()[before:]]
+        self.assertIn("## The user's message (sent when resuming the plan)\n"
+                      "P1.S1.1 tested a placeholder: retire it", briefs[0])
+        self.assertEqual(self.h._resume_note, "")
+        self.assertFalse(any("## The user's message" in b for b in briefs[1:]))
+
+    def test_a_replaced_behaviour_is_retired(self):
+        retire = [{"expectation": "P1.S1.1", "why": "phase 2 made add() multiply on purpose"},
+                  {"expectation": "phase 1.1", "why": "the same"}]
+        self.run_plan(list(REGRESSION) + [
+            call("plan_stories", outline=[{"id": "S2", "title": KEEP_SUB["title"], "depends_on": ["S1"]}]),
+            call("write_story", story=KEEP_SUB),
+            call("finish_stories", retire=[{"expectation": "P9.S1.1", "why": "x"}]),
+            call("finish_stories", retire=retire),
+            call("complete_story", summary="nothing to change"),
+            ChatResponse(content="stop", done_reason="stop")])
+        refused = self.tool_results("finish_stories")[0]
+        self.assertIn("P9.S1.1 is not a saved acceptance test", refused)
+        self.assertIn("P1.S1.1", refused)                            # the ids it can retire
+        p1 = self.h.plan.story_sets[1].get("S1").acceptance[0]
+        self.assertEqual(p1.retired["by"], "phase 2")
+        self.assertTrue(self.h.plan.steps[0].acceptance[0].retired)
+        self.assertTrue(any("retires these earlier acceptance tests" in t for t in self.system_lines()))
+        self.assertNotIn("P1.S1.1", [cid for cid, _c in self.h._saved_tests(2)])
+        folder = next((self.wd / ".momo" / "stories").iterdir())
+        self.assertIn("Retired (phase 2): phase 2 made add() multiply on purpose",
+                      (folder / "phase-1.md").read_text())
+        # R1 was proven only by the retired tests: the last gate wants new proof
+        gate = self.h.plan.story_sets[2].gate
+        self.assertFalse(gate["passed"])
+        self.assertIn("R1: add(2, 3) returns 5", gate["output"])
+        self.assertNotIn("passed before fails now", gate["output"])
+
+    def test_a_retired_line_survives_the_story_file(self):
+        from harness.stories import Criterion, criterion_line
+        c = Criterion(text="x")
+        self.assertTrue(criterion_line(c, "Retired (phase 2): the engine replaced it"))
+        self.assertEqual(c.retired, {"by": "phase 2", "why": "the engine replaced it"})
+        self.assertEqual(Criterion.from_dict(c.to_dict()).retired, c.retired)
+
+    def test_scratch_files_are_questioned_once(self):
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("write_file", path="verify_api.py", content="print(1)\n"),
+                       call("complete_story", summary="add works"),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")])
+        first = self.tool_results("complete_story")[0]
+        self.assertIn("look like scratch work and are not among the story's files: verify_api.py", first)
+        self.assertEqual(self.h.plan.story_sets[1].get("S1").status, "done")   # kept on the second call
+
+    def test_the_gate_verifies_in_batches(self):
+        many = [criterion(f"adds {k}", f"add({k}, 1)", k + 1) for k in range(5)]
+        plan = {**PLAN_ARGS, "steps": [{**PLAN_ARGS["steps"][0], "acceptance": many},
+                                       PLAN_ARGS["steps"][1]]}
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")], plan=plan)
+        self.assertTrue(any("🔎 Verifying phase 1 — 5 expectations in 2 batches" in t
+                            for t in self.system_lines()))
+        gate = [r for r in self.verifier_requests()
+                if r["messages"][1]["content"].startswith("# Verify phase 1")]
+        self.assertEqual([len(_RX_EXPECTATION.findall(r["messages"][1]["content"])) for r in gate],
+                         [4, 1])
+        self.assertTrue(self.h.plan.story_sets[1].gate["passed"])
+
+    def test_a_gate_verifier_that_runs_out_does_not_ask_for_test_stories(self):
+        idle = [ChatResponse(content="Looking around.", done_reason="stop")] * (STORY_NUDGES + 1)
+        # the story's two passes (deferred), the gate batch's two, one alone for each
+        ScriptedClient.verifier = idle * 6
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")])
+        lines = self.system_lines()
+        self.assertTrue(any("(alone" in t for t in lines))
+        self.assertTrue(any("2 not verified (the verifier ran out of turns)" in t for t in lines))
+        fix = self.writer_requests()[-1]["messages"][1]["content"]
+        self.assertIn("The verifier ran out of turns before it got a test working for these", fix)
+        self.assertIn("Never write a story whose only work is testing", fix)
+        self.assertNotIn("cannot be verified as written", fix)
 
 
 class Run4Fixes(Base):
@@ -1067,6 +1178,26 @@ class PhaseByPhase(Base):
                                      if m.get("role") == "tool" and m.get("name") in ("create_plan", "write_phase")))
         self.assertIn("Outline stored (2 phases). Next: write phase 1 — Fix add", results[0])
         self.assertIn("Stored phase 1 (Fix add). Next: write phase 2 — Add sub", results[1])
+
+    def test_a_text_reply_mid_plan_gets_a_note(self):
+        # run 7: the outline was stored, then "I'm ready to start with Phase 1." ended the turn
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            ChatResponse(content="I'm ready to start with Phase 1.", done_reason="stop"),
+                            call("write_phase", phase=1, **PHASE1),
+                            call("write_phase", phase=2, **PHASE2),
+                            call("finish_plan"),
+                            *HAPPY])
+        self.assertIsNone(self.h.plan)                         # approved and run to the end
+        self.assertTrue(any("asked the planner to go on" in t for t in self.system_lines()))
+        notes = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                 if m.get("role") == "user" and "The plan is not finished" in (m.get("content") or "")]
+        self.assertIn("Next: write phase 1 — Fix add", notes[0])
+
+    def test_a_question_mid_plan_ends_the_turn(self):
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            ChatResponse(content="Should sub() accept floats?", done_reason="stop")])
+        self.assertFalse(any("asked the planner to go on" in t for t in self.system_lines()))
+        self.assertIsNotNone(self.h._plan_draft)
 
     def test_a_re_sent_outline_keeps_the_written_phases(self):
         # run 6c: after each restart the planner re-sent its outline with reworded

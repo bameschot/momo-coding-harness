@@ -2,6 +2,8 @@
 waited on until it is ready, and left running; command_output reads its log as
 it grows and stop_command ends it.  Before this, "server &" kept running
 untracked after the call, /clear and the harness itself."""
+import os
+import signal
 import tempfile
 import time
 import unittest
@@ -138,3 +140,54 @@ class Background(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Reap(unittest.TestCase):
+    """A story role's foreground command leaves nothing running (run 6: a
+    `python3 server.py & …` held the port for the next test, 17 times)."""
+
+    LEAVES = "sleep 30 & echo $! > child.pid; echo hi"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.wd = Path(self.tmp.name)
+        self.store = run_store.RunStore(self.wd / "runs")
+
+    def tearDown(self):
+        try:
+            os.kill(self.child(), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+        self.store.stop_all()
+        self.tmp.cleanup()
+
+    def child(self) -> int:
+        return int((self.wd / "child.pid").read_text())
+
+    def alive(self) -> bool:
+        try:
+            os.kill(self.child(), 0)
+        except OSError:
+            return False
+        return True
+
+    def test_story_roles_stop_what_a_command_left_running(self):
+        for mode in ("new", "classic"):
+            with self.subTest(mode=mode):
+                out = dispatch("run_command", {"command": self.LEAVES}, self.wd, run_mode=mode,
+                               run_store=self.store, run_reap=True)
+                self.assertIn("hi", out)
+                self.assertIn("[stopped what it left running", out)
+                time.sleep(0.2)
+                self.assertFalse(self.alive())
+
+    def test_nothing_left_no_note(self):
+        out = dispatch("run_command", {"command": "echo hi"}, self.wd, run_mode="new",
+                       run_store=self.store, run_reap=True)
+        self.assertNotIn("stopped what it left running", out)
+
+    def test_coding_mode_keeps_it(self):
+        out = dispatch("run_command", {"command": self.LEAVES}, self.wd, run_mode="new",
+                       run_store=self.store)
+        self.assertNotIn("stopped what it left running", out)
+        self.assertTrue(self.alive())

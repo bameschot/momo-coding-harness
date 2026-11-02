@@ -908,7 +908,7 @@ ollama serve</code></pre></div>
       <li><strong>A plan made before any question is sent back once</strong> with a note to ask first. Sent again, it goes through: a small, fully specified fix may need no question. Revising a plan you've seen never is. <code>/plan questions off</code> turns this off.</li>
       <li><strong>Before approving,</strong> you can edit <code>.momo/plan.md</code> by hand: reword, reorder, add or delete steps, or mark one <code>[-]</code> to skip it.</li>
       <li><strong>Approving</strong> switches to coding mode and runs the plan one step at a time. The plan stays in the system prompt, so the model keeps its place.</li>
-      <li><strong>A paused plan</strong> carries on with <code>/plan resume</code> or any message, even after a restart.</li>
+      <li><strong>A paused plan</strong> carries on with <code>/plan resume</code> or any message, even after a restart. In a stories plan the message goes to the next story writer or story.</li>
     </ul>
     <div class="table-scroll"><table>
       <tr><th>Command</th><th>Effect</th></tr>
@@ -1106,14 +1106,16 @@ ollama serve</code></pre></div>
       <li><strong>Depends on</strong>: stories of this phase (<code>S2</code>) or of earlier phases (<code>P1.S3</code>, read-only).</li>
       <li><strong>Acceptance</strong>: expected behaviour in plain words, each with examples of what is done through the product's interface and the exact output, e.g. <em>POST /api/command {"command": "look"} → status <code>200</code>, the reply contains <code>Great Hall</code></em>. Never code, class names or test files.</li>
     </ul>
-    <p>After <code>complete_story</code> a separate <strong>verifier</strong> reads the code as it turned out and writes a small black-box test per expectation in <code>tests/acceptance/</code>, in whatever form fits the product. It may not touch product code, and its tests may not import it (unless the product is a library). momo runs each test itself and holds the verdicts to them. The saved tests run again at every phase gate, so a later story cannot quietly break an earlier one. When a story passes, momo records what it delivered: the model's summary, the files and definitions it changed, and its acceptance tests. That is what the stories after it see.</p>
+    <p>After <code>complete_story</code> a separate <strong>verifier</strong> reads the code as it turned out and writes a small black-box test per expectation in <code>tests/acceptance/</code>, in whatever form fits the product. It may not touch product code, and its tests may not import it (unless the product is a library). momo runs each test itself and holds the verdicts to them. The saved tests run again at every phase gate, so a later story cannot quietly break an earlier one. At the gate the verifier takes the expectations four at a time, each batch in its own pass. When a story passes, momo records what it delivered: the model's summary, the files and definitions it changed, and its acceptance tests. That is what the stories after it see.</p>
 
     <h3>When a story gets stuck</h3>
     <ul>
       <li><strong>It counts as failed</strong> after the verifier reports unmet expectations 3 times, running out of turns (<code>/plan stories cap N</code>, default 40), the <a href="#loop-guard">loop guard</a> stopping it, or ending without <code>complete_story</code>. A reply without any tool call first gets one reminder.</li>
       <li><strong>The writer re-splits it</strong>, using what went wrong: the story and those waiting on it are replaced by smaller or corrected stories. It outlines and writes only the replacements, with new ids, one per turn as above.</li>
       <li><strong>A second failure pauses the plan.</strong> Edit the story in its file, mark it <code>[ ]</code> to retry, then <code>/plan resume</code>. A re-split that never got written is tried again on resume.</li>
-      <li><strong>Failing phase checks</strong> get one pass of fix stories before the plan pauses.</li>
+      <li><strong>Failing phase checks</strong> get one pass of fix stories before the plan pauses. An expectation the verifier ran out of turns on is reported apart from a real failure, and the fix pass is told not to write stories that only test.</li>
+      <li><strong>A test of replaced behaviour</strong> (phase 1's placeholder reply, now the real engine) is not brought back: the fix pass retires it with <code>finish_stories</code>' <code>retire</code> (<code>P1.S1.4</code> and why), you approve it with the stories, and it stops running at the gates. A requirement it proved then needs a new test.</li>
+      <li><strong>A message while the plan is paused</strong> goes to the next story writer or story, which starts from a fresh context, so it is not lost.</li>
       <li><strong>A bug in earlier code</strong> is not the story's failure: it fixes a small one itself, or calls <code>report_defect</code>. The writer then adds one fix story, and the blocked story runs again after it, without counting as an attempt.</li>
       <li><strong>A wrong expectation</strong> (it asks for something the story is not about, or no product could meet it) goes back to the writer, through <code>report_defect</code> or the verifier's <code>unclear</code>, and a corrected story replaces it.</li>
       <li><strong>Nothing to test through yet</strong> (the engine before its server): the verifier answers <code>not_yet</code>, or momo sees the interface's files do not exist, and the expectation is checked at the phase gate instead.</li>

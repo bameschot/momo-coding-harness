@@ -6,6 +6,7 @@ grep, or its beginning and end — that command_output can re-query; "classic"
 returns the output itself."""
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -44,7 +45,8 @@ def run_command(command: str, timeout: int | None = None, tail: int | None = Non
                 net_access: str = "off", cancel=None, run_mode: str = "classic",
                 run_store: "run_store_mod.RunStore | None" = None,
                 run_output_limit: int = run_store_mod.DEFAULT_LIMIT,
-                run_exit: dict | None = None, run_compact: bool = False) -> str:
+                run_exit: dict | None = None, run_compact: bool = False,
+                run_reap: bool = False) -> str:
     refusal, note = web_refusal(command, net_access)
     if refusal:
         return refusal
@@ -75,11 +77,12 @@ def run_command(command: str, timeout: int | None = None, tail: int | None = Non
         return note + _run_to_log(command, timeout, workdir, cancel, run_store,
                                   run_output_limit, tail, grep, context, defaulted, run_exit,
                                   end_line=head, background=bool(background), wait_for=wait_for,
-                                  compact=run_compact)
+                                  compact=run_compact, reap=run_reap)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         proc, stopped = exec_command(command, timeout, workdir, cancel, out, err)
         if proc is None:
             return stopped
+        reaped = _reap(proc) if run_reap and not stopped else ""
         out_text, err_text = output_tail(out), output_tail(err)
     if run_exit is not None and not stopped:
         run_exit["code"] = proc.returncode
@@ -105,7 +108,26 @@ def run_command(command: str, timeout: int | None = None, tail: int | None = Non
             parts = [run_store_mod.grep(lines, grep, context)]
     if proc.returncode != 0:
         parts.append(f"[exit code: {proc.returncode}]")
-    return note + ("\n".join(parts) or "(no output)")
+    return note + ("\n".join(parts) or "(no output)") + reaped
+
+
+# A story role's foreground command that started a server with `&` left it
+# holding the port: run 6's implementers and verifiers got 17 "Address already
+# in use" from their own earlier servers.  Coding mode keeps what a command
+# started (build daemons outlive the build on purpose).
+_REAPED = ("\n[stopped what it left running (e.g. `python3 server.py &`): start a server inside "
+           "the test that needs it and stop it there, or with background=true and stop_command]")
+
+
+def _reap(proc) -> str:
+    """Kill what the finished command left running in its session: the note
+    for the result, '' when nothing was left."""
+    try:
+        os.killpg(proc.pid, 0)
+    except OSError:
+        return ""
+    run_store_mod.kill_group(proc)
+    return _REAPED
 
 
 def _start_background(command, timeout, defaulted, wait_for, workdir, cancel, log, store, path):
@@ -145,7 +167,7 @@ def _start_background(command, timeout, defaulted, wait_for, workdir, cancel, lo
 def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, context,
                 defaulted=False, run_exit: dict | None = None, end_line: int | None = None,
                 background: bool = False, wait_for: str | None = None,
-                compact: bool = False) -> str:
+                compact: bool = False, reap: bool = False) -> str:
     """/run-mode new: stdout and stderr in order in one log file, and a bounded
     view of it back, ending with the log's full path for command_output.
     background: start it, wait until it is ready, and leave it running.
@@ -164,6 +186,7 @@ def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, con
     if proc is None:
         path.unlink(missing_ok=True)
         return stopped
+    reaped = _reap(proc) if reap and not background and not stopped else ""
     live = background and not stopped and proc.poll() is None
     if run_exit is not None and not stopped and not live:
         run_exit["code"] = proc.returncode
@@ -184,7 +207,7 @@ def _run_to_log(command, timeout, workdir, cancel, store, limit, tail, grep, con
     if stopped:
         head = f"ERROR: {stopped}" + longer(stopped, defaulted)    # the log path stays last
         return f"{head}\n[output before it stopped]\n{body}\n{foot}" if text else f"{head}\n{foot}"
-    return f"{notice}{body or '(no output)'}\n{foot}"
+    return f"{notice}{body or '(no output)'}{reaped}\n{foot}"
 
 
 def _after(result: str, args: dict, workdir: Path, index) -> str:
@@ -228,6 +251,6 @@ TOOL = Tool(
     suggests=("stop_command",),
     run=run_command, order=500, group="edit & shell", modes=WRITE_ROLES | INVESTIGATE_ROLES,
     inject=("net_access", "cancel", "run_mode", "run_store", "run_output_limit", "run_exit",
-            "run_compact"),
+            "run_compact", "run_reap"),
     windows_itself=new_run_mode, after=_after,
     example={"command": "python -m pytest", "tail": 30})

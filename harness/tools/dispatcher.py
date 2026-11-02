@@ -17,13 +17,13 @@ from . import registry
 # unblock the private network for itself.
 STATE = ("net_access", "net_max_bytes", "net_max_chars", "index", "cancel", "read_budget",
          "run_mode", "run_store", "run_output_limit", "search_sources", "edit_features",
-         "run_exit", "run_compact", "ctx")
+         "run_exit", "run_compact", "run_reap", "ctx")
 
 _DEFAULT_STATE = {"net_access": "off", "net_max_bytes": 0, "net_max_chars": 0, "index": None,
                   "cancel": None, "read_budget": None, "run_mode": "classic", "run_store": None,
                   "run_output_limit": run_store_mod.DEFAULT_LIMIT, "search_sources": None,
                   "edit_features": editing.EDIT_FEATURES, "run_exit": None, "run_compact": False,
-                  "ctx": None}
+                  "run_reap": False, "ctx": None}
 
 _INT_RE = re.compile(r"\s*[-+]?\d+\s*")
 _PLACEHOLDER_RE = re.compile(r"^\s*\[written to [^\]]*\]\s*$")
@@ -91,7 +91,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              run_output_limit: int = run_store_mod.DEFAULT_LIMIT,
              search_sources=None,
              edit_features=editing.EDIT_FEATURES, run_exit: dict | None = None,
-             run_compact: bool = False,
+             run_compact: bool = False, run_reap: bool = False,
              ctx: "registry.ToolRunContext | None" = None,
              checkpoints=None) -> str:
     """read_budget: characters one read_file may return (None = no limit).
@@ -101,6 +101,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
     run_exit: run_command puts the command's exit code here as "code" (None when
     it was stopped or did not start), for a caller that must not parse the text.
     run_compact: run_command collapses redundant output lines (/cavecat).
+    run_reap: run_command stops what a finished command left running (story roles).
     ctx: the harness services a tool asks for with inject=("ctx",).
     checkpoints: the session's checkpoints.CheckpointStore; a write tool's paths
     are recorded in it before the call and after it (/undo, the Changes menu)."""
@@ -109,7 +110,7 @@ def dispatch(name: str, args: dict, workdir: Path, net_access: str = "off",
              "read_budget": read_budget, "run_mode": run_mode, "run_store": run_store,
              "run_output_limit": run_output_limit, "search_sources": search_sources,
              "edit_features": edit_features, "run_exit": run_exit,
-             "run_compact": run_compact,
+             "run_compact": run_compact, "run_reap": run_reap,
              "ctx": ctx if ctx is not None else registry.ToolRunContext(workdir, cancel)}
     tool = _runnable(name)
     if tool is not None and index is not None and index_route and tool.index_route:
