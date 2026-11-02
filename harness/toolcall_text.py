@@ -106,6 +106,21 @@ def _close_open(s: str) -> str:
     return s + ('"' if in_str else "") + "".join(reversed(stack))
 
 
+def _unwrap_arguments(obj: dict) -> dict:
+    """{"arguments": {...}} with no (known) name is the arguments object itself.
+    Run 6's planner wrote its create_plan as {"arguments": {...}, "interfaces":
+    [...]}: the object closed one key early, so a key left outside it joins it
+    when it is not there already."""
+    inner = obj.get("arguments", obj.get("parameters"))
+    if not isinstance(inner, dict):
+        return obj
+    merged = dict(inner)
+    for k, v in obj.items():
+        if k not in ("arguments", "parameters", "name"):
+            merged.setdefault(k, v)
+    return merged
+
+
 def _nameless_call(obj: dict, tools: list[dict]) -> dict | None:
     """The call a bare arguments object stands for: a "content" payload is a
     file write (write_file, when offered); otherwise the one offered tool that
@@ -369,7 +384,7 @@ def recover_text_calls(text: str, tools: list[dict]) -> tuple[list[dict], str]:
         obj = _lenient_json(payload, closed)
         hit = _accept_full(obj)
         if hit is None and isinstance(obj, dict) and obj.get("name") not in known:
-            hit = _nameless_call(obj, tools)
+            hit = _nameless_call(_unwrap_arguments(obj), tools)
         if hit is not None:
             _append(hit)
             spans.append((start, end))
@@ -441,6 +456,17 @@ def recover_text_calls(text: str, tools: list[dict]) -> tuple[list[dict], str]:
                     (close := re.compile(r"\s*\)").match(text, end)):
                 start, end = wrap.start(), close.end()
             cands.append((hit, (start, end)))
+
+    # ```json {…} ``` holding the arguments alone, with no tool name: run 5's
+    # planner wrote its whole plan this way, twice.  It is the call of the one
+    # offered tool the object fits (_nameless_call), and only when it ends the
+    # reply (_trailing), so a JSON example in an answer stays text.
+    for m in re.finditer(r"```(?:json)?[ \t]*\n?\s*(?=\{)", text):
+        close = text.find("```", m.end())
+        obj = _lenient_json(text[m.end():close if close >= 0 else len(text)], close >= 0)
+        if isinstance(obj, dict) and obj.get("name") not in known and \
+                (hit := _nameless_call(_unwrap_arguments(obj), tools)):
+            cands.append((hit, (m.start(), close + 3 if close >= 0 else len(text))))
 
     # <ask_choice question="…" options="[…]" />: a call written as a tag with
     # attributes (run 4a's planner asked its question this way).

@@ -107,6 +107,7 @@ class Tool:
     hidden_by_index: bool = False    # not while the code index is on (an index tool replaces it)
     needs_net: bool = False          # only while internet access is on
     needs_run_mode: str | None = None    # only in this /run-mode
+    needs_stories: bool | None = None    # True: only for a stories plan; False: never for one
     needs_edit_feature: str | None = None
     requires: Callable[[], bool] | None = None    # e.g. tree-sitter installed
     # With /tools discover: listed in the prompt, offered once loaded.  None is
@@ -158,6 +159,8 @@ class Tool:
         if self.needs_net and not ctx.net_on:
             return None
         if self.needs_run_mode is not None and ctx.run_mode != self.needs_run_mode:
+            return None
+        if self.needs_stories is not None and bool(ctx.stories) != self.needs_stories:
             return None
         if self.needs_edit_feature is not None and self.needs_edit_feature not in ctx.edit_features:
             return None

@@ -808,7 +808,7 @@ class Run3(Base):
             {**PLAN_ARGS["steps"][0], "checks": ["python3 -c \"print(open('calc.py').read())\""]},
             {**PLAN_ARGS["steps"][1], "checks": ["python3 server.py & sleep 2 && curl localhost:8000"]}]}
         err = self.h._handle_create_plan(weak)
-        self.assertIn("these phase checks cannot prove their phase", err)
+        self.assertIn("the plan needs these changes", err)
         self.assertIn("phase 1:", err)
         self.assertIn("only prints", err)
         self.assertIn("in the background (&)", err)
@@ -925,7 +925,12 @@ class Verifier(Base):
                       self.h._handle_create_plan(vague))
         checks_only = {**PLAN_ARGS, "steps": [{**PLAN_ARGS["steps"][0], "acceptance": [],
                                                "checks": ["true"]}, PLAN_ARGS["steps"][1]]}
-        self.assertIn("needs an 'outcome' and 'acceptance'", self.h._handle_create_plan(checks_only))
+        self.assertIn("phase 1: has checks, details, files, outcome, title — missing acceptance",
+                      self.h._handle_create_plan(checks_only))
+        # run 5: a phase that arrived as {"acceptance": …} alone
+        lost = {**PLAN_ARGS, "steps": PLAN_ARGS["steps"] + [{"acceptance": PLAN_ARGS["steps"][0]["acceptance"]}]}
+        self.assertIn("phase 3: has acceptance — missing title, details, outcome",
+                      self.h._handle_create_plan(lost))
 
     def test_a_story_with_check_commands_is_refused(self):
         self.run_plan([*write_set({**FIX_ADD, "acceptance": [legacy("adds", "true", ["R1"])]}),
@@ -1028,6 +1033,145 @@ class Run4Fixes(Base):
         from harness.story_runner import DEFAULT_STORIES_CAP, verify_cap
         self.assertEqual([verify_cap(n) for n in (1, 2, 3, 8)], [13, 18, 23, 40])
         self.assertEqual(DEFAULT_STORIES_CAP, 40)
+
+
+FRAME = {k: v for k, v in PLAN_ARGS.items() if k != "steps"}
+OUTLINE = [{"title": st["title"], "outcome": st["outcome"]} for st in PLAN_ARGS["steps"]]
+PHASE1, PHASE2 = ({k: v for k, v in st.items() if k != "title"} for st in PLAN_ARGS["steps"])
+VAGUE = {**PHASE2, "acceptance": [{"behaviour": "sub works",
+                                   "examples": [{"given": "sub two numbers", "expect": "the difference"}]}]}
+
+
+class PhaseByPhase(Base):
+    """Run 5's planner could not resend one large plan after refusals: 17
+    create_plan calls, none accepted.  A stories plan is now an outline, one
+    phase per turn, and finish_plan; and a refused call restarts the planner
+    from the harness's summary, in a cleared context."""
+
+    def plan_in_steps(self, script, answers=()):
+        self.h.set_mode("plan")
+        self.assertEqual(self.h.set_plan_kind("stories"), "")
+        self.answers = list(answers)
+        ScriptedClient.script = script
+        self.h.send("make calc work")
+
+    def test_outline_then_phases_then_finish(self):
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            call("write_phase", phase=1, **PHASE1),
+                            call("write_phase", phase=2, **PHASE2),
+                            call("finish_plan"),
+                            *HAPPY])
+        self.assertIsNone(self.h.plan)                         # approved and run to the end
+        self.assertTrue(any("Plan complete: Calc" in t for t in self.system_lines()))
+        results = list(dict.fromkeys(m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                                     if m.get("role") == "tool" and m.get("name") in ("create_plan", "write_phase")))
+        self.assertIn("Outline stored (2 phases). Next: write phase 1 — Fix add", results[0])
+        self.assertIn("Stored phase 1 (Fix add). Next: write phase 2 — Add sub", results[1])
+
+    def test_a_re_sent_outline_keeps_the_written_phases(self):
+        # run 6c: after each restart the planner re-sent its outline with reworded
+        # titles and lost the phases it had written
+        reworded = [{**o, "title": f"Phase {i}: {o['title']}"} for i, o in enumerate(OUTLINE, 1)]
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            call("write_phase", phase=1, **PHASE1),
+                            call("create_plan", **FRAME, steps=reworded),
+                            ChatResponse(content="stop", done_reason="stop")])
+        self.assertEqual(sorted(self.h._plan_draft["phases"]), [1])
+        self.assertIn("Next: write phase 2", self.h._plan_next())
+
+    def test_one_phase_per_turn(self):
+        two = ChatResponse(content="", done_reason="stop", tool_calls=[
+            ToolCall("write_phase", {"phase": 1, **PHASE1}), ToolCall("write_phase", {"phase": 2, **PHASE2})])
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE), two,
+                            ChatResponse(content="stop", done_reason="stop")])
+        results = [m["content"] for m in ScriptedClient.requests[-1]["messages"] if m.get("role") == "tool"]
+        self.assertTrue(any(r.startswith("ERROR: one phase per turn — phase 2 was not stored") for r in results))
+        self.assertEqual(sorted(self.h._plan_draft["phases"]), [1])
+
+    def test_a_refused_phase_restarts_from_a_summary(self):
+        choice = call("ask_choice", question="Where should sub() live?",
+                      options=["In calc.py (recommended)", "In a new module"])
+        self.plan_in_steps([choice,
+                            call("create_plan", **FRAME, steps=OUTLINE),
+                            call("write_phase", phase=1, **PHASE1),
+                            call("write_phase", phase=2, **VAGUE),           # refused
+                            call("write_phase", phase=2, **PHASE2),
+                            call("finish_plan"),
+                            ChatResponse(content="stop", done_reason="stop")], answers=["1"])
+        after = next(r for r in ScriptedClient.requests
+                     if len(r["messages"]) == 2 and "# Planning, attempt 2" in (r["messages"][1].get("content") or ""))
+        summary = after["messages"][1]["content"]
+        self.assertEqual([m["role"] for m in after["messages"]], ["system", "user"])
+        for part in ("## The user's request\nmake calc work",
+                     "## Decided with the user\n- Where should sub() live? → option 1",
+                     "- ✓ 1. Fix add — kept", "- ✗ 2. Add sub — refused, write it again",
+                     "## Why it was refused\n- phase 2: \"sub works\": the verifier cannot check",
+                     "Next: write phase 2 — Add sub — with write_phase",
+                     "do NOT call create_plan again"):
+            self.assertIn(part, summary)
+        self.assertTrue(any("Plan refused — context cleared; the planner restarts from a summary "
+                            "(attempt 2)" in t for t in self.system_lines()))
+        self.assertTrue(any(r.get("by") == "plan-retry" for r in self.h.compacted))   # /export full
+        self.assertIsNotNone(self.h.plan)                                           # then approved
+        self.assertEqual(self.h.plan.steps[0].title, "Fix add")
+
+    def test_the_ask_first_gate_does_not_restart(self):
+        self.h.plan_questions = True
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            ChatResponse(content="stop", done_reason="stop")])
+        self.assertFalse(any("context cleared" in t for t in self.system_lines()))
+
+    def test_planning_pauses_after_too_many_refusals(self):
+        from harness.plan_runner import PLAN_MAX_RESTARTS
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE)]
+                           + [call("write_phase", phase=2, **{**PHASE2, "acceptance": []})]
+                           * (PLAN_MAX_RESTARTS + 2))
+        self.assertTrue(any(f"Planning paused after {PLAN_MAX_RESTARTS} refused attempts" in t
+                            for t in self.system_lines()))
+        self.assertIn("## Why it was refused", (self.wd / ".momo/plan-draft.md").read_text())
+        self.assertIsNone(self.h.plan)
+
+    def test_feedback_at_approval_keeps_the_written_phases(self):
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            call("write_phase", phase=1, **PHASE1),
+                            call("write_phase", phase=2, **PHASE2),
+                            call("finish_plan"),
+                            call("write_phase", phase=2, **{**PHASE2, "details": "calc.py sub(), with tests"}),
+                            call("finish_plan"),
+                            ChatResponse(content="stop", done_reason="stop")],
+                           answers=["make phase 2 test sub() too", "n"])
+        results = list(dict.fromkeys(m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                                     if m.get("role") == "tool" and m.get("name") == "finish_plan"))
+        self.assertIn("Rewrite the phases it concerns with write_phase", results[0])
+        self.assertEqual(self.h.plan.steps[1].details, "calc.py sub(), with tests")
+        self.assertEqual(self.h.plan.steps[0].title, "Fix add")
+
+    def test_a_heuristic_check_gives_way_after_two_refusals(self):
+        # run 6: "Server restricts file access to the static/ directory" was not
+        # recognised as the traversal requirement, five restarts in a row
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = "make calc work; server.py serves one HTML page via http.server"
+        args = {**FRAME, "steps": PLAN_ARGS["steps"]}
+        for _ in range(2):
+            self.assertIn("serves only files inside its folder", self.h._handle_create_plan(args))
+        self.assertNotIn("ERROR", self.h._handle_create_plan(args))
+        self.assertTrue(any("accepted although the check still says" in t for t in self.system_lines()))
+        from harness.plan_runner import _RX_HOSTILE
+        self.assertTrue(_RX_HOSTILE.search("Server restricts file access to the static/ directory"))
+
+    def test_every_problem_in_one_refusal(self):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        bad = {**FRAME, "interfaces": [], "steps": [{**PLAN_ARGS["steps"][0], "acceptance": []},
+                                                    {**PLAN_ARGS["steps"][1], **VAGUE}]}
+        err = self.h._handle_create_plan(bad)
+        for part in ("name how the product is used in 'interfaces'", "phase 1: has ",
+                     "missing acceptance", "phase 2: \"sub works\": the verifier cannot check",
+                     "A valid phase looks like this:"):
+            self.assertIn(part, err)
 
 class PhaseChecks(unittest.TestCase):
     def test_weak_phase_checks_get_a_note(self):
@@ -1317,7 +1461,8 @@ class Commands(Base):
         self.h.set_mode("plan")
         self.h.set_plan_kind("stories")
         args = {**PLAN_ARGS, "steps": [{"title": "x", "details": "y"}]}
-        self.assertIn("needs an 'outcome'", self.h._handle_create_plan(args))
+        self.assertIn("phase 1: has details, title — missing outcome, acceptance",
+                      self.h._handle_create_plan(args))
 
     def test_show_stories(self):
         self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])

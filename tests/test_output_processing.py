@@ -135,6 +135,31 @@ class SloppyToolCallJson(unittest.TestCase):
         calls, _ = recover_text_calls(STORY_MUD["attribute_calls"][1], tools.PLAN_INVESTIGATE_TOOLS)
         self.assertEqual([len(c["arguments"]["options"]) for c in calls], [3, 2])
 
+    def test_a_fenced_plan_of_bare_arguments(self):
+        # run 5's planner wrote its plan as a ```json block, no tool name — once
+        # with a typo (`"phase: 3`) that leaves it unreadable
+        from harness.tools import registry
+        from harness.tools.registry import ToolContext
+        plan_tools = registry.offered(ToolContext(role="plan", stories=True))
+        typo = STORY_MUD["bare_plan"]
+        self.assertEqual(recover_text_calls(typo, plan_tools)[0], [])
+        calls, rest = recover_text_calls(typo.replace('"phase: 3,', '"phase": 3,'), plan_tools)
+        self.assertEqual([c["name"] for c in calls], ["create_plan"])
+        self.assertEqual(rest, "")
+        example = ('A plan looks like this:\n```json\n{"title": "x", "goal": "y", "interfaces": [], '
+                   '"steps": [], "requirements": []}\n```\nIt has a title and a goal.')
+        self.assertEqual(recover_text_calls(example, plan_tools)[0], [])
+
+    def test_arguments_without_a_name(self):
+        # run 6's planner after a restart: <tool_call>{"arguments": {…}, "interfaces": […]}</tool_call>
+        from harness.tools import registry
+        from harness.tools.registry import ToolContext
+        plan_tools = registry.offered(ToolContext(role="plan", stories=True))
+        calls, rest = recover_text_calls(STORY_MUD["arguments_only"], plan_tools)
+        self.assertEqual([c["name"] for c in calls], ["create_plan"])
+        self.assertEqual(len(calls[0]["arguments"]["steps"]), 3)
+        self.assertNotIn("<tool_call>", rest)
+
     def test_unreadable_stays_unread(self):
         text = '<tool_call>{"name": "write_file", "arguments": {"path": "a", content: x}}</tool_call>'
         self.assertEqual(recover_text_calls(text, tools.ALL_TOOLS)[0], [])

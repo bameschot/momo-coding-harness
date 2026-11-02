@@ -88,17 +88,17 @@ def _phase_check_notes(steps) -> str:
             + " — a phase passes these without doing its work.") if notes else ""
 
 
-def _requirement_problems(plan: Plan, raw) -> str:
-    """Why a stories plan's requirements are not usable ("" when they are): the
+def _requirement_problems(plan: Plan, raw) -> list[str]:
+    """Why a stories plan's requirements are not usable ([] when they are): the
     request must be split into requirements R1, R2, …, each assigned to a phase."""
     reqs, n = plan.requirements, len(plan.steps)
     if not plan.request:
-        return ""
+        return []
     if not reqs:
-        return ("ERROR: a stories plan needs 'requirements': the user's request split into one "
+        return ["a stories plan needs 'requirements': the user's request split into one "
                 "line each (every command, endpoint and behaviour they named — a list such as "
                 "'look, go/n/s/e/w, say' is one requirement per item), each with an id R1, R2, … "
-                "and the phase that delivers it. Call create_plan again with the complete plan.")
+                "and the phase that delivers it"]
     errors, seen = [], set()
     for r in reqs:
         if not re.fullmatch(r"R\d+", r["id"]):
@@ -127,8 +127,7 @@ def _requirement_problems(plan: Plan, raw) -> str:
         errors.append("the request has a server that serves files: add a requirement that it "
                       "serves only files inside its folder (GET /../server.py → 404), in the "
                       "phase that builds the server")
-    return ("ERROR: fix the requirements: " + "; ".join(errors) + ". Call create_plan again "
-            "with the complete plan.") if errors else ""
+    return errors
 
 
 # A request for a server that serves files (pages, static files) …
@@ -139,7 +138,19 @@ _RX_SERVES_FILES = re.compile(
     r"(?:http\.server|HTTPServer|web\s*server)")
 # … needs a requirement for the hostile path.
 _RX_HOSTILE = re.compile(r"(?i)\.\./|travers|outside (?:the|its)|only files (?:in|inside|under|from)"
-                         r"|only serves?|serves? only|untrusted|hostile|escap")
+                         r"|only serves?|serves? only|untrusted|hostile|escap"
+                         # run 6: "Server restricts file access to the static/ directory"
+                         r"|(?:restrict|limit|confin|block|prevent|den(?:y|ies)|forbid|refus|reject)\w*"
+                         r"\b.{0,40}\b(?:files?|paths?|access|director)")
+
+# Checks that read the planner's words, and can be wrong about them: the same
+# one refused twice in a row is dropped with a note (run 6 restarted five times
+# on "Server restricts file access to the static/ directory").
+_HEURISTIC = ("the request has a server that serves files", "the request lists ",
+              "make it a thin end-to-end slice",
+              # run 6c: four of six refusals asked for a backticked value in
+              # outputs like "the program exits"; the verifier can still test it
+              "the verifier cannot check")
 
 
 # "Commands: look, go/n/s/e/w, say (to players in the room), who, …": a list in
@@ -196,6 +207,44 @@ def _request_command_note(plan: Plan) -> str:
     return ("Note: the request says " + ", ".join(f"`{c}`" for c in missing)
             + " must pass, and the last phase does not check it as written; the harness runs it "
             "at the last phase's gate.")
+
+
+PLAN_MAX_RESTARTS = 5      # refused plan calls the planner restarts from a summary before planning pauses
+
+_EXAMPLE_PHASE = json.dumps({
+    "phase": 1, "title": "Look around", "details": "server.py with POST /api/command and the look command",
+    "outcome": "a player can look around through the API", "files": ["server.py", "game.py"],
+    "acceptance": [{"behaviour": "look describes the room", "covers": ["R1"],
+                    "examples": [{"given": "POST /api/command {\"name\": \"Ann\", \"command\": \"look\"}",
+                                  "expect": "status `200`, the reply contains `Great Hall`"}]}]},
+    ensure_ascii=False)
+
+
+def _phase_problems(step: Step, n: int, interfaces: list[str], workdir,
+                    got: list[str] | None = None) -> list[str]:
+    """What is wrong with one phase of a stories plan ([] when nothing); got:
+    the fields it arrived with (run 5: a phase came as {"acceptance": …} alone,
+    four times, while the refusal did not say so)."""
+    from .story_runner import MAX_COVERS
+    lacks = [f for f, v in (("title", step.title and step.title != "(untitled step)"),
+                            ("details", step.details), ("outcome", step.outcome),
+                            ("acceptance", step.acceptance)) if not v]
+    problems = ([(f"has {', '.join(got)} — " if got is not None else "") + f"missing {', '.join(lacks)}"]
+                if lacks else [])
+    problems += [e for c in step.acceptance for e in criterion_problems(c)]
+    problems += [f"\"{c.text[:60]}\" covers {len(c.covers)} requirements — name only what its own "
+                 f"examples show (at most {MAX_COVERS})" for c in step.acceptance
+                 if len(c.covers) > MAX_COVERS]
+    given = [e["given"] for c in step.acceptance for e in c.examples]
+    if n == 1 and given and not any(acts_through_interface(g, interfaces) for g in given):
+        # run 4a/4b's first plans built the engine first, with parser return
+        # values as examples
+        problems.append("make it a thin end-to-end slice the user can try through an interface "
+                        "— at least one example acts through one (a request such as `POST "
+                        "/api/command …`, a command line, a library call)")
+    planned = set(step.files)
+    problems += [f"`{c}` {e}" for c in step.checks for e in check_problems(c, workdir, planned)]
+    return problems
 
 
 class PlanRunnerMixin:
@@ -366,7 +415,9 @@ class PlanRunnerMixin:
         if not self.plan.steps:
             return "The plan has no steps."
         self.plan_phase = "executing"
-        self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""   # the next plan asks afresh
+        self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
+        self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
+        self._plan_heuristics = {}   # the next plan asks afresh
         self._sync_plan_file()
         # The plan runs in coding mode (set_mode rebuilds the prompt and emits status).
         self.set_mode("coding")
@@ -379,6 +430,8 @@ class PlanRunnerMixin:
         self.plan = None
         self.plan_phase = "investigating"
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
+        self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
+        self._plan_heuristics = {}
         delete_plan_file(self.workdir)
         self.rebuild_system_prompt()
         self.emit_status()
@@ -418,6 +471,184 @@ class PlanRunnerMixin:
                 and not self._plan_gate_refused):
             self._plan_gate_refused = True
             return _ASK_FIRST
+        if self.plan_kind == "stories":
+            return self._outline_plan(args)
+        return self._submit_plan(args)
+
+    # ── a stories plan, phase by phase ────────────────────────────────────────
+    # Run 5's planner could not resend one large nested plan after refusals
+    # (17 calls, none accepted; a phase arrived as {"acceptance": …} alone, four
+    # times).  Like the stories: the frame and an outline (create_plan), one
+    # phase per turn (write_phase), then finish_plan.  A refusal costs one
+    # small call, and the phases written stay in the harness's draft.
+
+    def _outline_plan(self, args: dict) -> str:
+        """create_plan in a stories plan: the frame (title, goal, interfaces,
+        requirements) and an outline of the phases.  Phases sent in full are
+        taken too, each valid one kept; when all are there and valid the plan
+        is submitted at once."""
+        raw = args.get("steps")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = [x for x in raw.splitlines() if x.strip()]
+        raw = raw if isinstance(raw, list) else []
+        outline = []
+        for item in raw:
+            d = item if isinstance(item, dict) else {"title": str(item)}
+            outline.append({"title": str(d.get("title") or "").strip(),
+                            "outcome": str(d.get("outcome") or "").strip()})
+        frame = {"title": str(args.get("title") or "Implementation plan").strip(),
+                 "goal": str(args.get("goal") or "").strip(),
+                 "interfaces": str_list(args.get("interfaces")),
+                 "requirements": args.get("requirements")}
+        old = self._plan_draft or {}
+        # Written phases stay: by position when the number of phases is the same
+        # (run 6c's planner re-sent its outline after each restart with reworded
+        # titles, "Core Engine (CLI)" → "Phase 1: Core Engine (CLI)", and lost
+        # the phases it had written), else where the title still matches.
+        same = len(old.get("outline") or []) == len(outline)
+        phases = {i: ph for i, ph in (old.get("phases") or {}).items()
+                  if i <= len(outline) and (same or outline[i - 1]["title"] in ("", ph.get("title")))}
+        draft = self._plan_draft = {"frame": frame, "outline": outline, "phases": phases,
+                                    "problems": {}, "turns": -1, "phase_turn": None}
+        problems = self._frame_problems(draft)
+        for i, item in enumerate(raw, 1):
+            if isinstance(item, dict) and (item.get("acceptance") or item.get("details")):
+                got = self._take_phase(draft, i, item)
+                if got:
+                    problems += got
+        problems = self._yield_heuristics(problems)
+        if problems:
+            return self._refuse_plan(problems)
+        if len(draft["phases"]) == len(outline):
+            return self._finish_plan()
+        return (f"Outline stored ({len(outline)} phase{'s' if len(outline) != 1 else ''}). "
+                + self._plan_next())
+
+    def _frame_problems(self, draft: dict) -> list[str]:
+        frame, outline = draft["frame"], draft["outline"]
+        problems = []
+        if not outline:
+            problems.append("no phases: give 'steps', one {title, outcome} per phase (usually 2-7)")
+        for i, o in enumerate(outline, 1):
+            if not o["title"]:
+                problems.append(f"phase {i} in the outline has no title")
+        if not frame["interfaces"]:
+            problems.append("name how the product is used in 'interfaces' — one line per way in, "
+                            "e.g. \"CLI: `python3 tool.py <file>`\", \"Service: `python3 server.py`, "
+                            "HTTP on localhost:8000\", \"Library: `import pager`\"")
+        plan = Plan(title=frame["title"], request=self._plan_request(),
+                    steps=[Step(title=o["title"] or "(untitled step)") for o in outline],
+                    requirements=requirement_list(frame["requirements"]))
+        return problems + _requirement_problems(plan, frame["requirements"])
+
+    def _take_phase(self, draft: dict, n: int, item: dict) -> list[str]:
+        """Validate phase n and keep it in the draft; its problems ([] = kept)."""
+        if not 1 <= n <= len(draft["outline"]):
+            return [f"there is no phase {n} in the outline (1–{len(draft['outline'])}); change "
+                    "the outline with create_plan to add one"]
+        item = {k: v for k, v in item.items() if k not in ("status", "tag", "stage", "phase")}
+        arrived = sorted(k for k, v in item.items() if v not in (None, "", []))
+        if not str(item.get("title") or "").strip():
+            item["title"] = draft["outline"][n - 1]["title"]       # the outline's title
+        if not str(item.get("outcome") or "").strip() and draft["outline"][n - 1]["outcome"]:
+            item["outcome"] = draft["outline"][n - 1]["outcome"]
+        step = Step.from_dict(item)
+        problems = [f"phase {n}: {e}" for e in _phase_problems(step, n, draft["frame"]["interfaces"],
+                                                               self.workdir, arrived)]
+        if problems:
+            draft["phases"].pop(n, None)
+            draft["problems"][n] = problems
+            return problems
+        draft["phases"][n] = step.to_dict()
+        draft["problems"].pop(n, None)
+        draft["outline"][n - 1]["title"] = step.title
+        return []
+
+    def _handle_write_phase(self, args: dict) -> str:
+        draft = self._plan_draft
+        if draft is None or self.plan_kind != "stories":
+            return ("ERROR: outline the plan first: call create_plan with the title, goal, "
+                    "interfaces, requirements and one {title, outcome} line per phase.")
+        try:
+            n = int(args.get("phase"))
+        except (TypeError, ValueError):
+            return "ERROR: 'phase' is the phase's number in the outline (1, 2, …)."
+        if draft.get("phase_turn") is not None and draft["phase_turn"] == draft.get("turns"):
+            return (f"ERROR: one phase per turn — phase {n} was not stored. Send it with "
+                    "write_phase in your next turn.")
+        problems = self._yield_heuristics(self._take_phase(draft, n, args))
+        if problems and n in draft["problems"]:
+            return self._refuse_plan(problems)
+        if n not in draft["phases"]:                 # only heuristic doubts: keep it anyway
+            item = {k: v for k, v in args.items() if k not in ("status", "tag", "stage", "phase")}
+            item.setdefault("title", draft["outline"][n - 1]["title"])
+            draft["phases"][n] = Step.from_dict(item).to_dict()
+            draft["problems"].pop(n, None)
+        draft["phase_turn"] = draft.get("turns")
+        self._plan_restarts = 0          # progress: the cap counts refusals in a row
+        return f"Stored phase {n} ({draft['phases'][n]['title']}). " + self._plan_next()
+
+    def _handle_finish_plan(self, args: dict) -> str:
+        draft = self._plan_draft
+        if draft is None or self.plan_kind != "stories":
+            return "ERROR: there is no plan to finish: outline it with create_plan first."
+        missing = [i for i in range(1, len(draft["outline"]) + 1) if i not in draft["phases"]]
+        if missing:
+            return (f"ERROR: not every phase is written yet: {', '.join(map(str, missing))}. "
+                    + self._plan_next())
+        return self._finish_plan()
+
+    def _finish_plan(self) -> str:
+        draft = self._plan_draft
+        args = {**draft["frame"], "steps": [draft["phases"][i]
+                                            for i in range(1, len(draft["outline"]) + 1)]}
+        return self._submit_plan(args)
+
+    def _plan_next(self) -> str:
+        """What the planner is due to do next, from the draft."""
+        draft = self._plan_draft
+        if draft is None:
+            return "Next: call create_plan with the frame and the outline."
+        for i, o in enumerate(draft["outline"], 1):
+            if i not in draft["phases"]:
+                return (f"Next: write phase {i} — {o['title']} — with write_phase: details, "
+                        "outcome, acceptance (behaviour with examples) and files.")
+        return (f"All {len(draft['outline'])} phases are written. Rewrite any that need it with "
+                "write_phase, then call finish_plan.")
+
+    def _yield_heuristics(self, problems: list[str]) -> list[str]:
+        """The problems to refuse on: a heuristic check refused twice in a row is
+        dropped, with a note, the third time."""
+        seen = self.__dict__.setdefault("_plan_heuristics", {})
+        out = []
+        for p in problems:
+            rule = next((h for h in _HEURISTIC if h in p), None)
+            if rule is None:
+                out.append(p)
+                continue
+            key = (p.split(":")[0] if p.startswith("phase ") else "", rule)   # per phase
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] > 2:
+                self.event_queue.put(ChatEvent("system",
+                    f"Note: accepted although the check still says \"{p[:120]}\" — refused twice "
+                    "already, so the check may be misreading the plan."))
+                continue
+            out.append(p)
+        return out
+
+    def _refuse_plan(self, problems: list[str]) -> str:
+        """A refused plan call: every problem at once, with a valid phase to copy
+        from; the loop then restarts the planner from a summary (_restart_planning)."""
+        text = ("ERROR: the plan needs these changes:\n" + "\n".join(f"- {p}" for p in problems)
+                + "\nA valid phase looks like this:\n" + _EXAMPLE_PHASE)
+        self._plan_restart = "\n".join(problems)
+        return text
+
+    def _submit_plan(self, args: dict) -> str:
+        """Validate the complete plan, show it and ask for approval."""
         steps = self._parse_steps(args.get("steps"))
         if not steps:
             return ("ERROR: create_plan needs a non-empty 'steps' list of "
@@ -429,53 +660,24 @@ class PlanRunnerMixin:
         if self.plan_kind == "tdd":
             err = self._make_tdd_plan(plan, args)
             if err:
+                self._plan_last_args = args
+                self._plan_restart = err.removeprefix("ERROR: ")
                 return err
             approve_note = f" Approving also lets the harness run `{plan.test_command}` after every step."
         if self.plan_kind == "stories":
-            incomplete = [s.title for s in steps if not s.outcome or not s.acceptance]
-            if incomplete:
-                return ("ERROR: every phase needs an 'outcome' and 'acceptance': the expected "
-                        "behaviour that closes it, each with examples (an action through the "
-                        "product's interface → the output it must give); missing in: "
-                        f"{', '.join(incomplete)}. Call create_plan again with the complete plan.")
             plan.interfaces = str_list(args.get("interfaces"))
+            raw_steps = args.get("steps") if isinstance(args.get("steps"), list) else []
+            problems = [f"phase {i}: {e}" for i, st in enumerate(steps, 1)
+                        for e in _phase_problems(st, i, plan.interfaces, self.workdir,
+                                                 sorted(raw_steps[i - 1]) if i <= len(raw_steps)
+                                                 and isinstance(raw_steps[i - 1], dict) else None)]
             if not plan.interfaces:
-                return ("ERROR: name how the product is used in 'interfaces' — one line per way "
-                        "in, e.g. \"CLI: `python3 tool.py <file>`\", \"Service: `python3 "
-                        "server.py`, HTTP on localhost:8000\", \"Library: `import pager`\". "
-                        "The acceptance examples act through these. Call create_plan again "
-                        "with the complete plan.")
-            from .story_runner import MAX_COVERS
-            wrong = [f"phase {i}: {e}" for i, st in enumerate(steps, 1) for c in st.acceptance
-                     for e in criterion_problems(c)]
-            first = [e["given"] for c in steps[0].acceptance for e in c.examples] if steps else []
-            if first and not any(acts_through_interface(g, plan.interfaces) for g in first):
-                # run 4a/4b's first plans built the engine first, with parser
-                # return values as examples
-                wrong.append("phase 1: make it a thin end-to-end slice the user can try through "
-                             "an interface — at least one example acts through one (a request "
-                             "such as `POST /api/command …`, a command line, a library call)")
-            wrong += [f"phase {i}: \"{c.text[:60]}\" covers {len(c.covers)} requirements — name only "
-                      f"what its own examples show (at most {MAX_COVERS})"
-                      for i, st in enumerate(steps, 1) for c in st.acceptance
-                      if len(c.covers) > MAX_COVERS]
-            if wrong:
-                return ("ERROR: fix these phase expectations:\n" + "\n".join(f"- {w}" for w in wrong)
-                        + "\nCall create_plan again with the complete plan.")
-            planned = {f for st in steps for f in st.files}
-            bad = [f"phase {i}: `{c}` {e}" for i, st in enumerate(steps, 1) for c in st.checks
-                   for e in check_problems(c, self.workdir, planned)]
-            if bad:
-                # run 3's first plan: a print-only check, `server.py & … curl`
-                # left running, and `ls static/index.html` — the story rules
-                # refused such checks, but phase checks were never read.
-                return ("ERROR: these phase checks cannot prove their phase:\n"
-                        + "\n".join(f"- {b}" for b in bad)
-                        + "\nCall create_plan again with the complete plan.")
+                problems.append("name how the product is used in 'interfaces'")
             plan.requirements = requirement_list(args.get("requirements"))
-            err = _requirement_problems(plan, args.get("requirements"))
-            if err:
-                return err
+            problems += _requirement_problems(plan, args.get("requirements"))
+            problems = self._yield_heuristics(problems)
+            if problems:
+                return self._refuse_plan(problems)
             plan.kind = "stories"
             notes = " ".join(x for x in (_phase_check_notes(steps), _request_command_note(plan)) if x)
             if notes:
@@ -507,8 +709,112 @@ class PlanRunnerMixin:
                     "Do not call any more tools; reply with one short sentence.")
         self.plan_phase = "investigating"
         self.rebuild_system_prompt()
+        self._plan_qa.append(("Approve this plan?", answer))
+        if self.plan_kind == "stories" and self._plan_draft is not None:
+            return (f"User requested changes to the plan: {answer}\nRewrite the phases it concerns "
+                    "with write_phase (or the outline with create_plan), then call finish_plan. "
+                    "The other phases are kept.")
         return (f"User requested changes to the plan: {answer}\n"
                 "Investigate further if needed, then call create_plan again with the complete revised plan.")
+
+    # ── a clean restart after a refused plan ──────────────────────────────────
+
+    def _restart_planning(self, reasons: str) -> None:
+        """Clear the planning conversation and start the planner again from a
+        summary the harness writes from its own records: run 5's planner made
+        each attempt from a context full of refused calls and broken drafts."""
+        from .compaction import _paired_calls
+        msgs = self.messages
+        for name, args, result in _paired_calls(msgs[1:]):
+            if name in ("ask_user", "ask_choice") and isinstance(args, dict) and result \
+                    and not result.startswith("ERROR"):
+                qa = (str(args.get("question") or "").strip(),
+                      result.removeprefix("User answered: ").removeprefix("User chose ").strip())
+                if qa not in self._plan_qa:
+                    self._plan_qa.append(qa)
+        users = [i for i, m in enumerate(msgs) if m.get("role") == "user"]
+        for i in users[1:]:                  # answers to questions asked in the reply text
+            prev = next((m.get("content") or "" for m in reversed(msgs[:i])
+                         if m.get("role") == "assistant"), "")
+            text = str(msgs[i].get("content") or "").strip()
+            if "?" in str(prev) and text and not text.startswith("[") and not text.startswith("# Planning"):
+                q = [x.strip() for x in re.split(r"(?<=\?)\s+", str(prev)) if x.strip().endswith("?")]
+                qa = ((q[-1] if q else "your question")[:300], text[:500])
+                if qa not in self._plan_qa:
+                    self._plan_qa.append(qa)
+        summary = self._plan_summary(reasons)
+        self._archive_context(by="plan-retry")
+        del msgs[1:]
+        self._append_user(summary)
+        self.event_queue.put(ChatEvent("system",
+            f"Plan refused — context cleared; the planner restarts from a summary (attempt "
+            f"{self._plan_restarts + 1})."))
+
+    def _pause_planning(self) -> None:
+        """Too many refused plan calls: stop, with the summary kept for the user
+        (and as the context the next message continues from)."""
+        path = self.workdir / ".momo" / "plan-draft.md"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.messages[-1].get("content") or "", encoding="utf-8")
+            where = ".momo/plan-draft.md"
+        except OSError:
+            where = "the chat"
+        self._plan_restarts = 0
+        self.event_queue.put(ChatEvent("system",
+            f"Planning paused after {PLAN_MAX_RESTARTS} refused attempts. The draft and what is "
+            f"still wrong are in {where} — give feedback (any message) to continue from them."))
+
+    def _plan_summary(self, reasons: str) -> str:
+        """What the planner restarts from: the request, what was decided, what it
+        found, its draft as the harness holds it, why it was refused, and what
+        to do now."""
+        draft = self._plan_draft
+        lines = [f"# Planning, attempt {self._plan_restarts + 1}", "",
+                 "Your last plan call was refused, so the conversation was cleared. This is "
+                 "everything that counts from it; continue from here.", "",
+                 "## The user's request", self._plan_request() or "(none recorded)"]
+        if self._plan_qa:
+            lines += ["", "## Decided with the user"]
+            lines += [f"- {q} → {a}" for q, a in self._plan_qa]
+        frame = (draft or {}).get("frame") or (getattr(self, "_plan_last_args", None) or {})
+        if frame.get("goal"):
+            lines += ["", "## What you found (your plan's goal)", str(frame["goal"])]
+        scratch = self.workdir / ".momo" / "scratch"
+        notes = sorted(p.name for p in scratch.iterdir() if p.is_file()) if scratch.is_dir() else []
+        if notes:
+            lines += ["", "Your notes in .momo/scratch/: " + ", ".join(notes[:10])]
+        if draft is not None:
+            lines += ["", "## Your draft so far", f"Title: {frame.get('title', '')}"]
+            if frame.get("interfaces"):
+                lines += ["Interfaces:"] + [f"- {x}" for x in frame["interfaces"]]
+            reqs = requirement_list(frame.get("requirements"))
+            if reqs:
+                lines += ["Requirements:"] + [f"- {r['id']} (phase {r['phase']}): {r['text']}" for r in reqs]
+            lines.append("Phases:")
+            for i, o in enumerate(draft["outline"], 1):
+                if i in draft["phases"]:
+                    ph = draft["phases"][i]
+                    lines.append(f"- ✓ {i}. {ph['title']} — kept: {ph.get('outcome', '')}")
+                elif i in draft["problems"]:
+                    lines.append(f"- ✗ {i}. {o['title']} — refused, write it again")
+                else:
+                    lines.append(f"- … {i}. {o['title']} — not written yet")
+        elif frame:
+            lines += ["", "## Your last plan (refused)", "```json",
+                      json.dumps(frame, ensure_ascii=False, indent=1)[:4000], "```"]
+        lines += ["", "## Why it was refused"] + [f"- {r}" for r in reasons.splitlines() if r.strip()]
+        kept = draft is not None and draft.get("outline")
+        lines += ["", "## What to do now",
+                  "Fix only these problems; what is kept stays. "
+                  + ("The outline and the kept phases are stored: do NOT call create_plan "
+                     "again unless the outline itself was refused. " if kept and draft["phases"]
+                     and not any(r.startswith(("the request", "R", "name how", "no phases"))
+                                 for r in reasons.splitlines()) else "")
+                  + (self._plan_next() if draft is not None else
+                     "Call create_plan again with the complete corrected plan."),
+                  "", "A valid phase looks like this:", _EXAMPLE_PHASE]
+        return "\n".join(lines)
 
     def _make_tdd_plan(self, plan: Plan, args: dict) -> str:
         """Turn plan into a TDD plan: tag its steps and wrap them in the

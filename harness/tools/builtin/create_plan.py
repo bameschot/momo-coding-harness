@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..registry import Tool, tool_schema
-from ._plan_schema import PHASE, REQUIREMENT, STEP, STEP_TDD, plan_variant
+from ._plan_schema import PHASE_OUTLINE, REQUIREMENT, STEP, STEP_TDD, plan_variant
 
 _TDD = tool_schema("create_plan",
     "Submit the test-driven implementation plan once investigation is complete. The harness "
@@ -30,21 +30,21 @@ _TDD = tool_schema("create_plan",
     ["title", "goal", "test_command", "acceptance", "steps"])
 
 _STORIES = tool_schema("create_plan",
-    "Submit the phased plan once investigation is complete. The harness writes it to a Markdown "
-    "file and asks the user to approve it. On approval the phases run in order: when a phase "
-    "starts, a story writer looks at the code as it is then and breaks the phase into small "
-    "stories, which are implemented one at a time; the harness runs the phase's checks before "
-    "the next phase starts. So each phase is a coherent milestone (a module, a feature, a layer), "
-    "not a single edit: give its outcome and the commands that prove it, and leave the "
-    "step-by-step detail to the stories. If the user asks for changes, call create_plan again "
-    "with the complete new plan.",
+    "Start the phased plan once investigation is complete: its frame (title, goal, interfaces, "
+    "requirements) and an outline, one {title, outcome} line per phase. Then write each phase in "
+    "full with write_phase, one per turn, and submit the plan with finish_plan; the harness then "
+    "asks the user to approve it. On approval the phases run in order: when a phase starts, a "
+    "story writer breaks it into small stories against the code as it is then, and the harness "
+    "checks the phase's expected behaviour before the next phase starts. Call create_plan again "
+    "to change the outline; the phases already written are kept.",
     {"title": {"type": "string", "description": "Short name for the feature or project"},
      "goal":  {"type": "string", "description": "What the change achieves and why, including key findings, decisions and the user's answers"},
      "interfaces": {"type": "array", "items": {"type": "string"},
                     "description": "How the product is used, one line per way in, e.g. "
                                    "\"CLI: `python3 tool.py <file>`\", \"Service: `python3 server.py`, HTTP on "
                                    "localhost:8000\", \"Library: `import pager`\", \"Output files in `build/`\""},
-     "steps": {"type": "array", "items": PHASE, "description": "The phases, in order (usually 2-7)"},
+     "steps": {"type": "array", "items": PHASE_OUTLINE,
+               "description": "The outline: one line per phase, in order (usually 2-7)"},
      "requirements": {"type": "array", "items": REQUIREMENT,
                       "description": "The user's request split into one requirement per line — every "
                                      "command, endpoint and behaviour they named, one per item of a "
@@ -55,23 +55,8 @@ _EXAMPLE_STORIES = {
     "title": "Paginated search API",
     "goal": "Add /search with paging; results come from the existing index in src/index.py.",
     "interfaces": ["Service: `python3 -m src.api`, HTTP on localhost:8080"],
-    "steps": [
-        {"title": "Search returns results",
-         "details": "src/api.py: GET /search?q= using Index.query(), with its tests.",
-         "outcome": "GET /search?q=a returns the matches as JSON",
-         "acceptance": [{"behaviour": "a search returns the matching documents",
-                         "examples": [{"given": "GET /search?q=apple",
-                                       "expect": "status 200, JSON list with `apple pie` first"}],
-                         "covers": ["R1"]}],
-         "files": ["src/api.py", "tests/test_api.py"]},
-        {"title": "Pages of results",
-         "details": "src/pager.py: paginate(); /search takes &page=.",
-         "outcome": "GET /search?q=a&page=2 returns the second page of 5",
-         "acceptance": [{"behaviour": "results come in pages of 5",
-                         "examples": [{"given": "GET /search?q=a&page=3 with 11 matches",
-                                       "expect": "status 200, exactly 1 result"}],
-                         "covers": ["R2", "R3"]}],
-         "files": ["src/pager.py", "src/api.py", "tests/test_pager.py"]}],
+    "steps": [{"title": "Search returns results", "outcome": "GET /search?q=a returns the matches as JSON"},
+              {"title": "Pages of results", "outcome": "GET /search?q=a&page=2 returns the second page of 5"}],
     "requirements": [
         {"id": "R1", "text": "GET /search?q= returns matching results as JSON", "phase": 1},
         {"id": "R2", "text": "?page=N returns the Nth page of 5 results", "phase": 2},

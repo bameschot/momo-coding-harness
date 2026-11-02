@@ -20,6 +20,7 @@ from .compaction import (CompactionMixin, _paired_calls, calls_tokens, content_t
 from .plan import Plan
 from .plan_runner import TDD_MAX_REFUSALS, PlanRunnerMixin, keeps_green
 from .story_runner import DEFAULT_STORIES_CAP, STORY_NUDGES, StoryRunnerMixin
+from .plan_runner import PLAN_MAX_RESTARTS
 from .mcp_mixin import MCPMixin
 from .tools import (DIFF_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, LOCKED_TOOLS,
                     NET_TOOL_NAMES, RUN_STORE_TOOLS, ToolContext, ToolRunContext, dispatch,
@@ -371,7 +372,7 @@ _IDLE_NOTES = 2
 _PROGRESS_TOOLS = frozenset({"ask_user", "ask_choice", "create_plan", "revise_plan",
                              "complete_step", "plan_stories", "write_story", "finish_stories",
                              "complete_story", "report_defect", "save_acceptance_test",
-                             "finish_verification"})
+                             "finish_verification", "write_phase", "finish_plan"})
 _IDLE_NOTE = "[Note from the harness, not the user] {n} tool calls in a row without {since}. {act}"
 _IDLE_ACT = {
     "coding": ("a change", "If the user asked a question, answer it now. If they asked for a "
@@ -539,6 +540,15 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         # asked its questions in text and planned two answers later, and the
         # plan's request was the last answer.
         self._plan_first_request = ""
+        # A stories plan written phase by phase (create_plan outline, write_phase,
+        # finish_plan): its frame, outline and the phases written so far; and
+        # after a refused plan call the reasons that restart the planner from a
+        # summary (_restart_planning), how many restarts, and the questions
+        # answered so far (they outlive the cleared context).
+        self._plan_draft: dict | None = None
+        self._plan_restart = ""
+        self._plan_restarts = 0
+        self._plan_qa: list[tuple[str, str]] = []
         # A stories plan's phase at work: "story-writer" while its stories are
         # written, "story-exec" while one runs; None otherwise.  It replaces the
         # role (tools and prompt) for that while.
@@ -2201,6 +2211,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     self._append_user(text)
                 guard.bump()                 # the user said something: a new epoch
                 idle_calls = 0
+            if self._plan_draft is not None:
+                self._plan_draft["turns"] = iteration     # write_phase: one phase per turn
             if self._story or self._writing or self._verifying:
                 self._story_tick(iteration)     # the plan view counts turns
             elif executing and self.plan is not None and not self.plan.stories:
@@ -2644,6 +2656,12 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     result = self._handle_create_plan(args)
                     if self.plan_phase == "executing":
                         plan_approved = True
+                elif name == "write_phase":
+                    result = self._handle_write_phase(args if isinstance(args, dict) else {})
+                elif name == "finish_plan":
+                    result = self._handle_finish_plan(args if isinstance(args, dict) else {})
+                    if self.plan_phase == "executing":
+                        plan_approved = True
                 elif name == "revise_plan":
                     result = self._handle_revise_plan(args)
                 elif name == "complete_step":
@@ -2793,6 +2811,20 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 if self._step_summary:
                     self.event_queue.put(ChatEvent("assistant", self._step_summary))
                 return "done"
+
+            # A refused plan call: clear the context and start the planner again
+            # from the harness's summary of it (run 5 made 17 attempts, each from
+            # a context full of refused calls and broken drafts).
+            if self._plan_restart:
+                reasons, self._plan_restart = self._plan_restart, ""
+                self._plan_restarts += 1
+                self._restart_planning(reasons)
+                if self._plan_restarts > PLAN_MAX_RESTARTS:
+                    self._pause_planning()
+                    return "paused"
+                guard.reset()
+                tool_only_turns, last_tool, _nudged, idle_calls = 0, None, False, 0
+                continue
 
             # About to loop: a note, the history kept.  The next hit rewinds.
             if hit is not None and hit.severity == "nudge":
@@ -3566,6 +3598,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         note = self.cancel_plan() if self.plan is not None else ""
         self.plan_kind = "normal"
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
+        self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
+        self._plan_heuristics = {}
         self.messages = [self.messages[0]]
         self.compacted = []
         self.summary_state = new_summary_state()
@@ -3598,6 +3632,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.plan_phase = "investigating"
         self.plan_kind = "normal"
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
+        self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
+        self._plan_heuristics = {}
         self.momo_lines = []
         self._momo_recap_turn = 0
         self.title = ""

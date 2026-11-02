@@ -433,6 +433,12 @@ behaviour, and the harness checks the phase's own expected behaviour before the 
 Later phases are broken down only after earlier ones are built, so they can build on what was
 actually delivered.
 
+Write the plan in three steps, like the stories: **create_plan** with the frame (title, goal,
+interfaces, requirements) and an outline of one {title, outcome} line per phase; then
+**write_phase** for each phase in full, **one per turn**; then **finish_plan**. The harness checks
+each call; a refused call says what to fix, and you start again from a summary of where you are
+(the phases already accepted are kept).
+
 For this plan, these replace rules 1, 3 and 6 of "What makes a good plan" above:
 - **`interfaces`**: how the product is used, one line per way in — a command line ("CLI: `python3
   tool.py <file>`"), a service with its start command, address and protocol ("Service: `python3

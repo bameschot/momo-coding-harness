@@ -74,6 +74,17 @@ PHASE = {
     "required": ["title", "details", "outcome", "acceptance"],
 }
 
+# create_plan in a stories plan: one line per phase, written in full with
+# write_phase afterwards (run 5's planner could not resend one large plan).
+PHASE_OUTLINE = {
+    "type": "object",
+    "properties": {
+        "title":   {"type": "string", "description": "Short name for the phase"},
+        "outcome": {"type": "string", "description": "One line: what works when it is done, seen from outside"},
+    },
+    "required": ["title"],
+}
+
 # Stories plans: the user's request, one requirement per line, each delivered
 # by a phase.  Story criteria name the ones they prove (CRITERION.covers).
 REQUIREMENT = {
