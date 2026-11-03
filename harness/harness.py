@@ -2664,10 +2664,16 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 if self.tools_discover != "off" and name not in self.loaded_tools:
                     self.load_tools([name], "called directly")
 
+                tool = registry.get(name)
+                leak = (template_leak(name, args, deep=True)
+                        if tool is not None and tool.harness and isinstance(args, dict) else "")
                 if name in self.disabled_tools.get(self.mode, ()):
                     # Offered no schema, but a text-recovered call or an older
                     # context can still name it.
                     result = f"ERROR: {name} is turned off for this role by the user."
+                elif leak:
+                    # the harness's own tools never reach _dispatch, which checks the rest
+                    result = leak
                 elif name == discover_mod.FIND_TOOLS:
                     result = self._find_tools(args if isinstance(args, dict) else {})
                 elif name == "ask_user":

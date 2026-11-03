@@ -417,6 +417,26 @@ class CodeAndLists(unittest.TestCase):
         self.assertEqual(_top_level_commas("`look`, `go`, `say`, `quit` work"), 3)
         self.assertEqual(_top_level_commas("Commands: look, go, say, who"), 3)
 
+    def test_running_a_test_file_is_running_the_tests(self):
+        # run 8's S5: the test command sat in `expect`
+        from harness.stories import drop_suite_runs, runs_the_suite
+        s5 = Criterion("the frontend works", examples=[
+            {"given": "A running server with a functional frontend",
+             "expect": "`python3 tests/test_frontend_integration.py` exits with code `0`"}])
+        self.assertTrue(runs_the_suite(s5))
+        self.assertTrue(any("running the tests is not a behaviour" in e for e in criterion_problems(s5)))
+        server = Criterion("it serves", examples=[{"given": "`python3 server.py`", "expect": "port `8000`"}])
+        self.assertFalse(runs_the_suite(server))
+        kept, dropped = drop_suite_runs([server, s5, Criterion("All engine and parser tests pass")])
+        self.assertEqual(([c.text for c in kept], len(dropped)), (["it serves"], 2))
+
+    def test_a_deep_template_leak_check(self):
+        from harness.toolcall_text import template_leak
+        self.assertIn("'title' argument ran into chat-template tokens",
+                      template_leak("write_story", {"story": {"title": "x<tool_call|>"}}, deep=True))
+        self.assertEqual(template_leak("write_story", {"story": {"title": "x<tool_call|>"}}), "")
+        self.assertEqual(template_leak("write_file", {"path": "a.md", "content": "<tool_call|>"}), "")
+
     def test_module_interfaces_count_as_absent(self):
         import tempfile
         from harness.story_runner import _absent_interfaces
@@ -427,6 +447,10 @@ class CodeAndLists(unittest.TestCase):
             (wd / "src").mkdir()
             (wd / "src" / "api.py").write_text("")
             self.assertEqual(_absent_interfaces(wd, ui), [])
+            # run 8: a test runner or stdlib server is not the product's own file
+            self.assertEqual(_absent_interfaces(wd, ["CLI: `python3 -m unittest discover tests`",
+                                                     "Web: `python3 -m http.server 8000`",
+                                                     "Tests: `python3 -m pytest -q`"]), [])
 
 
 

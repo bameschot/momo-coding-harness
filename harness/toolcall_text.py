@@ -618,16 +618,30 @@ _TEXT_ARGS = frozenset({"content", "old_string", "new_string", "edits", "text", 
                         "description", "body", "message", "note"})
 
 
-def template_leak(name: str, args: dict) -> str:
+def template_leak(name: str, args: dict, deep: bool = False) -> str:
     """An error for a call whose path, command or other short argument ran into
-    chat-template tokens, so it is not run on garbage; "" when it is clean."""
-    for key, value in args.items():
-        if key in _TEXT_ARGS or not isinstance(value, str):
+    chat-template tokens, so it is not run on garbage; "" when it is clean.
+    deep: every string, nested ones and prose included — a plan or story never
+    quotes the tokens on purpose (run 8 stored a phase titled
+    `Multiplayer & Social Features"}<tool_call|>…`)."""
+    def strings(value, key):
+        if isinstance(value, str):
+            yield key, value
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                yield from strings(v, k)
+        elif isinstance(value, list):
+            for v in value:
+                yield from strings(v, key)
+
+    for top, value in args.items() if isinstance(args, dict) else ():
+        if not deep and (top in _TEXT_ARGS or not isinstance(value, str)):
             continue
-        if _RX_TEMPLATE_TOKENS.search(value):
-            return (f"ERROR: {name}'s '{key}' argument ran into chat-template tokens "
-                    f"({value[:60]!r}…), so the call was not run — send the call again "
-                    "with only the argument's value.")
+        for key, text in strings(value, top):
+            if _RX_TEMPLATE_TOKENS.search(text):
+                return (f"ERROR: {name}'s '{key}' argument ran into chat-template tokens "
+                        f"({text[:60]!r}…), so the call was not run — send the call again "
+                        "with only the argument's value.")
     return ""
 
 def _strip_turn_markers(text: str) -> str:

@@ -22,6 +22,19 @@ _CAPPED_KEEP = 1_500
 LOOP_CAUSE = "your reply started repeating itself and ran into the output limit"
 
 _WRITE_TOOLS = ("write_file",)
+# A phase or a story is one call, so "split it across calls" cannot apply (run
+# 8b's planner was cut off twice writing one phase that held every command).
+_PLAN_ADVICE = {
+    "write_phase": ("A phase is written in one call, so make it smaller: fewer expectations, one "
+                    "example each, and shorter details. If it still holds more than that, split it "
+                    "in the outline: call create_plan with one more phase (the phases already "
+                    "written are kept by their titles)."),
+    "write_story": ("A story is written in one call, so make it smaller: shorter technical "
+                    "details, one example per expectation. If it is still too big, split it into "
+                    "two stories with plan_stories."),
+    "create_plan": ("Send only the frame and a one-line outline (one {title, outcome} per phase), "
+                    "then write each phase with write_phase."),
+}
 _EDIT_TOOLS = ("edit_file", "edit_files", "replace_symbol")
 
 
@@ -59,6 +72,8 @@ def retry_advice(name: str, tool_names, cause: str = "") -> str:
     if name in _EDIT_TOOLS:
         return ("Make the change in smaller edits: one change per call, with the text "
                 "to replace only as long as it needs to be to be unique.")
+    if name in _PLAN_ADVICE and (name != "create_plan" or "write_phase" in tool_names):
+        return _PLAN_ADVICE[name]                # create_plan: a stories plan's only
     return "Retry with smaller arguments, splitting the work across several calls."
 
 

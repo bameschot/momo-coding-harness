@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -2102,6 +2103,9 @@ def _project_imports(workdir: Path, f: Path, text: str, interfaces: list[str]) -
 _RX_INTERFACE_FILE = re.compile(r"(?<![\w/.:-])((?:[\w-]+/)*[\w-]+\.(?:py|js|mjs|ts|sh|rb|go|rs|java|php|pl))\b")
 
 
+_NOT_PRODUCT_MODULES = set(sys.stdlib_module_names) | {"pytest", "pip", "coverage", "flask", "uvicorn"}
+
+
 def _absent_interfaces(workdir: Path, interfaces: list[str]) -> list[str]:
     """The files the declared interfaces run (`python3 server.py` → server.py,
     `python3 -m src.api` → src/api.py) when none of them exists yet; [] when
@@ -2115,6 +2119,10 @@ def _absent_interfaces(workdir: Path, interfaces: list[str]) -> list[str]:
                     paths.append([m])
             for mod in re.findall(r"(?:^|\s)-m\s+([A-Za-z_][\w.]*)", code):
                 base = mod.replace(".", "/")
+                # `python3 -m unittest` / `-m http.server` run a tool, not the product
+                # (run 8 deferred every expectation of phase 1 on "unittest")
+                if mod.split(".")[0] in _NOT_PRODUCT_MODULES:
+                    continue
                 if mod not in named:
                     named.append(mod)
                     paths.append([f"{base}.py", f"{base}/__init__.py", f"{base}/__main__.py"])

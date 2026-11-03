@@ -159,6 +159,18 @@ def _phase_key(title: str) -> str:
     return re.sub(r"(?i)^\s*(?:phase|step)\s*\d+\s*[:.)\-–—]\s*", "", title or "").strip().lower()
 
 
+def _phase_for(draft: dict, title) -> int | None:
+    """The phase a write_phase without a number is for: the outline phase its
+    title names, else the first one not written yet; None when every phase is
+    written and no title matches."""
+    key = _phase_key(str(title or ""))
+    if key:
+        hit = next((i for i, o in enumerate(draft["outline"], 1) if _phase_key(o["title"]) == key), None)
+        if hit is not None:
+            return hit
+    return next((i for i in range(1, len(draft["outline"]) + 1) if i not in draft["phases"]), None)
+
+
 def _kept_phases(old: dict, old_count: int, outline: list[dict]) -> dict:
     """The written phases a new outline keeps, by their new position: where the
     title matches (run 6c's planner re-sent its outline with "Phase 1: " added
@@ -509,6 +521,11 @@ class PlanRunnerMixin:
                  "interfaces": str_list(args.get("interfaces")),
                  "requirements": args.get("requirements")}
         old = self._plan_draft or {}
+        # A call with no steps changes only the frame: run 8's planner sent the
+        # frame alone after a refusal, and that wiped the outline it had written.
+        frame_only = not outline and bool(old.get("outline"))
+        if frame_only:
+            outline = [dict(o) for o in old["outline"]]
         phases = _kept_phases(old.get("phases") or {}, len(old.get("outline") or []), outline)
         draft = self._plan_draft = {"frame": frame, "outline": outline, "phases": phases,
                                     "problems": {}, "turns": -1, "phase_turn": None, "notes": []}
@@ -525,13 +542,21 @@ class PlanRunnerMixin:
         draft["frame_refused"] = any(not p.startswith("phase ") or " in the outline " in p
                                      for p in problems)
         if problems:
+            if old.get("outline"):
+                # a refused call changes nothing: the outline and phases written stay
+                old["frame_refused"] = draft["frame_refused"]
+                self._plan_draft = old
+                return (self._refuse_plan(problems) + f"\nYour earlier outline ({len(old['outline'])} "
+                        f"phases) and the {len(old.get('phases') or {})} phase(s) written are kept.")
             return self._refuse_plan(problems)
         self._plan_refused = 0
         notes = self._take_draft_notes(draft)
         if len(draft["phases"]) == len(outline):
             return notes + self._finish_plan()
-        return (f"Outline stored ({len(outline)} phase{'s' if len(outline) != 1 else ''}). "
-                + notes + self._plan_next())
+        stored = (f"Frame updated; the outline of {len(outline)} phases is kept (no steps were sent). "
+                  if frame_only else
+                  f"Outline stored ({len(outline)} phase{'s' if len(outline) != 1 else ''}). ")
+        return stored + notes + self._plan_next()
 
     def _frame_problems(self, draft: dict) -> list[str]:
         frame, outline = draft["frame"], draft["outline"]
@@ -618,16 +643,23 @@ class PlanRunnerMixin:
             return ("ERROR: outline the plan first: call create_plan with the title, goal, "
                     "interfaces, requirements and one {title, outcome} line per phase.")
         try:
-            n = int(args.get("phase"))
+            n, took = int(args.get("phase")), ""
         except (TypeError, ValueError):
-            return "ERROR: 'phase' is the phase's number in the outline (1, 2, …)."
+            # run 8b: after two cut-off replies the planner sent write_phase six
+            # times without its number; the outline says which phase it is
+            n = _phase_for(draft, args.get("title"))
+            if n is None:
+                return "ERROR: 'phase' is the phase's number in the outline (1, 2, …)."
+            took = f"Took this as phase {n} ({draft['outline'][n - 1]['title']}). "
         if draft.get("phase_turn") is not None and draft["phase_turn"] == draft.get("turns"):
             return (f"ERROR: one phase per turn — phase {n} was not stored. Send it with "
                     "write_phase in your next turn.")
         draft["notes"] = []
         problems = self._yield_heuristics(self._take_phase(draft, n, args), {f"phase {n}"})
         if problems and n in draft["problems"]:
-            return self._refuse_plan(problems)
+            # a call that lacked its number is a fragment, not a plan: answered in
+            # place, it never restarts the planner (run 8b sent six)
+            return self._refuse_plan(problems, count=not took) + (f"\n({took.strip()})" if took else "")
         if n not in draft["phases"]:                 # only heuristic doubts: keep it anyway
             item = {k: v for k, v in args.items() if k not in ("status", "tag", "stage", "phase")}
             item.setdefault("title", draft["outline"][n - 1]["title"])
@@ -638,13 +670,16 @@ class PlanRunnerMixin:
         draft["phase_turn"] = draft.get("turns")
         self._plan_restarts = 0          # progress: the cap counts refusals in a row
         self._plan_refused = 0
-        return (f"Stored phase {n} ({draft['phases'][n]['title']}). "
+        return (took + f"Stored phase {n} ({draft['phases'][n]['title']}). "
                 + self._take_draft_notes(draft) + self._plan_next())
 
     def _handle_finish_plan(self, args: dict) -> str:
         draft = self._plan_draft
         if draft is None or self.plan_kind != "stories":
             return "ERROR: there is no plan to finish: outline it with create_plan first."
+        if not draft["outline"]:
+            return ("ERROR: there is no outline yet: call create_plan with the frame and one "
+                    "{title, outcome} line per phase.")
         missing = [i for i in range(1, len(draft["outline"]) + 1) if i not in draft["phases"]]
         if missing:
             return (f"ERROR: not every phase is written yet: {', '.join(map(str, missing))}. "
@@ -694,7 +729,7 @@ class PlanRunnerMixin:
             out.append(p)
         return out
 
-    def _refuse_plan(self, problems: list[str]) -> str:
+    def _refuse_plan(self, problems: list[str], count: bool = True) -> str:
         """A refused plan call: every problem at once, with a valid phase to copy
         from.  The first refusal in a row is answered in place; a second one
         restarts the planner from a summary (_restart_planning): run 7 cleared
@@ -702,6 +737,8 @@ class PlanRunnerMixin:
         spent 12 of its 17 planning minutes on them."""
         text = ("ERROR: the plan needs these changes:\n" + "\n".join(f"- {p}" for p in problems)
                 + "\nA valid phase looks like this:\n" + _EXAMPLE_PHASE)
+        if not count:
+            return text
         self._plan_refused = getattr(self, "_plan_refused", 0) + 1
         if self._plan_refused > 1:
             self._plan_restart = "\n".join(problems)

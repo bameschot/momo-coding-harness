@@ -1560,6 +1560,79 @@ class PhaseByPhase(Base):
         self.assertIn("Stored phase 2", out)
         self.assertIn("no exact value in \"the difference\"", out)
 
+    def start_outline(self, request="make calc work"):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = request
+        self.assertIn("Outline stored", self.h._handle_create_plan({**FRAME, "steps": OUTLINE}))
+
+    def test_a_write_phase_without_its_number_takes_the_due_phase(self):
+        # run 8b: after two cut-off replies the planner sent write_phase six times with no `phase`
+        self.start_outline()
+        out = self.h._handle_write_phase({**PHASE2, "title": "Add sub"})       # named by its title
+        self.assertIn("Took this as phase 2 (Add sub). Stored phase 2", out)
+        self.h._plan_draft["phase_turn"] = None                               # a new turn
+        out = self.h._handle_write_phase(dict(PHASE1))                         # the first not written
+        self.assertIn("Took this as phase 1 (Fix add). Stored phase 1", out)
+        self.h._plan_draft["phase_turn"] = None
+        self.assertIn("'phase' is the phase's number",
+                      self.h._handle_write_phase({**PHASE1, "title": "Something else"}))
+
+    def test_a_numberless_fragment_never_restarts_the_planner(self):
+        self.start_outline()
+        fragment = {"acceptance": PHASE2["acceptance"]}                       # no number, no details
+        for _ in range(2):
+            out = self.h._handle_write_phase(fragment)
+            self.assertIn("missing details", out)
+            self.assertIn("(Took this as phase 1 (Fix add).)", out)
+            self.h._plan_draft["phase_turn"] = None
+        self.assertEqual(self.h._plan_restart, "")
+
+    def test_cut_off_advice_for_a_phase_is_to_split_the_outline(self):
+        from harness.settle import retry_advice
+        self.assertIn("split it in the outline", retry_advice("write_phase", ["write_phase"]))
+        self.assertIn("plan_stories", retry_advice("write_story", ["write_story"]))
+        self.assertIn("write each phase with write_phase",
+                      retry_advice("create_plan", ["create_plan", "write_phase"]))
+        self.assertIn("several calls", retry_advice("create_plan", ["create_plan"]))  # a one-call plan
+
+    def test_a_phase_with_template_tokens_is_not_stored(self):
+        # run 8 stored phase 3 titled `Multiplayer & Social Features"}<tool_call|>…`
+        leaked = {**PHASE1, "title": 'Fix add"}<tool_call|>)<tool_call|><|channel>thought'}
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            call("write_phase", phase=1, **leaked),
+                            ChatResponse(content="stop", done_reason="stop")])
+        results = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                   if m.get("role") == "tool" and m.get("name") == "write_phase"]
+        self.assertIn("'title' argument ran into chat-template tokens", results[0])
+        self.assertEqual(self.h._plan_draft["phases"], {})
+
+    def test_a_frame_only_create_plan_keeps_the_outline(self):
+        # run 8: a frame-only create_plan after a refusal wiped the outline and phase 1
+        self.start_outline()
+        self.h._handle_write_phase({"phase": 1, **PHASE1})
+        out = self.h._handle_create_plan({k: v for k, v in FRAME.items()})
+        self.assertIn("the outline of 2 phases is kept", out)
+        self.assertEqual(sorted(self.h._plan_draft["phases"]), [1])
+        # a refused one changes nothing either
+        out = self.h._handle_create_plan({**FRAME, "requirements": [], "steps": OUTLINE[:1]})
+        self.assertIn("Your earlier outline (2 phases) and the 1 phase(s) written are kept", out)
+        self.assertEqual((len(self.h._plan_draft["outline"]), sorted(self.h._plan_draft["phases"])),
+                         (2, [1]))
+        self.h._plan_draft["phase_turn"] = None
+        self.h._handle_write_phase({"phase": 2, **PHASE2})
+        self.answers = ["n"]                                                  # keep it for later
+        self.assertIn("keep the plan for later", self.h._handle_finish_plan({}))
+
+    def test_finish_plan_without_an_outline(self):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = "make calc work"
+        self.h._handle_create_plan({k: v for k, v in FRAME.items()})        # refused: no phases
+        self.assertIn("there is no outline yet: call create_plan", self.h._handle_finish_plan({}))
+
     def test_every_problem_in_one_refusal(self):
         self.h.set_mode("plan")
         self.h.set_plan_kind("stories")

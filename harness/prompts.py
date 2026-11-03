@@ -470,6 +470,8 @@ For this plan, these replace rules 1, 3 and 6 of "What makes a good plan" above:
 - **Each step is a phase, and a vertical slice**: a thin path through the product that the user
   can already exercise through its interface, growing phase by phase (phase 1 of a game server is
   the server, the world and one command end to end — not "the data model"). Usually 2-7 phases.
+  A phase must fit one `write_phase` call: at most about 6 expectations; a bigger slice becomes
+  more phases.
   Name the files and components it covers and its design decisions; leave the steps to stories.
 - **Each phase has an `outcome`**: what exists and works when it is done, seen from outside.
 - **Each phase has `acceptance`**: the behaviour that closes it, written as "Writing

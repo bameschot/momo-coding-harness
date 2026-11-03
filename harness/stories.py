@@ -545,16 +545,36 @@ _RX_TEST_RUN = re.compile(r"^\W*(?:python3?\s+-m\s+(?:unittest|pytest)|pytest|np
 _RX_CONCRETE = re.compile(r"`[^`]+`|\"[^\"]+\"|(?<!\w)'[^'\n]+'(?!\w)|\b\d+\b")
 
 
+# A test file run as the example, in either field (run 8's S5: "… → `python3
+# tests/test_frontend_integration.py` exits with code `0`", which its verifier
+# could not make sense of and ran out on).
+_RX_TEST_FILE_RUN = re.compile(r"(?:\bpython3?(?:\s+-m\s+(?:unittest|pytest))?|\bpytest|\bsh|\bbash"
+                               r"|\bnode)\s+[\w./-]*(?:\btests?/|\btest_|_test\.)[\w./-]*")
+# An expectation with no examples that only says the tests pass (run 8: "All
+# engine and parser tests pass").
+_RX_SUITE_TEXT = re.compile(r"(?i)\btests?\b.{0,40}\b(?:pass|passes|succeed|are green)\b|\btest suite\b")
+
+
+def _runs_tests(e: dict) -> bool:
+    given, expect = e.get("given", ""), e.get("expect", "")
+    return bool(_RX_TEST_RUN.match(given) or _RX_TEST_FILE_RUN.search(given)
+                or _RX_TEST_FILE_RUN.search(expect))
+
+
 def runs_the_suite(c: Criterion) -> bool:
-    """Whether every example of an expectation only runs the test suite."""
-    return bool(c.examples) and all(_RX_TEST_RUN.match(e.get("given", "")) for e in c.examples)
+    """Whether every example of an expectation only runs the tests: the test
+    command, or a test file."""
+    return bool(c.examples) and all(_runs_tests(e) for e in c.examples)
 
 
 def drop_suite_runs(criteria: list[Criterion]) -> tuple[list[Criterion], list[Criterion]]:
-    """(kept, dropped): the expectations that only run the test suite taken out
-    while others remain (the harness runs the test command at the last gate);
-    alone they stay, and criterion_problems refuses them."""
-    suite = [c for c in criteria if runs_the_suite(c)]
+    """(kept, dropped): the expectations that only run the tests, or with no
+    examples only say they pass, taken out while others remain (the harness
+    runs the test command at the last gate); alone they stay, and
+    criterion_problems refuses them.  Callers drop only when a test command
+    is known."""
+    suite = [c for c in criteria
+             if runs_the_suite(c) or (not c.examples and _RX_SUITE_TEXT.search(c.text))]
     if not suite or len(suite) == len(criteria):
         return list(criteria), []
     return [c for c in criteria if c not in suite], suite
