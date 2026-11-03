@@ -20,7 +20,7 @@ from harness.events import ChatEvent
 from harness.llm.base import ChatResponse, LLMClient, ToolCall
 from harness.plan import PLAN_FILENAME
 from harness.plan import Plan, Step, request_commands
-from harness.plan_runner import _phase_check_notes, _request_command_note
+from harness.plan_runner import _request_command_note
 from harness.story_runner import STORY_NUDGES
 from home_tmp import setUpModule, tearDownModule  # noqa: F401
 
@@ -28,8 +28,6 @@ PY = shlex.quote(sys.executable)
 CALC_WRONG = "def add(a, b):\n    return 0\n"
 CALC_RIGHT = "def add(a, b):\n    return a + b\n"
 CALC_SUB = CALC_RIGHT + "\n\ndef sub(a, b):\n    return a - b\n"
-ADD_OK = f"{PY} -c \"from calc import add; assert add(2, 3) == 5\""
-SUB_OK = f"{PY} -c \"from calc import sub; assert sub(5, 3) == 2\""
 REPORT = "## What exists now\ncalc.add(a, b) adds."
 
 
@@ -59,11 +57,6 @@ def criterion(text, given, value, covers=None):
     public functions, `value` the result it must give."""
     return {"behaviour": text, "examples": [{"given": given, "expect": f"`{value}`"}],
             **({"covers": covers} if covers else {})}
-
-
-def legacy(text, check, covers=None):
-    """A criterion of an older plan: a shell check, no examples."""
-    return {"text": text, "check": check, **({"covers": covers} if covers else {})}
 
 
 ADD = criterion("add() adds", "add(2, 3)", 5, ["R1"])
@@ -417,7 +410,7 @@ class Writer(Base):
         self.assertTrue(self.h.plan.story_sets[1].approved)
 
     def test_approve_once_does_not_ask(self):
-        self.h.stories_approve = "once"
+        self.h.stories_approve = "auto"
         self.run_plan(list(HAPPY))
         self.assertIsNone(self.h.plan)
         self.assertFalse(any("Run these" in q for q in self.questions))
@@ -565,12 +558,146 @@ class Retire(Base):
             ChatResponse(content="stop", done_reason="stop")])
         self.assertTrue(self.tool_results("nothing to retire: this pass writes the phase's whole set"))
         # an unknown or finished story cannot be retired by a later pass
-        self.h._writing = {"phase": 1, "adds": True, "replaces": [], "append": True,
+        self.h._writing = {"phase": 1, "amend": {"replaces": []}, "replaces": [],
                            "base": self.h.plan.story_sets[1].stories if self.h.plan else []}
         if self.h.plan:
             self.assertIn("only pending or failed", self.h._take_replaces(self.h._writing, ["S1"]))
             self.assertIn("not a story of this phase", self.h._take_replaces(self.h._writing, ["S9"]))
         self.h._writing = None
+
+
+class Resume(Base):
+    """An adding pass whose draft the user sent back, then stopped: /plan
+    resume goes on with that pass, and the phase's finished stories stay."""
+
+    def test_a_re_split_sent_back_and_stopped_resumes_with_the_done_stories(self):
+        self.answers = ["y", "y", "make it smaller", "y"]
+        wrong = {**DOC_ADD, "acceptance": [criterion("two and two", "add(2, 2)", 5)]}   # cannot pass
+        doc = {**DOC_ADD, "id": "S3"}
+        self.run_plan([
+            *write_set(FIX_ADD, wrong),
+            call("write_file", path="calc.py", content=CALC_RIGHT),  # S1
+            call("complete_story", summary="add works"),
+            *give_up(),                                              # S2 fails: re-split
+            *write_set(doc),                                         # sent back with feedback
+            *give_up()])                                             # the writer stops
+        self.assertIsNotNone(self.h.plan.story_sets[1].amend)
+        ScriptedClient.script = [*write_set(doc), call("complete_story", summary="documented"),
+                                 ChatResponse(content="stop", done_reason="stop")]
+        self.h.send("go on")
+        sset = self.h.plan.story_sets[1]
+        self.assertEqual([(s.id, s.status) for s in sset.stories],
+                         [("S1", "done"), ("S2", "replaced"), ("S3", "done")])
+        self.assertEqual(sset.get("S1").delivered, "add works")
+        brief = self.writer_requests()[-2]["messages"][1]["content"]
+        self.assertIn("Story S2 (Document add()) failed", brief)
+        self.assertIn("## [x] S1 — Make add() add", brief)
+        self.assertNotIn("[ ] S3", brief)                        # the unapproved draft is not shown
+
+    def test_a_fix_story_may_not_depend_on_the_story_it_unblocks(self):
+        fix = {**Defects.FIX, "depends_on": ["S1"]}
+        self.run_plan([
+            *write_set(FIX_ADD),
+            call("report_defect", file="calc.py", problem="add() returns 0"),
+            *write_set(fix),                                          # refused: a cycle
+            call("plan_stories", outline=[{"id": "S2", "title": fix["title"]}]),
+            call("write_story", story=Defects.FIX),
+            call("finish_stories"),
+            call("write_file", path="calc.py", content=CALC_RIGHT),   # S2
+            call("complete_story", summary="add() fixed"),
+            call("complete_story", summary="add() works now"),        # S1 again
+            ChatResponse(content="stop", done_reason="stop")])
+        results = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                   if m.get("role") == "tool" and m.get("name") == "finish_stories"]
+        self.assertIn("dependency cycle", results[0])
+        sset = self.h.plan.story_sets[1]
+        self.assertEqual([(s.id, s.status) for s in sset.stories], [("S1", "done"), ("S2", "done")])
+        self.assertEqual(sset.get("S1").depends_on, ["S2"])
+
+    def test_the_writer_drops_test_runs_and_gets_value_advice(self):
+        suite = {"behaviour": "the unit tests pass", "covers": ["R1"],
+                 "examples": [{"given": "python3 -m unittest", "expect": "exit code `0`"}]}
+        vague = {"behaviour": "add() is documented", "examples": [{"given": "help(add)",
+                                                                  "expect": "a description"}]}
+        story = {**FIX_ADD, "acceptance": [ADD, suite, vague]}
+        self.run_plan([*write_set(story), ChatResponse(content="stop", done_reason="stop")],
+                      request="make calc work; `python3 -m unittest` must pass")
+        stored = next(m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                      if m.get("role") == "tool" and m.get("name") == "write_story")
+        self.assertIn("Stored S1", stored)
+        self.assertIn("Dropped \"the unit tests pass\": it only runs the tests", stored)
+        self.assertIn("no exact value in \"a description\"", stored)
+        self.assertEqual([c.text for c in self.h.plan.story_sets[1].get("S1").acceptance],
+                         ["add() adds", "add() is documented"])
+
+    def test_the_gate_verifier_has_no_not_yet(self):
+        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
+        briefs = [r["messages"][1]["content"] for r in self.verifier_requests()]
+        story_brief = next(b for b in briefs if b.startswith("# Verify P1.S1"))
+        gate_brief = next(b for b in briefs if b.startswith("# Verify phase 1"))
+        self.assertIn("give it `not_yet` at once", story_brief)
+        self.assertIn("This is the end of the phase", gate_brief)
+        self.assertNotIn("give it `not_yet`", gate_brief)
+
+    def test_an_apostrophe_is_not_a_quote(self):
+        from harness.stories import Criterion, criterion_problems
+        from harness.story_runner import expected_values
+        c = Criterion(text="arrivals are announced", examples=[{
+            "given": "Ann sends `go north`",
+            "expect": "Ann's reply names `Hall` and Bob's next poll has `Ann arrives`"}])
+        self.assertEqual(expected_values(c), ["Hall", "Ann arrives"])
+        self.assertEqual(expected_values(Criterion(text="x", examples=[
+            {"given": "a", "expect": "it says 'done'"}])), ["done"])
+        from harness.stories import criterion_notes
+        vague = Criterion(text="x", examples=[{"given": "a", "expect": "Ann's and Bob's lists"}])
+        self.assertEqual(criterion_problems(vague), [])
+        self.assertTrue(any("no exact value" in e for e in criterion_notes(vague)))
+
+
+class Revision(Base):
+    """A story writer's change to the later phases: checked like a written
+    phase, asked after the stories, and the requirements go with it."""
+
+    PLAN3 = {**PLAN_ARGS,
+             "steps": PLAN_ARGS["steps"] + [
+                 {"title": "Add mul", "details": "calc.py mul()", "outcome": "mul(2, 3) == 6",
+                  "acceptance": [criterion("multiplying works", "mul(2, 3)", 6)], "files": ["calc.py"]}],
+             "requirements": PLAN_ARGS["requirements"] + [{"id": "R3", "text": "mul(2, 3) returns 6",
+                                                            "phase": 3}]}
+    MERGED = {"title": "Add sub and mul", "details": "calc.py sub() and mul()",
+              "outcome": "sub and mul work", "files": ["calc.py"],
+              "acceptance": [criterion("subtracting works", "sub(3, 1)", 2),
+                             criterion("multiplying works", "mul(2, 3)", 6)]}
+
+    def test_a_revision_is_checked_and_its_requirements_move(self):
+        bad = {"reason": "sub and mul belong together", "phases": [{"title": "Add sub and mul"}]}
+        good = {"reason": "sub and mul belong together", "phases": [self.MERGED]}
+        self.run_plan([*write_set(FIX_ADD, revision=bad),
+                       call("finish_stories", phase_revision=good),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")], plan=self.PLAN3)
+        refusals = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                    if m.get("role") == "tool" and m.get("name") == "finish_stories"]
+        self.assertIn("phase_revision needs changes:\n- phase 2: missing details, outcome, acceptance",
+                      refusals[0])
+        # the stories were asked first, then the revision
+        self.assertTrue(self.questions[1].startswith("Run these 1 story for phase 1?"))
+        self.assertIn("proposes changing the phases after phase 1", self.questions[2])
+        plan = self.h.plan
+        self.assertEqual([s.title for s in plan.steps], ["Fix add", "Add sub and mul"])
+        self.assertEqual({r["id"]: r["phase"] for r in plan.requirements}, {"R1": 1, "R2": 2, "R3": 2})
+        self.assertTrue(any("R3 now belongs to phase 2" in t for t in self.system_lines()))
+
+    def test_a_declined_revision_keeps_the_phases(self):
+        good = {"reason": "merge", "phases": [self.MERGED]}
+        self.answers = ["y", "y", "n"]
+        self.run_plan([*write_set(FIX_ADD, revision=good),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       ChatResponse(content="stop", done_reason="stop")], plan=self.PLAN3)
+        self.assertEqual(len(self.h.plan.steps), 3)
+        self.assertEqual(self.h.plan.requirements[2]["phase"], 3)
 
 
 RUN2_REQUEST = ("Build a small MUD in Python 3, stdlib only. … Commands: look, go/n/s/e/w, say, who, "
@@ -618,7 +745,8 @@ class Requirements(Base):
                                          for i in range(1, 6)])
         from harness.stories import Criterion, Story, StorySet
         blanket = Story(id="S1", title="t", acceptance=[
-            Criterion("parse 'go north'", "true", [f"R{i}" for i in range(1, 6)])])
+            Criterion("parse 'go north'", [f"R{i}" for i in range(1, 6)],
+                      examples=[{"given": "`go north`", "expect": "`ok`"}])])
         errors = self.h._coverage_problems(1, StorySet(phase=1, stories=[blanket]))
         self.assertTrue(any("covers 5 requirements" in e for e in errors))
 
@@ -630,6 +758,33 @@ class Requirements(Base):
         self.assertIn("not proven by a passing acceptance test:\n- R2: sub(5, 3) returns 2", report)
         self.assertEqual(self.h._phase_checks(self.h.plan.steps[0], sset),
                          (True, "1 expectation(s) verified\n2 acceptance test(s) still pass"))
+
+    def test_a_test_suite_requirement_is_proven_by_the_test_command(self):
+        # run 7: "Unit tests for parser and logic pass" — the last gate's command proves it
+        self.h.plan = Plan(title="t", request="make calc work; python3 -m unittest must pass.",
+                           kind="stories", steps=[Step(title="a"), Step(title="b")],
+                           requirements=[{"id": "R1", "text": "add(2, 3) returns 5", "phase": 1},
+                                         {"id": "R2", "text": "Unit tests for calc pass", "phase": 1}])
+        self.assertEqual(self.h._suite_proofs(), {"R2": "python3 -m unittest"})
+        self.assertEqual([r["id"] for r in self.h._due_requirements(1)], ["R1"])
+        self.assertEqual([r["id"] for r in self.h._requirement_gaps(3)], ["R1"])
+        self.assertIn("- · R2 Unit tests for calc pass — `python3 -m unittest`, run at the last "
+                      "phase's gate", self.h._requirement_table(1))
+        brief = self.h._writer_brief(0)
+        self.assertIn("R2 (Unit tests for calc pass) is proven by `python3 -m unittest`", brief)
+        self.assertNotIn("- R2:", brief)
+
+    def test_a_test_suite_requirement_without_a_named_command(self):
+        # "with unit tests using unittest" names no command: the default one proves it
+        request = "A stdlib-only calc library, with unit tests using unittest."
+        self.h.plan = Plan(title="t", request=request, kind="stories", interfaces=["Library: `import calc`"],
+                           steps=[Step(title="a")],
+                           requirements=[{"id": "R1", "text": "Unit tests for calc pass", "phase": 1}])
+        self.assertEqual(self.h._suite_proofs(), {"R1": "python3 -m unittest discover -s tests"})
+        self.assertEqual(self.h._due_requirements(1), [])
+        from harness.plan import default_test_command
+        self.assertEqual(default_test_command("a node tool", ["CLI: `node cli.js`"]), "npm test")
+        self.assertEqual(default_test_command("a Go service", ["Service: `go run .`"]), "")
 
     def test_the_last_gate_runs_the_requests_command(self):
         self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
@@ -696,8 +851,9 @@ class Defects(Base):
 
 
 class OwnTests(Base):
-    """Run 2's P2.S1 put its tests in a file its check never ran, and a stray
-    root test_server.py stayed behind."""
+    """The test files a story writes are run when it submits (run 2's P2.S1
+    put its tests where nothing ran them), and a stray root test_server.py is
+    refused."""
 
     FAILING = "import unittest\n\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.fail('no')\n"
     PASSING = "import unittest\n\nclass T(unittest.TestCase):\n    def test_x(self):\n        pass\n"
@@ -706,7 +862,7 @@ class OwnTests(Base):
         return [m["content"] for r in ScriptedClient.requests for m in r["messages"]
                 if m.get("role") == "tool" and m.get("name") == "complete_story"]
 
-    def test_a_new_test_file_no_check_runs_is_run_too(self):
+    def test_a_new_test_file_is_run(self):
         self.run_plan([
             *write_set(FIX_ADD),
             call("write_file", path="calc.py", content=CALC_RIGHT),
@@ -733,9 +889,8 @@ class OwnTests(Base):
 
 
 class Run3(Base):
-    """What run 3 ran into: a check that ran a test file nobody wrote, a server
-    left running after its story, a check no code could pass, a failed story's
-    edits, weak phase checks, and no hostile-path requirement."""
+    """What run 3 ran into: a server left running after its story, an
+    expectation no code could meet, and a failed story's edits."""
 
     def tool_results(self, name):
         seen, out = set(), []
@@ -745,19 +900,6 @@ class Run3(Base):
                     if m["content"] not in out:
                         out.append(m["content"])
         return out
-
-    def test_a_legacy_check_file_that_does_not_exist_is_named(self):
-        # an older plan's criterion: a check command that runs a test file
-        self.run_plan(list(HAPPY[:5]) + [ChatResponse(content="stop", done_reason="stop")])
-        from harness.stories import Story
-        story = Story.from_dict({**FIX_ADD, "id": "S9", "files": ["calc.py", "tests/test_more.py"],
-                                 "acceptance": [legacy("more tests pass",
-                                                       f"{PY} -m unittest tests/test_more.py")]})
-        brief = self.h._story_brief(1, story)
-        self.assertIn("Its checks run tests/test_more.py, which does not exist yet", brief)
-        self.assertIn("run its acceptance checks, then call complete_story", brief)
-        failures, _passed, _results = self.h._run_story_checks(story, [])
-        self.assertIn("tests/test_more.py does not exist — this check runs it", failures[0])
 
     def test_a_storys_background_command_is_stopped_when_it_ends(self):
         self.run_plan([*write_set(FIX_ADD),
@@ -800,53 +942,51 @@ class Run3(Base):
         self.assertIn("Its changes are still in the code: calc.py.", brief)
         self.assertIn("undo what is wrong", brief)
 
-    def test_weak_phase_checks_are_refused(self):
-        self.h.set_mode("plan")
-        self.h.set_plan_kind("stories")
-        self.h._plan_asked = 1
-        weak = {**PLAN_ARGS, "steps": [
-            {**PLAN_ARGS["steps"][0], "checks": ["python3 -c \"print(open('calc.py').read())\""]},
-            {**PLAN_ARGS["steps"][1], "checks": ["python3 server.py & sleep 2 && curl localhost:8000"]}]}
-        err = self.h._handle_create_plan(weak)
-        self.assertIn("the plan needs these changes", err)
-        self.assertIn("phase 1:", err)
-        self.assertIn("only prints", err)
-        self.assertIn("in the background (&)", err)
-
-    def test_a_file_server_needs_a_hostile_path_requirement(self):
-        self.h.set_mode("plan")
-        self.h.set_plan_kind("stories")
-        self.h._plan_asked = 1
-        self.h._plan_first_request = RUN2_REQUEST.replace(
-            "Build a small MUD", "server.py serves one HTML page via http.server. Build a small MUD")
-        err = self.h._handle_create_plan(dict(PLAN_ARGS))
-        self.assertIn("GET /../server.py → 404", err)
-        ok = {**PLAN_ARGS, "requirements": PLAN_ARGS["requirements"] + [
-            {"id": "R3", "text": "the server serves only files inside static/ (GET /../server.py → 404)",
-             "phase": 2}]}
-        self.assertNotIn("ERROR", self.h._handle_create_plan(ok))
-
 
 class Verifier(Base):
     """The independent verifier pass: verdicts held against saved tests, an
     unclear expectation corrected by the writer, the gate's regression run."""
 
-    def test_an_unclear_expectation_is_corrected_by_the_writer(self):
+    def test_an_unclear_expectation_is_deferred_to_the_gate(self):
+        # it says nothing against the work: the story is not rewritten
         ScriptedClient.verifier = [call("finish_verification", results=[
             {"expectation": 1, "verdict": "unclear",
              "evidence": "the story asks for add() but the example calls plus()"}])]
-        fixed = {**FIX_ADD, "id": "S2", "title": "Make add() add (clear)"}
         self.run_plan([*write_set(FIX_ADD),
                        call("write_file", path="calc.py", content=CALC_RIGHT),
                        call("complete_story", summary="add works"),
-                       *write_set(fixed),
-                       call("complete_story", summary="add works"),
                        ChatResponse(content="stop", done_reason="stop")])
         sset = self.h.plan.story_sets[1]
-        self.assertEqual([(s.id, s.status) for s in sset.stories], [("S1", "replaced"), ("S2", "done")])
-        brief = self.writer_requests()[1]["messages"][1]["content"]
-        self.assertIn("cannot be verified as written: the story asks for add() but the example "
-                      "calls plus()", brief)
+        self.assertEqual([(s.id, s.status, s.attempts) for s in sset.stories], [("S1", "done", 0)])
+        self.assertIn("1 of them deferred by stories", sset.gate["output"])
+        self.assertTrue(sset.get("S1").acceptance[0].proven)
+        self.assertEqual(len(self.writer_requests()), 2)     # phase 2's writer: no rewrite
+
+    def test_an_unclear_expectation_at_the_gate_is_restated_and_retired(self):
+        unclear = {"verdict": "unclear", "evidence": "the example calls plus()"}
+        ScriptedClient.verifier = [
+            call("finish_verification", results=[{"expectation": 1, **unclear}]),    # S1
+            call("finish_verification", results=[{"expectation": k, **unclear}       # the gate
+                                                 for k in (1, 2)])]
+        restated = {**FIX_ADD, "id": "S2", "title": "Restate add()",
+                    "acceptance": [criterion("two and three make five", "add(2, 3)", 5, ["R1"])]}
+        self.run_plan([*write_set(FIX_ADD),
+                       call("write_file", path="calc.py", content=CALC_RIGHT),
+                       call("complete_story", summary="add works"),
+                       call("plan_stories", outline=[{"id": "S2", "title": restated["title"]}]),
+                       call("write_story", story=restated),
+                       call("finish_stories", retire=[
+                           {"expectation": "phase 1.1", "why": "restated in S2"},
+                           {"expectation": "P1.S1.1", "why": "restated in S2"}]),
+                       call("complete_story", summary="nothing to change"),
+                       ChatResponse(content="stop", done_reason="stop")])
+        fix = self.writer_requests()[1]["messages"][1]["content"]
+        self.assertIn("\"adding works\" (phase 1.1) cannot be verified as written", fix)
+        self.assertIn("Restate each as an expectation of a new story", fix)
+        sset = self.h.plan.story_sets[1]
+        self.assertEqual([(s.id, s.status) for s in sset.stories], [("S1", "done"), ("S2", "done")])
+        self.assertTrue(sset.get("S1").acceptance[0].retired)
+        self.assertTrue(sset.gate["passed"])
 
     # Run 4: the verifier of the engine story ran out of turns (the server it
     # had to test through came in a later story), and the harness had a good
@@ -919,13 +1059,6 @@ class Verifier(Base):
         self.h._plan_asked = 1
         no_ui = {k: v for k, v in PLAN_ARGS.items() if k != "interfaces"}
         self.assertIn("name how the product is used in 'interfaces'", self.h._handle_create_plan(no_ui))
-        vague = {**PLAN_ARGS, "steps": [
-            {**PLAN_ARGS["steps"][0], "acceptance": [
-                {"behaviour": "adding works", "examples": [{"given": "add two numbers",
-                                                            "expect": "the sum comes back"}]}]},
-            PLAN_ARGS["steps"][1]]}
-        self.assertIn("the verifier cannot check \"the sum comes back\"",
-                      self.h._handle_create_plan(vague))
         checks_only = {**PLAN_ARGS, "steps": [{**PLAN_ARGS["steps"][0], "acceptance": [],
                                                "checks": ["true"]}, PLAN_ARGS["steps"][1]]}
         self.assertIn("phase 1: has checks, details, files, outcome, title — missing acceptance",
@@ -936,7 +1069,8 @@ class Verifier(Base):
                       self.h._handle_create_plan(lost))
 
     def test_a_story_with_check_commands_is_refused(self):
-        self.run_plan([*write_set({**FIX_ADD, "acceptance": [legacy("adds", "true", ["R1"])]}),
+        self.run_plan([*write_set({**FIX_ADD, "acceptance": [{"text": "adds", "check": "true",
+                                                              "covers": ["R1"]}]}),
                        ChatResponse(content="stop", done_reason="stop")])
         results = {m["content"] for r in ScriptedClient.requests for m in r["messages"]
                    if m.get("role") == "tool" and m.get("name") == "write_story"}
@@ -988,7 +1122,7 @@ class Run6Fixes(Base):
             call("complete_story", summary="nothing to change"),
             ChatResponse(content="stop", done_reason="stop")])
         refused = self.tool_results("finish_stories")[0]
-        self.assertIn("P9.S1.1 is not a saved acceptance test", refused)
+        self.assertIn("P9.S1.1 is not an expectation that can be retired", refused)
         self.assertIn("P1.S1.1", refused)                            # the ids it can retire
         p1 = self.h.plan.story_sets[1].get("S1").acceptance[0]
         self.assertEqual(p1.retired["by"], "phase 2")
@@ -1035,21 +1169,30 @@ class Run6Fixes(Base):
                          [4, 1])
         self.assertTrue(self.h.plan.story_sets[1].gate["passed"])
 
-    def test_a_gate_verifier_that_runs_out_does_not_ask_for_test_stories(self):
+    def test_a_gate_verifier_that_runs_out_verifies_again_and_writes_no_stories(self):
         idle = [ChatResponse(content="Looking around.", done_reason="stop")] * (STORY_NUDGES + 1)
-        # the story's two passes (deferred), the gate batch's two, one alone for each
-        ScriptedClient.verifier = idle * 6
+        # the story's two passes (deferred); at the gate the batch's one and one
+        # alone for each, twice: no story can help a verifier that ran out
+        ScriptedClient.verifier = idle * 8
         self.run_plan([*write_set(FIX_ADD),
                        call("write_file", path="calc.py", content=CALC_RIGHT),
                        call("complete_story", summary="add works"),
                        ChatResponse(content="stop", done_reason="stop")])
         lines = self.system_lines()
         self.assertTrue(any("(alone" in t for t in lines))
-        self.assertTrue(any("2 not verified (the verifier ran out of turns)" in t for t in lines))
-        fix = self.writer_requests()[-1]["messages"][1]["content"]
-        self.assertIn("The verifier ran out of turns before it got a test working for these", fix)
-        self.assertIn("Never write a story whose only work is testing", fix)
-        self.assertNotIn("cannot be verified as written", fix)
+        self.assertEqual(sum("2 not verified (the verifier ran out of turns)" in t for t in lines), 2)
+        self.assertTrue(any("the verifier ran out of turns twice" in t for t in lines))
+        self.assertEqual(len(self.writer_requests()), 1)     # no fix pass
+        self.assertEqual(self.h._verify_bonus, 0)
+
+    def test_a_regression_of_replaced_behaviour_needs_only_retire(self):
+        retire = [{"expectation": "P1.S1.1", "why": "phase 2 made add() multiply on purpose"},
+                  {"expectation": "phase 1.1", "why": "the same"}]
+        self.run_plan(list(REGRESSION) + [call("finish_stories", retire=retire),
+                                          ChatResponse(content="stop", done_reason="stop")])
+        self.assertTrue(any(l.startswith("Retired P1.S1.1") for l in self.system_lines()))
+        self.assertEqual([s.id for s in self.h.plan.story_sets[2].stories], ["S1"])
+        self.assertTrue(self.h.plan.story_sets[1].get("S1").acceptance[0].retired)
 
 
 class Run4Fixes(Base):
@@ -1107,7 +1250,7 @@ class Run4Fixes(Base):
                        ChatResponse(content="stop", done_reason="stop")],
                       request="make calc work; `python3 -m unittest` must pass")
         brief = self.story_requests()[0]["messages"][1]["content"]
-        self.assertIn("## How the project's tests run\nThe user runs `python3 -m unittest`", brief)
+        self.assertIn("## How the project's tests run\nThe last phase's gate runs `python3 -m unittest`", brief)
         refusals = [m["content"] for r in ScriptedClient.requests for m in r["messages"]
                     if m.get("role") == "tool" and "finds no tests" in (m.get("content") or "")]
         self.assertTrue(refusals)
@@ -1151,6 +1294,10 @@ OUTLINE = [{"title": st["title"], "outcome": st["outcome"]} for st in PLAN_ARGS[
 PHASE1, PHASE2 = ({k: v for k, v in st.items() if k != "title"} for st in PLAN_ARGS["steps"])
 VAGUE = {**PHASE2, "acceptance": [{"behaviour": "sub works",
                                    "examples": [{"given": "sub two numbers", "expect": "the difference"}]}]}
+CODED = {**PHASE2, "acceptance": [{"behaviour": "sub works",                 # refused: code
+                                   "examples": [{"given": "assert sub(3, 1) == 2", "expect": "`2`"}]}]}
+SLICE = {**PHASE1, "acceptance": [{"behaviour": "adding works",              # not through an interface
+                                   "examples": [{"given": "the numbers 1 and 1", "expect": "`2`"}]}]}
 
 
 class PhaseByPhase(Base):
@@ -1219,13 +1366,28 @@ class PhaseByPhase(Base):
         self.assertTrue(any(r.startswith("ERROR: one phase per turn — phase 2 was not stored") for r in results))
         self.assertEqual(sorted(self.h._plan_draft["phases"]), [1])
 
-    def test_a_refused_phase_restarts_from_a_summary(self):
+    def test_a_first_refusal_is_answered_in_place(self):
+        # run 7 cleared the context for every refusal, one missing requirement included
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            call("write_phase", phase=1, **PHASE1),
+                            call("write_phase", phase=2, **CODED),           # refused
+                            call("write_phase", phase=2, **PHASE2),
+                            call("finish_plan"),
+                            ChatResponse(content="stop", done_reason="stop")])
+        self.assertFalse(any("context cleared" in t for t in self.system_lines()))
+        self.assertTrue(any(m.get("role") == "tool" and m["content"].startswith(
+            "ERROR: the plan needs these changes") for r in ScriptedClient.requests
+            for m in r["messages"]))                                      # left in the context
+        self.assertIsNotNone(self.h.plan)
+
+    def test_a_second_refusal_in_a_row_restarts_from_a_summary(self):
         choice = call("ask_choice", question="Where should sub() live?",
                       options=["In calc.py (recommended)", "In a new module"])
         self.plan_in_steps([choice,
                             call("create_plan", **FRAME, steps=OUTLINE),
                             call("write_phase", phase=1, **PHASE1),
-                            call("write_phase", phase=2, **VAGUE),           # refused
+                            call("write_phase", phase=2, **CODED),           # refused in place
+                            call("write_phase", phase=2, **CODED),           # refused: restart
                             call("write_phase", phase=2, **PHASE2),
                             call("finish_plan"),
                             ChatResponse(content="stop", done_reason="stop")], answers=["1"])
@@ -1236,7 +1398,7 @@ class PhaseByPhase(Base):
         for part in ("## The user's request\nmake calc work",
                      "## Decided with the user\n- Where should sub() live? → option 1",
                      "- ✓ 1. Fix add — kept", "- ✗ 2. Add sub — refused, write it again",
-                     "## Why it was refused\n- phase 2: \"sub works\": the verifier cannot check",
+                     "## Why it was refused\n- phase 2: \"sub works\" contains code (assert…)",
                      "Next: write phase 2 — Add sub — with write_phase",
                      "do NOT call create_plan again"):
             self.assertIn(part, summary)
@@ -1278,52 +1440,147 @@ class PhaseByPhase(Base):
         self.assertEqual(self.h.plan.steps[0].title, "Fix add")
 
     def test_a_heuristic_check_gives_way_after_two_refusals(self):
-        # run 6: "Server restricts file access to the static/ directory" was not
-        # recognised as the traversal requirement, five restarts in a row
+        # run 6c: four of six refusals asked for a backticked value the verifier could test anyway
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = "make calc work"
+        self.assertIn("Outline stored", self.h._handle_create_plan({**FRAME, "steps": OUTLINE}))
+        for _ in range(2):
+            self.assertIn("make it a thin end-to-end slice",
+                          self.h._handle_write_phase({"phase": 1, **SLICE}))
+        self.assertIn("Stored phase 1", self.h._handle_write_phase({"phase": 1, **SLICE}))
+        self.assertTrue(any("accepted although the check still says" in t for t in self.system_lines()))
+
+    def test_a_heuristic_counts_only_refusals_in_a_row(self):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = "make calc work"
+        self.h._handle_create_plan({**FRAME, "steps": OUTLINE})
+        slice_rule = "make it a thin end-to-end slice"
+        refusal = [f"phase 1: {slice_rule} the user can try"]
+        self.assertEqual(self.h._yield_heuristics(refusal, {"phase 1"}), refusal)
+        self.assertEqual(self.h._yield_heuristics(refusal, {"phase 1"}), refusal)
+        self.assertEqual(self.h._yield_heuristics([], {"phase 1"}), [])            # fixed: starts over
+        self.assertEqual(self.h._yield_heuristics(refusal, {"phase 2"}), refusal)  # another scope
+        self.assertEqual(self.h._yield_heuristics(refusal, {"phase 1"}), refusal)  # not the third time
+
+    def test_reordered_phases_keep_their_own_text(self):
+        swapped = list(reversed(OUTLINE))
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            call("write_phase", phase=1, **PHASE1),
+                            call("write_phase", phase=2, **PHASE2),
+                            call("create_plan", **FRAME, steps=swapped),   # all kept: submitted
+                            ChatResponse(content="stop", done_reason="stop")], answers=["n"])
+        steps = self.h.plan.steps
+        self.assertEqual([(s.title, s.details) for s in steps],
+                         [("Add sub", PHASE2["details"]), ("Fix add", PHASE1["details"])])
+
+    def test_a_refused_requirement_says_to_send_create_plan_again(self):
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = "make calc work"
+        self.h._handle_create_plan({**FRAME, "steps": OUTLINE})
+        self.h._handle_write_phase({"phase": 1, **PHASE1})
+        self.h._handle_create_plan({**FRAME, "requirements": [], "steps": OUTLINE})
+        self.assertNotIn("do NOT call create_plan", self.h._plan_summary("a stories plan needs 'requirements'"))
+        self.h._handle_create_plan({**FRAME, "steps": OUTLINE})
+        self.assertIn("do NOT call create_plan", self.h._plan_summary("phase 2: missing acceptance"))
+
+    def test_unit_tests_using_unittest_need_no_expectation(self):
+        # run 7's deadlock without a command in the request: the default command proves it
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = "make calc work, with unit tests using unittest."
+        reqs = FRAME["requirements"] + [{"id": "R9", "text": "Unit tests for calc pass", "phase": 2}]
+        out = self.h._handle_create_plan({**FRAME, "requirements": reqs, "steps": OUTLINE})
+        self.assertIn("R9 is proven by `python3 -m unittest discover -s tests`", out)
+        suite = {"behaviour": "all unit tests pass", "covers": ["R9"],
+                 "examples": [{"given": "python3 -m unittest", "expect": "exit code `0`"}]}
+        out = self.h._handle_write_phase({"phase": 2, **{**PHASE2, "acceptance":
+                                                         PHASE2["acceptance"] + [suite]}})
+        self.assertIn("Stored phase 2", out)
+        self.assertIn("Dropped phase 2's expectation", out)
+
+    def test_a_file_server_request_gets_no_requirement_of_the_harness(self):
+        # the confinement requirement is the planner's business, as the prompt says
         self.h.set_mode("plan")
         self.h.set_plan_kind("stories")
         self.h._plan_asked = 1
         self.h._plan_first_request = "make calc work; server.py serves one HTML page via http.server"
-        args = {**FRAME, "steps": PLAN_ARGS["steps"]}
-        for _ in range(2):
-            self.assertIn("serves only files inside its folder", self.h._handle_create_plan(args))
-        self.assertNotIn("ERROR", self.h._handle_create_plan(args))
-        self.assertTrue(any("accepted although the check still says" in t for t in self.system_lines()))
-        from harness.plan_runner import _RX_HOSTILE
-        self.assertTrue(_RX_HOSTILE.search("Server restricts file access to the static/ directory"))
+        out = self.h._handle_create_plan({**FRAME, "steps": OUTLINE})
+        self.assertIn("Outline stored", out)
+        self.assertEqual(self.h._plan_draft["frame"]["requirements"], FRAME["requirements"])
+
+    def test_a_test_suite_requirement_needs_no_expectation(self):
+        # run 7: "Unit tests for parser and logic pass" was accepted, then each
+        # expectation for it refused, at phase 1 and again at phase 3
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = "make calc work; python -m unittest must pass"
+        reqs = FRAME["requirements"] + [{"id": "R9", "text": "Unit tests for calc pass", "phase": 2}]
+        out = self.h._handle_create_plan({**FRAME, "requirements": reqs, "steps": OUTLINE})
+        self.assertIn("R9 is proven by `python -m unittest`, which the harness runs at the last "
+                      "phase's gate: give it no expected behaviour", out)
+        suite = {"behaviour": "all unit tests pass", "covers": ["R9"],
+                 "examples": [{"given": "python -m unittest", "expect": "exit code `0`"}]}
+        out = self.h._handle_write_phase({"phase": 2, **{**PHASE2, "acceptance":
+                                                         PHASE2["acceptance"] + [suite]}})
+        self.assertIn("Stored phase 2", out)
+        self.assertIn("Dropped phase 2's expectation \"all unit tests pass\"", out)
+        self.assertEqual([c["text"] for c in self.h._plan_draft["phases"][2]["acceptance"]],
+                         ["subtracting works"])
+        # alone it is still refused: the phase needs a behaviour the user sees
+        self.h._plan_draft["phase_turn"] = None                      # a new turn
+        out = self.h._handle_write_phase({"phase": 1, **{**PHASE1, "acceptance": [suite]}})
+        self.assertIn("running the tests is not a behaviour", out)
+
+    def test_a_refused_first_phase_says_the_outline_is_kept(self):
+        # run 7: phase 1 refused, nothing kept yet, and the planner re-sent its outline
+        self.plan_in_steps([call("create_plan", **FRAME, steps=OUTLINE),
+                            call("write_phase", phase=1, **{**PHASE1, "acceptance": []}),
+                            call("write_phase", phase=1, **{**PHASE1, "acceptance": []}),
+                            ChatResponse(content="stop", done_reason="stop")])
+        summary = next(m["content"] for r in ScriptedClient.requests for m in r["messages"]
+                       if "# Planning, attempt 2" in (m.get("content") or ""))
+        self.assertIn("do NOT call create_plan again", summary)
+
+    def test_a_vague_value_is_advice_not_a_refusal(self):
+        # run 6c: four of six refusals asked for a backticked value the verifier could test anyway
+        self.h.set_mode("plan")
+        self.h.set_plan_kind("stories")
+        self.h._plan_asked = 1
+        self.h._plan_first_request = "make calc work"
+        self.h._handle_create_plan({**FRAME, "steps": OUTLINE})
+        out = self.h._handle_write_phase({"phase": 2, **VAGUE})
+        self.assertIn("Stored phase 2", out)
+        self.assertIn("no exact value in \"the difference\"", out)
 
     def test_every_problem_in_one_refusal(self):
         self.h.set_mode("plan")
         self.h.set_plan_kind("stories")
         self.h._plan_asked = 1
         bad = {**FRAME, "interfaces": [], "steps": [{**PLAN_ARGS["steps"][0], "acceptance": []},
-                                                    {**PLAN_ARGS["steps"][1], **VAGUE}]}
+                                                    {**PLAN_ARGS["steps"][1], **CODED}]}
         err = self.h._handle_create_plan(bad)
         for part in ("name how the product is used in 'interfaces'", "phase 1: has ",
-                     "missing acceptance", "phase 2: \"sub works\": the verifier cannot check",
+                     "missing acceptance", "phase 2: \"sub works\" contains code",
                      "A valid phase looks like this:"):
             self.assertIn(part, err)
 
 class PhaseChecks(unittest.TestCase):
-    def test_weak_phase_checks_get_a_note(self):
-        suite = "python3 -m unittest discover tests"
-        steps = [Step(title="Engine", checks=[suite]), Step(title="Server", checks=[suite]),
-                 Step(title="Page", checks=["ls static/index.html && [ -s static/index.html ]"])]
-        note = _phase_check_notes(steps)
-        self.assertIn("phases 1 and 2 have the same checks", note)
-        self.assertIn("phase 3's checks only test that files exist", note)
-        self.assertEqual(_phase_check_notes([Step(title="a", checks=["python3 -m unittest t.a"]),
-                                             Step(title="b", checks=["python3 -m unittest t.b"])]), "")
-        # run 4: phases closed by expectations have no checks, so none are "the same"
-        self.assertEqual(_phase_check_notes([Step(title="a"), Step(title="b")]), "")
-
     def test_the_requests_own_command(self):
         self.assertEqual(request_commands(RUN2_REQUEST), ["python -m unittest"])
         self.assertEqual(request_commands("tests with pytest; `go test ./...` passes"), ["go test ./..."])
-        plan = Plan(title="MUD", request=RUN2_REQUEST,
-                    steps=[Step(title="a", checks=["python3 -m unittest tests/test_game.py"])])
+        from harness.stories import Criterion
+        plan = Plan(title="MUD", request=RUN2_REQUEST, steps=[Step(title="a")])
         self.assertIn("`python -m unittest` must pass", _request_command_note(plan))
-        plan.steps[0].checks.append("python -m unittest")
+        plan.steps[0].acceptance.append(Criterion("the tests pass", examples=[
+            {"given": "python -m unittest", "expect": "exit code `0`"}]))
         self.assertEqual(_request_command_note(plan), "")
 
     def test_requirements_round_trip(self):
@@ -1582,7 +1839,7 @@ class Commands(Base):
         self.assertIn("stories: the plan's steps are phases", self.cmd("/plan stories"))
         self.assertEqual(self.h.plan_kind, "stories")
         self.assertIn("run without asking", self.cmd("/plan stories approve once"))
-        self.assertEqual(session_mod.load_prefs()["stories_approve"], "once")
+        self.assertEqual(session_mod.load_prefs()["stories_approve"], "auto")   # once is auto
         self.assertIn("at most 12 turns", self.cmd("/plan stories cap 12"))
         self.assertEqual(session_mod.load_prefs()["stories_cap"], 12)
         self.assertTrue(self.cmd("/plan stories cap 2").startswith("ERROR"))

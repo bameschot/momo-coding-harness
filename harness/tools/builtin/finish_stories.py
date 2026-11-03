@@ -11,12 +11,21 @@ TOOL = Tool(
         "Submit the phase's stories once every story of the outline is written with write_story. "
         "The harness validates the set and returns what is wrong; fix it with write_story (or the "
         "outline with plan_stories), then call finish_stories again. The harness runs a story only "
-        "when its dependencies are done, and accepts it only when its acceptance checks pass.",
+        "when its dependencies are done, and an independent verifier tests its expectations. In a "
+        "re-split or fix pass that only needs to retire something, call it with `retire` and no "
+        "new stories.",
         {"phase_revision": {"type": "object",
                             "properties": {
                                 "reason": {"type": "string", "description": "What in the code shows the later phases are wrong"},
                                 "phases": {"type": "array", "items": PHASE,
-                                           "description": "The complete new list of phases after this one"}},
+                                           "description": "The complete new list of phases after this one"},
+                                "requirements": {"type": "array",
+                                                 "items": {"type": "object",
+                                                           "properties": {"id": {"type": "string"},
+                                                                          "phase": {"type": "integer"}},
+                                                           "required": ["id", "phase"]},
+                                                 "description": "The requirements whose phase changes with "
+                                                                "the new phases (R4 → phase 3)"}},
                             "required": ["reason", "phases"],
                             "description": "Optional: a change to the LATER phases, shown to the user with the stories "
                                            "and applied only if they approve it"},

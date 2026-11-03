@@ -8,7 +8,7 @@ from ..registry import Tool, tool_schema
 
 TOOL = Tool(
     tool_schema("report_defect",
-        "Use when this story's checks fail because of a bug in code an EARLIER story wrote, and "
+        "Use when this story cannot work because of a bug in code an EARLIER story wrote, and "
         "the fix is more than a few lines (fix a small one yourself and say so in complete_story's "
         "summary), or when one of this story's own acceptance criteria is wrong (pass 'criterion'). The "
         "harness has a separate story written that fixes the bug (or a corrected story), then runs "
@@ -17,7 +17,7 @@ TOOL = Tool(
          "problem":  {"type": "string",
                       "description": "What is wrong there and what it breaks, e.g. 'add_player() never "
                                      "puts the player in a room, so say reaches no one'"},
-         "evidence": {"type": "string", "description": "The failing check output that shows it"},
+         "evidence": {"type": "string", "description": "The failing output that shows it"},
          "criterion": {"type": "string",
                        "description": "Only when the defect is in one of THIS story's acceptance "
                                       "criteria (it asks for something the story is not about, "

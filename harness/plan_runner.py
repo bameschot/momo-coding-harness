@@ -11,10 +11,10 @@ from . import tdd as tdd_mod
 from . import tools as tools_mod
 from .tools import registry
 from .events import ChatEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
-from .stories import check_problems, criterion_problems, exists_only
+from .stories import criterion_notes, criterion_problems, drop_suite_runs, library_modules
 from .plan import (ACCEPTANCE_TAG, PLAN_FILENAME, Plan, Step, delete_plan_file, read_plan_file,
                    request_commands, requirement_list,
-                   str_list, write_plan_file)
+                   str_list, suite_command, write_plan_file)
 
 
 def _now() -> str:
@@ -28,7 +28,6 @@ _TDD_TEXT_RETRIES = 2
 TDD_MAX_REFUSALS = 3   # gate refusals in a row before the user is asked
 
 _REQUEST_CHARS = 4_000     # the user's request kept on a plan (Plan.request)
-# A check made only of file tests (ls, test -f/-s, [ -s … ]) proves no behaviour.
 
 # /plan questions: the answer to a first create_plan made before any question.
 _ASK_FIRST = (
@@ -70,22 +69,20 @@ def _no_work(step: Step, test_command: str, last: bool) -> bool:
                 or (last and test_command in f"{step.title}\n{step.details}"))
 
 
-def _phase_check_notes(steps) -> str:
-    """A note on phase checks that prove little (shown with the plan, not a
-    refusal): two phases with the same checks (the story-mud plan's phase 2 could
-    pass on phase 1's tests alone), or a check that only tests that files exist."""
-    notes, seen = [], {}
-    for i, s in enumerate(steps, 1):
-        key = tuple(sorted(s.checks))
-        if not key:                     # a phase closed by expectations, not commands
-            continue
-        if key in seen:
-            notes.append(f"phases {seen[key]} and {i} have the same checks")
-        seen.setdefault(key, i)
-        if s.checks and all(exists_only(c) for c in s.checks):
-            notes.append(f"phase {i}'s checks only test that files exist")
-    return ("Note on the phase checks: " + "; ".join(notes)
-            + " — a phase passes these without doing its work.") if notes else ""
+def _top_level_commas(text: str) -> int:
+    """Commas outside brackets and backticks: "GET /state returns {room, exits,
+    items}" names one thing."""
+    depth, quoted, n = 0, False, 0
+    for ch in text:
+        if ch == "`":
+            quoted = not quoted
+        elif not quoted and ch in "([{":
+            depth += 1
+        elif not quoted and ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == "," and not quoted and not depth:
+            n += 1
+    return n
 
 
 def _requirement_problems(plan: Plan, raw) -> list[str]:
@@ -108,7 +105,7 @@ def _requirement_problems(plan: Plan, raw) -> list[str]:
         seen.add(r["id"])
         if not 1 <= r["phase"] <= n:
             errors.append(f"{r['id']}: phase must be 1–{n}")
-        if r["text"].count(",") >= 3:
+        if _top_level_commas(r["text"]) >= 3:
             # run 3's first R4: "Commands: look, go/n/s/e/w, say, who, take, …"
             errors.append(f"{r['id']} lists several things — one requirement per item")
     if isinstance(raw, list) and len(raw) != len(reqs):
@@ -120,50 +117,31 @@ def _requirement_problems(plan: Plan, raw) -> list[str]:
         # run 4a/4b: "Core game engine and parser" stood for nine commands
         errors.append(f"the request lists {', '.join(listed)}; give each its own requirement — "
                       f"none names {', '.join(missing)}")
-    if (_RX_SERVES_FILES.search(plan.request)
-            and not any(_RX_HOSTILE.search(r["text"]) for r in reqs)):
-        # run 2's server returned its own source for GET /../server.py; a
-        # prompt rule asking for that criterion did not land in run 3.
-        errors.append("the request has a server that serves files: add a requirement that it "
-                      "serves only files inside its folder (GET /../server.py → 404), in the "
-                      "phase that builds the server")
     return errors
 
-
-# A request for a server that serves files (pages, static files) …
-_RX_SERVES_FILES = re.compile(
-    r"(?is)(?:http\.server|HTTPServer|web\s*server|\bserver\b).{0,200}?"
-    r"(?:serves?|serving)\b.{0,60}?(?:\.html|page|static|files?)\b"
-    r"|(?:serves?|serving)\b.{0,60}?(?:\.html|page|static|files?)\b.{0,200}?"
-    r"(?:http\.server|HTTPServer|web\s*server)")
-# … needs a requirement for the hostile path.
-_RX_HOSTILE = re.compile(r"(?i)\.\./|travers|outside (?:the|its)|only files (?:in|inside|under|from)"
-                         r"|only serves?|serves? only|untrusted|hostile|escap"
-                         # run 6: "Server restricts file access to the static/ directory"
-                         r"|(?:restrict|limit|confin|block|prevent|den(?:y|ies)|forbid|refus|reject)\w*"
-                         r"\b.{0,40}\b(?:files?|paths?|access|director)")
 
 # Checks that read the planner's words, and can be wrong about them: the same
 # one refused twice in a row is dropped with a note (run 6 restarted five times
 # on "Server restricts file access to the static/ directory").
-_HEURISTIC = ("the request has a server that serves files", "the request lists ",
-              "make it a thin end-to-end slice",
-              # run 6c: four of six refusals asked for a backticked value in
-              # outputs like "the program exits"; the verifier can still test it
-              "the verifier cannot check")
+_HEURISTIC = ("the request lists ",
+              "make it a thin end-to-end slice")
 
 
 # "Commands: look, go/n/s/e/w, say (to players in the room), who, …": a list in
-# the request, every item of which is a requirement.
+# the request, every item of which is a requirement.  Only a list of things the
+# product offers counts: "Constraints: stdlib only, no frameworks" is not one.
 _RX_REQUEST_LIST = re.compile(r"(?:^|(?<=[.;:\n]))\s*([A-Z][\w -]{1,30}):\s*([^.\n]+)")
+_RX_LIST_LABEL = re.compile(r"(?i)command|endpoint|route|feature|function|method|action|verb|option|flag"
+                            r"|operation|message|event|page|screen")
 
 
 def _request_list_items(request: str) -> list[str]:
-    """The first word of each item of a list of 3 or more in the request."""
+    """The first word of each item of a list of 3 or more in the request
+    whose label names what the product offers (Commands, Endpoints, …)."""
     items: list[str] = []
     for m in _RX_REQUEST_LIST.finditer(request or ""):
         parts = [p.strip() for p in m.group(2).split(",")]
-        if len(parts) < 3:
+        if len(parts) < 3 or not _RX_LIST_LABEL.search(m.group(1)):
             continue
         for part in parts:
             words = re.sub(r"\([^)]*\)", "", part).strip().split()
@@ -173,6 +151,33 @@ def _request_list_items(request: str) -> list[str]:
             if head and head not in items:
                 items.append(head)
     return items
+
+
+def _phase_key(title: str) -> str:
+    """A phase title as it is matched across outlines: no "Phase 2:" prefix,
+    no case."""
+    return re.sub(r"(?i)^\s*(?:phase|step)\s*\d+\s*[:.)\-–—]\s*", "", title or "").strip().lower()
+
+
+def _kept_phases(old: dict, old_count: int, outline: list[dict]) -> dict:
+    """The written phases a new outline keeps, by their new position: where the
+    title matches (run 6c's planner re-sent its outline with "Phase 1: " added
+    to each title and lost the phases it had written), else, with as many
+    phases as before, the unmatched ones where they were (a reworded title).
+    By title first, so reordered phases keep their own text."""
+    by_title = {_phase_key(ph.get("title", "")): i for i, ph in old.items()}
+    kept, used = {}, set()
+    for i, o in enumerate(outline, 1):
+        j = by_title.get(_phase_key(o["title"])) if o["title"] else None
+        if j is not None and j not in used:
+            kept[i] = old[j]
+            used.add(j)
+    if old_count == len(outline):
+        for i, o in enumerate(outline, 1):
+            if i not in kept and i in old and i not in used and _phase_key(o["title"]) not in by_title:
+                kept[i] = old[i]
+                used.add(i)
+    return kept
 
 
 _RX_HTTP_ACTION = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+/")
@@ -195,12 +200,11 @@ def acts_through_interface(given: str, interfaces: list[str]) -> bool:
 
 
 def _request_command_note(plan: Plan) -> str:
-    """A note when a command the request says must pass is not a check of the
-    last phase as written (the harness runs it at the last gate anyway)."""
+    """A note when a command the request says must pass is not an example of
+    the last phase as written (the harness runs it at the last gate anyway)."""
     step = plan.steps[-1] if plan.steps else None
-    said = " ".join((step.checks if step else [])
-                    + [f"{e['given']} {e['expect']}" for c in (step.acceptance if step else [])
-                       for e in c.examples])
+    said = " ".join(f"{e['given']} {e['expect']}" for c in (step.acceptance if step else [])
+                    for e in c.examples)
     missing = [c for c in request_commands(plan.request) if c not in said]
     if not missing:
         return ""
@@ -220,7 +224,7 @@ _EXAMPLE_PHASE = json.dumps({
     ensure_ascii=False)
 
 
-def _phase_problems(step: Step, n: int, interfaces: list[str], workdir,
+def _phase_problems(step: Step, n: int, interfaces: list[str],
                     got: list[str] | None = None) -> list[str]:
     """What is wrong with one phase of a stories plan ([] when nothing); got:
     the fields it arrived with (run 5: a phase came as {"acceptance": …} alone,
@@ -231,7 +235,8 @@ def _phase_problems(step: Step, n: int, interfaces: list[str], workdir,
                             ("acceptance", step.acceptance)) if not v]
     problems = ([(f"has {', '.join(got)} — " if got is not None else "") + f"missing {', '.join(lacks)}"]
                 if lacks else [])
-    problems += [e for c in step.acceptance for e in criterion_problems(c)]
+    libraries = library_modules(interfaces)
+    problems += [e for c in step.acceptance for e in criterion_problems(c, libraries)]
     problems += [f"\"{c.text[:60]}\" covers {len(c.covers)} requirements — name only what its own "
                  f"examples show (at most {MAX_COVERS})" for c in step.acceptance
                  if len(c.covers) > MAX_COVERS]
@@ -242,8 +247,6 @@ def _phase_problems(step: Step, n: int, interfaces: list[str], workdir,
         problems.append("make it a thin end-to-end slice the user can try through an interface "
                         "— at least one example acts through one (a request such as `POST "
                         "/api/command …`, a command line, a library call)")
-    planned = set(step.files)
-    problems += [f"`{c}` {e}" for c in step.checks for e in check_problems(c, workdir, planned)]
     return problems
 
 
@@ -359,7 +362,7 @@ class PlanRunnerMixin:
             sset = plan.story_sets[n]
             for sid in ids:
                 s = sset.get(sid)
-                s.status, s.delivered, s.facts, s.check_results = "pending", "", {}, []
+                s.status, s.delivered, s.facts = "pending", "", {}
                 s.started_at, s.finished_at, s.turns, s.refusals, s.failure = "", "", 0, 0, ""
             sset.gate = {}
             if n <= len(plan.steps) and plan.steps[n - 1].status == "done":
@@ -410,7 +413,7 @@ class PlanRunnerMixin:
                 reports = {s.title: s.report for s in self.plan.steps if s.report}
                 for s in edited.steps:
                     s.report = s.report or reports.get(s.title, "")
-            edited.request = edited.request or self.plan.request
+            edited.request = self.plan.request or edited.request   # not the user's to edit
             self.plan = edited
         if not self.plan.steps:
             return "The plan has no steps."
@@ -418,7 +421,7 @@ class PlanRunnerMixin:
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
         self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
         self._resume_note = ""
-        self._plan_heuristics = {}   # the next plan asks afresh
+        self._plan_heuristics, self._plan_refused = {}, 0   # the next plan asks afresh
         self._sync_plan_file()
         # The plan runs in coding mode (set_mode rebuilds the prompt and emits status).
         self.set_mode("coding")
@@ -433,7 +436,7 @@ class PlanRunnerMixin:
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
         self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
         self._resume_note = ""
-        self._plan_heuristics = {}
+        self._plan_heuristics, self._plan_refused = {}, 0
         delete_plan_file(self.workdir)
         self.rebuild_system_prompt()
         self.emit_status()
@@ -506,28 +509,29 @@ class PlanRunnerMixin:
                  "interfaces": str_list(args.get("interfaces")),
                  "requirements": args.get("requirements")}
         old = self._plan_draft or {}
-        # Written phases stay: by position when the number of phases is the same
-        # (run 6c's planner re-sent its outline after each restart with reworded
-        # titles, "Core Engine (CLI)" → "Phase 1: Core Engine (CLI)", and lost
-        # the phases it had written), else where the title still matches.
-        same = len(old.get("outline") or []) == len(outline)
-        phases = {i: ph for i, ph in (old.get("phases") or {}).items()
-                  if i <= len(outline) and (same or outline[i - 1]["title"] in ("", ph.get("title")))}
+        phases = _kept_phases(old.get("phases") or {}, len(old.get("outline") or []), outline)
         draft = self._plan_draft = {"frame": frame, "outline": outline, "phases": phases,
-                                    "problems": {}, "turns": -1, "phase_turn": None}
+                                    "problems": {}, "turns": -1, "phase_turn": None, "notes": []}
         problems = self._frame_problems(draft)
+        scopes = {""}
         for i, item in enumerate(raw, 1):
             if isinstance(item, dict) and (item.get("acceptance") or item.get("details")):
+                scopes.add(f"phase {i}")
                 got = self._take_phase(draft, i, item)
                 if got:
                     problems += got
-        problems = self._yield_heuristics(problems)
+        problems = self._yield_heuristics(problems, scopes)
+        # what the restart summary tells the planner to send again
+        draft["frame_refused"] = any(not p.startswith("phase ") or " in the outline " in p
+                                     for p in problems)
         if problems:
             return self._refuse_plan(problems)
+        self._plan_refused = 0
+        notes = self._take_draft_notes(draft)
         if len(draft["phases"]) == len(outline):
-            return self._finish_plan()
+            return notes + self._finish_plan()
         return (f"Outline stored ({len(outline)} phase{'s' if len(outline) != 1 else ''}). "
-                + self._plan_next())
+                + notes + self._plan_next())
 
     def _frame_problems(self, draft: dict) -> list[str]:
         frame, outline = draft["frame"], draft["outline"]
@@ -541,9 +545,20 @@ class PlanRunnerMixin:
             problems.append("name how the product is used in 'interfaces' — one line per way in, "
                             "e.g. \"CLI: `python3 tool.py <file>`\", \"Service: `python3 server.py`, "
                             "HTTP on localhost:8000\", \"Library: `import pager`\"")
-        plan = Plan(title=frame["title"], request=self._plan_request(),
+        request = self._plan_request()
+        reqs = requirement_list(frame["requirements"])
+        suite = [(r["id"], suite_command(r["text"], request, frame["interfaces"])) for r in reqs]
+        suite = [(rid, cmd) for rid, cmd in suite if cmd]
+        if suite:
+            ids = ", ".join(rid for rid, _ in suite)
+            cmds = ", ".join(f"`{c}`" for c in dict.fromkeys(cmd for _, cmd in suite))
+            draft["notes"].append(
+                f"{ids} {'is' if len(suite) == 1 else 'are'} proven by {cmds}, which the harness "
+                f"runs at the last phase's gate: give {'it' if len(suite) == 1 else 'them'} no "
+                "expected behaviour.")
+        plan = Plan(title=frame["title"], request=request,
                     steps=[Step(title=o["title"] or "(untitled step)") for o in outline],
-                    requirements=requirement_list(frame["requirements"]))
+                    requirements=reqs)
         return problems + _requirement_problems(plan, frame["requirements"])
 
     def _take_phase(self, draft: dict, n: int, item: dict) -> list[str]:
@@ -558,8 +573,9 @@ class PlanRunnerMixin:
         if not str(item.get("outcome") or "").strip() and draft["outline"][n - 1]["outcome"]:
             item["outcome"] = draft["outline"][n - 1]["outcome"]
         step = Step.from_dict(item)
+        self._drop_suite_runs(draft, n, step)
         problems = [f"phase {n}: {e}" for e in _phase_problems(step, n, draft["frame"]["interfaces"],
-                                                               self.workdir, arrived)]
+                                                               arrived)]
         if problems:
             draft["phases"].pop(n, None)
             draft["problems"][n] = problems
@@ -567,7 +583,34 @@ class PlanRunnerMixin:
         draft["phases"][n] = step.to_dict()
         draft["problems"].pop(n, None)
         draft["outline"][n - 1]["title"] = step.title
+        draft.setdefault("notes", []).extend(f"phase {n}: {x}" for c in step.acceptance
+                                             for x in criterion_notes(c))
         return []
+
+    def _drop_suite_runs(self, draft: dict, n: int, step: Step) -> None:
+        """Take out of a phase the expectations that only run the test suite,
+        with a note, when the harness runs a test command at the last gate (run
+        7's "the unit tests pass" was refused twice).  A phase left with none
+        keeps them, and is refused for them."""
+        request = self._plan_request()
+        cmds = request_commands(request) or [
+            c for r in requirement_list(draft["frame"]["requirements"])
+            for c in [suite_command(r["text"], request, draft["frame"]["interfaces"])] if c]
+        if not cmds:
+            return
+        step.acceptance, dropped = drop_suite_runs(step.acceptance)
+        for c in dropped:
+            draft.setdefault("notes", []).append(
+                f"Dropped phase {n}'s expectation \"{c.text[:60]}\": it only runs the tests, which "
+                f"the harness does itself (`{cmds[0]}` at the last phase's gate).")
+
+    def _take_draft_notes(self, draft: dict) -> str:
+        """The draft's notes for the tool result ('' when none), shown to the
+        user too, and cleared."""
+        notes, draft["notes"] = draft.get("notes") or [], []
+        for x in notes:
+            self.event_queue.put(ChatEvent("system", x))
+        return "".join(f"{x} " for x in notes)
 
     def _handle_write_phase(self, args: dict) -> str:
         draft = self._plan_draft
@@ -581,17 +624,22 @@ class PlanRunnerMixin:
         if draft.get("phase_turn") is not None and draft["phase_turn"] == draft.get("turns"):
             return (f"ERROR: one phase per turn — phase {n} was not stored. Send it with "
                     "write_phase in your next turn.")
-        problems = self._yield_heuristics(self._take_phase(draft, n, args))
+        draft["notes"] = []
+        problems = self._yield_heuristics(self._take_phase(draft, n, args), {f"phase {n}"})
         if problems and n in draft["problems"]:
             return self._refuse_plan(problems)
         if n not in draft["phases"]:                 # only heuristic doubts: keep it anyway
             item = {k: v for k, v in args.items() if k not in ("status", "tag", "stage", "phase")}
             item.setdefault("title", draft["outline"][n - 1]["title"])
-            draft["phases"][n] = Step.from_dict(item).to_dict()
+            step = Step.from_dict(item)
+            self._drop_suite_runs(draft, n, step)
+            draft["phases"][n] = step.to_dict()
             draft["problems"].pop(n, None)
         draft["phase_turn"] = draft.get("turns")
         self._plan_restarts = 0          # progress: the cap counts refusals in a row
-        return f"Stored phase {n} ({draft['phases'][n]['title']}). " + self._plan_next()
+        self._plan_refused = 0
+        return (f"Stored phase {n} ({draft['phases'][n]['title']}). "
+                + self._take_draft_notes(draft) + self._plan_next())
 
     def _handle_finish_plan(self, args: dict) -> str:
         draft = self._plan_draft
@@ -621,17 +669,22 @@ class PlanRunnerMixin:
         return (f"All {len(draft['outline'])} phases are written. Rewrite any that need it with "
                 "write_phase, then call finish_plan.")
 
-    def _yield_heuristics(self, problems: list[str]) -> list[str]:
+    def _yield_heuristics(self, problems: list[str], scopes: set[str]) -> list[str]:
         """The problems to refuse on: a heuristic check refused twice in a row is
-        dropped, with a note, the third time."""
+        dropped, with a note, the third time.  scopes: what this call checked
+        ("" the frame, "phase 2"); a rule it no longer hits there starts over."""
         seen = self.__dict__.setdefault("_plan_heuristics", {})
+        hit = {(p.split(":")[0] if p.startswith("phase ") else "", rule)   # per phase
+               for p in problems for rule in _HEURISTIC if rule in p}
+        for key in [k for k in seen if k[0] in scopes and k not in hit]:
+            del seen[key]
         out = []
         for p in problems:
             rule = next((h for h in _HEURISTIC if h in p), None)
             if rule is None:
                 out.append(p)
                 continue
-            key = (p.split(":")[0] if p.startswith("phase ") else "", rule)   # per phase
+            key = (p.split(":")[0] if p.startswith("phase ") else "", rule)
             seen[key] = seen.get(key, 0) + 1
             if seen[key] > 2:
                 self.event_queue.put(ChatEvent("system",
@@ -643,10 +696,15 @@ class PlanRunnerMixin:
 
     def _refuse_plan(self, problems: list[str]) -> str:
         """A refused plan call: every problem at once, with a valid phase to copy
-        from; the loop then restarts the planner from a summary (_restart_planning)."""
+        from.  The first refusal in a row is answered in place; a second one
+        restarts the planner from a summary (_restart_planning): run 7 cleared
+        the context for every refusal, one missing requirement included, and
+        spent 12 of its 17 planning minutes on them."""
         text = ("ERROR: the plan needs these changes:\n" + "\n".join(f"- {p}" for p in problems)
                 + "\nA valid phase looks like this:\n" + _EXAMPLE_PHASE)
-        self._plan_restart = "\n".join(problems)
+        self._plan_refused = getattr(self, "_plan_refused", 0) + 1
+        if self._plan_refused > 1:
+            self._plan_restart = "\n".join(problems)
         return text
 
     def _submit_plan(self, args: dict) -> str:
@@ -670,18 +728,20 @@ class PlanRunnerMixin:
             plan.interfaces = str_list(args.get("interfaces"))
             raw_steps = args.get("steps") if isinstance(args.get("steps"), list) else []
             problems = [f"phase {i}: {e}" for i, st in enumerate(steps, 1)
-                        for e in _phase_problems(st, i, plan.interfaces, self.workdir,
+                        for e in _phase_problems(st, i, plan.interfaces,
                                                  sorted(raw_steps[i - 1]) if i <= len(raw_steps)
                                                  and isinstance(raw_steps[i - 1], dict) else None)]
-            if not plan.interfaces:
-                problems.append("name how the product is used in 'interfaces'")
+            frame = ([] if plan.interfaces else ["name how the product is used in 'interfaces'"])
             plan.requirements = requirement_list(args.get("requirements"))
-            problems += _requirement_problems(plan, args.get("requirements"))
-            problems = self._yield_heuristics(problems)
+            frame += _requirement_problems(plan, args.get("requirements"))
+            problems = self._yield_heuristics(problems + frame,
+                                              {""} | {f"phase {i}" for i in range(1, len(steps) + 1)})
+            if self._plan_draft is not None:
+                self._plan_draft["frame_refused"] = any(p in frame for p in problems)
             if problems:
                 return self._refuse_plan(problems)
             plan.kind = "stories"
-            notes = " ".join(x for x in (_phase_check_notes(steps), _request_command_note(plan)) if x)
+            notes = _request_command_note(plan)
             if notes:
                 self.event_queue.put(ChatEvent("system", notes))
             approve_note = (" On approval each phase is broken into stories when it starts"
@@ -806,13 +866,12 @@ class PlanRunnerMixin:
             lines += ["", "## Your last plan (refused)", "```json",
                       json.dumps(frame, ensure_ascii=False, indent=1)[:4000], "```"]
         lines += ["", "## Why it was refused"] + [f"- {r}" for r in reasons.splitlines() if r.strip()]
-        kept = draft is not None and draft.get("outline")
+        # run 7: phase 1 refused, nothing kept yet, and the planner re-sent its outline
+        kept = draft is not None and draft.get("outline") and not draft.get("frame_refused")
         lines += ["", "## What to do now",
                   "Fix only these problems; what is kept stays. "
                   + ("The outline and the kept phases are stored: do NOT call create_plan "
-                     "again unless the outline itself was refused. " if kept and draft["phases"]
-                     and not any(r.startswith(("the request", "R", "name how", "no phases"))
-                                 for r in reasons.splitlines()) else "")
+                     "again unless the outline itself was refused. " if kept else "")
                   + (self._plan_next() if draft is not None else
                      "Call create_plan again with the complete corrected plan."),
                   "", "A valid phase looks like this:", _EXAMPLE_PHASE]

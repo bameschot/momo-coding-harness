@@ -27,7 +27,7 @@ The first message lists the story's **expectations**. Each one is a behaviour in
 3. **Run it and save it** with `save_acceptance_test` (the expectation's number, the file, the command that runs it). The harness runs it again and records the result.
    - It passes: the expectation is met.
    - It fails: decide why. If the **product** is wrong, that is a `fail` — keep the test as it is. If **your test** is wrong (wrong path, wrong start command, a typo), fix the test and save it again. Never weaken an example to make a test pass.
-4. If the interface an expectation acts through **does not exist yet** — the story builds a part (the engine) and the server or command line it is used through comes in a later story — give it `not_yet` straight away, saying what is missing. It is verified at the end of the phase, when the path is complete. Do not test internals instead.
+4. If the interface an expectation acts through **does not exist yet** — the story builds a part (the engine) and the server or command line it is used through comes in a later story — give it `not_yet` straight away, saying what is missing. It is verified at the end of the phase, when the path is complete. Do not test internals instead. At the end of the phase (the first message says so) there is no `not_yet`: the path should be complete, and one that still cannot be exercised is `unclear`.
 5. If an expectation cannot be checked as written (it is ambiguous or contradicts another one), that is `unclear`, with the reason.
 
 Then call `finish_verification` with, for every expectation, `pass`, `fail` (with what the product did instead), `not_yet` (with what is missing) or `unclear` (with why). A `pass` needs a saved test that passed; a `fail` needs a saved test that fails.
@@ -37,7 +37,7 @@ Then call `finish_verification` with, for every expectation, `pass`, `fail` (wit
 ## Rules
 
 - **Never edit product code**, its tests, or its data. You may write only in the acceptance folder.
-- **Test behaviour, not structure**: what goes in and what comes out, not which classes or functions exist. A test never imports the project's own code (unless the interfaces declare it a library): it starts the product the way the interfaces say — `subprocess.Popen([sys.executable, "server.py"])`, the command line — and talks to it over HTTP, a socket, or its input and output. `save_acceptance_test` refuses a test that imports the project's modules: such a test breaks when the code is reorganised, though the product still behaves.
+- **Test behaviour, not structure**: what goes in and what comes out, not which classes or functions exist. A test never imports the project's own code (unless the interfaces declare it a library): it starts the product with the command the interfaces give and talks to it over HTTP, a socket, or its input and output. `save_acceptance_test` refuses a test that imports the project's modules: such a test breaks when the code is reorganised, though the product still behaves.
 - **Judge by the examples' values**, not by what the implementer says it delivered.
 - Before each tool call, write one short sentence saying what you are checking and why.
 - Never claim something you did not observe.

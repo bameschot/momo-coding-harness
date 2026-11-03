@@ -338,12 +338,11 @@ function stepSections(view, step) {
   const out = [];
   if (step.details) out.push(section(`${key}:details`, "Details", !step.stories.length, (b) => b.append(md(step.details))));
   if (step.outcome) out.push(section(`${key}:outcome`, "Outcome", true, (b) => b.append(el("div", "", step.outcome))));
-  if (step.checks.length) {
-    const g = step.gate || {};
-    const title = g.passed === undefined ? "Checks" : `Checks ${g.passed ? "✓ pass" : "✗ fail"}`;
-    out.push(section(`${key}:checks`, title, g.passed === false, (b) => {
-      for (const c of step.checks) b.append(cmd(c));
-      if (g.passed === false && g.output) b.append(el("pre", "tl-output", g.output));
+  const g = step.gate || {};
+  if (g.passed !== undefined) {
+    out.push(section(`${key}:gate`, `Phase gate ${g.passed ? "✓ pass" : "✗ fail"}`, g.passed === false, (b) => {
+      if (g.command) b.append(cmd(g.command));
+      if (g.output) b.append(el("pre", "tl-output", g.output));
     }));
   }
   if (step.report) out.push(section(`${key}:report`, "Report", false, (b) => b.append(md(step.report))));
@@ -365,7 +364,7 @@ function storySections(key, s) {
                 el("span", "", c.text));
       if (c.check) li.append(cmd(c.check));
       if (r && r.output && r.passed === false) li.append(el("pre", "tl-output", r.output));
-      else if (r && r.output && !c.check) li.append(el("div", "tl-note", `evidence: ${r.output}`));
+      else if (r && r.output && r.passed === null) li.append(el("div", "tl-note", r.output));
       ul.append(li);
     }
     b.append(ul);

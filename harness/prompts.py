@@ -65,12 +65,13 @@ def _planner_prompt(workdir: str) -> str:
 def _story_writer_prompt(workdir: str) -> str:
     raw = _load_role("story-writer")
     if raw:
-        return raw.replace("{workdir}", workdir)
+        return raw.replace("{workdir}", workdir).replace("{expectations}", EXPECTATIONS)
     return (
         "You are the story writer of a phased plan. Investigate the code the current phase "
         "builds on with the read tools, outline small, dependency-ordered stories with "
         "plan_stories, then write them one per turn with write_story, each with exact technical "
-        "details and acceptance criteria with check commands, and call finish_stories. "
+        "details and acceptance criteria (expected behaviour with examples), and call "
+        "finish_stories. "
         f"Do not edit files. Working directory: {workdir}"
     )
 
@@ -424,6 +425,28 @@ These rules replace "To finish" in "How the loop works" above: a step ends with 
 # stories plan; _STORY_EXECUTION_RULES follows the coder role while one story
 # runs, with the story itself in the first user message (a fresh context).
 
+# How an expected behaviour is written: the planner's phases and the story
+# writer's stories (roles/story-writer.md, {expectations}) share this text, and
+# stories.criterion_problems / criterion_notes hold them to it.
+EXPECTATIONS = """### Writing expectations
+
+An expectation is a behaviour in plain words (`behaviour`) with at least one example
+(`examples`): what is done through one of the product's interfaces (`given`) → what must come out
+(`expect`), with the exact values in backticks or as numbers — `quoted` text, status or exit
+codes, counts, JSON fields. A verifier writes and runs the tests afterwards, against the code as
+it turned out, so never write code, class or method names, test files, or commands that only run
+the tests. State what lasts, never a placeholder a later phase replaces (a dummy
+`{"status": "ok"}`). Take values from the code and data as they are, spelled exactly. Untrusted
+input (paths, names, typed commands) gets an example of the hostile case.
+- CLI — good: given "`python3 csv2json.py data.csv --pretty`", expect "exit `0`, prints a JSON
+  list of `3` objects". Bad: "`convert()` returns a list".
+- Service — good: given "`GET /items/7`", expect "status `200`, JSON with `\"id\": 7`"; given
+  "`GET /../server.py`", expect "status `404`". Bad: "`Item.__init__` sets the id".
+- Library — good: given "`paginate(range(11), 5)`",
+  expect "`[[0, 1, 2, 3, 4], [5, 6, 7, 8, 9], [10]]`". Bad: "assert len(pages) == 3".
+- Output files — good: given "`python3 build.py`", expect "`build/index.html` contains
+  `<title>Home</title>`"."""
+
 _PLAN_STORIES_RULES = """## This plan is phased (stories)
 
 The user chose a stories plan. After approval the harness runs it one phase at a time: when a
@@ -449,21 +472,18 @@ For this plan, these replace rules 1, 3 and 6 of "What makes a good plan" above:
   the server, the world and one command end to end — not "the data model"). Usually 2-7 phases.
   Name the files and components it covers and its design decisions; leave the steps to stories.
 - **Each phase has an `outcome`**: what exists and works when it is done, seen from outside.
-- **Each phase has `acceptance`**: the behaviour that closes it, in plain words, each with at
-  least one example — what is done through an interface → what must come out, with the exact
-  values (`quoted` text, status or exit codes, counts, JSON fields, hashes). Never code, class or
-  function names, test files or commands that only run tests: a verifier writes and runs the tests
-  against the code as it turns out. Never expect a placeholder reply a later phase replaces (a
-  dummy `{"status": "ok"}`): its test fails as a regression once the real thing is there. State
-  what lasts (the page loads, the endpoint answers status `200` with JSON).
+- **Each phase has `acceptance`**: the behaviour that closes it, written as "Writing
+  expectations" below says.
 - **Cover the request with `requirements`**: split the user's request into one line per thing they
   named (each command, endpoint, message, behaviour; "look, go/n/s/e/w, say" is one requirement per
   command), ids R1, R2, …, each with the phase that delivers it. Each is proven by an expected
   behaviour whose `covers` names it; the harness reports any without a passing test as a gap.
 - **The user's own command**: a command the request says must pass (e.g. `python -m unittest`) is
-  run by the harness at the last phase, exactly as written.
-- **Untrusted input** (HTTP paths, names, commands typed by users) gets handled in the phase that
-  reads it: e.g. a static file server serves only files inside its folder."""
+  run by the harness at the last phase, exactly as written. A requirement that the tests exist or
+  pass is proven by it (or by the test command the request implies): give it no expected
+  behaviour.
+
+""" + EXPECTATIONS
 
 _STORY_EXECUTION_RULES = """## Implementing one story
 
@@ -496,8 +516,8 @@ These rules replace "To finish" in "How the loop works" above: a story ends with
   alone). If an acceptance criterion cannot be right — it asks for something the story is not
   about, contradicts another, or no correct product can meet it — call report_defect with
   `criterion` set to its text.
-- If you need the user's input, use ask_user. A plain-text reply without a tool call also ends
-  the story, as not done."""
+- If you need the user's input, use ask_user. A reply without a tool call does not finish the
+  story: call complete_story."""
 
 # ── TDD plans ────────────────────────────────────────────────────────────────
 # Appended to the planner role while the next plan is test-driven, and after

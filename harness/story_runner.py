@@ -6,10 +6,12 @@ Each phase runs in three parts, each in a fresh context (the history before
 it goes to the compaction archive, marked by="story", so /export full keeps
 it): the story writer breaks the phase into stories against the code as it is
 now (an outline first, then one story per turn, so no single turn has to work
-out the whole set); the stories run one at a time, in dependency order, each accepted only
-when its acceptance checks pass; then the phase's own checks run and a phase
-report is written for the next phase's writer.  A story that fails is re-split
-by the writer; one that fails again pauses the plan for the user."""
+out the whole set); the stories run one at a time, in dependency order, each
+accepted once an independent verifier finds its expected behaviour; then the
+phase gate verifies the phase's own expectations and re-runs every saved
+acceptance test, and a phase report is written for the next phase's writer.
+A story that fails is re-split by the writer (_amend_stories); one that fails
+again pauses the plan for the user."""
 from __future__ import annotations
 
 import re
@@ -22,8 +24,9 @@ from . import tdd as tdd_mod
 from . import transcript as transcript_mod
 from .events import ChatEvent, ErrorEvent, ToolCallEvent, ToolResultEvent
 from .loop_guard import _owners
-from .plan import PLAN_FILENAME, Step, delete_plan_file, request_commands
-from .stories import (Criterion, Story, StorySet, check_files, check_problems, new_stories_dir, outline_entries, read_story_file,
+from .plan import PLAN_FILENAME, Step, delete_plan_file, request_commands, suite_command
+from .stories import (Criterion, Story, StorySet, _cycle, criterion_notes, drop_suite_runs,
+                      library_modules, new_stories_dir, outline_entries, read_story_file,
                       validate_outline, write_story_file)
 from .toolcall_text import text_call_error
 
@@ -31,7 +34,8 @@ from .toolcall_text import text_call_error
 # 3–4 took 4–23 turns; one that had finished its work ran out at 30.
 DEFAULT_STORIES_CAP = 40
 STORIES_CAP_RANGE = (5, 100)
-APPROVE_MODES = ("each", "once")  # /plan stories approve: every phase's stories, or none
+APPROVE_MODES = ("each", "auto")  # /plan stories approve: every phase's stories, or none
+APPROVE_ALIASES = {"once": "auto"}  # the old name of auto
 WRITER_CAP = 60                   # iterations of one story-writing pass
 STORY_MAX_REFUSALS = 3            # complete_story refusals before the story counts as failed
 STORY_NUDGES = 3                  # notes for a story or writing reply without a tool call
@@ -54,7 +58,7 @@ _REPORT_PROMPT = (
     "## Known gaps\n\nUnder Known gaps, also list the parts of the user's request (when given) "
     "that this phase should have covered and the notes do not show as done. The harness's "
     "record of requirements is the truth: every requirement it marks ✗ goes under Known gaps. "
-    "Claim a behaviour only when a verified expectation, a passed check or a test name below "
+    "Claim a behaviour only when a verified expectation, a passed test or a test name below "
     "shows it — 'planned to provide' is what a story was asked for, not what it proved. Do not invent anything that "
     "is not in the notes.")
 _YES = ("y", "yes", "ok", "go", "run", "approve", "approved")
@@ -64,16 +68,10 @@ _RETIRE_HINT = (
     "If a failing test checks behaviour this phase replaced on purpose (a placeholder, a dummy "
     "reply), do not bring the old behaviour back: retire it with finish_stories' `retire` "
     "({\"expectation\": \"P1.S1.4\", \"why\": \"what replaced it\"}). Otherwise fix the product.")
-# A check that failed because the server it talks to is not running (run 2's
-# P2.S4): the story cannot fix that by changing its code.
 _RX_TEST_FILE = re.compile(r"^(?:test_.*|.*_test)\.py$")
 _RX_SCRATCH = re.compile(r"^(?:(?:verify|check|debug|scratch|tmp|temp|try)_\w*\.\w+|.*\.(?:pid|log))$")
-_RX_PY = re.compile(r"^(?:\S*/)?python(?:3(?:\.\d+)?)?$")
 _RX_NO_TESTS = re.compile(r"^Ran 0 tests|NO TESTS RAN|no tests ran", re.M)
 _RX_NO_MODULE = re.compile(r"ModuleNotFoundError: No module named '([A-Za-z_]\w*)'")
-_RX_NO_SERVER = re.compile(r"Connection refused|ConnectionRefusedError|Address already in use")
-_SERVER_HINT = ("\n  (the check needs a server: a test starts the server itself, in setUpClass, "
-                "and stops it in tearDownClass)")
 
 
 class StoryRunnerMixin:
@@ -140,7 +138,7 @@ class StoryRunnerMixin:
         plan = self.plan
         n = idx + 1
         step = plan.steps[idx]
-        fixes = 0
+        fixes, reverified = 0, False
         while True:
             sset = plan.story_sets.get(n)
             if sset is not None:
@@ -148,7 +146,10 @@ class StoryRunnerMixin:
                 if edited is not None:          # the user's edits since it was written
                     sset.merge_from_file(edited)
             if sset is None or not sset.approved:
-                outcome = self._write_stories(idx)
+                # An unapproved draft of an adding pass (a re-split, a fix) resumes
+                # that pass from its snapshot: a whole-phase pass would drop the
+                # phase's finished stories.
+                outcome = self._write_stories(idx, amend=sset.amend if sset is not None else None)
                 if outcome != "done":
                     return outcome
                 continue
@@ -180,13 +181,9 @@ class StoryRunnerMixin:
                     if outcome != "done":
                         return outcome
                     continue
-                failed = [s for s in sset.stories if s.status == "failed"]
-                waiting = [s.id for s in sset.blocked()]
                 self.event_queue.put(ChatEvent("system",
-                    f"Phase {n} cannot go on: {', '.join(s.id for s in failed)} failed "
-                    f"{MAX_ATTEMPTS} times" + (f" and {', '.join(waiting)} wait on it" if waiting else "")
-                    + f". Edit {self._stories_rel(n)} (mark a story [ ] to retry it), then "
-                    "/plan resume."))
+                    f"Phase {n} cannot go on: {_stuck_reason(sset)}. Edit {self._stories_rel(n)} "
+                    "(mark a story [ ] to retry it), then /plan resume."))
                 return "paused"
             passed, report = self._phase_checks(step, sset, last=n == len(plan.steps))
             if passed:
@@ -194,16 +191,29 @@ class StoryRunnerMixin:
                 self._write_stories_file(sset)
                 self.event_queue.put(ChatEvent("system", f"Phase {n} report:\n{step.report}"))
                 return "done"
+            kinds = set(sset.gate.get("kinds") or ())
+            if kinds == {"ran_out"}:
+                # Nothing shows the product is wrong: verify again with more turns
+                # once; new stories cannot help a verifier that ran out.
+                if not reverified:
+                    reverified, self._verify_bonus = True, VERIFY_PER_EXPECTATION
+                    continue
+                self.event_queue.put(ChatEvent("system",
+                    f"Phase {n}: the verifier ran out of turns twice before it got these tests "
+                    f"working:\n{_tail(report)}\nEdit the expectations or the code, then /plan resume."))
+                return "paused"
             if fixes >= GATE_FIXES:
                 self.event_queue.put(ChatEvent("system",
                     f"Phase {n}'s checks still fail after a fix pass:\n{_tail(report)}"))
                 return "paused"
             fixes += 1
-            outcome = self._write_stories(idx, extra=(
+            outcome = self._amend_stories(idx, (
                 "All stories of this phase are done, but the phase's checks fail:\n\n"
                 f"{report}\n\nOutline and write NEW stories that fix this (ids after the existing "
-                "ones, depending on the stories they build on). Do not repeat the finished stories."),
-                append=True)
+                "ones, depending on the stories they build on). Do not repeat the finished stories. "
+                "If nothing needs building (only an earlier test of replaced behaviour, or an "
+                "unclear expectation, must go), call finish_stories with just `retire`."),
+                may_be_empty=kinds <= {"regression", "unclear", "ran_out"})
             if outcome != "done":
                 return outcome
 
@@ -228,27 +238,40 @@ class StoryRunnerMixin:
 
     # ── writing stories ───────────────────────────────────────────────────────
 
-    def _write_stories(self, idx: int, extra: str = "", replaces: list[str] | None = None,
-                       append: bool = False, remap: str | None = None) -> str:
+    def _amend_stories(self, idx: int, why: str, replaces: tuple | list = (),
+                       remap: str | None = None, blocks: str | None = None,
+                       may_be_empty: bool = False) -> str:
+        """A writing pass that adds to the phase's stories (a re-split, a fix
+        story, a corrected story, a gate fix) instead of writing the set.
+        replaces: the stories it retires; remap: the one whose dependents move
+        to the new stories; blocks: the one that waits for them; may_be_empty:
+        finish_stories may add nothing (only `retire`)."""
+        sset = self.plan.story_sets.get(idx + 1)
+        return self._write_stories(idx, amend={
+            "extra": why, "replaces": list(replaces), "remap": remap, "blocks": blocks,
+            "may_be_empty": may_be_empty,
+            "base": [s.to_dict() for s in sset.stories] if sset is not None else []})
+
+    def _write_stories(self, idx: int, extra: str = "", amend: dict | None = None) -> str:
         """One story-writing pass for phase idx: the writer investigates,
         outlines the stories (plan_stories), writes them one per turn
         (write_story) and submits them (finish_stories) until a set is valid
-        and approved.  "done" when the phase has an approved set, else why not."""
+        and approved.  amend (from _amend_stories, or a stored draft's): the
+        pass adds to the phase's stories as they were when it began.  "done"
+        when the phase has an approved set, else why not."""
         n = idx + 1
         self._fresh_context()
         self._enter_role("story-writer")
-        # A re-split or fix pass adds to the phase's stories as they are now: a
-        # snapshot, since a submitted set is stored before approval and its
-        # drafts must not become "existing" stories when the user sends it
-        # back (the story-mud run tripled its stories that way).
-        base = self.plan.story_sets.get(n) if (replaces or append) else None
-        w = self._writing = {"phase": n, "replaces": replaces or [], "append": append,
-                             "adds": bool(replaces or append),
-                             "base": [Story.from_dict(s.to_dict()) for s in base.stories]
-                                     if base is not None else None,
-                             "stored": False, "outline": [], "drafts": {}, "story_turn": -1,
-                             "remap": remap}
-        self._append_user(self._writer_brief(idx, extra))
+        # An adding pass works on a snapshot of the stories, kept with its draft:
+        # a submitted set is stored before approval, and its drafts must not become
+        # "existing" stories when the user sends it back (the story-mud run
+        # tripled its stories that way), nor be all there is on /plan resume.
+        amend = dict(amend) if amend else None
+        w = self._writing = {"phase": n, "amend": amend,
+                             "replaces": list(amend["replaces"]) if amend else [],
+                             "base": [Story.from_dict(d) for d in amend["base"]] if amend else None,
+                             "stored": False, "outline": [], "drafts": {}, "story_turn": -1}
+        self._append_user(self._writer_brief(idx, (amend or {}).get("extra") or extra))
         self._turn_user = self.messages[-1]
         before = self._background_runs()
         try:
@@ -276,7 +299,7 @@ class StoryRunnerMixin:
             what = ("Call the tool itself now, with JSON arguments. " + self._writer_next(self._writing))
         else:
             what = ("A story ends only with complete_story. Make the change with a tool call "
-                    "(edit_file / write_file), run the acceptance checks, then call complete_story.")
+                    "(edit_file / write_file), try the story's examples, then call complete_story.")
         return ("[Note from the harness, not the user] Your reply had no tool call, so nothing "
                 "happened" + (f": {err}" if err else "") + ". " + what)
 
@@ -314,7 +337,14 @@ class StoryRunnerMixin:
             lines += ["", "Each needs at least one expected behaviour whose examples show it, "
                           "naming it in covers (e.g. covers: [\"R3\"]); finish_stories refuses "
                           "the set until every one is covered. Write the examples the way the "
-                          "user meets it: a command typed in the page is sent as the page sends it."]
+                          "user meets the product."]
+        suite = self._suite_proofs()
+        mine = [r for r in plan.requirements if r["phase"] == n and r["id"] in suite]
+        if mine:
+            lines += [""] + [f"{r['id']} ({r['text']}) is proven by `{suite[r['id']]}`, which the "
+                             "harness runs at the last phase's gate: give it no expected behaviour, "
+                             "and have the stories that write the code write its unit tests."
+                             for r in mine]
         if plan.interfaces:
             lines += ["", "## How the product is used (its interfaces)"]
             lines += [f"- {x}" for x in plan.interfaces]
@@ -330,9 +360,6 @@ class StoryRunnerMixin:
             for c in step.acceptance:
                 lines.append(f"- {c.text}")
                 lines += [f"  - e.g. {e['given']} → {e['expect']}" for e in c.examples]
-        if step.checks:
-            lines += ["Checks the harness runs when all stories are done:"]
-            lines += [f"- `{c}`" for c in step.checks]
         if step.files:
             lines += [f"Files: {', '.join(step.files)}"]
         for i, s in enumerate(plan.steps[:idx], 1):
@@ -347,8 +374,15 @@ class StoryRunnerMixin:
                     lines.append(f"  provides: {p}")
                 if s.delivered:
                     lines.append(f"  delivered: {' '.join(s.delivered.split())[:300]}")
+        w = getattr(self, "_writing", None)
         current = plan.story_sets.get(n)
-        if current is not None and current.stories:
+        if w and w.get("base"):
+            shown = StorySet(phase=n, title=step.title, stories=w["base"], approved=True)
+            lines += ["", "## Stories of this phase so far", shown.to_markdown()]
+        elif current is not None and current.stories and not current.approved:
+            lines += ["", "## Your earlier draft of this phase (not approved: write the set again)",
+                      current.to_markdown()]
+        elif current is not None and current.stories:
             lines += ["", "## Stories of this phase so far", current.to_markdown()]
         if extra:
             lines += ["", "## What to do now", extra]
@@ -365,7 +399,7 @@ class StoryRunnerMixin:
     def _writer_kept(self, w: dict) -> list[Story]:
         """The phase's stories a re-split or a fix pass adds to (copies, the
         ones it replaces marked so); [] when the writer writes the whole phase."""
-        if not w.get("adds") or w.get("base") is None:
+        if not w.get("amend") or w.get("base") is None:
             return []
         kept = [Story.from_dict(s.to_dict()) for s in w["base"]]
         for s in kept:
@@ -378,7 +412,9 @@ class StoryRunnerMixin:
         outline = w["outline"]
         if not outline:
             return ("Next: once you know the code this phase builds on, outline the stories "
-                    "with plan_stories.")
+                    "with plan_stories."
+                    + (" If no new story is needed, call finish_stories with just `retire`."
+                       if (w.get("amend") or {}).get("may_be_empty") else ""))
         missing = [e for e in outline if e["id"] not in w["drafts"]]
         if missing:
             e = missing[0]
@@ -436,7 +472,7 @@ class StoryRunnerMixin:
                if str(x).strip()]
         if not ids:
             return ""
-        if not w.get("adds"):
+        if not w.get("amend"):
             return ("ERROR: nothing to retire: this pass writes the phase's whole set, so leave "
                     "the stories that should go out of the outline instead of using replaces.")
         stories = {s.id: s for s in (w.get("base") or [])}
@@ -480,6 +516,10 @@ class StoryRunnerMixin:
                     "product's interface → the output it must give. An independent verifier "
                     "writes and runs the tests after the story is implemented.")
         story = Story.from_dict(raw)
+        # an expectation that only runs the tests is the last gate's job (as for a phase)
+        dropped = []
+        if self._test_commands():
+            story.acceptance, dropped = drop_suite_runs(story.acceptance)
         if w["story_turn"] == w.get("turns"):
             return (f"ERROR: one story per turn — {story.id or 'this story'} was not stored. "
                     "Send it with write_story in your next turn.")
@@ -508,10 +548,8 @@ class StoryRunnerMixin:
             outline.append(entry)
         earlier = self.plan.earlier_stories(n)
         ids = {e["id"] for e in outline} | {s.id for s in kept if s.status != "replaced"}
-        planned = ({f for d in w["drafts"].values() for f in d.files}
-                   | {f for k in kept if k.status != "replaced" for f in k.files} | set(story.files))
         errors = (validate_outline(outline, kept, earlier)
-                  + story.problems(ids, earlier, self.workdir, planned))
+                  + story.problems(ids, earlier, self.workdir, library_modules(self.plan.interfaces)))
         if errors:
             return (f"ERROR: {story.id or 'the story'} needs changes before it is stored:\n"
                     + "\n".join(f"- {e}" for e in errors)
@@ -529,15 +567,26 @@ class StoryRunnerMixin:
                  "dependencies, its scope), rewrite that one with write_story first.")
         kept_note = (f" Kept the outline's {' and '.join(inherited)} for {story.id}."
                      if inherited else "")
+        notes = [f"Dropped \"{c.text[:60]}\": it only runs the tests, which the last phase's gate "
+                 f"does (`{self._test_commands()[0]}`)." for c in dropped]
+        notes += [f"Note: {x}." for c in story.acceptance for x in criterion_notes(c)]
         return (f"{'Replaced the draft of' if rewritten else 'Stored'} {story.id} "
-                f"({k}/{len(outline)} written).{kept_note}{after} {self._writer_next(w)}"
+                f"({k}/{len(outline)} written).{kept_note}{after} "
+                + "".join(f"{x} " for x in notes) + self._writer_next(w)
                 + self._feedback_reminder(w))
 
     def _handle_finish_stories(self, args: dict) -> str:
         w = self._writer()
         if not w:
             return "ERROR: finish_stories is only available while a phase's stories are written."
-        if not w["outline"]:
+        retire, problems = self._retire_problems(w["phase"], args.get("retire"))
+        if problems:
+            return ("ERROR: " + "\n".join(problems) + "\nFix `retire` (or leave it out), then call "
+                    "finish_stories again.")
+        # An adding pass may add nothing: a gate failure that only needs a test of
+        # replaced behaviour retired, or a verifier that ran out of turns.
+        empty_ok = bool(w.get("amend")) and (bool(retire) or w["amend"].get("may_be_empty"))
+        if not w["outline"] and not empty_ok:
             return ("ERROR: nothing to submit yet: outline the stories with plan_stories, then "
                     "write each one with write_story.")
         missing = [e["id"] for e in w["outline"] if e["id"] not in w["drafts"]]
@@ -546,10 +595,6 @@ class StoryRunnerMixin:
                     f"need{'s' if len(missing) == 1 else ''} write_story (or leave "
                     f"{'it' if len(missing) == 1 else 'them'} out of the outline with plan_stories). "
                     + self._writer_next(w))
-        retire, problems = self._retire_problems(w["phase"], args.get("retire"))
-        if problems:
-            return ("ERROR: " + "\n".join(problems) + "\nFix `retire` (or leave it out), then call "
-                    "finish_stories again.")
         w["retire"] = retire
         new = [Story.from_dict(w["drafts"][e["id"]].to_dict()) for e in w["outline"]]
         return self._submit_stories(w, new, args.get("phase_revision"))
@@ -561,25 +606,32 @@ class StoryRunnerMixin:
         plan = self.plan
         n = w["phase"]
         kept = self._writer_kept(w)
+        amend = w.get("amend") or {}
         if kept:
             # Replacements inherit the failed story's attempts, so failing
             # again pauses the plan.
-            failed = next((s for s in kept if w["replaces"] and s.id == w["replaces"][0]), None)
+            first = (amend.get("replaces") or [None])[0]
+            failed = next((s for s in kept if s.id == first), None)
             for s in new:
                 s.attempts = max(s.attempts, failed.attempts if failed else 0)
-            if w.get("remap"):          # a corrected story stands in for the one it replaces
+            if amend.get("remap"):      # a corrected story stands in for the one it replaces
                 for s in kept:
-                    if not s.finished and w["remap"] in s.depends_on:
-                        s.depends_on = [d for d in s.depends_on if d != w["remap"]] + [
+                    if not s.finished and amend["remap"] in s.depends_on:
+                        s.depends_on = [d for d in s.depends_on if d != amend["remap"]] + [
                             x.id for x in new if x.id not in s.depends_on]
+            blocked = next((s for s in kept if s.id == amend.get("blocks")), None)
+            if blocked is not None:     # the story that reported a defect waits for its fix
+                blocked.depends_on += [x.id for x in new if x.id not in blocked.depends_on]
         sset = StorySet(phase=n, title=plan.steps[n - 1].title, stories=kept + new)
-        errors = sset.validate(plan.earlier_stories(n), self.workdir) + self._coverage_problems(n, sset)
+        errors = (sset.validate(plan.earlier_stories(n), self.workdir, library_modules(plan.interfaces))
+                  + self._coverage_problems(n, sset))
         if errors:
             return ("ERROR: the stories need changes before they can run:\n"
                     + "\n".join(f"- {e}" for e in errors)
                     + "\nFix them with write_story (or the outline with plan_stories), then call "
                       "finish_stories again.")
         sset.approved = False
+        sset.amend = amend              # resumed as this pass if it is never approved
         plan.story_sets[n] = sset
         err = self._write_stories_file(sset)
         if err:
@@ -596,7 +648,12 @@ class StoryRunnerMixin:
     def _approve_stories(self, n: int, sset: StorySet, revision,
                          retire: list[tuple[str, str]] = ()) -> str:
         """Ask the user per the setting; '' once approved, else the tool result
-        that sends the writer back (feedback, or errors in a hand edit)."""
+        that sends the writer back (feedback, errors in a hand edit or in the
+        phase revision).  A phase revision is asked after the stories, and
+        applied only with them."""
+        phases = self._revision_phases(n, revision)
+        if isinstance(phases, str):
+            return phases
         self.event_queue.put(ChatEvent("assistant", sset.to_markdown()))
         if retire:
             by = {cid: c for cid, c, _n in self._criteria(n)}
@@ -605,14 +662,11 @@ class StoryRunnerMixin:
                 "behaviour was replaced on purpose):\n"
                 + "\n".join(f"- {cid}: {by[cid].text if cid in by else ''} — {why}"
                              for cid, why in retire)))
-        if isinstance(revision, dict) and isinstance(revision.get("phases"), list):
-            if not self._apply_phase_revision(n, revision):
-                note = "The user declined the change to the later phases; they stay as they were."
-                self.event_queue.put(ChatEvent("system", note))
         if self.stories_approve == "each":
+            todo = len([s for s in sset.stories if not s.finished])
             answer = self._ask_user(
-                f"Run these {len(sset.stories)} stories for phase {n}? y = run them · anything "
-                f"else = feedback for the story writer. You can edit {self._stories_rel(n)} "
+                f"Run these {todo} stor{'y' if todo == 1 else 'ies'} for phase {n}? y = run them · "
+                f"anything else = feedback for the story writer. You can edit {self._stories_rel(n)} "
                 "before answering.").strip()
             if answer.lower().rstrip(".!") not in _YES:
                 w = self._writer()
@@ -625,7 +679,8 @@ class StoryRunnerMixin:
             edited = read_story_file(self._stories_path(), n)
             if edited is not None:
                 sset.merge_from_file(edited)
-                errors = sset.validate(self.plan.earlier_stories(n), self.workdir)
+                errors = sset.validate(self.plan.earlier_stories(n), self.workdir,
+                                       library_modules(self.plan.interfaces))
                 if errors:
                     w = self._writer()
                     if w:                       # the drafts take the user's edits
@@ -636,24 +691,57 @@ class StoryRunnerMixin:
                             + "\n".join(f"- {e}" for e in errors)
                             + "\nFix them with write_story, keeping the user's changes, then call "
                               "finish_stories again.")
-        sset.approved = True
+        sset.approved, sset.amend = True, {}
         self._write_stories_file(sset)
+        if phases and not self._apply_phase_revision(n, phases, revision):
+            self.event_queue.put(ChatEvent("system",
+                "The user declined the change to the later phases; they stay as they were."))
         self._sync_plan_file()
         return ""
 
-    def _apply_phase_revision(self, n: int, revision: dict) -> bool:
-        from .plan import Step as _Step
-        phases = [_Step.from_dict(p) for p in revision["phases"] if isinstance(p, dict)]
+    def _revision_phases(self, n: int, revision) -> list[Step] | str | None:
+        """finish_stories' phase_revision as the new later phases, checked the
+        way write_phase checks a phase; an ERROR for the writer; None when
+        there is none."""
+        if not (isinstance(revision, dict) and isinstance(revision.get("phases"), list)):
+            return None
+        from .plan_runner import _phase_problems
+        phases = [Step.from_dict(p) for p in revision["phases"] if isinstance(p, dict)]
         if not phases:
-            return False
+            return None
+        problems = [f"phase {n + i}: {e}" for i, st in enumerate(phases, 1)
+                    for e in _phase_problems(st, n + i, self.plan.interfaces)]
+        if problems:
+            return ("ERROR: phase_revision needs changes:\n" + "\n".join(f"- {p}" for p in problems)
+                    + "\nFix phase_revision (or leave it out), then call finish_stories again.")
+        return phases
+
+    def _apply_phase_revision(self, n: int, phases: list[Step], revision: dict) -> bool:
+        """Ask the user; on yes replace the phases after n and move the
+        requirements the revision names, then any left past the last phase
+        onto it (they would otherwise never be due or checked)."""
         shown = "\n".join(f"{n + i}. {p.title} — {p.outcome}" for i, p in enumerate(phases, 1))
         answer = self._ask_user(
             f"The story writer proposes changing the phases after phase {n}:\n"
             f"{revision.get('reason', '')}\n\n{shown}\n\nApply this change? y / n").strip()
         if answer.lower().rstrip(".!") not in _YES:
             return False
-        self.plan.steps = self.plan.steps[:n] + phases
-        self._sync_plan_file()
+        plan = self.plan
+        plan.steps = plan.steps[:n] + phases
+        moves = {str(r.get("id") or "").strip().upper(): r.get("phase")
+                 for r in revision.get("requirements") or [] if isinstance(r, dict)}
+        last, moved = len(plan.steps), []
+        for r in plan.requirements:
+            to = moves.get(r["id"])
+            if isinstance(to, int) and n < to <= last:
+                r["phase"] = to
+            elif r["phase"] > last:
+                r["phase"] = last
+                moved.append(r["id"])
+        if moved:
+            self.event_queue.put(ChatEvent("system",
+                f"{', '.join(moved)} now belong{'s' if len(moved) == 1 else ''} to phase {last}, "
+                "the last one: the revision removed the phase they were in."))
         return True
 
     # ── running one story ─────────────────────────────────────────────────────
@@ -726,10 +814,9 @@ class StoryRunnerMixin:
                 return outcome
             st["submitted"] = False
             found = self._verify_story(n, story)
-            if found["unclear"]:
-                st["defect"], st["bad_check"] = _unclear_report(found["unclear"]), True
-                return outcome
             if not found["fail"]:
+                # An expectation the verifier finds unclear says nothing against
+                # the work: the gate verifies it again, where it can be restated.
                 self._accept_story(n, story, st, story.delivered)
                 return outcome
             st["refusals"] += 1
@@ -762,15 +849,14 @@ class StoryRunnerMixin:
         "deferred": [(criterion, why)]}; the verdicts and tests are kept on the
         criteria.
 
-        An expectation the verifier did not get to (no verdict, no saved test)
-        gets one more pass: a verifier that ran out of turns says nothing about
-        the expectation (run 4's engine stories were rewritten twice for it).
-        At the gate the expectations go GATE_BATCH per pass, one that a shared
-        pass did not get to gets a pass alone, and what is still unverified is
-        reported as "ran_out", apart from the verifier's own "unclear".
-        One that acts through an interface not built yet (`not_yet`, or still
-        unverified) is deferred to the phase gate, where the slice is complete;
-        at the gate both count as unclear."""
+        One pass per batch (all of a story's expectations; GATE_BATCH at a
+        gate), then one pass alone for each it did not get to (no verdict, no
+        saved test): a verifier that ran out of turns says nothing about the
+        expectation (run 4's engine stories were rewritten twice for it).  What
+        is still unverified is deferred to the gate, or at the gate reported as
+        "ran_out", apart from the verifier's own "unclear".  `not_yet` (the
+        interface is not built yet) defers to the gate; at the gate it counts
+        as unclear."""
         criteria = story.acceptance if criteria is None else criteria
         label = label or f"P{n}.{story.id}"
         todo = []
@@ -811,20 +897,16 @@ class StoryRunnerMixin:
         for b, batch in enumerate(batches, 1):
             part = f"batch {b}/{len(batches)}" if len(batches) > 1 else ""
             rest = self._verify_batch(n, story, label, criteria, batch, at_gate, found, part)
-            # one more pass alone for what a shared pass did not get to
-            left += rest if len(batch) == 1 else [
-                i for i in rest
-                if self._verify_batch(n, story, label, criteria, [i], at_gate, found,
-                                      "alone", attempts=(3,))]
+            # one more pass each, alone, for what the pass did not get to
+            left += [i for i in rest
+                     if self._verify_batch(n, story, label, criteria, [i], at_gate, found,
+                                           "alone" if len(batch) > 1 else part, attempt=2)]
         why = "the verifier did not get a test for it working"
         for i in left:
             c = criteria[i]
-            if at_gate:
-                c.verdict = None
-                found["ran_out"].append((c, why))
-            else:
-                c.verdict = {"passed": None, "deferred": True, "evidence": why, "at": _now()}
-                deferred.append((c, why))
+            # still deferred: the next gate verifies it again
+            c.verdict = {"passed": None, "deferred": True, "evidence": why, "at": _now()}
+            (found["ran_out"] if at_gate else deferred).append((c, why))
         ran_out = found["ran_out"]
         parts = [f"{len(fail)} not met"] * bool(fail) + [f"{len(unclear)} unclear"] * bool(unclear) \
             + [f"{len(ran_out)} not verified (the verifier ran out of turns)"] * bool(ran_out) \
@@ -835,46 +917,45 @@ class StoryRunnerMixin:
 
     def _verify_batch(self, n: int, story: Story, label: str, criteria: list[Criterion],
                       todo: list[int], at_gate: bool, found: dict, part: str = "",
-                      attempts: tuple = (1, 2)) -> list[int]:
-        """Verifier passes over the expectations `todo`, adding the verdicts to
-        `found`; returns the ones no pass got to (no verdict, no saved test)."""
+                      attempt: int = 1) -> list[int]:
+        """One verifier pass over the expectations `todo`, adding the verdicts
+        to `found`; returns the ones it did not get to (no verdict, no saved
+        test)."""
         fail, unclear, deferred = found["fail"], found["unclear"], found["deferred"]
-        for attempt in attempts:
-            results, runs = self._verifier_pass(n, story, label, criteria, todo, attempt, part)
-            again = []
-            for i in todo:
-                c = criteria[i]
-                verdict, evidence = results.get(i, (None, ""))
-                if verdict is None:          # no verdict: what its saved test showed
-                    run = runs.get(i)
-                    if run is None:
-                        again.append(i)
-                        continue
-                    verdict, evidence = (("pass", "") if run[0] else
-                                         ("fail", "its saved test fails:\n" + _tail(run[1], 12)))
-                if verdict == "not_yet":
-                    if at_gate:
-                        verdict, evidence = "unclear", ("the verifier found no way to exercise it "
-                                                        f"through the product's interfaces: {evidence}")
-                    else:
-                        c.verdict = {"passed": None, "deferred": True, "evidence": evidence,
-                                     "at": _now()}
-                        deferred.append((c, evidence))
-                        continue
-                if verdict == "unclear":
-                    c.verdict = None
-                    unclear.append((c, evidence))
+        results, runs = self._verifier_pass(n, story, label, criteria, todo, attempt, part, at_gate)
+        left = []
+        for i in todo:
+            c = criteria[i]
+            verdict, evidence = results.get(i, (None, ""))
+            if verdict is None:          # no verdict: what its saved test showed
+                run = runs.get(i)
+                if run is None:
+                    left.append(i)
                     continue
-                c.verdict = {"passed": verdict == "pass", "evidence": evidence, "at": _now()}
-                if verdict == "fail":
-                    fail.append((c, evidence))
-            todo = again
-            if not todo:
-                break
-        return todo
+                verdict, evidence = (("pass", "") if run[0] else
+                                     ("fail", "its saved test fails:\n" + _tail(run[1], 12)))
+            if verdict == "not_yet":
+                if at_gate:
+                    verdict, evidence = "unclear", ("the verifier found no way to exercise it "
+                                                    f"through the product's interfaces: {evidence}")
+                else:
+                    c.verdict = {"passed": None, "deferred": True, "evidence": evidence, "at": _now()}
+                    deferred.append((c, evidence))
+                    continue
+            if verdict == "unclear":
+                # kept for the gate (again): it says nothing against the work
+                c.verdict = {"passed": None, "deferred": True, "evidence": f"unclear: {evidence}",
+                             "at": _now()}
+                unclear.append((c, evidence))
+                continue
+            c.verdict = {"passed": verdict == "pass", "evidence": evidence, "at": _now()}
+            if verdict == "fail":
+                fail.append((c, evidence))
+        return left
 
     def _verifier_pass(self, n: int, story: Story, label: str, criteria: list[Criterion],
-                       todo: list[int], attempt: int, part: str = "") -> tuple[dict, dict]:
+                       todo: list[int], attempt: int, part: str = "",
+                       at_gate: bool = False) -> tuple[dict, dict]:
         """One verifier context: (verdicts by index, saved test runs by index)."""
         saved = (self.messages, self.story_role, self._story, self._turn_user)
         self._story = None
@@ -886,7 +967,7 @@ class StoryRunnerMixin:
             f"🔎 Verifying {label} — {len(todo)} expectation{'s' if len(todo) != 1 else ''}"
             + (f" ({', '.join(x for x in (part, 'second pass' * (attempt == 2)) if x)})"
                if part or attempt == 2 else "")))
-        brief = self._verify_brief(n, story, label, criteria, todo)
+        brief = self._verify_brief(n, story, label, criteria, todo, at_gate)
         if attempt > 1:
             brief += ("\n\nA first verifier pass ran out of turns before it saved a test for these. "
                       "Start by finding how the product is run (its entry point and how it is "
@@ -896,7 +977,7 @@ class StoryRunnerMixin:
         before = self._background_runs()
         try:
             self._run_loop(self._current_tools() if self.tools_enabled else [],
-                           verify_cap(len(todo)))
+                           verify_cap(len(todo)) + getattr(self, "_verify_bonus", 0) * len(todo))
         finally:
             self._drop_unsaved_tests(v)
             self._archive_context(by="verify")
@@ -919,7 +1000,7 @@ class StoryRunnerMixin:
                     pass
 
     def _verify_brief(self, n: int, story: Story, label: str, criteria: list[Criterion],
-                      todo: list[int]) -> str:
+                      todo: list[int], at_gate: bool = False) -> str:
         plan = self.plan
         tag = label.replace(".", "_").replace(" ", "_").lower()
         lines = [f"# Verify {label}: {story.title}", "",
@@ -940,10 +1021,14 @@ class StoryRunnerMixin:
             lines.append(f"- Save its test as `{ACCEPTANCE_DIR}/{tag}_c{i + 1}_<short-name>.<ext>`")
         lines += ["", "For each expectation: find out from the code how to exercise it through "
                       "the interface, write the test, run it, save it with save_acceptance_test; "
-                      "then call finish_verification with a verdict for every expectation. If the "
-                      "interface an expectation acts through does not exist yet (e.g. the server "
-                      "it needs is not written), give it `not_yet` at once, with what is missing: "
-                      "it is verified at the end of the phase, when the path is complete."]
+                      "then call finish_verification with a verdict for every expectation. "
+                      + ("This is the end of the phase: every interface it needs should exist now, "
+                         "so there is no `not_yet`. If one truly cannot be exercised, give it "
+                         "`unclear` with what is missing." if at_gate else
+                         "If the interface an expectation acts through does not exist yet (e.g. the "
+                         "server it needs is not written), give it `not_yet` at once, with what is "
+                         "missing: it is verified at the end of the phase, when the path is "
+                         "complete.")]
         return "\n".join(lines)
 
     def _archive_context(self, by: str) -> None:
@@ -993,7 +1078,7 @@ class StoryRunnerMixin:
             return f"ERROR: {path} does not exist — write the test first, then save it."
         if not command or Path(path).name not in command:
             return f"ERROR: 'command' must run {path}, e.g. `sh {path}` or `python3 {path}`."
-        problems = check_problems(command, self.workdir, {path})
+        problems = _test_command_problems(command)
         if problems:
             return "ERROR: this command cannot be an acceptance test: " + "; ".join(problems)
         text = f.read_text(encoding="utf-8", errors="replace")
@@ -1002,9 +1087,9 @@ class StoryRunnerMixin:
             # run 4: P1.S2's tests called GameWorld.execute_command and broke on
             # the next story's refactor while the API still behaved
             return (f"ERROR: the test imports {', '.join(inside)} — the project's own code. Test "
-                    "the product through its interfaces (start it the way they say, e.g. "
-                    "subprocess.Popen([sys.executable, 'server.py']), and send the request or "
-                    "run the command), never its modules: a test of internals breaks when the "
+                    "the product through its interfaces (start it with the command they give, "
+                    "and send the request or run the command line), never its modules: a test "
+                    "of internals breaks when the "
                     "code is reorganised, though the product still behaves.")
         missing = [x for x in expected_values(c) if x not in text]
         if missing:
@@ -1012,6 +1097,12 @@ class StoryRunnerMixin:
                     + ("s " if len(missing) > 1 else " ") + ", ".join(f"`{x}`" for x in missing)
                     + " — check exactly what the example expects; never weaken it.")
         ok, out = self._run_acceptance_test(command)
+        old = (c.test or {}).get("path") or ""
+        if old and old != path and old.startswith(ACCEPTANCE_DIR + "/"):
+            try:                            # one test per expectation: the folder keeps no strays
+                (self.workdir / old).unlink()
+            except OSError:
+                pass
         c.test = {"path": path, "command": command}
         v["saved"][i] = (ok, out)
         if ok:
@@ -1130,21 +1221,13 @@ class StoryRunnerMixin:
         if any(c.examples for c in story.acceptance):
             lines += ["", "An independent verifier tests the acceptance examples after you call "
                           "complete_story, with its own tests through these interfaces."]
-        cmds = request_commands(plan.request)
+        cmds = self._test_commands()
         if cmds:
             lines += ["", "## How the project's tests run",
-                      f"The user runs `{cmds[0]}`: it must find and pass your unit tests. "
+                      f"The last phase's gate runs `{cmds[0]}`: it must find and pass your unit tests. "
                       + _test_hint(cmds[0]) + "."]
         lines += self._take_resume_note()
-        missing = self._missing_check_files(story)
-        if missing:
-            lines += ["", "Its checks run " + ", ".join(missing) + ", which "
-                      + ("does" if len(missing) == 1 else "do") + " not exist yet: write the "
-                      "tests there — the checks run exactly that file."]
-        lines += ["", "Implement this story, " + ("try its examples yourself"
-                                                if any(c.examples for c in story.acceptance)
-                                                else "run its acceptance checks")
-                  + ", then call complete_story."]
+        lines += ["", "Implement this story, try its examples yourself, then call complete_story."]
         return "\n".join(lines)
 
     def _take_resume_note(self) -> list[str]:
@@ -1157,14 +1240,6 @@ class StoryRunnerMixin:
         return ["", "## The user's message (sent when resuming the plan)", note, "",
                 "Follow it: where it differs from what this brief says, it wins."]
 
-    def _missing_check_files(self, story: Story) -> list[str]:
-        out = []
-        for c in story.acceptance:
-            for f in check_files(c.check or ""):
-                if f not in out and not (self.workdir / f).exists():
-                    out.append(f)
-        return out
-
     def _dependency(self, n: int, ref: str) -> Story | None:
         if ref.startswith("P"):
             return self.plan.earlier_stories(n).get(ref)
@@ -1172,82 +1247,51 @@ class StoryRunnerMixin:
         return sset.get(ref) if sset else None
 
     def _accept_text_end(self, n: int, story: Story, state: dict, at_cap: bool = False) -> bool:
-        """A story that ended with text instead of complete_story: run its
-        checks and, for expectations, the verifier, and accept it when all
-        pass (the story-mud run failed a story whose own run of its check had
-        passed, only because it summed up in text).  A criterion backed by
-        evidence alone still needs complete_story."""
-        if not story.acceptance or any(not c.check and not c.examples for c in story.acceptance):
+        """A story that ended with text instead of complete_story: run its unit
+        tests and the verifier, and accept it when they pass (the story-mud run
+        failed a story that had done its work, only because it summed up in
+        text)."""
+        if not story.acceptance or any(not c.examples for c in story.acceptance):
             return False
-        failures, passed, results = self._run_story_checks(story, [], state["start"])
-        story.check_results = results
+        failures, passed = self._run_own_tests(story, state["start"])
         if failures:
             return False
         last = next((m.get("content") for m in reversed(self.messages[state["start"]:])
                      if m.get("role") == "assistant" and m.get("content")), "")
-        delivered = " ".join(str(last).split())[:600]
-        if any(c.examples for c in story.acceptance):
-            story.delivered = delivered
-            found = self._verify_story(n, story)
-            if found["fail"] or found["unclear"]:
-                state["failure"] = (("It reached the turn limit" if at_cap
-                                     else "It ended without complete_story")
-                                    + ", and the verifier found:\n"
-                                    + "\n".join(x for x in (_fail_report(found["fail"]),
-                                                            _unclear_report(found["unclear"])) if x))
-                return False
+        story.delivered = " ".join(str(last).split())[:600]
+        found = self._verify_story(n, story)
+        if found["fail"]:
+            state["failure"] = (("It reached the turn limit" if at_cap
+                                 else "It ended without complete_story")
+                                + ", and the verifier found:\n" + _fail_report(found["fail"]))
+            return False
         state["passed"] = passed
-        self._accept_story(n, story, state, delivered)
+        self._accept_story(n, story, state, story.delivered)
         self._step_summary = story.delivered or f"Story {story.id} done."
         self.event_queue.put(ChatEvent("system",
             f"Story {story.id} " + ("reached the turn limit" if at_cap
-                                    else "ended without complete_story") + "; its "
-            + ("expectations are verified" if any(c.examples for c in story.acceptance)
-               else "checks pass") + " — accepted."))
+                                    else "ended without complete_story")
+            + "; its expectations are verified — accepted."))
         return True
 
-    def _run_story_checks(self, story: Story, evidence: list,
-                          start: int | None = None) -> tuple[list[str], list[str], list[dict]]:
-        """Run a story's acceptance checks: (failure reports, the checks that
-        passed, a result per criterion).  A criterion without a check passes on
-        matching evidence ({criterion, how}), else its result is None.  With
-        start (where the story's messages begin), the test files the story
-        wrote that no check runs are run too (_own_tests)."""
-        failures, passed, results = [], [], []
-        for c in story.acceptance:
-            if c.check:
-                self.event_queue.put(ToolCallEvent("story_check", {"command": c.check}))
-                ok, out = tdd_mod.run_tests(c.check, self.workdir, self._cancel)
-                self.event_queue.put(ToolResultEvent("story_check", out))
-                results.append({"passed": ok, "output": out[-_RESULT_CHARS:], "at": _now()})
-                if ok:
-                    passed.append(c.check)
-                else:
-                    gone = [f for f in check_files(c.check) if not (self.workdir / f).exists()]
-                    failures.append(f"✗ {c.text}\n  `{c.check}`\n{_indent(_tail(out))}"
-                                    + (_SERVER_HINT if _RX_NO_SERVER.search(out) else "")
-                                    + (f"\n  ({', '.join(gone)} does not exist — this check runs "
-                                       "it: write the tests in that file)" if gone else ""))
+    def _run_own_tests(self, story: Story, start: int) -> tuple[list[str], list[str]]:
+        """Run the test files the story wrote (_own_tests), and the project's
+        test command when it wrote any (_suite_finds_tests): (failure reports,
+        the commands that passed)."""
+        failures, passed = [], []
+        for path, cmd, problem in self._own_tests(story, start):
+            if problem:
+                failures.append(f"✗ {path}: {problem}")
+                continue
+            self.event_queue.put(ToolCallEvent("story_check", {"command": cmd}))
+            ok, out = tdd_mod.run_tests(cmd, self.workdir, self._cancel)
+            self.event_queue.put(ToolResultEvent("story_check", out))
+            if ok and not _RX_NO_TESTS.search(out):
+                passed.append(cmd)
             else:
-                how = next((str(e.get("how") or "").strip() for e in evidence if isinstance(e, dict)
-                            and str(e.get("how") or "").strip()
-                            and _same(str(e.get("criterion") or ""), c.text)), "")
-                results.append({"passed": True if how else None, "output": how, "at": _now()})
-        if start is not None:
-            for path, cmd, problem in self._own_tests(story, start):
-                if problem:
-                    failures.append(f"✗ {path}: {problem}")
-                    continue
-                self.event_queue.put(ToolCallEvent("story_check", {"command": cmd}))
-                ok, out = tdd_mod.run_tests(cmd, self.workdir, self._cancel)
-                self.event_queue.put(ToolResultEvent("story_check", out))
-                if ok and not _RX_NO_TESTS.search(out):
-                    passed.append(cmd)
-                else:
-                    failures.append(f"✗ the story's own tests in {path} pass (no check ran them)\n"
-                                    f"  `{cmd}`\n{_indent(_tail(out))}" + self._import_hint(out))
-            failures += self._suite_finds_tests(story, start)
-        return failures, passed, results
+                failures.append(f"✗ the story's own tests in {path} pass\n"
+                                f"  `{cmd}`\n{_indent(_tail(out))}" + self._import_hint(out))
+        return failures + self._suite_finds_tests(story, start), passed
 
     def _import_hint(self, out: str) -> str:
         """run 4's P2.S1 looped on `No module named 'server'` until its turns ran out."""
@@ -1262,26 +1306,23 @@ class StoryRunnerMixin:
         that command must find tests: plain `python -m unittest` found none in
         runs 2–4 (no tests/__init__.py), and only the last gate would say so."""
         wrote = [f for f in self._story_facts(start, [])["files"] if _RX_TEST_FILE.match(Path(f).name)]
-        cmds = request_commands(self.plan.request) if self.plan else []
+        cmds = self._test_commands()
         out = []
         for cmd in cmds if wrote else []:
             self.event_queue.put(ToolCallEvent("story_check", {"command": cmd}))
             _ok, text = tdd_mod.run_tests(cmd, self.workdir, self._cancel)
             self.event_queue.put(ToolResultEvent("story_check", text))
             if _RX_NO_TESTS.search(text):
-                out.append(f"✗ `{cmd}` (the user's own test command) finds no tests, though this "
+                out.append(f"✗ `{cmd}` (the project's test command) finds no tests, though this "
                            f"story wrote {', '.join(wrote)}\n{_indent(_tail(text, 6))}\n  ({_test_hint(cmd)})")
         return out
 
     def _own_tests(self, story: Story, start: int) -> list[tuple[str, str, str]]:
-        """The test files this story wrote that none of its checks runs, as
-        (path, the command that runs it, ""), or (path, "", the problem) for a
-        test file outside the story's files and any tests folder (run 2's P2.S1
-        put its tests in a file its check never ran; a stray root test_server.py
-        stayed behind)."""
-        checks = [c.check for c in story.acceptance if c.check]
-        runner = next((a for c in checks for a in _argv(c) if _RX_PY.match(a)), "python3")
-        pytest = any("pytest" in c for c in checks)
+        """The Python test files this story wrote, as (path, the command that
+        runs it, ""), or (path, "", the problem) for a test file outside the
+        story's files and any tests folder (a stray root test_server.py stayed
+        behind in run 2)."""
+        pytest = any("pytest" in c for c in self._test_commands())
         out = []
         for path in self._story_facts(start, [])["files"]:
             pp = Path(path)
@@ -1291,9 +1332,9 @@ class StoryRunnerMixin:
             if not {"test", "tests"} & set(pp.parts[:-1]) and path not in story.files:
                 out.append((path, "", "a test file outside the story's files and the tests "
                                       "folder — move it into tests/ or delete it"))
-            elif not any(_runs(c, path) for c in checks):
-                out.append((path, f"{runner} -m pytest -q {path}" if pytest
-                            else f"{runner} -m unittest {path}", ""))
+            else:
+                out.append((path, f"python3 -m pytest -q {path}" if pytest
+                            else f"python3 -m unittest {path}", ""))
         return out
 
     def _handle_complete_story(self, args: dict) -> str:
@@ -1308,24 +1349,18 @@ class StoryRunnerMixin:
             return ("ERROR: not submitted yet: you created files that look like scratch work and are "
                     f"not among the story's files: {', '.join(scratch)}. Delete them, or call "
                     "complete_story again to keep them.")
-        evidence = args.get("evidence") if isinstance(args.get("evidence"), list) else []
-        failures, passed, results = self._run_story_checks(story, evidence, st["start"])
-        story.check_results = results
-        unbacked = [c.text for c, r in zip(story.acceptance, results)
-                    if not c.check and not c.examples and r["passed"] is None]
-        if unbacked and not failures:
-            failures += [f"✗ {t}\n  no evidence: add {{criterion, how}} to 'evidence'" for t in unbacked]
+        failures, passed = self._run_own_tests(story, st["start"])
         if failures:
             st["refusals"] += 1
             story.refusals = st["refusals"]
             self.emit_status()
             report = "\n".join(failures)
             if st["refusals"] >= STORY_MAX_REFUSALS:
-                st["failure"] = f"Its acceptance checks failed {st['refusals']} times:\n{report}"
+                st["failure"] = f"Its tests failed {st['refusals']} times:\n{report}"
                 self._step_summary = ""
-                return ("ERROR: story not complete — the checks failed again:\n" + report
+                return ("ERROR: story not complete — its tests failed again:\n" + report
                         + "\nThe harness stops this story here. Do not call any more tools.")
-            return ("ERROR: story not complete — these acceptance criteria fail:\n" + report
+            return ("ERROR: story not complete — these fail:\n" + report
                     + "\nFix this, then call complete_story again.")
         summary = str(args.get("summary") or "").strip()
         st["passed"] = passed
@@ -1338,7 +1373,7 @@ class StoryRunnerMixin:
                     "tools.")
         self._accept_story(st["phase"], story, st, summary)
         self._step_summary = story.delivered or f"Story {story.id} done."
-        return "Story accepted: its checks pass."
+        return "Story accepted: its tests pass."
 
     def _scratch_files(self, st: dict, story: Story) -> list[str]:
         """Files the story created that look like leftovers of trying things out
@@ -1394,7 +1429,7 @@ class StoryRunnerMixin:
                              f"{report}")
             return ("This story already had a fix story written for a defect; the harness "
                     "stops it here as not done. Do not call any more tools.")
-        check = str(args.get("criterion") or args.get("check") or "").strip()
+        check = str(args.get("criterion") or "").strip()
         if check:
             # run 3's P1.S2 had `assert Room.__issubclass__`, which no class has;
             # the model added `__issubclass__ = True` to every class to pass it.
@@ -1409,31 +1444,21 @@ class StoryRunnerMixin:
     def _fix_defect(self, idx: int, story: Story) -> str:
         """A story reported a defect in earlier code: a writer pass adds one fix
         story, and the blocked story waits for it."""
-        n = idx + 1
-        sset = self.plan.story_sets[n]
-        before = {s.id for s in sset.stories}
+        sset = self.plan.story_sets[idx + 1]
         self.event_queue.put(ChatEvent("system",
             f"Story {story.id} is blocked by a defect in earlier code; asking the story writer "
             f"for a fix story:\n{_tail(story.defect)}"))
         nxt = max((s.number for s in sset.stories), default=0) + 1
-        outcome = self._write_stories(idx, append=True, extra=(
+        return self._amend_stories(idx, (
             f"Story {story.id} ({story.title}) is blocked by a defect in code an earlier story "
             f"wrote:\n\n{story.defect}\n\nLook at that code and write ONE story, S{nxt}, that "
             f"fixes it and adds a regression test proving the fix. Do not change {story.id} or "
-            f"the finished stories: {story.id} runs again once S{nxt} is done."))
-        if outcome != "done":
-            return outcome
-        sset = self.plan.story_sets[n]
-        added = [s.id for s in sset.stories if s.id not in before and not s.finished]
-        blocked = sset.get(story.id)
-        if blocked is not None and added:
-            blocked.depends_on += [a for a in added if a not in blocked.depends_on]
-            self._write_stories_file(sset)
-        return "done"
+            f"the finished stories: {story.id} runs again once S{nxt} is done (it will depend "
+            f"on S{nxt}, so S{nxt} must not depend on {story.id})."), blocks=story.id)
 
     def _fix_check(self, idx: int, story: Story) -> str:
-        """A story reported that one of its own checks is wrong: the writer
-        replaces it with one story doing the same work under correct checks,
+        """A story reported that one of its own expectations is wrong: the writer
+        replaces it with one story doing the same work under correct ones,
         and stories that depended on it depend on the replacement."""
         n = idx + 1
         sset = self.plan.story_sets[n]
@@ -1442,7 +1467,7 @@ class StoryRunnerMixin:
             f"Story {story.id} reports a wrong expectation; asking the story writer to correct "
             f"it:\n"
             f"{_tail(story.defect)}"))
-        return self._write_stories(idx, replaces=[story.id], remap=story.id, extra=(
+        return self._amend_stories(idx, replaces=[story.id], remap=story.id, why=(
             f"Story {story.id} ({story.title}) reports that one of its acceptance criteria is "
             f"wrong:\n\n{story.defect}\n\nLook at the criterion and the code. Write ONE story, "
             f"S{nxt}, that replaces {story.id}: the same work (what {story.id} already wrote "
@@ -1464,7 +1489,7 @@ class StoryRunnerMixin:
         self.messages[-1]["content"] = (
             f"{self.messages[-1].get('content') or ''}\n\n[Note from the harness, not the user] "
             f"{cap - iteration + 1} turns left for this story. If a bug in code an earlier story "
-            "wrote is what keeps the checks failing, fix it when it is small, or call "
+            "wrote is what keeps this story from working, fix it when it is small, or call "
             "report_defect.")
 
     def _story_failed(self, idx: int, story: Story, outcome: str) -> str:
@@ -1489,7 +1514,7 @@ class StoryRunnerMixin:
         sset = self.plan.story_sets[idx + 1]
         ids = [story.id] + _dependents(sset, story.id)
         nxt = max((s.number for s in sset.stories), default=0) + 1
-        return self._write_stories(idx, replaces=ids, extra=(
+        return self._amend_stories(idx, replaces=ids, why=(
             f"Story {story.id} ({story.title}) failed:\n\n{story.failure or 'no reason recorded'}\n\n"
             f"Look at the code as it is now and replace {', '.join(ids)} with smaller or "
             f"corrected stories that avoid this. Outline and write ONLY the replacement "
@@ -1502,40 +1527,53 @@ class StoryRunnerMixin:
     # ── the phase gate ────────────────────────────────────────────────────────
 
     def _phase_checks(self, step: Step, sset: StorySet, last: bool = False) -> tuple[bool, str]:
+        """The phase gate (_gate); a re-verification's extra turns last one gate."""
+        try:
+            return self._gate(step, sset, last)
+        finally:
+            self._verify_bonus = 0
+
+    def _gate(self, step: Step, sset: StorySet, last: bool) -> tuple[bool, str]:
         """The phase gate, stopping at the first failure; the result is kept on
-        the story set for the progress view.
+        the story set for the progress view, with the kinds of failure
+        (fail, unclear, ran_out, regression, command, gap) that decide what
+        _run_phase does next.
         1. The phase's own expectations, verified like a story's (a verifier
            pass writes and saves their acceptance tests).
         2. Every acceptance test saved so far, in this phase and earlier ones:
            a later story must not break what an earlier one delivered.
-        3. Its legacy check commands, and at the last phase the commands the
-           user's request says must pass, as written (run 2 ended "complete"
-           with plain `python -m unittest` finding no tests).
+        3. At the last phase, the project's test commands: the ones the
+           request says must pass, as written (run 2 ended "complete" with
+           plain `python -m unittest` finding no tests), and those proving
+           its test-suite requirements.
         4. At the last phase, every requirement must be proven."""
         n = self.plan.steps.index(step) + 1
         out = []
 
-        def fail(report: str, command: str = "", output: str = "") -> tuple[bool, str]:
+        def fail(report: str, kinds: list[str], command: str = "",
+                 output: str = "") -> tuple[bool, str]:
             sset.gate = {"passed": False, "command": command, "output": (output or report)[-_RESULT_CHARS:],
-                         "at": _now()}
+                         "kinds": kinds, "at": _now()}
             return False, report
 
         # the phase's own expectations, and the stories' that waited for the
         # complete path (deferred: their interface did not exist yet)
         waiting = [c for s in sset.stories if s.status == "done" for c in s.acceptance
-                   if c.verdict and c.verdict.get("deferred")]
-        criteria = [c for c in step.acceptance if c.examples] + waiting
+                   if c.verdict and c.verdict.get("deferred") and not c.retired]
+        criteria = [c for c in step.acceptance if c.examples and not c.retired] + waiting
         if criteria:
             pseudo = Story(id="phase", title=step.title, description=step.outcome,
                            delivered=step.outcome, acceptance=criteria)
             found = self._verify_story(n, pseudo, label=f"phase {n}", criteria=criteria,
                                        at_gate=True)
-            if found["fail"] or found["unclear"] or found["ran_out"]:
+            kinds = [k for k in ("fail", "unclear", "ran_out") if found[k]]
+            if kinds:
+                ids = {id(c): cid for cid, c, _n in self._criteria(n)}
                 return fail("\n\n".join(x for x in (
                     _fail_report(found["fail"]) and
                     "The phase's expected behaviour is not there yet:\n" + _fail_report(found["fail"]),
-                    _unclear_report(found["unclear"]),
-                    _ran_out_report(found["ran_out"])) if x))
+                    _unclear_report(found["unclear"], ids),
+                    _ran_out_report(found["ran_out"])) if x), kinds)
             out.append(f"{len(criteria)} expectation(s) verified"
                        + (f", {len(waiting)} of them deferred by stories" if waiting else ""))
         saved = self._saved_tests(n)
@@ -1549,12 +1587,10 @@ class StoryRunnerMixin:
             return fail("\n\n".join(
                 f"An acceptance test that passed before fails now ({cid}: {c.text}):\n"
                 f"`{c.test['command']}`\n{_tail(text, 12)}" for cid, c, text in broken)
-                + "\n\n" + _RETIRE_HINT, broken[0][1].test["command"], broken[0][2])
+                + "\n\n" + _RETIRE_HINT, ["regression"], broken[0][1].test["command"], broken[0][2])
         if saved:
             out.append(f"{len(saved)} acceptance test(s) still pass")
-        cmds = list(step.checks)
-        if last:
-            cmds += [c for c in request_commands(self.plan.request) if c not in cmds]
+        cmds = self._test_commands() if last else []
         for cmd in cmds:
             self.event_queue.put(ToolCallEvent("phase_check", {"command": cmd}))
             ok, text = tdd_mod.run_tests(cmd, self.workdir, self._cancel)
@@ -1564,14 +1600,15 @@ class StoryRunnerMixin:
                                           "proves nothing — unittest discovers tests/ only when "
                                           "it has an __init__.py)")
             if not ok:
-                return fail(f"`{cmd}` failed:\n{_tail(text)}", cmd, text)
+                return fail(f"`{cmd}` failed:\n{_tail(text)}", ["command"], cmd, text)
             out.append(f"`{cmd}` passes")
         gaps = self._requirement_gaps(len(self.plan.steps) + 1) if last else []
         if gaps:
             return fail("These requirements of the user's request are not proven by a passing "
-                        "acceptance test:\n" + "\n".join(f"- {r['id']}: {r['text']}" for r in gaps))
+                        "acceptance test:\n" + "\n".join(f"- {r['id']}: {r['text']}" for r in gaps),
+                        ["gap"])
         if not out:
-            out.append("(the phase has no checks)")
+            out.append("(the phase has nothing to verify)")
         sset.gate = {"passed": True, "output": "\n".join(out), "at": _now()}
         return True, sset.gate["output"]
 
@@ -1597,21 +1634,25 @@ class StoryRunnerMixin:
         return out
 
     def _retire_problems(self, n: int, raw) -> tuple[list[tuple[str, str]], list[str]]:
-        """finish_stories' `retire`: ([(id, why)], problems).  Only a saved test
-        of a done story or an earlier phase can be retired, with a reason."""
+        """finish_stories' `retire`: ([(id, why)], problems).  An expectation of
+        a done story or of a phase up to this one can be retired, with a reason:
+        one with a saved test of replaced behaviour, or one the verifier found
+        unclear and a new story restates."""
         items, problems = [], []
         if raw in (None, "", []):
             return items, problems
         if not isinstance(raw, list):
             return items, ["retire must be a list of {expectation, why}"]
-        known = {cid.lower(): cid for cid, c, _n in self._criteria(n) if c.test and not c.retired}
+        known = {cid.lower(): cid for cid, c, _n in self._criteria(n) if not c.retired}
         for x in raw:
             cid = str((x.get("expectation") or x.get("id") or "") if isinstance(x, dict) else x).strip()
             why = str(x.get("why") or x.get("reason") or "").strip() if isinstance(x, dict) else ""
             if cid.lower() not in known:
-                problems.append(f"retire: {cid or '(no id)'} is not a saved acceptance test "
+                shown = list(known.values())
+                problems.append(f"retire: {cid or '(no id)'} is not an expectation that can be retired "
                                 "(ids look like P1.S1.4 — story S1 of phase 1, expectation 4 — "
-                                f"or phase 1.2); saved: {', '.join(known.values()) or 'none'}")
+                                f"or phase 1.2); these can: {', '.join(shown[:20]) or 'none'}"
+                                + (" …" if len(shown) > 20 else ""))
             elif not why:
                 problems.append(f"retire: {cid} needs a `why`: what replaced the behaviour it tests")
             else:
@@ -1635,8 +1676,7 @@ class StoryRunnerMixin:
         """Each requirement id → the verifiable criteria that cover it, as
         (where, criterion, passed: True/False/None = not verified), in phases
         before `upto` (all when None): stories' criteria (replaced stories do
-        not count) and the phases' own.  An expectation is proven by its
-        verifier verdict; a legacy check by its last run."""
+        not count) and the phases' own, each proven by its verifier verdict."""
         out: dict[str, list] = {}
         for n, sset in sorted(self.plan.story_sets.items()):
             if upto is not None and n >= upto:
@@ -1644,16 +1684,10 @@ class StoryRunnerMixin:
             for s in sset.stories:
                 if s.status == "replaced":
                     continue
-                for i, c in enumerate(s.acceptance):
-                    if not (c.examples or c.check) or c.retired:
+                for c in s.acceptance:
+                    if not c.examples or c.retired:
                         continue
-                    if s.status != "done":
-                        passed = None
-                    elif c.examples:
-                        passed = c.proven
-                    else:
-                        r = s.check_results[i] if i < len(s.check_results) else {}
-                        passed = r.get("passed")
+                    passed = c.proven if s.status == "done" else None
                     for rid in c.covers:
                         out.setdefault(rid, []).append((f"P{n}.{s.id}", c, passed))
         for n, step in enumerate(self.plan.steps, 1):
@@ -1664,21 +1698,38 @@ class StoryRunnerMixin:
                     out.setdefault(rid, []).append((f"phase {n}", c, c.proven if c.verdict else None))
         return out
 
+    def _suite_proofs(self) -> dict[str, str]:
+        """Requirement id → the test command that proves it, for requirements
+        about the test suite (plan.suite_command): the last gate runs it, and no
+        expectation covers them."""
+        return {r["id"]: cmd for r in self.plan.requirements
+                for cmd in [suite_command(r["text"], self.plan.request, self.plan.interfaces)] if cmd}
+
+    def _test_commands(self) -> list[str]:
+        """The commands the last gate runs as the project's tests: the request's
+        own, then those that prove its test-suite requirements."""
+        if self.plan is None:
+            return []
+        return list(dict.fromkeys(request_commands(self.plan.request)
+                                  + list(self._suite_proofs().values())))
+
     def _requirement_gaps(self, upto: int) -> list[dict]:
-        """The requirements of phases before `upto` that no passing check proves."""
-        cov = self._coverage(upto)
-        return [r for r in self.plan.requirements if r["phase"] < upto
+        """The requirements of phases before `upto` that no passing check proves
+        (bar those the test command proves at the last gate)."""
+        cov, suite = self._coverage(upto), self._suite_proofs()
+        return [r for r in self.plan.requirements if r["phase"] < upto and r["id"] not in suite
                 and not any(passed for _w, _c, passed in cov.get(r["id"], []))]
 
     def _due_requirements(self, n: int) -> list[dict]:
         """What phase n's stories must cover: its own requirements, and earlier
         phases' that no passing check proves yet."""
-        gaps = {r["id"] for r in self._requirement_gaps(n)}
-        return [r for r in self.plan.requirements if r["phase"] == n or r["id"] in gaps]
+        gaps, suite = {r["id"] for r in self._requirement_gaps(n)}, self._suite_proofs()
+        return [r for r in self.plan.requirements
+                if (r["phase"] == n and r["id"] not in suite) or r["id"] in gaps]
 
     def _coverage_problems(self, n: int, sset: StorySet) -> list[str]:
         """A submitted set's requirement errors: a due requirement no live
-        criterion with a check covers, or a covers id that is no requirement."""
+        expectation covers, or a covers id that is no requirement."""
         if not self.plan.requirements:
             return []
         ids = {r["id"] for r in self.plan.requirements}
@@ -1687,6 +1738,8 @@ class StoryRunnerMixin:
             if s.status == "replaced":
                 continue
             for c in s.acceptance:
+                if c.retired:                   # proves nothing any more (_coverage)
+                    continue
                 unknown = [x for x in c.covers if x not in ids]
                 if len(c.covers) > MAX_COVERS and not s.finished:
                     # run 3's phase 2: every criterion covered R5–R13, all nine
@@ -1698,11 +1751,12 @@ class StoryRunnerMixin:
                     errors.append(f"{s.id}: covers {', '.join(unknown)}, which "
                                   f"{'is' if len(unknown) == 1 else 'are'} not among the "
                                   f"requirements ({', '.join(sorted(ids, key=_rnum))})")
-                if c.examples or c.check:
+                if c.examples:
                     covered |= set(c.covers)
         step = self.plan.steps[n - 1] if n <= len(self.plan.steps) else None
         for c in (step.acceptance if step else []):    # the phase's own expectations
-            covered |= set(c.covers)
+            if not c.retired:
+                covered |= set(c.covers)
         for r in self._due_requirements(n):
             if r["id"] not in covered:
                 errors.append(f"{r['id']} ({r['text']}) is not covered — give a story an "
@@ -1713,16 +1767,18 @@ class StoryRunnerMixin:
     def _requirement_table(self, upto: int) -> str:
         """The requirements of phases up to `upto` and what proves them, for the
         phase report: written by the harness, not the model."""
-        cov = self._coverage(upto + 1)
+        cov, suite = self._coverage(upto + 1), self._suite_proofs()
         lines = []
         for r in self.plan.requirements:
             if r["phase"] > upto:
                 continue
             proof = [(w, c) for w, c, passed in cov.get(r["id"], []) if passed]
-            if proof:
+            if r["id"] in suite and not proof:
+                lines.append(f"- · {r['id']} {r['text']} — `{suite[r['id']]}`, run at the last "
+                             "phase's gate")
+            elif proof:
                 w, c = proof[0]
-                how = (f"`{c.test['command']}`" if c.test else
-                       f"`{c.check}`" if c.check else f"\"{c.text}\"")
+                how = f"`{c.test['command']}`" if c.test else f"\"{c.text}\""
                 lines.append(f"- ✓ {r['id']} {r['text']} — {w}: {how}")
             else:
                 lines.append(f"- ✗ {r['id']} {r['text']} — not proven by a passing test")
@@ -1741,7 +1797,7 @@ class StoryRunnerMixin:
                          f"delivered: {s.delivered or '-'}\n"
                          f"files: {', '.join(s.facts.get('files') or []) or '-'}\n"
                          f"definitions: {', '.join(s.facts.get('definitions') or []) or '-'}\n"
-                         f"checks passed: {'; '.join(s.facts.get('checks') or []) or '-'}\n"
+                         f"tests passed: {'; '.join(s.facts.get('checks') or []) or '-'}\n"
                          f"verified expectations: "
                          f"{'; '.join(c.text for c in s.acceptance if c.proven) or '-'}"
                          + (f"\ntests: {', '.join(tests)}" if tests else ""))
@@ -1806,7 +1862,7 @@ class StoryRunnerMixin:
             steps.append({
                 "n": n, "title": step.title, "status": step.status, "stage": step.stage,
                 "tag": step.tag, "details": step.details, "files": step.files, "note": step.note,
-                "tests": step.tests, "outcome": step.outcome, "checks": step.checks,
+                "tests": step.tests, "outcome": step.outcome,
                 "report": step.report, "started_at": step.started_at,
                 "finished_at": step.finished_at, "turns": step.turns,
                 "gate": sset.gate if sset else {},
@@ -1865,31 +1921,21 @@ def _story_view(sset: StorySet, s: Story) -> dict:
             "dependents": _dependents_any(sset, s.id), "attempts": s.attempts,
             "turns": s.turns, "refusals": s.refusals, "started_at": s.started_at,
             "finished_at": s.finished_at,
-            "criteria": [_criterion_view(c, s.check_results[i] if i < len(s.check_results) else None)
-                         for i, c in enumerate(s.acceptance)]}
+            "criteria": [_criterion_view(c) for c in s.acceptance]}
 
 
-def _criterion_view(c: Criterion, legacy_result) -> dict:
+def _criterion_view(c: Criterion) -> dict:
     """A criterion as the plan view shows it: its behaviour with the examples,
-    the command that checks it (the verifier's saved test, or a legacy check)
-    and the last result (the verdict, or the legacy check's run)."""
+    the verifier's saved test ("check") and its verdict."""
     text = c.text + "".join(f"\n  e.g. {e['given']} → {e['expect']}" for e in c.examples)
-    if c.examples:
-        result = ({"passed": c.verdict.get("passed"), "output": c.verdict.get("evidence") or "",
-                   "at": c.verdict.get("at", "")} if c.verdict else None)
-    else:
-        result = legacy_result
-    return {"text": text, "check": c.test["command"] if c.test else c.check, "result": result}
+    result = ({"passed": c.verdict.get("passed"), "output": c.verdict.get("evidence") or "",
+               "at": c.verdict.get("at", "")} if c.verdict else None)
+    return {"text": text, "check": c.test["command"] if c.test else None, "result": result}
 
 
 def _dependents_any(sset: StorySet, story_id: str) -> list[str]:
     """Stories of the set that list story_id among their dependencies (any status)."""
     return [s.id for s in sset.stories if story_id in s.depends_on]
-
-
-def _same(a: str, b: str) -> bool:
-    a, b = " ".join(a.lower().split()), " ".join(b.lower().split())
-    return bool(a) and (a == b or a in b or b in a)
 
 
 def _now() -> str:
@@ -1902,29 +1948,6 @@ def _tail(text: str, n: int = 25) -> str:
 
 def _indent(text: str) -> str:
     return "\n".join(f"  {ln}" for ln in text.splitlines())
-
-
-def _argv(cmd: str) -> list[str]:
-    try:
-        return shlex.split(cmd)
-    except ValueError:
-        return cmd.split()
-
-
-def _runs(check: str, path: str) -> bool:
-    """Whether a check command runs the tests in path: it names the file, its
-    module or its folder, discovers tests, or runs the whole suite."""
-    argv = _argv(check)
-    module = path.removesuffix(".py").replace("/", ".")
-    folder = str(Path(path).parent)
-    if path in check or module in argv or "discover" in argv:
-        return True
-    if any(a.rstrip("/") == folder for a in argv if folder != "."):
-        return True
-    for i, a in enumerate(argv[:-1]):
-        if a == "-m" and argv[i + 1] in ("unittest", "pytest"):
-            return not [x for x in argv[i + 2:] if not x.startswith("-")]
-    return argv[:1] == ["pytest"] and not [x for x in argv[1:] if not x.startswith("-")]
 
 
 def _rnum(rid: str) -> int:
@@ -1953,7 +1976,9 @@ def expected_values(c: Criterion) -> list[str]:
     and 'quoted' fragments and numbers — which its acceptance test must check."""
     out = []
     for e in c.examples:
-        for m in re.finditer(r"`([^`]+)`|\"([^\"]+)\"|'([^']+)'|\b(\d+)\b", e.get("expect", "")):
+        # an apostrophe inside a word (Ann's) is not a quote
+        for m in re.finditer(r"`([^`]+)`|\"([^\"]+)\"|(?<!\w)'([^'\n]+)'(?!\w)|\b(\d+)\b",
+                             e.get("expect", "")):
             v = next(g for g in m.groups() if g)
             if v not in out:
                 out.append(v)
@@ -1972,8 +1997,30 @@ def _fail_report(fail: list) -> str:
     return "\n".join(lines)
 
 
-def _unclear_report(unclear: list) -> str:
-    return "\n".join(f"\"{c.text}\" cannot be verified as written: {why}" for c, why in unclear)
+def _unclear_report(unclear: list, ids: dict | None = None) -> str:
+    """Expectations the verifier could not check as written; with ids (by
+    id(criterion)), how the writer gets rid of them."""
+    if not unclear:
+        return ""
+    lines = [f"\"{c.text}\"" + (f" ({ids[id(c)]})" if ids and id(c) in ids else "")
+             + f" cannot be verified as written: {why}" for c, why in unclear]
+    if ids:
+        lines.append("Restate each as an expectation of a new story, with examples that can be "
+                     "checked, and retire the unclear one with finish_stories' `retire` (its id is "
+                     "in brackets).")
+    return "\n".join(lines)
+
+
+def _stuck_reason(sset: StorySet) -> str:
+    """Why no story of the set can run, for the pause message."""
+    failed = [s.id for s in sset.stories if s.status == "failed"]
+    waiting = [s.id for s in sset.blocked()]
+    cycle = _cycle([s for s in sset.stories if s.status == "pending"])
+    parts = ([f"{', '.join(failed)} failed {MAX_ATTEMPTS} times"] if failed else []) \
+        + ([f"{', '.join(waiting)} wait on {'it' if len(failed) == 1 else 'them'}"]
+           if waiting and failed else [f"{', '.join(waiting)} cannot run"] if waiting else []) \
+        + ([f"a dependency cycle: {' → '.join(cycle)}"] if cycle else [])
+    return " and ".join(parts) or "no story is ready to run"
 
 
 def _ran_out_report(ran_out: list) -> str:
@@ -2006,6 +2053,23 @@ def _project_files(workdir: Path, limit: int = 60) -> list[str]:
 
 
 
+# `server.py & sleep 2 && curl …`: a lone & leaves the process running (run 3's
+# server held :8000), and a kill stops what the test did not start (run 2).
+_RX_BACKGROUND = re.compile(r"(?<![&>|])&(?![&>])")
+_RX_KILL = re.compile(r"(?:^|[\s;&|(])(?:pkill|killall|kill)\s")
+
+
+def _test_command_problems(cmd: str) -> list[str]:
+    """What is wrong with the command that runs a saved acceptance test."""
+    try:
+        shlex.split(cmd)
+    except ValueError as e:
+        return [f"it does not parse as a command ({e})"]
+    return ((["it starts a process in the background (&) and leaves it running; the test "
+              "starts and stops what it needs itself"] if _RX_BACKGROUND.search(cmd) else [])
+            + (["it stops processes it did not start"] if _RX_KILL.search(cmd) else []))
+
+
 def verify_cap(expectations: int) -> int:
     return min(VERIFY_MAX, VERIFY_BASE + VERIFY_PER_EXPECTATION * expectations)
 
@@ -2027,8 +2091,7 @@ def _project_imports(workdir: Path, f: Path, text: str, interfaces: list[str]) -
                 names.add(node.module.split(".")[0])
     else:
         names |= {a or b for a, b in re.findall(r"\bfrom\s+([A-Za-z_]\w*)\s+import|\bimport\s+([A-Za-z_]\w*)", text)}
-    libraries = {m for x in interfaces if x.lower().startswith("library")
-                 for m in re.findall(r"import\s+([A-Za-z_]\w*)", x)}
+    libraries = library_modules(interfaces)
     import sys
     return sorted(n for n in names
                   if n not in sys.stdlib_module_names and n not in libraries and n != "tests"
@@ -2040,13 +2103,22 @@ _RX_INTERFACE_FILE = re.compile(r"(?<![\w/.:-])((?:[\w-]+/)*[\w-]+\.(?:py|js|mjs
 
 
 def _absent_interfaces(workdir: Path, interfaces: list[str]) -> list[str]:
-    """The files the declared interfaces run (`python3 server.py` → server.py)
-    when none of them exists yet; [] when one does or none is named."""
-    named = []
+    """The files the declared interfaces run (`python3 server.py` → server.py,
+    `python3 -m src.api` → src/api.py) when none of them exists yet; [] when
+    one does or none is named."""
+    named, paths = [], []
     for x in interfaces:
         for code in re.findall(r"`([^`]+)`", x):
-            named += [m for m in _RX_INTERFACE_FILE.findall(code) if m not in named]
-    if not named or any((workdir / f).exists() for f in named):
+            for m in _RX_INTERFACE_FILE.findall(code):
+                if m not in named:
+                    named.append(m)
+                    paths.append([m])
+            for mod in re.findall(r"(?:^|\s)-m\s+([A-Za-z_][\w.]*)", code):
+                base = mod.replace(".", "/")
+                if mod not in named:
+                    named.append(mod)
+                    paths.append([f"{base}.py", f"{base}/__init__.py", f"{base}/__main__.py"])
+    if not named or any((workdir / f).exists() for alts in paths for f in alts):
         return []
     return named
 

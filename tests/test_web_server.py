@@ -154,6 +154,17 @@ class WebServer(unittest.TestCase):
         self.c._busy = False
         self.assertTrue(self.h.plan_questions)
 
+    def test_story_settings_from_the_web(self):
+        _, body = self.request("GET", "/api/state")
+        st = json.loads(body)["status"]
+        self.assertEqual((st["stories_approve"], st["stories_cap"]), ("each", 40))
+        for cmd in ("/plan stories approve once", "/plan stories cap 25"):   # once: the old name
+            r, _ = self.request("POST", "/api/submit", {"text": cmd})
+            self.assertEqual(r.status, 200)
+        _, body = self.request("GET", "/api/state")
+        st = json.loads(body)["status"]
+        self.assertEqual((st["stories_approve"], st["stories_cap"]), ("auto", 25))
+
     def test_state_carries_the_upload_limit(self):
         _, body = self.request("GET", "/api/state")
         self.assertGreater(json.loads(body)["max_upload"], 0)
@@ -171,13 +182,14 @@ class WebServer(unittest.TestCase):
         from harness.stories import Criterion, Story, StorySet
         _, body = self.request("GET", "/api/state")
         self.assertIsNone(json.loads(body)["plan_view"])
-        self.h.plan = Plan(title="P", kind="stories", steps=[Step(title="A", outcome="o", checks=["true"])])
+        self.h.plan = Plan(title="P", kind="stories", steps=[Step(title="A", outcome="o")])
         self.h.plan.story_sets[1] = StorySet(phase=1, approved=True, stories=[
-            Story(id="S1", title="T", acceptance=[Criterion("ok", "true")])])
+            Story(id="S1", title="T", acceptance=[Criterion("ok", examples=[{"given": "`x`", "expect": "`1`"}],
+                                                            test={"path": "t.sh", "command": "sh t.sh"})])])
         try:
             _, body = self.request("GET", "/api/state")
             view = json.loads(body)["plan_view"]
-            self.assertEqual(view["steps"][0]["stories"][0]["criteria"][0]["check"], "true")
+            self.assertEqual(view["steps"][0]["stories"][0]["criteria"][0]["check"], "sh t.sh")
         finally:
             self.h.plan = None
 

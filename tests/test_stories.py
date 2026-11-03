@@ -6,15 +6,14 @@ from datetime import datetime
 from pathlib import Path
 
 from harness.plan import Plan, Step
-from harness.stories import (MAX_STORIES, Criterion, Story, StorySet, check_problems,
-                             criterion_problems,
+from harness.stories import (MAX_STORIES, Criterion, Story, StorySet, criterion_problems,
                              new_stories_dir, outline_entries, read_story_file, slug,
                              validate_outline, write_story_file)
 
 
 def story(sid, deps=(), status="pending", **kw):
     kw.setdefault("description", f"Do {sid}.")
-    kw.setdefault("acceptance", [Criterion("it works", "python3 -c 'pass'")])
+    kw.setdefault("acceptance", [Criterion("it works", examples=[{"given": "`run`", "expect": "`ok`"}])])
     return Story(id=sid, title=f"Story {sid}", depends_on=list(deps), status=status, **kw)
 
 
@@ -26,8 +25,9 @@ FULL = Story(
     pitfalls=["126 bytes already needs the 16-bit length", "the mask key comes after the length"],
     files=["mud/ws.py"], depends_on=["S1", "P1.S3"],
     provides=["encode_frame(opcode: int, payload: bytes, mask_key: bytes | None = None) -> bytes"],
-    acceptance=[Criterion("RFC 6455 §5.7 'Hello' encodes to 81 05 48 65 6c 6c 6f",
-                          "python3 -m unittest tests.test_ws.Encode", ["R2", "R4"]),
+    acceptance=[Criterion("RFC 6455 §5.7 'Hello' encodes to 81 05 48 65 6c 6c 6f", ["R2", "R4"],
+                          examples=[{"given": "the server sends `Hello`",
+                                     "expect": "the client reads bytes `81 05 48 65 6c 6c 6f`"}]),
                 Criterion("the docstring names the RFC section"),
                 Criterion("a short message is one frame", covers=["R1"],
                           examples=[{"given": "the client sends `hi`",
@@ -71,7 +71,7 @@ class Markdown(unittest.TestCase):
         text = text.replace("Depends: S1", "Depends: none")
         text += ("\n## [ ] S3 — Added by hand\nDepends: S1, S2\n\n### Description\nNew.\n\n"
                  "### Notes from me\nKeep it short.\n\n### Acceptance\n- tests pass\n"
-                 "  Check: `python3 -m unittest`\n- reads well\n")
+                 "  Check: `python3 -m unittest`\n- reads well\n")   # an older plan's Check: is dropped
         back = StorySet.from_markdown(text)
         self.assertEqual([s.id for s in back.stories], ["S1", "S2", "S3"])
         self.assertEqual(back.get("S2").title, "Decode frames")
@@ -79,8 +79,7 @@ class Markdown(unittest.TestCase):
         s3 = back.get("S3")
         self.assertEqual(s3.depends_on, ["S1", "S2"])
         self.assertIn("Keep it short.", s3.description)       # an unknown heading is kept
-        self.assertEqual(s3.acceptance, [Criterion("tests pass", "python3 -m unittest"),
-                                         Criterion("reads well")])
+        self.assertEqual(s3.acceptance, [Criterion("tests pass"), Criterion("reads well")])
 
     def test_merge_keeps_what_was_delivered(self):
         sset = StorySet(phase=1, stories=[FULL, story("S3", ["S2"])])
@@ -94,7 +93,7 @@ class Markdown(unittest.TestCase):
     def test_run_data_lives_in_the_session_not_the_file(self):
         s = story("S1", status="failed", started_at="2026-10-28T15:00:00",
                   finished_at="2026-10-28T15:06:00", turns=12, refusals=2,
-                  check_results=[{"passed": False, "output": "AssertionError", "at": "t"}])
+                  failure="AssertionError")
         sset = StorySet(phase=1, stories=[s], gate={"passed": False, "output": "x", "at": "t"})
         self.assertEqual(StorySet.from_dict(sset.to_dict()), sset)
         md = sset.to_markdown()
@@ -102,15 +101,16 @@ class Markdown(unittest.TestCase):
             self.assertNotIn(leak, md)
 
     def test_a_merge_keeps_the_last_run(self):
-        s = story("S1", status="failed", turns=12, refusals=2,
-                  check_results=[{"passed": False, "output": "boom", "at": "t"}])
+        s = story("S1", status="failed", turns=12, refusals=2, failure="boom")
+        s.acceptance[0].verdict = {"passed": False, "evidence": "x", "at": "t"}
         sset = StorySet(phase=1, stories=[s])
         sset.merge_from_file(StorySet.from_markdown(sset.to_markdown()))
         back = sset.get("S1")
-        self.assertEqual((back.turns, back.refusals, back.check_results[0]["output"]), (12, 2, "boom"))
-        edited = StorySet.from_markdown(sset.to_markdown().replace("python3 -c 'pass'", "true"))
+        self.assertEqual((back.turns, back.refusals, back.failure), (12, 2, "boom"))
+        self.assertEqual(back.acceptance[0].verdict["passed"], False)
+        edited = StorySet.from_markdown(sset.to_markdown().replace("`ok`", "`fine`"))
         sset.merge_from_file(edited)
-        self.assertEqual(sset.get("S1").check_results, [])     # its checks changed
+        self.assertIsNone(sset.get("S1").acceptance[0].verdict)     # its expectation changed
 
     def test_a_failed_story_reset_in_the_file_is_retried(self):
         sset = StorySet(phase=1, stories=[story("S1", status="failed", attempts=2)])
@@ -149,11 +149,9 @@ class Validate(unittest.TestCase):
     def test_criteria_and_files(self):
         errs = "\n".join(self.errors(
             story("S1", acceptance=[]),
-            story("S2", acceptance=[Criterion("x", "")]),
             story("S3", files=["../outside.py"]),
             story("S4", description="")))
         self.assertIn("S1 (Story S1): no acceptance criteria", errs)
-        self.assertIn("S2 (Story S2): empty check", errs)
         self.assertIn("file ../outside.py is outside", errs)
         self.assertIn("S4 (Story S4): no description", errs)
 
@@ -163,25 +161,6 @@ class Validate(unittest.TestCase):
         self.assertEqual(self.errors(), ["no stories: write at least one"])
         self.assertEqual(self.errors(story("S1", status="replaced")),
                          ["no stories: write at least one"])
-
-
-# Checks the story-mud run's story writer produced (phase 2), as written.
-MUD_S1 = ("python3 -c \"import os, threading, time, http.server, urllib.request; "
-          "os.makedirs('static', exist_ok=True); f=open('static/test.txt', 'w'); f.write('hello'); "
-          "f.close(); from server import MUDServer; server = MUDServer(('127.0.0.1', 0)); "
-          "t = threading.Thread(target=server.serve_forever); t.daemon=True; t.start(); "
-          "port = server.server_address[1]; time.sleep(0.5); try: r = urllib.request.urlopen("
-          "f'http://127.0.0.1:{port}/test.txt'); assert r.read().decode() == 'hello'; "
-          "print('S1 passed'); finally: server.shutdown(); t.join(); os.remove('static/test.txt'); "
-          "os.rmdir('static')\"")
-MUD_S2 = ("python3 -c \"import json, urllib.request, threading, time, os, uuid; from server import "
-          "MUDServer; from game import Game, World; import unittest; class TestAPI(unittest.TestCase): "
-          "def test_flow(self): ... \"")
-MUD_P1 = ("python3 -c \"from game import Player, CommandParser; p = Player('1', 'Alice', 'start'); "
-          "print(p.name); cmd, arg = CommandParser().parse('go north'); print(cmd, arg)\"")
-RUN2_STARTS_SERVER = ("python3 -c \"import subprocess, time; proc = subprocess.Popen(['python3', "
-                      "'server.py']); time.sleep(1); assert proc.poll() is None; proc.terminate(); "
-                      "proc.wait()\"")
 
 
 class Expectations(unittest.TestCase):
@@ -203,8 +182,6 @@ class Expectations(unittest.TestCase):
     def test_what_is_refused(self):
         cases = {
             "needs at least one example": Criterion("look works"),
-            "the verifier cannot check": Criterion("look works", examples=[
-                {"given": "Ann sends look", "expect": "the room is described"}]),
             "needs both what is done": Criterion("look works", examples=[{"given": "", "expect": "`x`"}]),
             "contains code": Criterion("models exist", examples=[
                 {"given": "import models", "expect": "`True`"}]),
@@ -212,14 +189,16 @@ class Expectations(unittest.TestCase):
         for why, c in cases.items():
             with self.subTest(why):
                 self.assertTrue(any(why in e for e in criterion_problems(c)), criterion_problems(c))
+        from harness.stories import criterion_notes
+        vague = Criterion("look works", examples=[{"given": "Ann sends look",
+                                                   "expect": "the room is described"}])
+        self.assertEqual(criterion_problems(vague), [])                 # advice, not a refusal
+        self.assertTrue(any("no exact value" in x for x in criterion_notes(vague)))
         suite = Criterion("commands work", examples=[{"given": "python3 -m unittest test_game.py",
                                                       "expect": "exit code `0`"}])
         self.assertTrue(any("running the tests is not a behaviour" in e for e in criterion_problems(suite)))
         dotted = Criterion("rooms", examples=[{"given": "Room.__init__(x)", "expect": "`1`"}])
         self.assertTrue(any("contains code" in e for e in criterion_problems(dotted)))
-
-    def test_a_legacy_check_is_left_to_the_check_rules(self):
-        self.assertEqual(criterion_problems(Criterion("adds", check="true")), [])
 
     def test_examples_from_strings_and_markdown(self):
         c = Criterion.from_dict({"behaviour": "b", "examples": ["`look` → names `Hall`"]})
@@ -227,85 +206,15 @@ class Expectations(unittest.TestCase):
         self.assertEqual(c.text, "b")
 
 
-class CheckCommands(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.wd = Path(self.tmp.name)
-        (self.wd / "game.py").write_text("")
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def problems(self, cmd, planned=("server.py", "tests/test_game.py", "tests/test_kill_switch.py")):
-        return check_problems(cmd, self.wd, set(planned))
-
-    def test_the_story_mud_checks_are_refused(self):
-        s1 = self.problems(MUD_S1)
-        self.assertTrue(any("is not valid Python" in e and "cannot follow ';'" in e for e in s1))
-        self.assertTrue(any("deletes files" in e for e in s1))
-        self.assertTrue(any("is not valid Python" in e for e in self.problems(MUD_S2)))
-        self.assertEqual(self.problems(MUD_P1), ["only prints, so it exits 0 whatever the "
-                                                 "result; assert the expected value (assert x == …)"])
-
-    def test_a_module_the_project_cannot_have(self):
-        bad = self.problems("python3 -c \"import requests; assert requests.get('x').ok\"")
-        self.assertIn("imports requests", bad[0])
-        (self.wd / "requirements.txt").write_text("requests>=2\n")
-        self.assertEqual(self.problems("python3 -c \"import requests; assert requests\""), [])
-        # stdlib, a project module, and a file this phase's stories will write
-        self.assertEqual(self.problems("python3 -c \"import json, game, server; assert game\""), [])
-
-    def test_a_check_that_swallows_its_errors(self):
-        cmd = "python3 -c \"import game\ntry:\n    assert game.x\nexcept Exception as e:\n    print(e)\""
-        self.assertTrue(any("without re-raising" in e for e in self.problems(cmd)))
-        ok = "python3 -c \"import sys\ntry:\n    assert 1\nexcept Exception:\n    sys.exit(1)\""
-        self.assertEqual(self.problems(ok), [])
-
-    def test_good_checks_pass(self):
-        for cmd in ("python3 -m unittest tests/test_game.py",
-                    "python3 -c \"from game import add; assert add(2, 3) == 5\"",
-                    "/usr/bin/python3.14 -c 'import game'",
-                    "grep -q '<input' static/index.html",
-                    "python3 -c \"assert '<input' in open('static/index.html').read()\"",
-                    "python3 -c \"import tempfile, shutil; d = tempfile.mkdtemp(); shutil.rmtree(d)\"",
-                    RUN2_STARTS_SERVER, "python3 -m unittest tests.test_kill_switch"):
-            self.assertEqual(self.problems(cmd), [], cmd)
-
-    def test_run3s_checks_that_could_not_pass(self):
-        # phase 3: `server.py & sleep 2 && curl …` left the server running;
-        # P3.S5: its check ran a test file nobody wrote.
-        bg = self.problems("python3 server.py & sleep 2 && curl http://localhost:8000/api/poll")
-        self.assertTrue(any("in the background (&)" in e for e in bg))
-        self.assertIn("runs tests/test_server_command_integration.py, which does not exist",
-                      self.problems("python3 tests/test_server_command_integration.py")[0])
-        self.assertEqual(self.problems("python3 -m unittest tests.test_game.TestGame.test_look"), [])
-        self.assertEqual(self.problems("python3 -m unittest t.py",
-                                       planned=("t.py",)), [])
-
-    def test_the_run2_checks_that_could_not_pass(self):
-        # P2.S3 stopped the server with pkill; P2.S4 fetched localhost:8000 with
-        # nothing running, then was rewritten to only test that the page exists.
-        self.assertIn("stops processes", self.problems("pkill -f 'python3 server.py'; true")[0])
-        self.assertIn("does not start", self.problems(
-            "python3 -c \"import urllib.request; assert urllib.request.urlopen("
-            "'http://localhost:8000/').status == 200\"")[0])
-        for cmd in ("python3 -c \"import os; assert os.path.exists('static/index.html')\"",
-                    "ls static/index.html && [ -s static/index.html ]"):
-            self.assertIn("only tests that a file exists", self.problems(cmd)[0], cmd)
-
-    def test_a_story_with_a_broken_check_is_not_valid_but_a_done_one_is_kept(self):
-        bad = story("S1", acceptance=[Criterion("parses", MUD_P1)], files=["game.py"])
-        self.assertTrue(any("only prints" in e for e in StorySet(phase=1, stories=[bad]).validate({}, self.wd)))
-        bad.status = "done"
-        self.assertEqual(StorySet(phase=1, stories=[bad]).validate({}, self.wd), [])
-
+class Duplicates(unittest.TestCase):
     def test_duplicates_are_refused(self):
         a = story("S2", files=["game.py"])
         b = story("S5", files=["game.py"])
         b.title = a.title.upper() + "!"
         errors = StorySet(phase=1, stories=[a, b]).validate({})
         self.assertTrue(any(e.startswith("S5 duplicates S2") for e in errors))
-        b.title, b.acceptance = "Something else", [Criterion("x", "python3 -c 'import game'")]
+        b.title, b.acceptance = "Something else", [Criterion("x", examples=[{"given": "`b`",
+                                                                          "expect": "`2`"}])]
         self.assertEqual(StorySet(phase=1, stories=[a, b]).validate({}), [])
 
 
@@ -417,8 +326,7 @@ class PlanPhases(unittest.TestCase):
         p = Plan(title="Tiny MUD", goal="A MUD.", kind="stories",
                  stories_dir=".momo/stories/tiny-mud-20261028-1504",
                  steps=[Step(title="WebSocket protocol", details="mud/ws.py",
-                             outcome="mud/ws.py speaks RFC 6455",
-                             checks=["python3 -m unittest tests.test_ws"], report="Done: ws.py"),
+                             outcome="mud/ws.py speaks RFC 6455", report="Done: ws.py"),
                         Step(title="World model")])
         p.story_sets[1] = StorySet(phase=1, title="WebSocket protocol",
                                    stories=[story("S1", status="done")])
@@ -451,7 +359,6 @@ class PlanPhases(unittest.TestCase):
         back = Plan.from_markdown(md)
         self.assertEqual((back.kind, back.stories_dir), ("stories", p.stories_dir))
         self.assertEqual(back.steps[0].outcome, "mud/ws.py speaks RFC 6455")
-        self.assertEqual(back.steps[0].checks, ["python3 -m unittest tests.test_ws"])
         self.assertNotIn("Stories:", back.steps[0].details)
 
     def test_earlier_stories(self):
@@ -464,6 +371,63 @@ class PlanPhases(unittest.TestCase):
         self.assertNotIn("outcome", p.to_dict()["steps"][0])
         self.assertNotIn("story_sets", p.to_dict())
         self.assertEqual(Plan.from_markdown(p.to_markdown()).kind, "normal")
+
+
+    def test_a_request_with_headings_survives_the_plan_file(self):
+        # pasted specs have headings, and a checkbox in one became a phase
+        p = Plan(title="t", goal="g\n## Notes\nn", kind="stories",
+                 request="Build a MUD.\n\n## Commands\nlook, go, say\n\n## Rules\n- [ ] keep it small",
+                 steps=[Step(title="a", details="d")])
+        back = Plan.from_markdown(p.to_markdown())
+        self.assertEqual((back.request, back.goal), (p.request, p.goal))
+        self.assertEqual([s.title for s in back.steps], ["a"])
+
+
+class CodeAndLists(unittest.TestCase):
+    """What counts as code in an expectation, and what is a list in a request."""
+
+    def problems(self, given, libraries=()):
+        return criterion_problems(Criterion("x", examples=[{"given": given, "expect": "exit `0`"}]),
+                                  libraries)
+
+    def test_command_lines_and_library_calls_are_not_code(self):
+        from harness.stories import library_modules
+        libs = library_modules(["Library: `from pager import paginate`"])
+        self.assertIn("pager", libs)
+        for given in ("`tool import data.csv` is run", "python3 build.py (no flags)",
+                      "paginate(range(11), 5)"):
+            self.assertEqual(self.problems(given), [], given)
+        self.assertEqual(self.problems("`pager.paginate(range(11), 5)`", libs), [])
+
+    def test_code_is_still_refused(self):
+        for given in ("`world.add_player('Ann')`", "Room.__init__ runs", "import calc",
+                      "`from calc import add`", "`x = 1; import os`", "assert add(1, 1) == 2"):
+            self.assertTrue(any("contains code" in e for e in self.problems(given)), given)
+        self.assertTrue(self.problems("`pager.paginate(range(11), 5)`"))   # no Library interface
+
+    def test_only_a_list_of_what_the_product_offers_is_split(self):
+        from harness.plan_runner import _request_list_items
+        self.assertEqual(_request_list_items("Constraints: stdlib only, no frameworks, Python 3.12."), [])
+        self.assertEqual(_request_list_items("A MUD. Commands: look, go/n/s, say, quit."),
+                         ["look", "go", "say", "quit"])
+
+    def test_a_requirement_with_a_bracketed_list_is_one_thing(self):
+        from harness.plan_runner import _top_level_commas
+        self.assertEqual(_top_level_commas("GET /state returns {room, exits, items, players}"), 0)
+        self.assertEqual(_top_level_commas("`look`, `go`, `say`, `quit` work"), 3)
+        self.assertEqual(_top_level_commas("Commands: look, go, say, who"), 3)
+
+    def test_module_interfaces_count_as_absent(self):
+        import tempfile
+        from harness.story_runner import _absent_interfaces
+        with tempfile.TemporaryDirectory() as d:
+            wd = Path(d)
+            ui = ["Service: `python3 -m src.api`, HTTP on localhost:8080"]
+            self.assertEqual(_absent_interfaces(wd, ui), ["src.api"])
+            (wd / "src").mkdir()
+            (wd / "src" / "api.py").write_text("")
+            self.assertEqual(_absent_interfaces(wd, ui), [])
+
 
 
 if __name__ == "__main__":

@@ -391,8 +391,8 @@ _IDLE_ACT = {
                   "fact you still need in one call. Once the step is done and verified, call "
                   "complete_step."),
     "story-exec": ("a change", "Make the story's change now if you know enough, or get the one "
-                   "fact you still need in one call. Once its acceptance checks pass, call "
-                   "complete_story."),
+                   "fact you still need in one call. Once it is built and its examples give "
+                   "what they expect, call complete_story."),
     "story-verifier": ("a saved test", "Write the test for the next expectation now, run it and "
                        "save it with save_acceptance_test; once every expectation has one, call "
                        "finish_verification."),
@@ -548,6 +548,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self._plan_draft: dict | None = None
         self._plan_restart = ""
         self._plan_restarts = 0
+        self._plan_refused = 0        # refused plan calls in a row: the second restarts
         self._plan_qa: list[tuple[str, str]] = []
         # The user's message that resumed a paused stories plan: the next story
         # writer's or story's brief takes it (_take_resume_note).
@@ -556,7 +557,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         # written, "story-exec" while one runs; None otherwise.  It replaces the
         # role (tools and prompt) for that while.
         self.story_role: str | None = None
-        # /plan stories approve each|once, /plan stories cap N
+        # /plan stories approve each|auto, /plan stories cap N
         self.stories_approve: str = "each"
         self.stories_cap: int = DEFAULT_STORIES_CAP
         self._writing: dict | None = None    # a story-writing pass: its phase and mode
@@ -2928,7 +2929,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                              + self._writer_next(self._writing))
                 elif self.story_role == "story-exec":
                     nudge = ("You have been calling tools for several turns. Once the story is "
-                             "implemented and its acceptance checks pass, call complete_story with "
+                             "built and its examples give what they expect, call complete_story with "
                              "a short summary.")
                 elif self.story_role == "story-verifier":
                     nudge = ("You have been calling tools for several turns. "
@@ -3122,7 +3123,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             act = ("Call the next tool, ask_choice about an open decision, or call create_plan "
                    "once the decisions are settled with the user.")
         elif self.story_role == "story-exec":
-            act = "Call the tool for your next step now; once the acceptance checks pass, call complete_story."
+            act = ("Call the tool for your next step now; once the story is built and its examples "
+                   "give what they expect, call complete_story.")
         elif self.story_role == "story-verifier":
             act = _IDLE_ACT["story-verifier"][1]
         elif self._plan_executing():
@@ -3364,6 +3366,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             provider=self.provider,
             plan_progress=self._plan_progress(),
             plan_kind=self._plan_kind_shown(),
+            stories_approve=self.stories_approve,
+            stories_cap=self.stories_cap,
             title=self.title,
             guides=self.guides,
             think_level=self.think_level,
@@ -3629,7 +3633,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
         self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
         self._resume_note = ""
-        self._plan_heuristics = {}
+        self._plan_heuristics, self._plan_refused = {}, 0
         self.messages = [self.messages[0]]
         self.compacted = []
         self.summary_state = new_summary_state()
@@ -3664,7 +3668,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
         self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
         self._resume_note = ""
-        self._plan_heuristics = {}
+        self._plan_heuristics, self._plan_refused = {}, 0
         self.momo_lines = []
         self._momo_recap_turn = 0
         self.title = ""

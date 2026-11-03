@@ -254,8 +254,9 @@ def main():
         harness.plan_questions = questions
     elif questions in ("on", "off"):
         harness.plan_questions = questions == "on"
-    if prefs.get("stories_approve") in story_runner_mod.APPROVE_MODES:
-        harness.stories_approve = prefs["stories_approve"]
+    approve = story_runner_mod.APPROVE_ALIASES.get(prefs.get("stories_approve"), prefs.get("stories_approve"))
+    if approve in story_runner_mod.APPROVE_MODES:
+        harness.stories_approve = approve
     cap = pref_int("stories_cap", lambda v: story_runner_mod.STORIES_CAP_RANGE[0] <= v
                    <= story_runner_mod.STORIES_CAP_RANGE[1])
     if cap:

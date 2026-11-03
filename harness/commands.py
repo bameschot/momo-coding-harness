@@ -191,20 +191,23 @@ def _undo_file(harness: Harness, arg: str) -> CommandResult:
 
 
 def _plan_stories_setting(harness: Harness, words: list[str]) -> str:
-    """/plan stories approve each|once · /plan stories cap N"""
-    from .story_runner import APPROVE_MODES, STORIES_CAP_RANGE
+    """/plan stories approve each|auto · /plan stories cap N"""
+    from .story_runner import APPROVE_ALIASES, APPROVE_MODES, STORIES_CAP_RANGE
     lo, hi = STORIES_CAP_RANGE
-    if words[0] == "approve" and len(words) == 2 and words[1] in APPROVE_MODES:
-        harness.stories_approve = words[1]
-        session_mod.save_prefs(stories_approve=words[1])
-        return ("Stories: you approve every phase's stories before they run." if words[1] == "each"
+    mode = APPROVE_ALIASES.get(words[1], words[1]) if len(words) == 2 else ""
+    if words[0] == "approve" and mode in APPROVE_MODES:
+        harness.stories_approve = mode
+        session_mod.save_prefs(stories_approve=mode)
+        harness.emit_status()
+        return ("Stories: you approve every phase's stories before they run." if mode == "each"
                 else "Stories: each phase's stories run without asking (changes to later phases "
                      "still ask).")
     if words[0] == "cap" and len(words) == 2 and words[1].isdigit() and lo <= int(words[1]) <= hi:
         harness.stories_cap = int(words[1])
         session_mod.save_prefs(stories_cap=harness.stories_cap)
+        harness.emit_status()
         return f"Stories: at most {harness.stories_cap} turns per story before it counts as stuck."
-    return (f"ERROR: usage: /plan stories approve each|once · /plan stories cap N ({lo}-{hi}) "
+    return (f"ERROR: usage: /plan stories approve each|auto · /plan stories cap N ({lo}-{hi}) "
             f"— now approve {harness.stories_approve}, cap {harness.stories_cap}")
 
 
@@ -1921,8 +1924,8 @@ Available commands:
   /plan normal        Plan mode with a normal plan (the default)
   /plan stories       Plan mode with a phased plan: each phase is broken into small, checked
                       stories when it starts, written against the code as it is then
-  /plan stories approve each|once  Review every phase's stories before they run (default
-                      each), or let them run (saved)
+  /plan stories approve each|auto  Review every phase's stories before they run (default
+                      each), or let them run without asking (saved; once = auto)
   /plan stories cap N  Turns one story may take before it counts as stuck (default 40, saved)
   /plan questions [on|off]  Ask before planning: a first create_plan made without a
                       question to you is refused once (default on, saved)

@@ -77,7 +77,7 @@ class Levels(Base):
         self.assertEqual(got.start, len("/plan stories "))
         # Prefix matches first, then the rest that contain it.
         self.assertEqual([(i.value, i.more) for i in got.items], [("approve ", True), ("cap ", True)])
-        self.assertEqual(self.values("/plan stories approve "), ["each", "once"])
+        self.assertEqual(self.values("/plan stories approve "), ["auto", "each"])
 
     def test_a_word_some_usage_continues_after_goes_on(self):
         stories = [i for i in self.run_at("/plan ").items if i.label == "stories"][0]

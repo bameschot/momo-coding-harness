@@ -3,10 +3,10 @@
 A stories plan's steps are phases.  When a phase starts, a story writer breaks
 it into stories, written against the code as it is then: small technical tasks
 (about one definition each) with a description, technical details, hints,
-pitfalls and acceptance criteria, ordered by a dependency graph.  The harness
-runs one ready story at a time, each in a fresh context, and accepts it only
-when its checks pass; what it delivered is recorded for the stories that build
-on it.
+pitfalls and acceptance criteria (expected behaviour with examples), ordered by
+a dependency graph.  The harness runs one ready story at a time, each in a
+fresh context, and accepts it once an independent verifier's tests of its
+examples pass; what it delivered is recorded for the stories that build on it.
 
 One phase's stories are a StorySet, mirrored to <stories dir>/phase-N.md: the
 harness writes it, the user may edit it before approving it, and it is re-read
@@ -17,10 +17,7 @@ is kept when the plan completes.
 """
 from __future__ import annotations
 
-import ast
 import re
-import shlex
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -64,10 +61,9 @@ class Criterion:
     (`text`) with concrete examples — an action through the product's
     interface and the output it must give.  An independent verifier pass
     writes and runs a test for it after the story is implemented; the harness
-    keeps that test (`test`) and its verdict.  `check` is the older form, a
-    shell command the writer gave up front; it still loads and runs."""
+    keeps that test (`test`) and its verdict.  (Older plans' shell `check`s
+    are no longer read.)"""
     text: str
-    check: str | None = None   # legacy: a command the harness runs
     covers: list[str] = field(default_factory=list)   # the plan's requirement ids (R1, …) it proves
     examples: list[dict] = field(default_factory=list)  # [{"given": …, "expect": …}]
     test: dict | None = None   # the verifier's saved test: {"path", "command"}
@@ -80,12 +76,10 @@ class Criterion:
     def from_dict(cls, d) -> "Criterion":
         if isinstance(d, str):
             return cls(text=d.strip())
-        check = d.get("check")
         test = d.get("test") if isinstance(d.get("test"), dict) else None
         verdict = d.get("verdict") if isinstance(d.get("verdict"), dict) else None
         retired = d.get("retired") if isinstance(d.get("retired"), dict) else None
         return cls(text=str(d.get("behaviour") or d.get("text") or "").strip(),
-                   check=None if check is None else str(check).strip(),
                    covers=_requirement_ids(d.get("covers")),
                    examples=_examples(d.get("examples")),
                    test=({"path": str(test.get("path") or ""), "command": str(test.get("command") or "")}
@@ -93,7 +87,7 @@ class Criterion:
                    verdict=verdict, retired=retired)
 
     def to_dict(self) -> dict:
-        return {"text": self.text, **({"check": self.check} if self.check is not None else {}),
+        return {"text": self.text,
                 **({"covers": self.covers} if self.covers else {}),
                 **({"examples": self.examples} if self.examples else {}),
                 **({"test": self.test} if self.test else {}),
@@ -103,8 +97,6 @@ class Criterion:
     def to_markdown(self, indent: str = "  ") -> list[str]:
         """The lines under the criterion's own `- text` line."""
         lines = [f"{indent}Example: {e['given']} → {e['expect']}" for e in self.examples]
-        if self.check is not None:
-            lines.append(f"{indent}Check: `{self.check}`")
         if self.covers:
             lines.append(f"{indent}Covers: {', '.join(self.covers)}")
         if self.test:
@@ -116,7 +108,7 @@ class Criterion:
 
     @property
     def proven(self) -> bool:
-        """The verifier's test for it passed (or, legacy, its check did)."""
+        """The verifier's test for it passed."""
         return bool(self.verdict and self.verdict.get("passed"))
 
 
@@ -155,15 +147,13 @@ class Story:
     status: str = "pending"    # pending | in_progress | done | failed | replaced
     attempts: int = 0
     delivered: str = ""        # the model's note at complete_story
-    facts: dict = field(default_factory=dict)   # the harness's: files, definitions, checks
+    facts: dict = field(default_factory=dict)   # the harness's: files, definitions, checks (tests passed)
     # How its latest run went, for the progress view (session only, not the file):
-    # ISO times, _run_loop turns, complete_story refusals, and per acceptance
-    # criterion its last result {"passed": bool | None, "output": str, "at": iso}.
+    # ISO times, _run_loop turns and refusals (complete_story's and the verifier's).
     started_at: str = ""
     finished_at: str = ""
     turns: int = 0
     refusals: int = 0
-    check_results: list = field(default_factory=list)
     failure: str = ""          # why its last run failed: the re-split (also on resume) uses it
     defect: str = ""           # the defect in earlier code it reported (report_defect), once
 
@@ -201,20 +191,16 @@ class Story:
             finished_at=str(d.get("finished_at", "") or ""),
             turns=_count(d.get("turns")),
             refusals=_count(d.get("refusals")),
-            check_results=[r if isinstance(r, dict) else {} for r in (d.get("check_results") or [])]
-                          if isinstance(d.get("check_results"), list) else [],
             failure=str(d.get("failure", "") or ""),
             defect=str(d.get("defect", "") or ""),
         )
 
     def problems(self, ids: set[str], earlier: dict[str, "Story"] | None = None,
-                 workdir: Path | None = None, planned: set[str] | None = None,
-                 checks: bool = True) -> list[str]:
+                 workdir: Path | None = None, libraries=()) -> list[str]:
         """What is wrong with this story on its own ([] when nothing).  ids: the
         stories of this phase it may depend on; earlier: those of finished
-        phases by "P<n>.S<m>"; planned: the files this phase's stories will
-        write (a check may import what they create); checks=False skips
-        reading the check commands (check_problems)."""
+        phases by "P<n>.S<m>"; libraries: the modules of a declared Library
+        interface (their calls are not code in an expectation)."""
         earlier = earlier or {}
         errors: list[str] = []
         where = f"{self.id} ({self.title})"
@@ -224,14 +210,7 @@ class Story:
             errors.append(f"{where}: no acceptance criteria — add at least one expected "
                           "behaviour with examples (an action → the output it must give)")
         for c in self.acceptance:
-            errors += [f"{where}: {e}" for e in criterion_problems(c)]
-            if c.check is not None and not c.check:
-                errors.append(f"{where}: empty check for \"{c.text}\" — give the command, "
-                              "or leave check out for a criterion backed by evidence")
-            elif c.check and checks:
-                shown = c.check if len(c.check) <= 80 else c.check[:77] + "…"
-                errors += [f"{where}: check `{shown}` {e}"
-                           for e in check_problems(c.check, workdir, planned or set(self.files))]
+            errors += [f"{where}: {e}" for e in criterion_problems(c, libraries)]
         errors += _dependency_problems(where, self.id, self.depends_on, ids, earlier)
         for f in self.files:
             if _bad_path(f, workdir):
@@ -245,7 +224,7 @@ class Story:
                 "provides": self.provides, "acceptance": [c.to_dict() for c in self.acceptance],
                 "status": self.status, "attempts": self.attempts, "delivered": self.delivered,
                 "facts": self.facts, "started_at": self.started_at, "finished_at": self.finished_at,
-                "turns": self.turns, "refusals": self.refusals, "check_results": self.check_results,
+                "turns": self.turns, "refusals": self.refusals,
                 "failure": self.failure, "defect": self.defect}
 
     def to_markdown(self) -> str:
@@ -284,8 +263,11 @@ class StorySet:
     title: str = ""             # the phase's title, for the file heading
     stories: list[Story] = field(default_factory=list)
     approved: bool = False
-    gate: dict = field(default_factory=dict)   # the phase checks' last result: passed, output, at
+    gate: dict = field(default_factory=dict)   # the phase gate's last result: passed, output, kinds, at
     report: str = ""            # the phase report, once the phase is done (a copy of Step.report)
+    # An adding writer pass whose draft this is, until it is approved:
+    # {extra, replaces, remap, blocks, may_be_empty, base: [story dicts]}
+    amend: dict = field(default_factory=dict)
 
     def get(self, story_id: str) -> Story | None:
         return next((s for s in self.stories if s.id == story_id.upper()), None)
@@ -331,7 +313,7 @@ class StorySet:
         return stuck
 
     def validate(self, earlier: dict[str, Story] | None = None,
-                 workdir: Path | None = None) -> list[str]:
+                 workdir: Path | None = None, libraries=()) -> list[str]:
         """What is wrong with this set ([] when it can run).  earlier: the
         stories of finished phases by "P<n>.S<m>"."""
         earlier = earlier or {}
@@ -350,10 +332,8 @@ class StorySet:
                 errors.append(f"{s.id}: id used twice")
             seen.add(s.id)
         ids = {s.id for s in live}
-        planned = {f for s in live for f in s.files}
         for s in live:
-            # a done story's checks have passed: newer rules do not reopen it
-            errors += s.problems(ids, earlier, workdir, planned, checks=not s.finished)
+            errors += s.problems(ids, earlier, workdir, libraries)
         errors += _duplicates(live)
         cycle = _cycle(live)
         if cycle:
@@ -369,13 +349,16 @@ class StorySet:
                             if isinstance(s, dict)],
                    approved=bool(d.get("approved")),
                    gate=d.get("gate") if isinstance(d.get("gate"), dict) else {},
-                   report=str(d.get("report", "") or ""))
+                   report=str(d.get("report", "") or ""),
+                   amend=d.get("amend") if isinstance(d.get("amend"), dict) else {})
 
     def to_dict(self) -> dict:
         d = {"phase": self.phase, "title": self.title, "approved": self.approved,
              "gate": self.gate, "stories": [s.to_dict() for s in self.stories]}
         if self.report:
             d["report"] = self.report
+        if self.amend:
+            d["amend"] = self.amend
         return d
 
     def to_markdown(self) -> str:
@@ -386,8 +369,8 @@ class StorySet:
                  "[~] in progress · [x] done · [!] failed · [-] replaced. 'Depends:' lists "
                  "story ids (P<n>.S<m> for earlier phases). Under an acceptance criterion, "
                  "'Example:' is an action → the output it must give, 'Test:' the acceptance "
-                 "test the verifier saved for it, 'Retired' a test a later phase replaced on "
-                 "purpose, and 'Check:' (older plans) a command the harness runs. -->"]
+                 "test the verifier saved for it, and 'Retired' a test a later phase replaced "
+                 "on purpose. -->"]
         for s in self.stories:
             parts += ["", s.to_markdown()]
         if self.report:
@@ -494,8 +477,6 @@ class StorySet:
                 s.started_at, s.finished_at, s.turns, s.refusals, s.failure, s.defect = (
                     old.started_at, old.finished_at, old.turns, old.refusals, old.failure,
                     old.defect)
-                if [c.check for c in s.acceptance] == [c.check for c in old.acceptance]:
-                    s.check_results = old.check_results
                 for c in s.acceptance:          # a verdict belongs to an unchanged expectation
                     same = next((o for o in old.acceptance if o.text == c.text
                                  and o.examples == c.examples), None)
@@ -527,30 +508,77 @@ def _count(v) -> int:
 
 
 # Code in an expectation: run 2–3's criteria named classes and methods
-# (`Room.__issubclass__`, `parse_command('go north')`), which tied them to code
-# the writer had not seen.  A plain `name(args)` stays allowed: a library's
-# public call is how its user meets it.
-_RX_CODE = re.compile(r"\bimport\s+\w|\bassert\b|\bdef\s+\w|\blambda\b|__\w+__"
-                      r"|\b[A-Za-z_]\w*\.[A-Za-z_]\w*\s*\(")
+# (`Room.__issubclass__`, `world.add_player(`), which tied them to code the
+# writer had not seen.  A plain `name(args)`, or `module.name(args)` of a
+# declared library, stays allowed: a library's public call is how its user
+# meets it.  An import counts only as a statement (`tool import data.csv` is a
+# command line), a call only with its parenthesis right after the name.
+_RX_CODE = re.compile(r"(?:^|[`;]\s*)import\s+[A-Za-z_]|\bfrom\s+[\w.]+\s+import\s+\w"
+                      r"|\bassert\b|\bdef\s+\w|\blambda\b|__\w+__"
+                      r"|\b([A-Za-z_]\w*)\.[A-Za-z_]\w*\(")
+
+
+def library_modules(interfaces) -> set[str]:
+    """The modules a declared Library interface is used through:
+    "Library: `import pager`" and "Library: `from pager import paginate`"."""
+    out: set[str] = set()
+    for x in interfaces or ():
+        if str(x).lower().startswith("library"):
+            out |= set(re.findall(r"\b(?:import|from)\s+([A-Za-z_]\w*)", str(x)))
+    return out
+
+
+def _code_in(text: str, libraries=()) -> str:
+    """The first piece of code in text ('' when none), bar a declared
+    library's own calls."""
+    for m in _RX_CODE.finditer(text):
+        if m.group(1) and m.group(1) in libraries:
+            continue
+        return m.group(0).strip(" `;")
+    return ""
 # Running the test suite is not a behaviour the user sees (run 4b's phase 1:
 # "python3 -m unittest test_game.py → exit code 0" claimed all nine commands);
 # the harness runs the request's own test command at the end anyway.
 _RX_TEST_RUN = re.compile(r"^\W*(?:python3?\s+-m\s+(?:unittest|pytest)|pytest|npm\s+(?:run\s+)?test"
                           r"|yarn\s+test|go\s+test|cargo\s+test|make\s+(?:test|check))\b")
 # A value the verifier can check: `quoted`, "quoted", 'quoted', or a number.
-_RX_CONCRETE = re.compile(r"`[^`]+`|\"[^\"]+\"|'[^']+'|\b\d+\b")
+_RX_CONCRETE = re.compile(r"`[^`]+`|\"[^\"]+\"|(?<!\w)'[^'\n]+'(?!\w)|\b\d+\b")
 
 
-def criterion_problems(c: Criterion) -> list[str]:
+def runs_the_suite(c: Criterion) -> bool:
+    """Whether every example of an expectation only runs the test suite."""
+    return bool(c.examples) and all(_RX_TEST_RUN.match(e.get("given", "")) for e in c.examples)
+
+
+def drop_suite_runs(criteria: list[Criterion]) -> tuple[list[Criterion], list[Criterion]]:
+    """(kept, dropped): the expectations that only run the test suite taken out
+    while others remain (the harness runs the test command at the last gate);
+    alone they stay, and criterion_problems refuses them."""
+    suite = [c for c in criteria if runs_the_suite(c)]
+    if not suite or len(suite) == len(criteria):
+        return list(criteria), []
+    return [c for c in criteria if c not in suite], suite
+
+
+def criterion_notes(c: Criterion) -> list[str]:
+    """Advice on an expectation, not a refusal: an example whose expected
+    value is not exact (run 6c was refused four times for "the program
+    exits", which a verifier can still test)."""
+    shown = c.text if len(c.text) <= 60 else c.text[:57] + "…"
+    return [f"\"{shown}\": no exact value in \"{e['expect'][:60]}\", so the verifier's test is "
+            "held to nothing — give it in backticks or as a number (exit code `0`, status `200`, "
+            "the reply contains `Great Hall`)"
+            for e in c.examples if e.get("given") and e.get("expect")
+            and not _RX_CONCRETE.search(e["expect"])]
+
+
+def criterion_problems(c: Criterion, libraries=()) -> list[str]:
     """What is wrong with one acceptance criterion as an expectation ([] when
-    nothing): it needs the behaviour, at least one example with a concrete
-    expected value, and no code.  A legacy criterion (a `check` and no
-    examples) is left to check_problems."""
+    nothing): it needs the behaviour, at least one example with what is done
+    and what must come out, and no code (criterion_notes advises on values)."""
     shown = c.text if len(c.text) <= 60 else c.text[:57] + "…"
     if not c.text:
         return ["an acceptance criterion has no behaviour"]
-    if c.check is not None and not c.examples:
-        return []
     errors = []
     if not c.examples:
         errors.append(f"\"{shown}\" needs at least one example: an action through the "
@@ -559,26 +587,23 @@ def criterion_problems(c: Criterion) -> list[str]:
         if not e.get("given") or not e.get("expect"):
             errors.append(f"\"{shown}\": an example needs both what is done (given) and "
                           "what must come out (expect)")
-        elif not _RX_CONCRETE.search(e["expect"]):
-            errors.append(f"\"{shown}\": the verifier cannot check \"{e['expect'][:60]}\" — "
-                          "give the expected value in backticks or as a number, e.g. exit code "
-                          "`0`, status `200`, the reply contains `Great Hall`, `3` items")
-    if c.examples and all(_RX_TEST_RUN.match(e.get("given", "")) for e in c.examples):
+    if runs_the_suite(c):
         errors.append(f"\"{shown}\": running the tests is not a behaviour the user sees (the "
                       "harness runs the request's test command itself) — give what the user does "
                       "through the product's interface and what comes out")
-    code = next((t for t in [c.text] + [x for e in c.examples for x in e.values()]
-                 if _RX_CODE.search(t)), "")
+    code = next((x for x in (_code_in(t, libraries) for t in [c.text] + [v for e in c.examples
+                                                                        for v in e.values()]) if x), "")
     if code:
-        errors.append(f"\"{shown}\" contains code ({_RX_CODE.search(code).group(0).strip()}…) — "
+        errors.append(f"\"{shown}\" contains code ({code}…) — "
                       "describe what the user does and observes, not classes, methods or test "
                       "code")
     return errors
 
 
 def criterion_line(c: Criterion, line: str) -> bool:
-    """Apply an `Example:` / `Covers:` / `Test:` / `Check:` line to criterion c;
-    False when the line is none of these."""
+    """Apply an `Example:` / `Covers:` / `Test:` line to criterion c; False
+    when the line is none of these.  An older plan's `Check:` line is
+    consumed and dropped."""
     r = re.match(r"^retired\s*\(([^)]*)\):\s*(.*)$", line.strip(), re.I)
     if r:
         c.retired = {"by": r.group(1).strip(), "why": r.group(2).strip()}
@@ -588,7 +613,7 @@ def criterion_line(c: Criterion, line: str) -> bool:
         return False
     key, val = m.group(1).lower(), m.group(2).strip()
     if key == "check":
-        c.check = val.strip("`").strip()
+        pass                            # the legacy check model is gone
     elif key == "covers":
         c.covers = _requirement_ids(val)
     elif key == "example":
@@ -611,209 +636,6 @@ def _parse_acceptance(lines: list[str]) -> list[Criterion]:
         elif out:
             out[-1].text = f"{out[-1].text} {s}".strip()
     return out
-
-
-# ── check commands ────────────────────────────────────────────────────────────
-# A story's checks are read, never run, before the story is stored: the
-# story-mud run approved python -c checks that were SyntaxErrors (`...; try:`),
-# imported requests in a stdlib-only project, printed their own exceptions and
-# rmdir'ed the project's static/ folder.
-
-_RX_PYTHON = re.compile(r"^(?:\S*/)?python(?:3(?:\.\d+)?)?$")
-_RX_COMPOUND = re.compile(r";\s*(with|try|def|class|for|while|if|elif|else|except|finally)\b")
-_RX_DELETE = re.compile(r"\brm\s+-\w*[rR]|\brmdir\b|shutil\.rmtree|os\.(?:remove|unlink|rmdir)\s*\(")
-_RX_TEMP = re.compile(r"tmp|temp", re.I)
-# run 2: a check pkill'ed the server another check needed, and one fetched
-# localhost:8000 with nothing listening, so it could never pass.
-_RX_KILL = re.compile(r"(?:^|[\s;&|(])(?:pkill|killall|kill)\s|\bos\.kill(?:pg)?\s*\(")
-_RX_LOCAL_URL = re.compile(r"\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b")
-_RX_STARTS = re.compile(r"Popen|subprocess|Thread|serve_forever|HTTPServer")
-# `server.py & sleep 2 && curl …`: a lone & leaves the process running after the
-# check (run 3's phase 3 check; a story's background server held :8000).
-_RX_BACKGROUND = re.compile(r"(?<![&>|])&(?![&>])")
-_RX_EXISTS_ONLY = re.compile(r"^(?:\s*(?:&&|;)?\s*(?:ls\s+\S+|test\s+-[efsd]\s+\S+|\[\s+-[efsd]\s+\S+\s+\]))+\s*$")
-_EXISTS_CALLS = {"exists", "isfile", "isdir", "is_file", "is_dir"}
-_EXIT_CALLS = {"exit", "_exit", "main", "fail"}     # sys.exit, os._exit, unittest.main, self.fail
-_DEP_FILES = ("requirements.txt", "requirements-dev.txt", "pyproject.toml", "setup.cfg",
-              "setup.py", "Pipfile")
-
-
-def check_problems(cmd: str, workdir: Path | None = None, planned=()) -> list[str]:
-    """What is wrong with a check command, read without running it ([] when
-    nothing seen): a python -c body that does not compile, imports a module the
-    project cannot have, swallows its exceptions or only prints; a command that
-    deletes files outside a temp dir.  planned: files the phase's stories write."""
-    try:
-        argv = shlex.split(cmd)
-    except ValueError as e:
-        return [f"does not parse as a command ({e})"]
-    errors = []
-    if _RX_DELETE.search(cmd) and not _RX_TEMP.search(cmd):
-        errors.append("deletes files — a check must not delete project files (put scratch "
-                      "files in a tempfile.TemporaryDirectory())")
-    if _RX_KILL.search(cmd):
-        errors.append("stops processes — a check must not kill what it did not start (a test "
-                      "that starts a server stops it itself, in tearDown)")
-    if _RX_BACKGROUND.search(cmd):
-        errors.append("starts a process in the background (&) and leaves it running; write a "
-                      "unittest that starts the server in setUpClass and stops it in "
-                      "tearDownClass")
-    if _RX_LOCAL_URL.search(cmd) and not _RX_STARTS.search(cmd):
-        errors.append("talks to a local server it does not start, so it fails when nothing is "
-                      "running; write a unittest that starts the server in setUpClass and "
-                      "stops it in tearDownClass")
-    if exists_only(cmd):
-        errors.append("only tests that a file exists, which passes without the work; check "
-                      "what the file contains or what the code does")
-    for i, a in enumerate(argv[:-2]):
-        if _RX_PYTHON.match(a) and argv[i + 1] == "-c":
-            errors += _python_problems(argv[i + 2], workdir, planned)
-    for f in check_files(cmd):
-        if workdir is not None and f not in planned and not (workdir / f).exists():
-            errors.append(f"runs {f}, which does not exist and is not among the files to be "
-                          "written — add it to the files of the story (or phase) that writes it")
-    return errors
-
-
-def check_files(cmd: str) -> list[str]:
-    """The test files a check command runs, as workdir-relative paths:
-    `python3 tests/x.py`, `-m unittest tests/x.py` or `tests.x[.Class.test]`,
-    `pytest tests/x.py::name`.  A check whose file nobody writes can never
-    pass (run 3's P3.S5 wrote its tests elsewhere and used up two stories'
-    turns on them)."""
-    try:
-        argv = shlex.split(cmd)
-    except ValueError:
-        return []
-    out: list[str] = []
-
-    def add(path: str) -> None:
-        if path and path not in out:
-            out.append(path)
-
-    for i, a in enumerate(argv):
-        if _RX_PYTHON.match(a) and i + 1 < len(argv) and argv[i + 1].endswith(".py"):
-            add(argv[i + 1])
-        runner = (a == "-m" and i + 1 < len(argv) and argv[i + 1] in ("unittest", "pytest")) \
-            or PurePosixPath(a).name in ("pytest", "py.test")
-        if not runner:
-            continue
-        for x in argv[i + (2 if a == "-m" else 1):]:
-            if x.startswith("-") or x in ("discover",) or any(c in x for c in ";&|"):
-                if any(c in x for c in ";&|"):
-                    break
-                continue
-            x = x.split("::")[0]
-            if x.endswith(".py"):
-                add(x)
-            elif re.fullmatch(r"[A-Za-z_][\w.]*", x) and "." in x:
-                parts = []
-                for part in x.split("."):
-                    if part[:1].isupper():
-                        break             # tests.test_game.TestGame.test_look
-                    parts.append(part)
-                if len(parts) > 1:
-                    add("/".join(parts) + ".py")
-        break
-    return out
-
-
-def exists_only(cmd: str) -> bool:
-    """A check that only tests that files exist: `ls f`, `test -f f`, or a
-    python -c whose every assertion is os.path.exists(…) or Path(…).is_file()."""
-    if _RX_EXISTS_ONLY.match(cmd):
-        return True
-    try:
-        argv = shlex.split(cmd)
-    except ValueError:
-        return False
-    if len(argv) != 3 or not _RX_PYTHON.match(argv[0]) or argv[1] != "-c":
-        return False
-    try:
-        tree = ast.parse(argv[2])
-    except SyntaxError:
-        return False
-    asserts = [n for n in ast.walk(tree) if isinstance(n, ast.Assert)]
-    return bool(asserts) and all(
-        all(_call_name(c) in _EXISTS_CALLS for c in ast.walk(a.test) if isinstance(c, ast.Call))
-        and any(isinstance(c, ast.Call) for c in ast.walk(a.test)) for a in asserts)
-
-
-def _python_problems(src: str, workdir: Path | None, planned) -> list[str]:
-    try:
-        tree = ast.parse(src)
-    except SyntaxError as e:
-        hint = (" — with/try/def/class/for/if cannot follow ';' on one line"
-                if _RX_COMPOUND.search(src) else "")
-        return [f"is not valid Python ({e.msg}{hint}); put the check in a test file (e.g. "
-                "tests/test_<name>.py) and run it with python3 -m unittest"]
-    errors = []
-    for top in sorted(_imports(tree)):
-        if not _importable(top, workdir, planned):
-            errors.append(f"imports {top}, which is neither in the standard library nor in the "
-                          "project; use what the project has (the standard library if the "
-                          "request says so)")
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ExceptHandler) and _broad(node) and not _reraises(node):
-            errors.append("catches exceptions without re-raising them, so it passes when it "
-                          "fails; let the error propagate")
-            break
-    if (not any(isinstance(n, (ast.Assert, ast.Raise)) or _exit_call(n) for n in ast.walk(tree))
-            and any(_call_name(n) == "print" for n in ast.walk(tree))):
-        errors.append("only prints, so it exits 0 whatever the result; assert the expected "
-                      "value (assert x == …)")
-    return errors
-
-
-def _imports(tree: ast.AST) -> set[str]:
-    out = set()
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Import):
-            out |= {a.name.split(".")[0] for a in n.names}
-        elif isinstance(n, ast.ImportFrom) and not n.level and n.module:
-            out.add(n.module.split(".")[0])
-    return out
-
-
-def _importable(top: str, workdir: Path | None, planned) -> bool:
-    if top in sys.stdlib_module_names or top == "__future__":
-        return True
-    stems = {PurePosixPath(f).parts[0].removesuffix(".py") for f in planned if f}
-    if top in stems:
-        return True
-    if workdir is None:
-        return True                     # nothing to look in: do not guess
-    if (workdir / f"{top}.py").exists() or (workdir / top).is_dir() \
-            or (workdir / "src" / f"{top}.py").exists() or (workdir / "src" / top).is_dir():
-        return True
-    for name in _DEP_FILES:             # a declared dependency (installed or not)
-        try:
-            if re.search(rf"(?i)\b{re.escape(top)}\b", (workdir / name).read_text(errors="replace")):
-                return True
-        except OSError:
-            pass
-    return any(workdir.glob(f".venv/lib/python*/site-packages/{top}*")) \
-        or any(workdir.glob(f"venv/lib/python*/site-packages/{top}*"))
-
-
-def _broad(handler: ast.ExceptHandler) -> bool:
-    t = handler.type
-    return t is None or (isinstance(t, ast.Name) and t.id in ("Exception", "BaseException"))
-
-
-def _reraises(handler: ast.ExceptHandler) -> bool:
-    return any(isinstance(n, ast.Raise) or _exit_call(n) for b in handler.body for n in ast.walk(b))
-
-
-def _call_name(node: ast.AST) -> str:
-    if not isinstance(node, ast.Call):
-        return ""
-    f = node.func
-    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
-
-
-def _exit_call(node: ast.AST) -> bool:
-    return _call_name(node) in _EXIT_CALLS
 
 
 def _bad_path(path: str, workdir: Path | None) -> bool:
@@ -903,15 +725,14 @@ def validate_outline(outline: list[dict], kept: list[Story] | None = None,
 
 def _duplicates(live: list[Story]) -> list[str]:
     """Unfinished stories that are the same story twice: the same title, or the
-    same files and checks or examples (a re-split in the story-mud run wrote S2-S4 again as
+    same files and examples (a re-split in the story-mud run wrote S2-S4 again as
     S5-S7 and S8-S10 while the originals stayed pending)."""
     errors, seen = [], {}
     for s in live:
         if s.finished or s.status == "in_progress":
             continue
         title = re.sub(r"[\W_]+", " ", s.title.lower()).strip()
-        checks = frozenset([c.check for c in s.acceptance if c.check]
-                           + [f"{e['given']} → {e['expect']}" for c in s.acceptance for e in c.examples])
+        checks = frozenset(f"{e['given']} → {e['expect']}" for c in s.acceptance for e in c.examples)
         keys = []
         if title and title != "untitled story":
             keys.append(("title", title))
@@ -919,7 +740,7 @@ def _duplicates(live: list[Story]) -> list[str]:
             keys.append(("work", frozenset(s.files), checks))
         first = next((seen[k] for k in keys if k in seen), None)
         if first is not None:
-            errors.append(f"{s.id} duplicates {first} (same title, or same files and checks) — "
+            errors.append(f"{s.id} duplicates {first} (same title, or same files and examples) — "
                           f"keep one: retire the other with plan_stories replaces=[{first}], or "
                           f"drop {s.id} from the outline")
         for k in keys:

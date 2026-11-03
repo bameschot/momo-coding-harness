@@ -786,6 +786,10 @@ function applyWatchStatus(s) {
   for (const f of document.querySelectorAll('input[data-cmd="/plan questions"]')) {
     f.checked = s.plan_questions ?? true;
   }
+  if (s.stories_approve) $("#stories-approve").value = s.stories_approve;
+  for (const f of document.querySelectorAll('input[data-cmd="/plan stories cap"]')) {
+    if (document.activeElement !== f && s.stories_cap != null) f.value = String(s.stories_cap);
+  }
 }
 
 const INDEX_INSTALL_HINT = "no tree-sitter packages are installed. "
@@ -1621,6 +1625,7 @@ function updatePlanKind() {
   sel.disabled = busy || /^(exec|phase)/.test(status.plan_progress || "");
 }
 $("#plan-kind").onchange = (e) => send(`/plan ${e.target.value}`);
+$("#stories-approve").onchange = (e) => send(`/plan stories approve ${e.target.value}`);
 // Every chip opens its popover (chips.js; THINK and INDEX here) — none toggles
 // on a bare click.
 for (const [chip, menu] of [["#run-badge", "#run-menu"], ["#net-badge", "#net-menu"],

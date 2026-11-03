@@ -70,7 +70,7 @@ class _Golden:
         h.story_role = None
         if role.startswith("story-"):
             h.mode = "coding"
-            h.plan = Plan(title="P", steps=[Step(title="s", outcome="o", checks=["true"])],
+            h.plan = Plan(title="P", steps=[Step(title="s", outcome="o")],
                           kind="stories")
             h.plan_phase = "executing"
             h.story_role = role

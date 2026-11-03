@@ -70,6 +70,8 @@ class StatusEvent:
     provider: str = ""
     plan_progress: str = ""  # plan mode: "awaiting approval" | "exec 3/7" | ""
     plan_kind: str = "normal"  # plan mode: the active plan's type, else the next plan's
+    stories_approve: str = "each"  # /plan stories approve: each | auto
+    stories_cap: int = 40      # /plan stories cap: turns per story
     title: str = ""          # session title (model-generated or /title)
     guides: bool = False     # project guide files (AGENTS.md, ...) in the system prompt
     think_level: str = "on"       # /think: off | on | low | medium | high

@@ -20,6 +20,10 @@ _STATUS_MARK = {"pending": " ", "in_progress": "~", "done": "x", "skipped": "-"}
 _MARK_STATUS = {" ": "pending", "~": "in_progress", "x": "done", "X": "done", "-": "skipped"}
 
 _RX_STEP  = re.compile(r'^\s*[-*]\s*\[([ xX~-])\]\s*(?:\d+[.)]\s*)?(.*?)\s*$')
+# The headings to_markdown writes: only these end a section, so a request or
+# goal with headings of its own ("## Commands") keeps them.
+_SECTIONS = ("goal", "request", "interfaces", "requirements", "test command",
+             "step test command", "steps")
 _RX_TITLE = re.compile(r'^#\s+(?:Plan:\s*)?(.+?)\s*$')
 
 # TDD plans: the harness wraps the model's steps in a test-writing stage and an
@@ -51,9 +55,8 @@ class Step:
     tag: str = ""
     stage: str = "impl"
     # Stories plans only: a step is a phase, with what exists when it is done,
-    # the commands that close it, and the report written when they pass.
+    # the expected behaviour that closes it, and the report written at its gate.
     outcome: str = ""
-    checks: list[str] = field(default_factory=list)      # legacy: commands the harness runs
     # the expected behaviour with examples that closes the phase, verified like
     # a story's criteria (stories.Criterion)
     acceptance: list[Criterion] = field(default_factory=list)
@@ -84,7 +87,6 @@ class Step:
             tag=str(d.get("tag", "") or "").strip(),
             stage=stage if stage in STAGES else "impl",
             outcome=str(d.get("outcome", "") or "").strip(),
-            checks=str_list(d.get("checks")),
             acceptance=[Criterion.from_dict(c) for c in (d.get("acceptance") or [])
                         if isinstance(c, (dict, str))],
             report=str(d.get("report", "") or "").strip(),
@@ -98,8 +100,8 @@ class Step:
              "status": self.status, "note": self.note}
         if self.tests or self.tag or self.stage != "impl":
             d.update(tests=self.tests, tag=self.tag, stage=self.stage)
-        if self.outcome or self.checks or self.report or self.acceptance:
-            d.update(outcome=self.outcome, checks=self.checks, report=self.report)
+        if self.outcome or self.report or self.acceptance:
+            d.update(outcome=self.outcome, report=self.report)
         if self.acceptance:
             d["acceptance"] = [c.to_dict() for c in self.acceptance]
         if self.started_at or self.finished_at or self.turns:
@@ -222,8 +224,6 @@ class Plan:
                 lines.append(f"  Stage: {s.stage}")
             if s.outcome:
                 lines.append(f"  Outcome: {s.outcome}")
-            for c in s.checks:
-                lines.append(f"  Check: `{c}`")
             for c in s.acceptance:
                 lines.append(f"  Accept: {c.text}")
                 lines += c.to_markdown("    ")
@@ -263,7 +263,8 @@ class Plan:
                 m = _RX_TITLE.match(line)
                 title = m.group(1) if m else line[2:].strip()
                 continue
-            if line.startswith("## "):
+            if line.startswith("## ") and (line[3:].strip().lower() in _SECTIONS
+                                           or section not in ("goal", "request")):
                 _flush()
                 cur, detail_lines = None, []
                 section = line[3:].strip().lower()
@@ -310,8 +311,7 @@ class Plan:
                 elif s.lower().startswith("outcome:"):
                     cur.outcome = s[8:].strip()
                 elif s.lower().startswith("check:"):
-                    if s[6:].strip().strip("`").strip():
-                        cur.checks.append(s[6:].strip().strip("`").strip())
+                    pass                # an older plan's check command: no longer run
                 elif s.lower().startswith("stories:") and kind == "stories":
                     pass                # progress the harness writes, not an edit
                 else:
@@ -525,3 +525,36 @@ def request_commands(request: str) -> list[str]:
         if (quoted or _RX_MUST_PASS.match(text[m.end():m.end() + 40])) and cmd not in out:
             out.append(cmd)
     return out
+
+
+# A requirement that the test suite exists or passes ("Unit tests for the parser
+# and logic pass"): the harness proves it by running the test command at the
+# last gate, so no expectation covers it.  Run 7's planner was refused twice for
+# its expectation "the unit tests pass", which ran the tests.
+_RX_SUITE_REQUIREMENT = re.compile(
+    r"(?i)\bunit\s*tests?\b|\bunittest\b|\bpytest\b|\btest\s+suite\b|\btests?\s+(?:pass|are green)\b")
+
+
+def suite_command(text: str, request: str, interfaces=()) -> str:
+    """The test command that proves a requirement about the test suite: the
+    request's own must-pass command, else one the requirement names, else the
+    one the request and interfaces imply ('' when the requirement is not about
+    the suite, or nothing says how the tests run)."""
+    if not _RX_SUITE_REQUIREMENT.search(text or ""):
+        return ""
+    cmds = request_commands(request) or request_commands(text)
+    return cmds[0] if cmds else default_test_command(f"{request}\n{text}", interfaces)
+
+
+def default_test_command(request: str, interfaces=()) -> str:
+    """The test command a request implies without naming one as a command
+    ("unit tests using unittest", a Python CLI): run 7's deadlock came back
+    whenever no command could be read from the request."""
+    said = "\n".join([request or "", *interfaces])
+    if re.search(r"(?i)\bpytest\b", said):
+        return "python3 -m pytest"
+    if re.search(r"(?i)\bunittest\b|\bpython\d?\b|\.py\b", said):
+        return "python3 -m unittest discover -s tests"
+    if re.search(r"(?i)\bnpm\b|\bnode(?:\.?js)?\b|\bjest\b|\bvitest\b", said):
+        return "npm test"
+    return ""
