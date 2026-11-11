@@ -873,7 +873,7 @@ function applyBusy(b, w) {
     // Send the next queued message once the turn is over.
     if (queue.length) setTimeout(sendNextQueued, 150);
   }
-  $("#stop").hidden = !(busy && !waiting);
+  $("#stop").hidden = !busy;               // a pending question can be interrupted too
   // Enter while momo works steers the turn: the button says when it is read.
   $("#send-label").textContent = "Send";
   $("#send").title = busy && !waiting ? "momo is working — the model reads this after its current step (Enter)" : "Send (Enter)";
@@ -1578,7 +1578,7 @@ input.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (open) closeSuggest();
     else if (editing) $("#edit-cancel").click();
-    else if (busy && !waiting) post("api/cancel").catch(() => {});
+    else if (busy) post("api/cancel").catch(() => {});
     return;
   }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -1776,7 +1776,7 @@ document.addEventListener("keydown", (e) => {
     for (const [d, close] of Object.entries(DRAWERS)) {
       if (!$(d).hidden) return close();
     }
-    if (busy && !waiting) post("api/cancel").catch(() => {});
+    if (busy) post("api/cancel").catch(() => {});
     return;
   }
   if (e.altKey && !e.metaKey && !e.ctrlKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {

@@ -1,5 +1,6 @@
 import json
 import os
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -64,6 +65,13 @@ class Logger:
             "removed_messages": removed,
             "analysed": analysed,
         })
+
+    def log_error(self, where: str, exc: BaseException):
+        """An exception a worker thread did not handle, with its traceback (the
+        TUI owns the terminal, so this is where it goes instead of stderr)."""
+        self._write({"type": "error", "where": where,
+                     "error": f"{type(exc).__name__}: {exc}",
+                     "traceback": "".join(traceback.format_exception(exc))})
 
     def log_compact(self, mode: str, model: str, removed: int, tokens_before: int, tokens_after: int):
         self._write({

@@ -1809,7 +1809,7 @@ class TUI:
             # Close the suggestions, else interrupt a running turn (as in the web UI).
             if self._sugg:
                 self._close_suggest()
-            elif self._busy and not self._waiting_for_input:
+            elif self._busy:                         # waiting for an answer too
                 self.controller.cancel()
             return "full"
         if key == curses.KEY_BTAB:                   # Shift+Tab cycles the modes

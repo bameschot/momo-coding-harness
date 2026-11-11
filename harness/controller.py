@@ -17,7 +17,7 @@ from . import attachments as attach_mod
 from .commands import mask_token, handle as handle_command
 from .events import (BusyEvent, ChatEvent, CompanionEvent, ErrorEvent, ThinkEvent, ToolCallEvent,
                      ToolResultEvent, UserEvent)
-from .harness import Harness
+from .harness import Harness, is_note
 from .llm import make_client
 
 # CommandResult fields that change how a frontend renders, not harness state.
@@ -88,6 +88,8 @@ def transcript_events(messages: list[dict]) -> list[Any]:
             continue
         elif role == "thinking":
             events.append(ThinkEvent(content))
+        elif role == "user" and is_note(msg):
+            events.append(ChatEvent("system", content))      # what the harness told the model
         elif role == "user":
             events.append(UserEvent(attach_mod.summarize(content)))
         elif role == "assistant":
@@ -321,6 +323,8 @@ class Controller:
         def _run():
             try:
                 fn(*args)
+            except Exception as e:           # a thread must report, not vanish (or print)
+                self.harness.report_crash(getattr(fn, "__name__", "worker"), e)
             finally:
                 self._finish_bg(fn)
 
@@ -341,7 +345,7 @@ class Controller:
             try:
                 h.send("\n\n".join(queued))
             except Exception as e:           # a thread must report, not vanish
-                self.bus.put(ErrorEvent(f"{type(e).__name__}: {e}"))
+                h.report_crash("send", e)
 
     # ── actions ───────────────────────────────────────────────────────────────
 
@@ -420,7 +424,8 @@ class Controller:
             if (err := self._resend_guard()):
                 self._system(err)
                 return False
-            last = next((m for m in reversed(self.harness.messages) if m.get("role") == "user"), None)
+            last = next((m for m in reversed(self.harness.messages)
+                     if m.get("role") == "user" and not is_note(m)), None)
             if last is None:
                 self._system("Nothing to edit.")
                 return False
@@ -453,18 +458,23 @@ class Controller:
 
     def last_user_message(self) -> dict | None:
         """{typed, attachments: [names]} for the web UI's edit action."""
-        last = next((m for m in reversed(self.harness.messages) if m.get("role") == "user"), None)
+        last = next((m for m in reversed(self.harness.messages)
+                     if m.get("role") == "user" and not is_note(m)), None)
         if last is None:
             return None
         typed, atts = attach_mod.split(last.get("content") or "")
         return {"typed": typed, "attachments": [a["name"] for a in atts]}
 
     def cancel(self) -> bool:
-        """Interrupt the running LLM call. Returns True if something was interrupted."""
-        if self._busy and not self.waiting:
+        """Interrupt the running turn: its LLM call or tool, or the question it
+        waits on.  Returns True if something was interrupted."""
+        if not self._busy:
+            return False
+        if self.waiting:
+            self.harness.cancel_question()
+        else:
             self.harness.cancel()
-            return True
-        return False
+        return True
 
     def set_mode(self, mode: str) -> bool:
         """Switch mode, unless a turn is running (its tools were chosen for the

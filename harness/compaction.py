@@ -425,11 +425,12 @@ class CompactionMixin:
         sent = self._sent_reasoning()
         costs = [msg_tokens(m, sent) for m in msgs]
         fixed = costs[0] if msgs else 0
-        if fixed >= self.context_limit:
+        limit = self._compact_limit()   # in the estimate's units (see Harness)
+        if fixed >= limit:
             return False, (f"Context not compacted: the system prompt and tool reference alone are "
                            f"~{fixed:,} tokens, over the {self.context_limit:,}-token limit. "
                            "Raise it with /context <n> or /context <n>%.")
-        target = fixed + (self.context_limit - fixed) // 3
+        target = fixed + (limit - fixed) // 3
         total = sum(costs)
 
         users = [i for i, m in enumerate(msgs) if m.get("role") == "user"]

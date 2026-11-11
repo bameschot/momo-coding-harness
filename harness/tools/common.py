@@ -20,6 +20,12 @@ CODE_NAV_LANGS = ("Python, Java, C/C++, Kotlin, Rust, JS/TS; also YAML/TOML/JSON
                   "CSS, SQL, shell, Dockerfiles")
 
 
+# A file read whole into memory (read_file, grep_file, grep_extract, the diff
+# snapshots): above this it is refused before a byte is read — a multi-GB log
+# would otherwise be loaded (and decoded) whole, whatever range was asked for.
+MAX_READ_BYTES = 64 * 2**20
+
+
 def read_text(path: str, workdir: Path, *, refuse_binary: bool = False) -> tuple[Path, str] | str:
     """(resolved path, text) of a file in the workdir, or an ERROR string.
     With refuse_binary, a file with a NUL byte near the start is an ERROR too."""
@@ -28,6 +34,16 @@ def read_text(path: str, workdir: Path, *, refuse_binary: bool = False) -> tuple
         return p
     if p.is_dir():
         return f"ERROR: {path} is a directory — use list_directory to see what it contains"
+    try:
+        size = p.stat().st_size
+    except FileNotFoundError:
+        return f"ERROR: file not found: {path}"
+    except OSError as e:
+        return f"ERROR: {e}"
+    if size > MAX_READ_BYTES:
+        return (f"ERROR: {path} is {size:,} bytes, over the {MAX_READ_BYTES // 2**20} MB a file "
+                f"tool reads — nothing was read. Look at parts of it with shell tools instead "
+                f"(tail -n 100, sed -n '1,100p', grep -n) if run_command is available.")
     try:
         raw = p.read_bytes()
     except FileNotFoundError:

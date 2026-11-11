@@ -213,6 +213,10 @@ _TITLE_REPLY_TOKENS = 48  # ... tokens kept free for the title reply
 _MOMO_LINES_MAX = 30      # remembered recap lines per session
 
 
+# Put on the answer queue to wake a worker blocked in _ask_user when the user
+# interrupts instead of answering.
+_CANCELLED = object()
+
 # The one retry prompt after an empty reply: (why it was empty, whose turn).
 _RETRY_TEXT = {
     ('cut_off', 'design'):
@@ -423,6 +427,25 @@ def _checkpoint_name(t: dict) -> str:
     return f"turn {t['turn']}" + (f", {t['step']}" if t.get("step") else "")
 
 
+# Notes the harness injects into the conversation go as role "user" (the turn
+# format has no other slot) but carry this key, so /retry, message editing and
+# the replayed transcript never mistake one for what the user typed.  The key is
+# stripped before a request (_api_messages).
+NOTE_KEY = "harness"
+NOTE_PREFIX = "[Note from the harness, not the user]"
+
+
+def note_message(text: str) -> dict:
+    return {"role": "user", "content": text, NOTE_KEY: True}
+
+
+def is_note(m: dict) -> bool:
+    """A harness-injected user message (also in sessions saved before the key)."""
+    if m.get("role") != "user":
+        return False
+    return bool(m.get(NOTE_KEY)) or str(m.get("content") or "").startswith(NOTE_PREFIX)
+
+
 def _has_model(available: list[str], name: str) -> bool:
     """Ollama lists an untagged name with its implicit :latest tag."""
     return name in available or f"{name}:latest" in available
@@ -438,7 +461,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.provider = provider
         self.client = make_client(provider, host=host, model=model)
         self.event_queue = EventBus()  # fan-out to every frontend (TUI, web)
-        self._user_input_queue: queue.Queue[str] = queue.Queue()
+        self._user_input_queue: queue.Queue = queue.Queue()   # answers, or _CANCELLED
         self.awaiting_input: bool = False  # True while the worker blocks in _ask_user
         self.max_tool_result = 0   # chars; 0 = unlimited; configurable via /tool-result or --max-tool-result
         # /think, --think, prefs "think": off | on | low | medium | high.  What is
@@ -549,6 +572,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self._plan_restart = ""
         self._plan_restarts = 0
         self._plan_refused = 0        # refused plan calls in a row: the second restarts
+        self._plan_heuristics: dict = {}   # PlanRunnerMixin's per-plan one-time checks
         self._plan_qa: list[tuple[str, str]] = []
         # The user's message that resumed a paused stories plan: the next story
         # writer's or story's brief takes it (_take_resume_note).
@@ -624,6 +648,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self._token_estimate = 0
         self._stream_chars = 0      # chars of the reply currently streaming in
         self._measured_tokens: int | None = None  # last prompt+eval the server reported
+        # Server-counted prompt tokens per estimated token, from the last reply
+        # (_note_estimate_ratio): chars/4 undercounts code and digits ~2.5x, and
+        # compaction must start before the server rejects the prompt, not after.
+        self._est_ratio: float = 1.0
         self._cancel = threading.Event()
         self._backend_lock = threading.Lock()   # refresh_backend: idle poll vs send()
         # Whether the server answered the last check (None: not checked yet).  While
@@ -668,15 +696,37 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         return self._ask_user(question).strip().lower() in ("y", "yes")
 
     def _ask_user(self, question: str, options: list[str] | None = None) -> str:
-        """Emit an AskUserEvent and block the worker thread until a frontend answers."""
+        """Emit an AskUserEvent and block the worker thread until a frontend
+        answers.  Interrupted (Esc while waiting, cancel_question) it returns ""
+        with _cancel set, which ends the turn at the loop's next check."""
+        # A cancel sentinel left from an earlier question is stale; an answer
+        # already queued (typed ahead, or a test's) still answers this one.
+        kept = []
+        while True:
+            try:
+                item = self._user_input_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not _CANCELLED:
+                kept.append(item)
+        for item in kept:
+            self._user_input_queue.put(item)
+        if self._cancel.is_set():
+            return ""
         self.awaiting_input = True
         self.event_queue.put(AskUserEvent(question, list(options or [])))
         # Only ever called from a worker thread, so the harness is busy by definition.
         self.event_queue.put(BusyEvent(busy=True, waiting=True))
         try:
-            return self._user_input_queue.get()
+            answer = self._user_input_queue.get()
         finally:
             self.awaiting_input = False
+        return "" if answer is _CANCELLED else answer
+
+    def cancel_question(self) -> None:
+        """Interrupt a turn that is waiting for the user's answer."""
+        self._cancel.set()
+        self._user_input_queue.put(_CANCELLED)
 
     def _fetch_chars(self) -> int:
         """Text budget for one fetch_url result: /net-max-chars, but never above
@@ -891,6 +941,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         else:
             self.client.set_host(host)
             self.client.set_model(model)
+        self._est_ratio = 1.0          # another model, another tokenizer
         self._reconcile_fixed_model()
         self._sync_context_limit()
         self.client.forget_thinking_caps()
@@ -898,6 +949,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
 
     def set_model(self, model: str):
         """Switch model and re-sync context limit from the new model's capabilities."""
+        self._est_ratio = 1.0          # another model, another tokenizer
         self.client.set_model(model)
         self._sync_context_limit(emit=True)
         self.client.forget_thinking_caps()
@@ -2041,6 +2093,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 continue
             if reasoning and m.get("role") == "assistant":
                 m = {**m, "reasoning": reasoning}
+            elif NOTE_KEY in m:
+                m = {k: v for k, v in m.items() if k != NOTE_KEY}
             reasoning = None
             out.append(m)
         return out
@@ -2059,12 +2113,23 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         total = sum(cats[k] for k, _, sent in _CTX_CATEGORIES if sent and k != "generating")
         return total if schemas else total - cats["schemas"]
 
+    def _compact_limit(self) -> int:
+        """The compaction limit in the estimate's units: context_limit scaled by
+        how far the estimate fell short of the server's count last time."""
+        return max(1, int(self.context_limit / self._est_ratio))
+
+    def _note_estimate_ratio(self, estimated: int, prompt_tokens: int | None) -> None:
+        """Learn the estimate's shortfall from a reply the server counted:
+        clamped to 1-4 (never relaxes compaction below the plain estimate)."""
+        if prompt_tokens and estimated > 0:
+            self._est_ratio = min(4.0, max(1.0, prompt_tokens / estimated))
+
     def _read_budget(self) -> int:
         """Characters one read_file may return: the context the next request
         leaves free, less _READ_RESERVE % of the window (tokens as the harness
         estimates them, 4 characters each)."""
-        left = (self.context_limit - self._estimate(schemas=True)
-                - self.context_limit * _READ_RESERVE // 100)
+        limit = self._compact_limit()
+        left = limit - self._estimate(schemas=True) - limit * _READ_RESERVE // 100
         return max(left, _READ_FLOOR_TOKENS) * 4
 
     def _answer_from_thinking(self, thinking: str) -> None:
@@ -2159,12 +2224,46 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             self._autosave()
             self.event_queue.put(self._done_event())
 
+    def report_crash(self, where: str, exc: BaseException) -> None:
+        """A worker run raised (a bug, not a tool error — those become results):
+        log the traceback, give every call left without a result one so the next
+        request is well-formed, save, and tell the frontends."""
+        try:
+            self.logger.log_error(where, exc)
+        except Exception:
+            pass
+        self._settle_unanswered()
+        try:
+            self._autosave()
+        except Exception:
+            pass
+        self.event_queue.put(ErrorEvent(
+            f"Internal error ({where}): {type(exc).__name__}: {exc} — the turn stopped; "
+            f"the traceback is in {self.logger.path.name}."))
+
+    def _settle_unanswered(self) -> None:
+        """Results for the newest batch's calls that have none (a crash between
+        appending the assistant turn and running its calls)."""
+        msgs = self.messages
+        i = next((k for k in range(len(msgs) - 1, 0, -1)
+                  if msgs[k].get("role") == "assistant" and msgs[k].get("tool_calls")), None)
+        if i is None or any(m.get("role") in ("user", "assistant") for m in msgs[i + 1:]):
+            return
+        answered = sum(1 for m in msgs[i + 1:] if m.get("role") == "tool")
+        for call in msgs[i]["tool_calls"][answered:]:
+            name = (call.get("function") or {}).get("name", "")
+            msgs.append({"role": "tool", "name": name,
+                         "content": settle.settled_result("interrupted", name)})
+
     def _append_user(self, text: str):
         """Append a user turn, keeping the history well-formed: bridge a tool→user
         gap with an empty assistant turn (Qwen3's template requires it) and merge
         into a trailing user turn rather than creating consecutive user messages."""
         last = self.messages[-1]["role"] if self.messages else ""
         if last == "user":
+            # Merged into a note the model has not answered yet: the message
+            # now holds the user's words, so it no longer counts as a note.
+            self.messages[-1].pop(NOTE_KEY, None)
             self.messages[-1]["content"] = f"{self.messages[-1].get('content') or ''}\n\n{text}".strip()
         else:
             if last == "tool":
@@ -2234,7 +2333,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             # auto-compact if needed
             self._stream_chars = 0
             self._token_estimate = self._estimate(schemas=True)
-            if self._estimate() > self.context_limit:
+            if self._estimate() > self._compact_limit():
                 changed, notice = self._compact()
                 # A compaction that could not help is reported once, not every iteration.
                 if changed:
@@ -2254,6 +2353,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 len(self.messages),
                 self._token_estimate,
             )
+            estimated_prompt = self._token_estimate
 
             try:
                 # role="thinking" is a harness-internal representation; strip it
@@ -2336,6 +2436,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             self._turn_stats["eval"] += eval_tokens or 0
 
             if prompt_tokens is not None:
+                self._note_estimate_ratio(estimated_prompt, prompt_tokens)
                 self._token_estimate = (prompt_tokens or 0) + (eval_tokens or 0)
                 self._measured_tokens = self._token_estimate
             else:
@@ -2428,8 +2529,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                         _suppress_think_next = True   # thinking shares the output budget
                     names = {t["function"]["name"] for t in tools}
                     self.messages.append({"role": "assistant", "content": content or None})
-                    self.messages.append({"role": "user",
-                                          "content": settle.cut_off_text_note(name, names, cause)})
+                    self.messages.append(note_message(settle.cut_off_text_note(name, names, cause)))
                     continue
                 if not content:
                     if last_tool == "write_file" and self.mode == "design":
@@ -2483,7 +2583,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                             # the template may produce malformed XML for tool definitions.
                             if self.messages[-1]["role"] == "tool":
                                 self.messages.append({"role": "assistant", "content": None})
-                            retry_msg = {"role": "user", "content": retry_text}
+                            retry_msg = note_message(retry_text)
                             self.messages.append(retry_msg)
                         tool_only_turns = 0
                         continue
@@ -2511,10 +2611,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                         and not _write_nudged):
                     _write_nudged = True
                     self.messages.append({"role": "assistant", "content": content or None})
-                    self.messages.append({"role": "user", "content":
+                    self.messages.append(note_message(
                         "You said you would write the design but did not call write_file. "
-                        "Call write_file now with both 'path' (the file path to write) and 'content' (the complete document)."
-                    })
+                        "Call write_file now with both 'path' (the file path to write) and 'content' (the complete document)."))
                     continue
                 # A story or a story-writing pass ends only with its own tool, so a
                 # reply without a tool call gets a note instead of ending it, up to
@@ -2527,7 +2626,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                         and (content or "").strip()):
                     run["nudges"] = run.get("nudges", 0) + 1
                     self.messages.append({"role": "assistant", "content": content})
-                    self.messages.append({"role": "user", "content": self._story_nudge(content, tools)})
+                    self.messages.append(note_message(self._story_nudge(content, tools)))
                     continue
                 # A stories plan written phase by phase: a reply without a tool call
                 # between the outline and finish_plan ends nothing (run 7's planner
@@ -2541,9 +2640,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     self.event_queue.put(ChatEvent(
                         "system", "The plan is not finished — asked the planner to go on."))
                     self.messages.append({"role": "assistant", "content": content})
-                    self.messages.append({"role": "user", "content":
+                    self.messages.append(note_message(
                         "[Note from the harness, not the user] The plan is not finished, and a "
-                        "reply without a tool call does nothing. " + self._plan_next()})
+                        "reply without a tool call does nothing. " + self._plan_next()))
                     continue
                 # Coding and momo: a reply without a tool call ends the turn, so one
                 # that only announces its next step gets a note and the loop goes on
@@ -2556,7 +2655,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     self.event_queue.put(ChatEvent(
                         "system", "The reply announced a next step — asked the model to continue."))
                     self.messages.append({"role": "assistant", "content": content})
-                    self.messages.append({"role": "user", "content": _NEXT_STEP_NOTE})
+                    self.messages.append(note_message(_NEXT_STEP_NOTE))
                     continue
                 self.messages.append({"role": "assistant", "content": content or None})
                 break
@@ -2681,7 +2780,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     # The TUI detects AskUserEvent, switches to waiting-for-input state,
                     # and calls provide_user_input() when the user submits a response.
                     answer = self._ask_user(args.get("question", ""))
-                    result = f"User answered: {answer}"
+                    result = ("ERROR: not answered — the user interrupted the turn."
+                              if self._cancel.is_set() else f"User answered: {answer}")
                     guard.bump()
                     self._plan_asked += investigating
                 elif name == "ask_choice":
@@ -2780,7 +2880,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                         cutoff = result.rfind("\n", 0, self.max_tool_result)
                         if cutoff < self.max_tool_result // 2:
                             cutoff = self.max_tool_result
-                        result = result[:cutoff] + f"\n... (truncated after {cutoff} chars of {total} — use read_file with start_line/end_line for specific sections)"
+                        how = ("use read_file with start_line/end_line for specific sections"
+                               if name == "read_file" else
+                               "ask for less: a narrower path, pattern or range")
+                        result = result[:cutoff] + f"\n... (truncated after {cutoff} chars of {total} — {how})"
                 result = self._annotate_result(name, args, result)
                 result += self._watch_syntax(name, args, diff_old, diff_existed, multi_snaps)
 
@@ -2897,8 +3000,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     since, act = _IDLE_ACT.get(loop_role, _IDLE_ACT["coding"])
                 self.event_queue.put(ChatEvent("system",
                     f"{idle_calls} tool calls without {since} — asked the model to act."))
-                self.messages.append({"role": "user", "content": _IDLE_NOTE.format(
-                    n=idle_calls, since=since, act=act).rstrip()})
+                self.messages.append(note_message(_IDLE_NOTE.format(
+                    n=idle_calls, since=since, act=act).rstrip()))
                 tool_only_turns = 0
                 continue
 
@@ -2940,7 +3043,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 elif self.story_role == "story-verifier":
                     nudge = ("You have been calling tools for several turns. "
                              + _IDLE_ACT["story-verifier"][1])
-                self.messages.append({"role": "user", "content": nudge})
+                self.messages.append(note_message(nudge))
                 tool_only_turns = 0
 
         return "done"
@@ -3085,10 +3188,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 datetime.now().isoformat(timespec="seconds"), by="loop")
             del msgs[start:]
         msgs.append({"role": "assistant", "content": analysis})
-        msgs.append({"role": "user", "content": _LOOP_NUDGE.format(
+        msgs.append(note_message(_LOOP_NUDGE.format(
             what=what, changes=changes,
             removed=("The steps that led to the loop were removed from the conversation "
-                     "and replaced by your analysis above. " if removed else ""))})
+                     "and replaced by your analysis above. " if removed else ""))))
         self._last_run = self._last_failed_call = None
         self._token_estimate = self._estimate(schemas=True)
         self._measured_tokens = None
@@ -3146,16 +3249,16 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             self.messages.append({"role": "thinking", "content": reasoning, "unsent": True})
         if last in ("user", "tool"):
             self.messages.append({"role": "assistant", "content": None})
-        self.messages.append({"role": "user", "content": _THINK_NOTE.format(
-            what=what, act=act, tail=tail)})
+        self.messages.append(note_message(_THINK_NOTE.format(
+            what=what, act=act, tail=tail)))
 
     def _nudge_loop(self, hit: Hit) -> None:
         """Warn about a loop in the making (edit churn): a note to the model, with
         the history kept and no loop reset counted."""
         self.event_queue.put(ChatEvent("system",
             f"Loop warning: {hit.describe()} — {hit.count} times. Nudging the model."))
-        self.messages.append({"role": "user", "content": _CHURN_NUDGE.format(
-            owner=hit.owner, count=hit.count, error=hit.error)})
+        self.messages.append(note_message(_CHURN_NUDGE.format(
+            owner=hit.owner, count=hit.count, error=hit.error)))
         self.logger.log_loop_reset(self.mode, self.client.model, hit.kind, hit.name,
                                    hit.count, 0, False, severity="nudge")
 
@@ -3199,6 +3302,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         notes: list[str] = []
         for rounds in range(_CHOICE_MAX_ROUNDS + 1):
             answer = self._ask_user(question, options)
+            if self._cancel.is_set():
+                return "ERROR: not answered — the user interrupted the turn."
             picked = _match_choice(answer, options)
             if picked is not None:
                 result = f"User chose option {picked + 1}: {options[picked]}"
@@ -3580,6 +3685,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.plan_kind = data.get("plan_kind") if data.get("plan_kind") in ("tdd", "stories") else "normal"
         if self.plan_phase == "executing" and self.mode == "plan":
             self.mode = "coding"   # sessions from before plans ran in coding mode
+        self._reset_plan_state()     # the drafts and counters were the other session's
+        self.take_steer()            # so were messages queued for its turn
         self.input_history.clear()
         self.input_history.extend(data.get("input_history", []))
         self.momo_lines = list(data.get("momo_lines", []))
@@ -3588,7 +3695,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self._title_turn = data.get("title_turn", 0)
         self.title_locked = bool(data.get("title_locked", False))
         self._turn_count = data.get("turn_count",
-                                    sum(1 for m in self.messages if m.get("role") == "user"))
+                                    sum(1 for m in self.messages
+                                        if m.get("role") == "user" and not is_note(m)))
         self._guides = self._read_guides() if self.guides else []
         # A restored session can point at another workdir: index that one instead.
         if self.index_enabled and (self.index is None or self.index.root != self.workdir.resolve()):
@@ -3626,6 +3734,15 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         """Remember this session and its workspace for the next launch."""
         session_mod.mark_current(self._ts, self.workdir)
 
+    def _reset_plan_state(self) -> None:
+        """Forget the planning conversation's state (not the plan itself): the
+        questions asked, a phase-by-phase draft, restarts, refusals and the
+        resume note.  /new, /clear and a loaded session all start it afresh."""
+        self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
+        self._plan_draft, self._plan_restart, self._plan_restarts, self._plan_qa = None, "", 0, []
+        self._resume_note = ""
+        self._plan_heuristics, self._plan_refused = {}, 0
+
     def clear_conversation(self) -> str:
         """/clear: drop the conversation and everything carried from it, keeping
         the session's settings.  The saved copy goes too: a cleared session left
@@ -3636,10 +3753,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         # (Safe here — the Controller rejects /clear while a plan step is running.)
         note = self.cancel_plan() if self.plan is not None else ""
         self.plan_kind = "normal"
-        self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
-        self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
-        self._resume_note = ""
-        self._plan_heuristics, self._plan_refused = {}, 0
+        self._reset_plan_state()
         self.messages = [self.messages[0]]
         self.compacted = []
         self.summary_state = new_summary_state()
@@ -3671,10 +3785,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.plan = None
         self.plan_phase = "investigating"
         self.plan_kind = "normal"
-        self._plan_asked, self._plan_gate_refused, self._plan_first_request = 0, False, ""
-        self._plan_draft, self._plan_restarts, self._plan_qa = None, 0, []
-        self._resume_note = ""
-        self._plan_heuristics, self._plan_refused = {}, 0
+        self._reset_plan_state()
         self.momo_lines = []
         self._momo_recap_turn = 0
         self.title = ""
@@ -3699,7 +3810,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         """Drop the last user message and everything after it (replies, tool calls,
         thinking). Returns that message's content, or None if there is none."""
         for i in range(len(self.messages) - 1, 0, -1):
-            if self.messages[i].get("role") == "user":
+            if self.messages[i].get("role") == "user" and not is_note(self.messages[i]):
                 content = self.messages[i].get("content") or ""
                 del self.messages[i:]
                 self._token_estimate = self._estimate(schemas=True)

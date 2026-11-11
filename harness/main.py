@@ -3,24 +3,16 @@ import curses
 import secrets
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
-from . import code_index
-from . import loop_guard as loop_guard_mod
-from . import think_watch as think_watch_mod
-from . import story_runner as story_runner_mod
-from . import net as net_mod
-from . import run_store as run_store_mod
 from . import session as session_mod
+from . import settings as settings_mod
 from .controller import Controller
 from .events import ChatEvent
-from .harness import (DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_UNDO_MAX, MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY,
-                      Harness)
-from .llm.base import THINK_LEVELS
-from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS, MODES
-from .think_trim import KEEP_LEVELS
-from .tools import registry as registry_mod
+from .harness import Harness
+from .prompts import MODES
 from .tui import run_tui
 from .web import tls as tls_mod
 from .web.server import is_loopback, start_web_server
@@ -52,70 +44,13 @@ def main():
                                              "workspace's last session is reopened)")
     parser.add_argument("--context", default=None, type=int, metavar="N",
                         help="Override context token limit (default: read from model)")
-    parser.add_argument("--mode",    default=None, choices=["design", "chat", "plan", "coding", "momo"],
+    parser.add_argument("--mode",    default=None, choices=list(MODES),
                         help="Starting mode (default: last-selected mode, else design; "
                              "ignored when restoring a session)")
-    parser.add_argument("--max-tool-result", default=None, type=int, metavar="N",
-                        help="Max chars returned by a single tool call, 0 = unlimited "
-                             "(default: last /tool-result setting, else 0)")
-    parser.add_argument("--run-mode", choices=("new", "classic"), default=None,
-                        help="run_command output: 'new' saves it to a log and returns a view "
-                             "(tail/grep, command_output); 'classic' returns all of it "
-                             "(default: last /run-mode setting, else new)")
-    parser.add_argument("--tools-discover", choices=("off", "extensions", "all"), default=None,
-                        help="Which tools are listed in the prompt and declared only once the model "
-                             "loads them (find_tools): 'extensions' = custom, workspace and MCP "
-                             "tools, 'all' = also rarely needed built-ins, 'off' = none "
-                             "(default: last /tools discover setting, else off)")
-    parser.add_argument("--tool-ref", choices=("full", "compact", "minimal"), default=None,
-                        help="System prompt tool reference: 'full', 'compact' (one line per "
-                             "tool) or 'minimal' (only the call format) (default: last "
-                             "/tool-ref setting, else minimal)")
-    parser.add_argument("--max-output-tokens", type=int, default=None, metavar="N",
-                        help="most tokens one model reply may take, 0 = no cap "
-                             "(default: last /max-output-tokens setting, else 25000)")
-    parser.add_argument("--think-budget", type=int, default=None, metavar="N",
-                        help="reasoning tokens one streamed reply may take before it is stopped "
-                             "and the model asked to act, 0 = off (default: last /think-budget "
-                             f"setting, else {think_watch_mod.DEFAULT_BUDGET})")
-    parser.add_argument("--reply-repeat", choices=("on", "off"), default=None,
-                        help="stop a streamed reply whose text keeps repeating itself and ask the "
-                             "model to act (default: last /think-budget reply-repeat setting, else on)")
-    parser.add_argument("--progress-note", choices=("on", "off"), default=None,
-                        help="note to the model after many tool calls in a row with no change, "
-                             "question or plan (default: last /progress-note setting, else on)")
-    parser.add_argument("--plan-questions", choices=("on", "off"), default=None,
-                        help="plan mode: refuse a first create_plan made before any question to "
-                             "the user, once (default: last /plan questions setting, else on)")
-    parser.add_argument("--loop-guard", default=None, metavar="N|off",
-                        help="repeats of one tool call (or one error) that count as a loop, "
-                             "or off (default: last /loop-guard setting, else 3)")
-    parser.add_argument("--loop-resets", type=int, default=None, metavar="N",
-                        help="loop resets per turn before the turn stops, 0 = stop at the "
-                             "first loop (default: last /loop-guard resets setting, else 2)")
-    parser.add_argument("--undo-max", type=int, default=None, metavar="N",
-                        help="turns of file checkpoints /undo can go back, 0 = no cap "
-                             "(default: last /undo-max setting, else 20)")
-    parser.add_argument("--run-output-limit", type=int, default=None, metavar="N",
-                        help="Chars in run_command's default view in run mode new, 0 = off "
-                             "(default: last /run-output-limit setting, else off)")
     parser.add_argument("--fresh", action="store_true", default=False,
                         help="Start a new session instead of restoring the last one")
-    parser.add_argument("--think", choices=THINK_LEVELS, default=None,
-                        help="Thinking/reasoning level: off, on, or low/medium/high for "
-                             "models that take one (default: last /think setting, else on)")
     parser.add_argument("--no-think", action="store_true", default=False,
                         help="Same as --think off")
-    parser.add_argument("--think-history", choices=THINK_HISTORY, default=None,
-                        help="Send the model's own reasoning back to it: off, turn (since "
-                             "the last user message) or all (default: last setting, else turn)")
-    parser.add_argument("--cavecat", choices=CAVECAT_LEVELS + tuple(CAVECAT_ALIASES), default=None,
-                        help="on: compress plans, tool text and command output, and keep "
-                             "replies short, to save tokens (default: last /cavecat, else off)")
-    parser.add_argument("--think-keep", choices=KEEP_LEVELS, default=None,
-                        help="How much of its earlier reasoning the model gets back: lean "
-                             "(small models), more (x2), most (x4), or off (all of it) "
-                             "(default: last /think-keep, else off)")
     parser.add_argument("--net", choices=("off", "on", "local"), default="off",
                         help="Let the model fetch URLs with fetch_url: 'on' reaches the "
                              "public internet, 'local' also allows localhost and the LAN "
@@ -123,48 +58,10 @@ def main():
     parser.add_argument("--net-confirm", choices=("on", "off"), default="on",
                         help="Ask y/N before each fetch_url POST/PUT/PATCH/DELETE "
                              "(default: on). Writes to private addresses always ask.")
-    parser.add_argument("--net-max-bytes", default=None, metavar="SIZE",
-                        help="Ceiling on a single fetch_url download, in bytes or with a "
-                             "unit: 200000, 500kb, 2mb (default: last /net-max-bytes "
-                             "setting, else 2mb)")
-    parser.add_argument("--net-max-chars", type=int, default=None, metavar="N",
-                        help="Characters of page text one fetch_url call returns; the model "
-                             "pages through the rest (default: last /net-max-chars setting, "
-                             "else 24000)")
     parser.add_argument("--no-stream", action="store_true", default=False,
                         help="Wait for complete replies instead of streaming them as they are generated")
-    parser.add_argument("--companion-idle-recap", action=argparse.BooleanOptionalAction, default=None,
-                        help="momo recaps the last turns in its speech bubble when you're idle "
-                             "(default: last /companion-idle-recap setting, else off)")
-    parser.add_argument("--companion-idle-recap-secs", default=None, type=int, metavar="N",
-                        help="Seconds of inactivity before momo recaps (default 90)")
-    parser.add_argument("--guides", action=argparse.BooleanOptionalAction, default=None,
-                        help="Put the workdir's AGENTS.md / CLAUDE.md / ... in the system prompt "
-                             "(default: last /guides setting, else off)")
-    parser.add_argument("--mcp", action=argparse.BooleanOptionalAction, default=None,
-                        help="Connect the MCP servers in ~/.momo-harness/mcp.json and the "
-                             "workdir's .mcp.json (default: last /mcp setting, else on)")
     parser.add_argument("--mcp-config", action="append", default=[], metavar="PATH",
                         help="An extra MCP config file (mcpServers format); may be repeated")
-    parser.add_argument("--index", action=argparse.BooleanOptionalAction, default=None,
-                        help="Index the workdir in memory and give the model the index_* search "
-                             "tools (default: last /index setting, else on)")
-    parser.add_argument("--index-max-mem", default=None, metavar="SIZE",
-                        help="Memory budget for the code index: 100mb, 512kb, 1gb (default: last "
-                             "/index-max-mem setting, else 100mb)")
-    parser.add_argument("--index-max-files", default=None, metavar="N",
-                        help="Most files the code index covers (default: last /index-max-files "
-                             "setting, else 100000)")
-    parser.add_argument("--index-workers", default=None, metavar="N",
-                        help="Processes the code index builds in: auto or 1-"
-                             f"{code_index.MAX_WORKERS} (default: last /index-workers setting, "
-                             "else auto)")
-    parser.add_argument("--index-persist", action=argparse.BooleanOptionalAction, default=None,
-                        help="Load the saved code index at start and save it on exit, in "
-                             "~/.momo-harness/index/ (default: last /index-persist setting, else on)")
-    parser.add_argument("--index-route", action=argparse.BooleanOptionalAction, default=None,
-                        help="With the code index on, answer plain-text grep_files and file-name "
-                             "find_files from the index (default: last /index-route setting, else on)")
     parser.add_argument("--web", action=argparse.BooleanOptionalAction, default=True,
                         help="Serve the browser chat UI alongside the TUI")
     parser.add_argument("--web-host", default="127.0.0.1", metavar="HOST",
@@ -189,6 +86,7 @@ def main():
                         help="Extra name accepted in the Host header with --web-insecure (repeatable)")
     parser.add_argument("--headless", action="store_true", default=False,
                         help="Run only the web UI (no terminal UI)")
+    settings_mod.add_arguments(parser)    # the saved settings' flags (settings.py)
     args = parser.parse_args()
     if args.headless and not args.web:
         parser.error("--headless needs the web UI; drop --no-web")
@@ -216,12 +114,6 @@ def main():
 
     if args.context is not None and args.context < 256:
         parser.error("--context: expected at least 256")
-    if args.max_tool_result is not None and args.max_tool_result < 0:
-        parser.error("--max-tool-result: expected 0 (unlimited) or more")
-    if args.net_max_bytes is not None and not net_mod.parse_size(args.net_max_bytes):
-        parser.error(f"--net-max-bytes: not a size: {args.net_max_bytes}")
-    if args.net_max_chars is not None and not 1000 <= args.net_max_chars <= net_mod.HARD_MAX_CHARS:
-        parser.error(f"--net-max-chars: expected 1000..{net_mod.HARD_MAX_CHARS}")
 
     prefs = session_mod.load_prefs()
     provider = args.provider or prefs.get("provider") or "ollama"
@@ -232,145 +124,28 @@ def main():
     except ValueError as e:        # an unusable --host (or saved provider)
         parser.error(str(e))
 
-    def pref_int(key: str, ok) -> int | None:
-        """A saved numeric setting, or None when it is missing or invalid."""
-        v = prefs.get(key)
-        return v if isinstance(v, int) and not isinstance(v, bool) and ok(v) else None
+    def _thread_crash(hook_args):
+        # Any thread's uncaught exception: into the session log, never onto the
+        # terminal (the default hook prints a traceback over the curses screen).
+        if hook_args.exc_type is SystemExit:
+            return
+        try:
+            harness.logger.log_error(f"thread {getattr(hook_args.thread, 'name', '?')}",
+                                     hook_args.exc_value)
+        except Exception:
+            pass
+    threading.excepthook = _thread_crash
 
-    max_tool_result = (args.max_tool_result if args.max_tool_result is not None
-                       else pref_int("max_tool_result", lambda v: v >= 0))
-    harness.max_tool_result = max_tool_result or 0
-    think = "off" if args.no_think else args.think or prefs.get("think")
-    harness.think_level = think if think in THINK_LEVELS else "on"
-    history = args.think_history or prefs.get("think_history")
-    harness.think_history = history if history in THINK_HISTORY else "turn"
-    cavecat = args.cavecat or prefs.get("cavecat")
-    cavecat = CAVECAT_ALIASES.get(cavecat, cavecat)     # a level saved before there were two
-    harness.cavecat = cavecat if cavecat in CAVECAT_LEVELS else "off"
-    keep = args.think_keep or prefs.get("think_keep")
-    harness.think_keep = keep if keep in KEEP_LEVELS else "off"
-    questions = args.plan_questions or prefs.get("plan_questions")
-    if isinstance(questions, bool):
-        harness.plan_questions = questions
-    elif questions in ("on", "off"):
-        harness.plan_questions = questions == "on"
-    approve = story_runner_mod.APPROVE_ALIASES.get(prefs.get("stories_approve"), prefs.get("stories_approve"))
-    if approve in story_runner_mod.APPROVE_MODES:
-        harness.stories_approve = approve
-    cap = pref_int("stories_cap", lambda v: story_runner_mod.STORIES_CAP_RANGE[0] <= v
-                   <= story_runner_mod.STORIES_CAP_RANGE[1])
-    if cap:
-        harness.stories_cap = cap
+    # Every saved setting: its flag, else its pref, else the Harness default.
+    if args.no_think:
+        args.think = "off"
+    returned = settings_mod.apply(harness, args, prefs, parser.error)
+    index_on = returned["index"]
     if args.no_stream:
         harness.stream = False
+    # Session-only by design: never saved, so a flag or the safe default.
     harness.net_access = args.net
     harness.net_confirm = args.net_confirm == "on"
-    net_bytes = (net_mod.parse_size(args.net_max_bytes) if args.net_max_bytes is not None
-                 else pref_int("net_max_bytes", lambda v: v > 0))
-    if net_bytes:
-        harness.net_max_bytes = min(net_bytes, net_mod.HARD_MAX_BYTES)
-    net_chars = (args.net_max_chars if args.net_max_chars is not None
-                 else pref_int("net_max_chars", lambda v: 1000 <= v <= net_mod.HARD_MAX_CHARS))
-    if net_chars:
-        harness.net_max_chars = net_chars
-    def flag_or_pref(flag, key: str, default: bool) -> bool:
-        return bool(flag if flag is not None else prefs.get(key, default))
-
-    def parsed(flag, name: str, key: str, parse, default):
-        """A flag's value (a bad one is a usage error), else a valid saved pref."""
-        if flag is not None:
-            value, err = parse(flag)
-            if value is None:
-                parser.error(f"{name}: {err}")
-            return value
-        if key in prefs:
-            value, _ = parse(prefs[key])
-            if value is not None:
-                return value
-        return default
-
-    harness.idle_recap = flag_or_pref(args.companion_idle_recap, "idle_recap", False)
-    harness.session_titles = bool(prefs.get("session_titles", True))
-    harness.idle_recap_secs = max(10, args.companion_idle_recap_secs
-                                  or pref_int("idle_recap_secs", lambda v: v > 0) or 90)
-    harness.guides = flag_or_pref(args.guides, "guides", False)
-    harness.index_max_bytes = parsed(args.index_max_mem, "--index-max-mem", "index_max_mem",
-                                     code_index.parse_max_mem, harness.index_max_bytes)
-    harness.index_max_files = parsed(args.index_max_files, "--index-max-files", "index_max_files",
-                                     code_index.parse_max_files, harness.index_max_files)
-    harness.index_workers = parsed(args.index_workers, "--index-workers", "index_workers",
-                                   code_index.parse_workers, harness.index_workers)
-    harness.index_persist = flag_or_pref(args.index_persist, "index_persist", True)
-    harness.index_route = flag_or_pref(args.index_route, "index_route", True)
-    index_on = flag_or_pref(args.index, "index", True)
-    harness.mcp_enabled = flag_or_pref(args.mcp, "mcp", True)
-    run_mode = args.run_mode or prefs.get("run_mode", "new")
-    harness.run_mode = run_mode if run_mode in ("new", "classic") else "new"
-    harness.tools_discover = registry_mod.discover_mode(
-        args.tools_discover or prefs.get("tools_discover", registry_mod.DEFAULT_DISCOVER))
-    tool_ref = args.tool_ref or prefs.get("tool_ref", "minimal")
-    harness.tool_ref = tool_ref if tool_ref in ("full", "compact", "minimal") else "minimal"
-    limit = args.run_output_limit if args.run_output_limit is not None \
-        else prefs.get("run_output_limit", harness.run_output_limit)
-    if not isinstance(limit, int) or (limit != 0 and limit < run_store_mod.MIN_LIMIT):
-        if args.run_output_limit is not None:
-            parser.error(f"--run-output-limit: expected 0 (off) or at least {run_store_mod.MIN_LIMIT}")
-        limit = run_store_mod.DEFAULT_LIMIT
-    harness.run_output_limit = limit
-    cap = args.max_output_tokens if args.max_output_tokens is not None \
-        else prefs.get("max_output_tokens", harness.max_output_tokens)
-    if not isinstance(cap, int) or (cap and cap < MIN_MAX_OUTPUT_TOKENS) or cap < 0:
-        if args.max_output_tokens is not None:
-            parser.error(f"--max-output-tokens: expected 0 (no cap) or at least "
-                         f"{MIN_MAX_OUTPUT_TOKENS}")
-        cap = DEFAULT_MAX_OUTPUT_TOKENS
-    harness.max_output_tokens = cap
-    budget = args.think_budget if args.think_budget is not None \
-        else prefs.get("think_budget", harness.think_budget)
-    if (isinstance(budget, bool) or not isinstance(budget, int) or budget < 0
-            or (budget and budget < think_watch_mod.MIN_BUDGET)):
-        if args.think_budget is not None:
-            parser.error(f"--think-budget: expected 0 (off) or at least {think_watch_mod.MIN_BUDGET}")
-        budget = think_watch_mod.DEFAULT_BUDGET
-    harness.think_budget = budget
-    if isinstance(prefs.get("think_repeat"), bool):
-        harness.think_repeat = prefs["think_repeat"]
-    if args.reply_repeat:
-        harness.reply_repeat = args.reply_repeat == "on"
-    elif isinstance(prefs.get("reply_repeat"), bool):
-        harness.reply_repeat = prefs["reply_repeat"]
-    note = args.progress_note or prefs.get("progress_note")
-    if isinstance(note, bool):
-        harness.progress_note = note
-    elif note in ("on", "off"):
-        harness.progress_note = note == "on"
-    undo_max = args.undo_max if args.undo_max is not None else prefs.get("undo_max", DEFAULT_UNDO_MAX)
-    if not isinstance(undo_max, int) or isinstance(undo_max, bool) or undo_max < 0:
-        if args.undo_max is not None:
-            parser.error("--undo-max: expected 0 (no cap) or a number of turns")
-        undo_max = DEFAULT_UNDO_MAX
-    harness.undo_max = undo_max
-    guard = args.loop_guard if args.loop_guard is not None else prefs.get("loop_guard")
-    if guard is not None:
-        if isinstance(guard, str) and guard.lower() in ("off", "0"):
-            guard = 0
-        elif isinstance(guard, str) and guard.isdigit():
-            guard = int(guard)
-        if (isinstance(guard, bool) or not isinstance(guard, int)
-                or (guard and not loop_guard_mod.MIN_THRESHOLD <= guard <= loop_guard_mod.MAX_THRESHOLD)):
-            if args.loop_guard is not None:
-                parser.error(f"--loop-guard: expected off or {loop_guard_mod.MIN_THRESHOLD}"
-                             f"-{loop_guard_mod.MAX_THRESHOLD}")
-        else:
-            harness.loop_guard = guard
-    resets = args.loop_resets if args.loop_resets is not None else prefs.get("loop_resets")
-    if resets is not None:
-        if (isinstance(resets, bool) or not isinstance(resets, int)
-                or not 0 <= resets <= loop_guard_mod.MAX_RESETS_LIMIT):
-            if args.loop_resets is not None:
-                parser.error(f"--loop-resets: expected 0-{loop_guard_mod.MAX_RESETS_LIMIT}")
-        else:
-            harness.loop_resets = resets
     harness.rebuild_system_prompt()     # the run_command schema depends on run_mode
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 

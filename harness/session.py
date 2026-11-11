@@ -48,15 +48,30 @@ def load_prefs() -> dict:
         return {}
 
 
-def save_prefs(**kwargs) -> None:
+def update_prefs(change) -> None:
+    """Read, change (change(prefs) edits the dict in place) and write the prefs
+    under one lock, so two threads' updates never overwrite each other."""
     with _prefs_lock:
         prefs = load_prefs()
-        prefs.update(kwargs)
+        change(prefs)
         atomic_write(prefs_path(), json.dumps(prefs, indent=2))
 
 
+def save_prefs(**kwargs) -> None:
+    update_prefs(lambda prefs: prefs.update(kwargs))
+
+
 def new_timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    """A new session name: the UTC second, with -2, -3 … when a session (or
+    its log, which a running momo opens at once) already has that name — two
+    sessions started in one second would otherwise share a file."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    folder = session_dir()
+    name, n = ts, 1
+    while (folder / f"{name}.json").exists() or (folder / f"{name}.log").exists():
+        n += 1
+        name = f"{ts}-{n}"
+    return name
 
 
 def session_path(ts: str) -> Path:
@@ -149,11 +164,14 @@ def mark_current(ts: str, workdir: Path) -> None:
     belongs to one workspace: another one's entry for it (it moved with
     /workspace) is dropped, so that workspace falls back to its newest session."""
     key = str(workdir)
-    per = {k: v for k, v in (load_prefs().get("workspace_sessions") or {}).items()
-           if isinstance(k, str) and isinstance(v, str) and k != key and v != ts}
-    per[key] = ts
-    per = dict(list(per.items())[-_WORKSPACES_KEPT:])
-    save_prefs(last_session=ts, last_workdir=key, workspace_sessions=per)
+
+    def change(prefs: dict) -> None:
+        per = {k: v for k, v in (prefs.get("workspace_sessions") or {}).items()
+               if isinstance(k, str) and isinstance(v, str) and k != key and v != ts}
+        per[key] = ts
+        prefs.update(last_session=ts, last_workdir=key,
+                     workspace_sessions=dict(list(per.items())[-_WORKSPACES_KEPT:]))
+    update_prefs(change)
 
 
 def forget(ts: str) -> None:

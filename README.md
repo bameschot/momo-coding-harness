@@ -57,7 +57,9 @@ Options:
 | `--cavecat` | last `/cavecat`, else `off` | `on`: compress plans, tool text and command output, and keep replies short, to save tokens; `off`. See [Cavecat mode](#cavecat-mode) |
 | `--max-output-tokens` | last setting, else `25000` | Most tokens one model reply may take, reasoning included; `0` = no cap. See `/max-output-tokens` |
 | `--think-budget` | last `/think-budget`, else `8000` | Reasoning tokens one streamed reply may take before it is stopped and the model asked to act; `0` = off. See [Reasoning watch](#reasoning-watch) |
+| `--think-repeat` | last `/think-budget repeat`, else `on` | `on`: stop streamed reasoning that keeps repeating itself; `off`. See [Reasoning watch](#reasoning-watch) |
 | `--reply-repeat` | last `/think-budget reply-repeat`, else `on` | `on`: stop a streamed reply whose text keeps repeating itself; `off`. See [Reasoning watch](#reasoning-watch) |
+| `--session-titles` / `--no-session-titles` | last `/session-titles`, else on | Let the model title the session while you're idle |
 | `--progress-note` | last `/progress-note`, else `on` | A note to the model after many tool calls in a row that changed nothing, or `off`. See [Progress note](#progress-note) |
 | `--plan-questions` | last `/plan questions`, else `on` | Plan mode: a first `create_plan` made before any question to you is sent back once, or `off`. See [Ask before planning](#2-ask-before-planning) |
 | `--loop-guard` | last `/loop-guard`, else `3` | Repeats of one tool call (or one error) that count as a loop, or `off`. See [Loop guard](#loop-guard) |

@@ -8,3 +8,6 @@ evals/.cache/
 
 # live checks with HOME=.scratch
 .scratch/
+
+# macOS Finder metadata
+.DS_Store

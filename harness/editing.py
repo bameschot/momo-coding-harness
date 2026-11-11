@@ -1484,9 +1484,11 @@ def write_file(path: str, content: str, *, workdir: Path, index=None, cancel=Non
     # A small model that doubts its write landed rewrites the same file again and
     # again; say so plainly rather than silently writing identical bytes.
     try:
-        if p.is_file() and p.read_text(encoding="utf-8") == content:
+        # Bytes, not read_text: that turns CRLF into LF, so LF content over a
+        # CRLF file read as "no change" and the file kept its line endings.
+        if p.is_file() and p.read_bytes() == content.encode("utf-8"):
             return f"No change: {path} already contains exactly this content."
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeEncodeError):
         pass
     old_text = None
     if {"feedback", "checks", "match"} & features:
