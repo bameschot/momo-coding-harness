@@ -650,6 +650,11 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       <p>On by default: fuzzy definition search, full-text search, callers and a ranked project map, always up to date.</p>
       <a class="more" href="#index">Code index →</a>
     </div>
+    <div class="card" style="--c: var(--focus)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>Sub-agents for broad questions</h3>
+      <p>The model can hand a broad question ("how does X work end to end") to a read-only sub-agent with a fresh context. Only its short report, with <code>path:line</code> evidence, comes back, so a small context window stays small.</p>
+      <a class="more" href="#explore">Sub-agents →</a>
+    </div>
     <div class="card" style="--c: var(--danger)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Confined to your project</h3>
       <p>File tools stay inside the working directory. Shell commands can reach further, so <code>/run-confirm on</code> lets you approve each one.</p>
@@ -867,6 +872,7 @@ ollama serve</code></pre></div>
     <ul>
       <li><strong>Modes</strong> decide which tools are offered. See <a href="#modes">Modes</a>.</li>
       <li><strong>Context</strong> is everything sent in one request. See <a href="#context">Context &amp; compaction</a>.</li>
+      <li><strong>Sub-agents</strong> answer a broad question in a context of their own, so the turn that asked keeps only the answer. See <a href="#explore">Sub-agents</a>.</li>
       <li><strong>"momo"</strong> is the app, one of its modes and the cat.</li>
     </ul>
   </section>
@@ -1359,6 +1365,11 @@ and tell the user what is blocking you.</code></pre></div>
       <tr><td><code>command_output</code></td><td>coding, momo, plan</td><td class="wrap">Search a saved command log without rerunning the command</td></tr>
       <tr><td><code>scratch_write</code></td><td>all modes</td><td class="wrap">Write a temporary file in the <a href="#scratch">scratchpad</a></td></tr>
     </table></div>
+    <h3>Sub-agent (design, chat, plan, coding, momo, a running plan)</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Tool</th><th>Description</th></tr>
+      <tr><td><code>explore</code></td><td class="wrap">Hand a research question (<code>question</code>, optionally <code>paths</code> to start from) to a read-only sub-agent with a fresh context. It returns a short report. See <a href="#explore">Sub-agents</a>.</td></tr>
+    </table></div>
     <h3>Internet (all modes, only with <code>/net on</code>)</h3>
     <div class="table-scroll"><table>
       <tr><th>Tool</th><th>Description</th></tr>
@@ -1378,6 +1389,54 @@ and tell the user what is blocking you.</code></pre></div>
       <li>Choices are saved with the session; <code>/new</code> starts with every tool on.</li>
       <li>Plan mode's own tools can't be switched off.</li>
     </ul>
+  </section>
+
+  <section id="explore" data-voice="explore">
+    <h2>Sub-agents</h2>
+    <p>A question like "how does a request get from the web UI to the model?" takes many searches and reads to answer. Each result stays in the context, so the answer costs most of a small window. With <code>explore</code>, the model hands that question to a <strong>sub-agent</strong>: another run of the same model, starting from a fresh context with its own prompt. The sub-agent investigates and replies with a short report. Only the call and the report land in the main conversation.</p>
+    <figure class="flow" aria-label="How an explore call is handled">
+      <div class="flow-col">
+        <div class="box model"><div class="flow-who">model</div>Call <code>explore</code><small>a question that stands on its own, and optionally the files to start from</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Set the turn aside<small>keep the conversation, the plan step and the queued messages as they are; start a context with only the explorer's prompt and the question</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">explorer</div>Investigate<small>search, outline, read, run read-only commands, in a loop like any turn</small></div>
+        <div class="side"><b>30 rounds</b> → asked for what it found so far</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">explorer</div>Reply with the report<small>the answer, the evidence as <code>path:line</code>, what it did not check</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>Return the report<small>as the <code>explore</code> result, with the files it looked at; restore the turn</small></div>
+        <div class="back">↺ back to the model that asked</div>
+      </div>
+      <div class="flow-legend"><span class="model">model</span><span class="harness">harness</span></div>
+      <figcaption>One explore call. The explorer's searches and reads never enter the main context.</figcaption>
+    </figure>
+
+    <h3 id="explore-when">When the model uses it</h3>
+    <p>The tool's description and the prompt's <em>Navigating code</em> section say when to use it. It is for a broad question that needs many reads: how a flow works end to end, where something is handled, every place that does X. For one file or one symbol a single call finds, the model is told to look it up itself. The explorer knows nothing of the conversation, so the question has to carry the names and files it is about.</p>
+
+    <h3 id="explore-can">What the explorer can do</h3>
+    <div class="table-scroll"><table>
+      <tr><th></th><th>Explorer</th></tr>
+      <tr><td>Read</td><td class="wrap">All read-only file tools, <a href="#tools">code navigation</a>, the <a href="#index">code index</a>, and <code>fetch_url</code> / <code>web_search</code> with <code>/net on</code></td></tr>
+      <tr><td>Run</td><td class="wrap"><code>run_command</code> for read-only commands such as <code>git log</code>, <code>git blame</code> or running a script. A command that writes project files is refused, as in plan mode.</td></tr>
+      <tr><td>Write</td><td class="wrap">Nothing: no edit tools, no scratchpad. A call to a tool it wasn't given is refused, including one written as text.</td></tr>
+      <tr><td>MCP</td><td class="wrap">Only tools the server marks read-only</td></tr>
+      <tr><td>Ask you</td><td class="wrap">No. It can't use <code>ask_user</code>. When the question is ambiguous, it answers the most likely reading and says which one it took.</td></tr>
+      <tr><td>Start another explorer</td><td class="wrap">No</td></tr>
+    </table></div>
+
+    <h3 id="explore-see">What you see</h3>
+    <ul>
+      <li>A <code>🔍 Exploring: …</code> line opens the run. The explorer's tool calls appear in the tool log like any others. A <code>🔍 Explorer done — N tool calls, T s</code> line closes it.</li>
+      <li>The report shows as the <code>explore</code> result, not as a chat message. The model that asked then answers you.</li>
+      <li>Messages you type while it runs wait for the main turn. <kbd>Esc</kbd> stops the explorer and the turn together.</li>
+      <li><code>/export full</code> keeps the explorer's whole context, at the point where it was called.</li>
+    </ul>
+
+    <h3 id="explore-off">Turning it off</h3>
+    <p><code>explore</code> is on by default in design, chat, plan, coding and momo mode, and while a plan runs. <a href="#tool-choices"><code>/tools explore off</code></a> turns it off for the current mode. <a href="#plan-stories">Story plans</a> don't offer it, because their writer, stories and verifier each start from a fresh context already.</p>
+    <p class="note">The explorer runs on the same model and server. On llama.cpp and Ollama, the main conversation may have to be processed again after an explore, because the server's prompt cache held the explorer's context. How much that costs depends on how many cache slots the server keeps.</p>
   </section>
 
   <section id="tool-structure" data-voice="tool-structure">
@@ -1810,6 +1869,7 @@ FAILED (failures=2)
       <li><strong>The conversation:</strong> messages, attachments, tool calls and results.</li>
       <li><strong>The model's earlier reasoning,</strong> as far as <a href="#think-history"><code>/think-history</code></a> sends it back.</li>
     </ul>
+    <p>A broad investigation can run in a <a href="#explore">sub-agent</a> instead: its reads stay in its own context, and only its report is added to this one.</p>
     <p>The limit (<code>/context</code>) is where compaction starts: by default <strong>half the window</strong>, leaving the other half for the reply. Raise it with <code>/context 75%</code> or set tokens with <code>/context 16384</code>.</p>
     <p class="note">On Ollama, memory is reserved for the model's full window. A model with a very large window can need much more RAM or VRAM than its weights alone.</p>
 
@@ -2678,6 +2738,10 @@ const SPEECH = {
     "< sandboxed to the workdir", "< .. escapes? rejected", "< edit_file: one match only",
     "< run_command can ask first", "< code_outline a folder!",
     "< \"40\" → 40, i fix it", "< <tool_call> works too~",
+  ],
+  explore: [
+    "< fresh context, purrr", "< go look, report back!", "< path:line or it didn't happen",
+    "< reads stay over there~", "< i only look, never touch", "< 30 rounds, then report",
   ],
   "tool-structure": [
     "< one file, one tool", "< /tools reload!", "< TOOL = Tool(...)",
