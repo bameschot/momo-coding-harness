@@ -9,23 +9,19 @@ from datetime import datetime
 from pathlib import Path
 
 from . import code_index, ignore_rules, momo_dir
-from .tools import registry
 from .tools import workspace as workspace_mod
 from .mcp import config as mcp_config
 from . import net as net_mod
 from . import checkpoints as checkpoints_mod
-from . import run_store as run_store_mod
 from . import search as search_mod
 from . import session as session_mod
+from . import settings as settings_mod
 from . import tools as tools_mod
 from . import transcript as transcript_mod
 from . import loop_guard as loop_guard_mod
 from . import think_watch as think_watch_mod
 from .compaction import content_text
-from .prompts import CAVECAT_ALIASES, CAVECAT_LEVELS
-from .think_trim import KEEP_LEVELS
-from .harness import MIN_MAX_OUTPUT_TOKENS, THINK_HISTORY, Harness, _mask_messages
-from .llm.base import THINK_LEVELS
+from .harness import Harness, _mask_messages
 from .tools import dispatch
 
 
@@ -190,21 +186,34 @@ def _undo_file(harness: Harness, arg: str) -> CommandResult:
                          confirm_action=lambda: harness.revert_file(path, force))
 
 
+def _set(harness: Harness, pref: str, raw) -> str:
+    """Read raw with the setting's parser from settings.SETTINGS and, when it
+    is valid, set it on harness and save it.  "" when set, else
+    "ERROR: <why>" (the same check as its command-line flag and saved pref)."""
+    value, err = settings_mod.parse(pref, raw)
+    if value is None:
+        return f"ERROR: {err}"
+    settings_mod.store(harness, pref, value)
+    return ""
+
+
+def _set_result(harness: Harness, pref: str, raw) -> CommandResult | None:
+    """_set as a command's answer: None when set, else the error to show."""
+    err = _set(harness, pref, raw)
+    return CommandResult(handled=True, output=err) if err else None
+
+
 def _plan_stories_setting(harness: Harness, words: list[str]) -> str:
     """/plan stories approve each|auto · /plan stories cap N"""
-    from .story_runner import APPROVE_ALIASES, APPROVE_MODES, STORIES_CAP_RANGE
+    from .story_runner import STORIES_CAP_RANGE
     lo, hi = STORIES_CAP_RANGE
-    mode = APPROVE_ALIASES.get(words[1], words[1]) if len(words) == 2 else ""
-    if words[0] == "approve" and mode in APPROVE_MODES:
-        harness.stories_approve = mode
-        session_mod.save_prefs(stories_approve=mode)
+    if words[0] == "approve" and len(words) == 2 and not _set(harness, "stories_approve", words[1]):
         harness.emit_status()
-        return ("Stories: you approve every phase's stories before they run." if mode == "each"
+        return ("Stories: you approve every phase's stories before they run."
+                if harness.stories_approve == "each"
                 else "Stories: each phase's stories run without asking (changes to later phases "
                      "still ask).")
-    if words[0] == "cap" and len(words) == 2 and words[1].isdigit() and lo <= int(words[1]) <= hi:
-        harness.stories_cap = int(words[1])
-        session_mod.save_prefs(stories_cap=harness.stories_cap)
+    if words[0] == "cap" and len(words) == 2 and not _set(harness, "stories_cap", words[1]):
         harness.emit_status()
         return f"Stories: at most {harness.stories_cap} turns per story before it counts as stuck."
     return (f"ERROR: usage: /plan stories approve each|auto · /plan stories cap N ({lo}-{hi}) "
@@ -213,11 +222,9 @@ def _plan_stories_setting(harness: Harness, words: list[str]) -> str:
 
 def _plan_questions_setting(harness: Harness, words: list[str]) -> str:
     """/plan questions [on|off]"""
-    if words and (len(words) > 1 or words[0] not in ("on", "off")):
+    if words and (len(words) > 1 or _set(harness, "plan_questions", words[0])):
         return "ERROR: usage: /plan questions [on|off]"
     if words:
-        harness.plan_questions = words[0] == "on"
-        session_mod.save_prefs(plan_questions=harness.plan_questions)
         harness.emit_status()
     if harness.plan_questions:
         return ("Plan questions: on — a first create_plan made before any question to you is "
@@ -255,35 +262,17 @@ def _loop_guard(harness: Harness, arg: str) -> CommandResult:
     if not words:
         return CommandResult(handled=True, output=_state())
     if words[0] == "resets":
-        try:
-            r = int(words[1]) if len(words) == 2 else -1
-        except ValueError:
-            r = -1
-        if not 0 <= r <= loop_guard_mod.MAX_RESETS_LIMIT:
-            return CommandResult(handled=True, output=(
-                f"ERROR: /loop-guard resets takes 0 (stop at the first loop) to "
-                f"{loop_guard_mod.MAX_RESETS_LIMIT}"))
-        harness.loop_resets = r
-        session_mod.save_prefs(loop_resets=r)
+        if len(words) != 2:
+            return CommandResult(handled=True, output="ERROR: usage: /loop-guard resets <n>")
+        if (bad := _set_result(harness, "loop_resets", words[1])):
+            return bad
     else:
         if len(words) > 1:
             return CommandResult(handled=True, output="ERROR: usage: /loop-guard [n|off|on] "
                                                       "or /loop-guard resets <n>")
-        if words[0] in ("off", "0", "none"):
-            n = 0
-        elif words[0] == "on":
-            n = harness.loop_guard or loop_guard_mod.THRESHOLD
-        else:
-            try:
-                n = int(words[0])
-            except ValueError:
-                n = -1
-            if not loop_guard_mod.MIN_THRESHOLD <= n <= loop_guard_mod.MAX_THRESHOLD:
-                return CommandResult(handled=True, output=(
-                    f"ERROR: /loop-guard takes {loop_guard_mod.MIN_THRESHOLD} to "
-                    f"{loop_guard_mod.MAX_THRESHOLD} repeats, off or on"))
-        harness.loop_guard = n
-        session_mod.save_prefs(loop_guard=n)
+        n = (harness.loop_guard or loop_guard_mod.THRESHOLD) if words[0] == "on" else words[0]
+        if (bad := _set_result(harness, "loop_guard", n)):
+            return bad
     harness.emit_status()
     return CommandResult(handled=True, output=_state())
 
@@ -307,37 +296,23 @@ def _think_budget(harness: Harness, arg: str) -> CommandResult:
     if words[0] == "repeat":
         if len(words) == 1:
             return CommandResult(handled=True, output=_state())
-        if len(words) > 2 or words[1] not in ("on", "off"):
+        if len(words) > 2 or _set(harness, "think_repeat", words[1]):
             return CommandResult(handled=True, output="ERROR: usage: /think-budget repeat [on|off]")
-        harness.think_repeat = words[1] == "on"
-        session_mod.save_prefs(think_repeat=harness.think_repeat)
     elif words[0] == "reply-repeat":
         if len(words) == 1:
             return CommandResult(handled=True, output=_state())
-        if len(words) > 2 or words[1] not in ("on", "off"):
+        if len(words) > 2 or _set(harness, "reply_repeat", words[1]):
             return CommandResult(handled=True,
                                  output="ERROR: usage: /think-budget reply-repeat [on|off]")
-        harness.reply_repeat = words[1] == "on"
-        session_mod.save_prefs(reply_repeat=harness.reply_repeat)
     else:
         if len(words) > 1:
             return CommandResult(handled=True, output="ERROR: usage: /think-budget [n|off], "
                                                       "/think-budget repeat [on|off] or "
                                                       "/think-budget reply-repeat [on|off]")
-        if words[0] in ("off", "0", "none"):
-            n = 0
-        elif words[0] == "on":
-            n = harness.think_budget or think_watch_mod.DEFAULT_BUDGET
-        else:
-            try:
-                n = int(words[0].replace(",", "").replace("_", ""))
-            except ValueError:
-                return CommandResult(handled=True, output=f"ERROR: invalid number: {words[0]}")
-            if n < think_watch_mod.MIN_BUDGET:
-                return CommandResult(handled=True, output=(
-                    f"ERROR: the budget must be at least {think_watch_mod.MIN_BUDGET:,} tokens, or off"))
-        harness.think_budget = n
-        session_mod.save_prefs(think_budget=n)
+        n = ((harness.think_budget or think_watch_mod.DEFAULT_BUDGET) if words[0] == "on"
+             else words[0])
+        if (bad := _set_result(harness, "think_budget", n)):
+            return bad
     harness.emit_status()
     return CommandResult(handled=True, output=_state())
 
@@ -352,10 +327,8 @@ def _progress_note(harness: Harness, arg: str) -> CommandResult:
     words = arg.lower().split()
     if not words:
         return CommandResult(handled=True, output=_state())
-    if len(words) > 1 or words[0] not in ("on", "off"):
+    if len(words) > 1 or _set(harness, "progress_note", words[0]):
         return CommandResult(handled=True, output="ERROR: usage: /progress-note [on|off]")
-    harness.progress_note = words[0] == "on"
-    session_mod.save_prefs(progress_note=harness.progress_note)
     harness.emit_status()
     return CommandResult(handled=True, output=_state())
 
@@ -368,19 +341,13 @@ def _undo_max(harness: Harness, arg: str) -> CommandResult:
         return f"undo history: {cap} · {used} checkpoint{'s' if used != 1 else ''} in use"
     if not arg:
         return CommandResult(handled=True, output=_state())
-    if arg.lower() in ("off", "0", "none"):
-        n = 0
-    else:
-        try:
-            n = int(arg)
-        except ValueError:
-            return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
-        if n < 1:
-            return CommandResult(handled=True, output="ERROR: keep at least 1 turn, or off")
+    n, err = settings_mod.parse("undo_max", arg)
+    if n is None:
+        return CommandResult(handled=True, output=f"ERROR: {err}")
 
     def _apply() -> str:
         dropped = harness.set_undo_max(n)
-        session_mod.save_prefs(undo_max=n)
+        settings_mod.store(harness, "undo_max", n)
         return _state() + (f" — dropped the {dropped} oldest" if dropped else "")
     drop = harness.checkpoints.would_drop(n)
     if drop:
@@ -491,15 +458,11 @@ def _think(harness, arg: str) -> CommandResult:
         note = harness.think_note()
         return CommandResult(handled=True, output=f"Thinking: {harness.think_level} ({offers})"
                                                   + (f"\n{note}" if note else ""))
-    level = {"true": "on", "yes": "on", "1": "on",
-             "false": "off", "no": "off", "0": "off"}.get(arg.lower(), arg.lower())
-    if level not in THINK_LEVELS:
-        return _bad_choice(arg, " | ".join(THINK_LEVELS))
-    harness.think_level = level
-    session_mod.save_prefs(think=level)
+    if (bad := _set_result(harness, "think", arg)):
+        return bad
     harness.emit_status()
     note = harness.think_note()
-    return CommandResult(handled=True, output=note or f"Thinking: {level}")
+    return CommandResult(handled=True, output=note or f"Thinking: {harness.think_level}")
 
 
 def _tool_listing(harness) -> str:
@@ -647,7 +610,8 @@ def _discover_command(harness, parts: list[str]) -> CommandResult:
         mode = names[0].lower()
         if (on := _on_off(mode)) is not None:      # on: extension tools only
             mode = "extensions" if on else "off"
-        if mode not in registry.DISCOVER_MODES or len(names) > 1:
+        mode, err = settings_mod.parse("tools_discover", mode)
+        if mode is None or len(names) > 1:
             return _bad_choice(" ".join(names), "'off', 'extensions' or 'all'")
         return CommandResult(handled=True, output=harness.set_tools_discover(mode))
     if harness.tools_discover == "off":
@@ -992,16 +956,12 @@ def handle(line: str, harness: Harness) -> CommandResult:
             cap = harness.max_tool_result
             return CommandResult(handled=True,
                                  output=f"Tool result cap: {cap} chars (0 = unlimited)")
-        try:
-            n = int(arg)
-            if n < 0:
-                return CommandResult(handled=True, output="ERROR: value must be >= 0")
-            harness.max_tool_result = n
-            session_mod.save_prefs(max_tool_result=n)
-            label = f"{n} chars" if n > 0 else "unlimited"
-            return CommandResult(handled=True, output=f"Tool result cap set to: {label}")
-        except ValueError:
-            return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
+        if (bad := _set_result(harness, "max_tool_result", arg)):
+            return bad
+        n = harness.max_tool_result
+        harness.emit_status()
+        label = f"{n} chars" if n > 0 else "unlimited"
+        return CommandResult(handled=True, output=f"Tool result cap set to: {label}")
 
     if cmd == "/think":
         return _think(harness, arg)
@@ -1012,13 +972,11 @@ def handle(line: str, harness: Harness) -> CommandResult:
                   "all": "all — the model sees its reasoning from every turn in history"}
         if not arg:
             return CommandResult(handled=True, output=f"Reasoning sent back: {labels[harness.think_history]}")
-        choice = arg.strip().lower()
-        if choice not in THINK_HISTORY:
-            return _bad_choice(arg, "'off', 'turn' or 'all'")
-        harness.think_history = choice
-        session_mod.save_prefs(think_history=choice)
+        if (bad := _set_result(harness, "think_history", arg)):
+            return bad
         harness.emit_status()
-        return CommandResult(handled=True, output=f"Reasoning sent back: {labels[choice]}")
+        return CommandResult(handled=True,
+                             output=f"Reasoning sent back: {labels[harness.think_history]}")
 
     if cmd == "/think-keep":
         labels = {"off": "off — earlier reasoning is sent back whole",
@@ -1029,13 +987,11 @@ def handle(line: str, harness: Harness) -> CommandResult:
             note = "" if harness.think_history != "off" else " (applies with /think-history turn|all)"
             return CommandResult(handled=True,
                                  output=f"Earlier reasoning kept: {labels[harness.think_keep]}{note}")
-        choice = arg.strip().lower()
-        if choice not in KEEP_LEVELS:
-            return _bad_choice(arg, "'off', 'lean', 'more' or 'most'")
-        harness.think_keep = choice
-        session_mod.save_prefs(think_keep=choice)
+        if (bad := _set_result(harness, "think_keep", arg)):
+            return bad
         harness.emit_status()
-        return CommandResult(handled=True, output=f"Earlier reasoning kept: {labels[choice]}"
+        return CommandResult(handled=True,
+                             output=f"Earlier reasoning kept: {labels[harness.think_keep]}"
                              " — the next request re-reads the reasoning sent back once")
 
     if cmd == "/cavecat":
@@ -1044,17 +1000,11 @@ def handle(line: str, harness: Harness) -> CommandResult:
                         "compact command output, short replies"}
         if not arg:
             return CommandResult(handled=True, output=f"Cavecat: {labels[harness.cavecat]}")
-        choice = arg.strip().lower()
-        if (on := _on_off(choice)) is not None:
-            choice = "on" if on else "off"
-        choice = CAVECAT_ALIASES.get(choice, choice)       # text/full/lite: earlier levels
-        if choice not in CAVECAT_LEVELS:
-            return _bad_choice(arg, "'off' or 'on'")
-        harness.cavecat = choice
-        session_mod.save_prefs(cavecat=choice)
+        if (bad := _set_result(harness, "cavecat", arg)):      # text/full/lite: earlier levels
+            return bad
         harness.rebuild_system_prompt()
         harness.emit_status()
-        return CommandResult(handled=True, output=f"Cavecat: {labels[choice]}")
+        return CommandResult(handled=True, output=f"Cavecat: {labels[harness.cavecat]}")
 
     if cmd == "/companion-idle-recap":
         def _state() -> str:
@@ -1062,24 +1012,16 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return f"Idle recap: {state} (after {harness.idle_recap_secs}s idle)"
         if not arg:
             return CommandResult(handled=True, output=_state())
-        if (on := _on_off(arg)) is not None:
-            harness.idle_recap = on
-        else:
-            try:
-                secs = int(arg)
-            except ValueError:
-                return CommandResult(handled=True, output=f"ERROR: expected 'on', 'off' or seconds, got: {arg}")
-            if secs < 10:
-                return CommandResult(handled=True, output="ERROR: idle time must be at least 10 seconds")
-            harness.idle_recap_secs = secs
-        session_mod.save_prefs(idle_recap=harness.idle_recap, idle_recap_secs=harness.idle_recap_secs)
+        if _set(harness, "idle_recap", arg) and _set(harness, "idle_recap_secs", arg):
+            return CommandResult(handled=True,
+                                 output=f"ERROR: expected 'on', 'off' or seconds, got: {arg}")
+        harness.emit_status()
         return CommandResult(handled=True, output=_state())
 
     if cmd == "/guides":
         sub = arg.lower()
-        if (on := _on_off(sub)) is not None:
-            harness.guides = on
-            session_mod.save_prefs(guides=harness.guides)
+        if _on_off(sub) is not None:
+            _set(harness, "guides", sub)
         elif sub and sub != "reload":
             return CommandResult(handled=True, output=f"ERROR: expected 'on', 'off' or 'reload', got: {arg}")
         if sub:
@@ -1165,13 +1107,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
                     f"command_output; default view {f'{n:,} chars' if n else 'the whole output'})")
         if not arg:
             return CommandResult(handled=True, output=_mode_state())
-        mode = arg.strip().lower()
-        if (on := _on_off(mode)) is not None:     # the web UI's checkbox
-            mode = "new" if on else "classic"
-        if mode not in tools_mod.RUN_MODES:
-            return _bad_choice(arg, "'new' or 'classic'")
-        harness.run_mode = mode
-        session_mod.save_prefs(run_mode=mode)
+        if (bad := _set_result(harness, "run_mode", arg)):   # on/off: the web UI's checkbox
+            return bad
         harness.rebuild_system_prompt()     # the run_command schema changes
         harness.emit_status()
         return CommandResult(handled=True, output=_mode_state())
@@ -1185,11 +1122,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
             }[harness.tool_ref]
         if not arg:
             return CommandResult(handled=True, output=_ref_state())
-        style = arg.strip().lower()
-        if style not in tools_mod.TOOL_REF_STYLES:
-            return _bad_choice(arg, "'full', 'compact' or 'minimal'")
-        harness.tool_ref = style
-        session_mod.save_prefs(tool_ref=style)
+        if (bad := _set_result(harness, "tool_ref", arg)):
+            return bad
         harness.rebuild_system_prompt()
         harness.refresh_status()
         return CommandResult(handled=True, output=_ref_state())
@@ -1210,18 +1144,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
                     if n else "model reply cap: off (a reply can run until the context is full)")
         if not arg:
             return CommandResult(handled=True, output=_cap())
-        if arg.lower() in ("off", "0", "none"):
-            n = 0
-        else:
-            try:
-                n = int(arg.replace(",", "").replace("_", ""))
-            except ValueError:
-                return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
-            if n < MIN_MAX_OUTPUT_TOKENS:
-                return CommandResult(handled=True, output=(
-                    f"ERROR: the cap must be at least {MIN_MAX_OUTPUT_TOKENS} tokens, or off"))
-        harness.max_output_tokens = n
-        session_mod.save_prefs(max_output_tokens=n)
+        if (bad := _set_result(harness, "max_output_tokens", arg)):
+            return bad
         harness.emit_status()
         return CommandResult(handled=True, output=_cap())
 
@@ -1233,18 +1157,8 @@ def handle(line: str, harness: Harness) -> CommandResult:
                     "run_command output view: off (the whole output is returned)")
         if not arg:
             return CommandResult(handled=True, output=_limit())
-        if arg.lower() in ("off", "0", "none"):
-            n = 0
-        else:
-            try:
-                n = int(arg.replace(",", "").replace("_", ""))
-            except ValueError:
-                return CommandResult(handled=True, output=f"ERROR: invalid number: {arg}")
-            if n < run_store_mod.MIN_LIMIT:
-                return CommandResult(handled=True, output=(
-                    f"ERROR: the limit must be at least {run_store_mod.MIN_LIMIT} chars, or off"))
-        harness.run_output_limit = n
-        session_mod.save_prefs(run_output_limit=n)
+        if (bad := _set_result(harness, "run_output_limit", arg)):
+            return bad
         harness.emit_status()
         return CommandResult(handled=True, output=_limit())
 
@@ -1297,16 +1211,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"Set it with a size, e.g. /net-max-bytes 500kb or /net-max-bytes 8mb. "
                 f"This bounds the download only; /net-max-chars sets how much text "
                 f"reaches the context."))
-        size = net_mod.parse_size(arg)
-        if size is None:
-            return CommandResult(handled=True, output=(
-                f"ERROR: not a size: {arg}. Use bytes or a unit, e.g. 200000, 500kb, 2mb."))
-        if size > net_mod.HARD_MAX_BYTES:
-            return CommandResult(handled=True, output=(
-                f"ERROR: {net_mod.format_size(size)} is above the "
-                f"{net_mod.format_size(net_mod.HARD_MAX_BYTES)} hard limit."))
-        harness.net_max_bytes = size
-        session_mod.save_prefs(net_max_bytes=size)
+        if (bad := _set_result(harness, "net_max_bytes", arg)):
+            return bad
+        size = harness.net_max_bytes
         harness.emit_status()
         return CommandResult(handled=True, output=(
             f"fetch_url download cap: {net_mod.format_size(size)} ({size} bytes)"))
@@ -1321,16 +1228,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"fetch_url text per call: {harness.net_max_chars:,} characters "
                 f"(~{harness.net_max_chars // 4:,} tokens); the model pages through the "
                 f"rest with offset=/find=.{clamp}\nSet it with a number, e.g. /net-max-chars 12000."))
-        try:
-            n = int(arg.replace(",", "").replace("_", ""))
-        except ValueError:
-            n = 0
-        if n < 1000 or n > net_mod.HARD_MAX_CHARS:
-            return CommandResult(handled=True, output=(
-                f"ERROR: expected a number of characters between 1000 and "
-                f"{net_mod.HARD_MAX_CHARS:,}, got: {arg}"))
-        harness.net_max_chars = n
-        session_mod.save_prefs(net_max_chars=n)
+        if (bad := _set_result(harness, "net_max_chars", arg)):
+            return bad
+        n = harness.net_max_chars
         harness.emit_status()
         warn = ""
         if n // 4 > harness.context_limit // 2:
@@ -1394,7 +1294,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
         if not sub or sub == "status":
             return CommandResult(handled=True, output=_format_index(harness))
         if (on := _on_off(sub)) is not None:
-            session_mod.save_prefs(index=on)
+            settings_mod.store(harness, "index", on)
             return CommandResult(handled=True, output=harness.set_index(on))
         if harness.index is None:
             return CommandResult(handled=True, output=f"ERROR: the code index is off — /index on first")
@@ -1420,11 +1320,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"Code index memory budget: {cur}\nSet it with a size, e.g. /index-max-mem 200mb. "
                 f"Over budget the index drops text-search signatures first, then the identifier "
                 f"index, then stops adding files."))
-        size, err = code_index.parse_max_mem(arg)
-        if size is None:
-            return CommandResult(handled=True, output=f"ERROR: {err}")
-        harness.index_max_bytes = size
-        session_mod.save_prefs(index_max_mem=size)
+        if (bad := _set_result(harness, "index_max_mem", arg)):
+            return bad
+        size = harness.index_max_bytes
         if harness.index is not None:
             harness.index.set_max_bytes(size)
         harness.emit_status()
@@ -1435,11 +1333,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=(
                 f"Code index file limit: {harness.index_max_files:,}\nSet it with a number, "
                 f"e.g. /index-max-files 200000. Files beyond it (in path order) are not indexed."))
-        n, err = code_index.parse_max_files(arg)
-        if n is None:
-            return CommandResult(handled=True, output=f"ERROR: {err}")
-        harness.index_max_files = n
-        session_mod.save_prefs(index_max_files=n)
+        if (bad := _set_result(harness, "index_max_files", arg)):
+            return bad
+        n = harness.index_max_files
         if harness.index is not None:
             harness.index.set_max_files(n)
         harness.emit_status()
@@ -1453,11 +1349,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                 f"Set it with /index-workers auto or a number from 1 to {code_index.MAX_WORKERS}. "
                 f"A first build or rebuild reads and parses files in that many processes; "
                 f"1 builds in one process."))
-        n, err = code_index.parse_workers(arg)
-        if n is None:
-            return CommandResult(handled=True, output=f"ERROR: {err}")
-        harness.index_workers = n
-        session_mod.save_prefs(index_workers=n)
+        if (bad := _set_result(harness, "index_workers", arg)):
+            return bad
+        n = harness.index_workers
         if harness.index is not None:
             harness.index.set_workers(n)
         harness.emit_status()
@@ -1469,9 +1363,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             return CommandResult(handled=True, output=(
                 f"Answer grep_files / find_files from the code index: "
                 f"{'on' if harness.index_route else 'off'}"))
-        if (on := _on_off(arg)) is not None:
-            harness.index_route = on
-            session_mod.save_prefs(index_route=harness.index_route)
+        if _on_off(arg) is not None and not _set(harness, "index_route", arg):
             harness.rebuild_system_prompt()     # the prompt and grep/find descriptions change
             harness.emit_status()
             extra = (" — a plain-text grep_files and a file-name find_files are answered by "
@@ -1491,9 +1383,7 @@ def handle(line: str, harness: Harness) -> CommandResult:
             state = "on" if harness.index_persist else "off"
             return CommandResult(handled=True, output=(
                 f"Code index save/load to disk: {state} ({code_index.pickle_path(harness.workdir)})"))
-        if (on := _on_off(arg)) is not None:
-            harness.index_persist = on
-            session_mod.save_prefs(index_persist=harness.index_persist)
+        if _on_off(arg) is not None and not _set(harness, "index_persist", arg):
             harness.emit_status()
             extra = (" — saved on exit, on a workdir change and after the first build; loaded "
                      "when the index starts") if harness.index_persist else ""
@@ -1556,10 +1446,12 @@ def handle(line: str, harness: Harness) -> CommandResult:
         return CommandResult(handled=True, output=f"Session title: {harness.title}")
 
     if cmd == "/session-titles":
-        result = _toggle(harness, "session_titles", arg, "Model-generated session titles")
-        if arg and _on_off(arg) is not None:
-            session_mod.save_prefs(session_titles=harness.session_titles)
-        return result
+        if arg and (bad := _set_result(harness, "session_titles", arg)):
+            return bad
+        if arg:
+            harness.emit_status()
+        state = "on" if harness.session_titles else "off"
+        return CommandResult(handled=True, output=f"Model-generated session titles: {state}")
 
     if cmd == "/sessions":
         sessions = session_mod.list_sessions()

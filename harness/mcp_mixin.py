@@ -193,7 +193,7 @@ class MCPMixin:
 
     def _mcp_status_fields(self) -> dict:
         ready, total, attention = self.mcp.counts()
-        return {"mcp_enabled": self.mcp_enabled, "mcp_confirm": self.mcp_confirm,
+        return {"mcp_confirm": self.mcp_confirm,       # mcp_enabled: a table setting
                 "mcp_ready": ready, "mcp_total": total, "mcp_attention": attention,
                 "mcp": [{"name": r["name"], "state": r["state"], "tools": r["tools"],
                          "error": r["error"]} for r in self.mcp.status_rows()]}

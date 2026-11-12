@@ -46,6 +46,12 @@ class StatusEvent:
     backend_reachable: bool | None = None  # False: server down, model/ctx are the last known
     tools_enabled: bool = True
     run_confirm: bool = False
+    # The saved settings: Harness.status_event fills these from settings.SETTINGS
+    # by attribute name (tests/test_settings.py checks each one is a field here).
+    max_tool_result: int = 0      # /tool-result: chars per tool result (0 = unlimited)
+    idle_recap: bool = False      # /companion-idle-recap: recap in the bubble when idle
+    idle_recap_secs: int = 90     # /companion-idle-recap N: seconds idle before it
+    session_titles: bool = True   # /session-titles: the model titles the session
     run_mode: str = "new"         # /run-mode: "new" (saved log + view) | "classic"
     run_output_limit: int = 0     # /run-output-limit: chars per run_command view (0 = off)
     max_output_tokens: int = 25000  # /max-output-tokens: cap on one model reply (0 = off)

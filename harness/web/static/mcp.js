@@ -97,8 +97,7 @@ export function applyMcpStatus(s) {
   btn.setAttribute("aria-label", label);
   const confirm = $("#mcp-confirm");
   if (confirm) confirm.checked = s.mcp_confirm !== false;
-  const on = $("#mcp-on");
-  if (on) on.checked = !off;
+  // #mcp-on is data-setting="mcp_enabled": app.js's applySettingFields sets it.
   // Re-render only when something shown changed: status events stream in
   // during a reply, and a re-render would take focus from a checkbox.
   const sig = JSON.stringify([s.mcp, s.mcp_enabled, s.mcp_confirm, s.tools_off, s.mode]);

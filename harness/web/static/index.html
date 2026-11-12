@@ -121,29 +121,29 @@
     <div id="think-levels"></div>
     <div id="think-note" class="muted menu-note"></div>
     <div class="menu-sub">Send reasoning back <kbd>/think-history</kbd></div>
-    <label title="The model never sees its earlier reasoning"><input type="radio" name="think-history" value="off"> off</label>
-    <label title="The model sees its reasoning since your last message — its current tool loop"><input type="radio" name="think-history" value="turn"> this turn</label>
-    <label title="The model sees its reasoning from every turn still in history — uses more context"><input type="radio" name="think-history" value="all"> all turns</label>
+    <label title="The model never sees its earlier reasoning"><input data-setting="think_history" type="radio" name="think-history" value="off"> off</label>
+    <label title="The model sees its reasoning since your last message — its current tool loop"><input data-setting="think_history" type="radio" name="think-history" value="turn"> this turn</label>
+    <label title="The model sees its reasoning from every turn still in history — uses more context"><input data-setting="think_history" type="radio" name="think-history" value="all"> all turns</label>
     <div class="menu-sub">Earlier reasoning kept <kbd>/think-keep</kbd></div>
-    <label title="Send earlier reasoning back whole"><input type="radio" name="think-keep" value="off"> off</label>
-    <label title="The plan steps and closing sentences, about the square root of its length — suits small models"><input type="radio" name="think-keep" value="lean"> lean</label>
-    <label title="Twice lean's share"><input type="radio" name="think-keep" value="more"> more</label>
-    <label title="Four times lean's share — suits large models"><input type="radio" name="think-keep" value="most"> most</label>
+    <label title="Send earlier reasoning back whole"><input data-setting="think_keep" type="radio" name="think-keep" value="off"> off</label>
+    <label title="The plan steps and closing sentences, about the square root of its length — suits small models"><input data-setting="think_keep" type="radio" name="think-keep" value="lean"> lean</label>
+    <label title="Twice lean's share"><input data-setting="think_keep" type="radio" name="think-keep" value="more"> more</label>
+    <label title="Four times lean's share — suits large models"><input data-setting="think_keep" type="radio" name="think-keep" value="most"> most</label>
     <div class="menu-sub">Reasoning watch <kbd>/think-budget</kbd></div>
-    <label class="menu-num" title="Reasoning tokens one streamed reply may take before momo stops it and asks the model to act on what it has. 'off' = only the reply cap applies.">Reasoning cap <input type="text" data-cmd="/think-budget" size="7" placeholder="8000"> tokens</label>
-    <label title="Stop a reply whose reasoning keeps coming back to the same line, and ask the model to act"><input type="checkbox" data-cmd="/think-budget repeat"> Stop repeating reasoning</label>
-    <label title="Stop a reply whose text keeps repeating itself (a looping reply), drop it and ask the model to act"><input type="checkbox" data-cmd="/think-budget reply-repeat"> Stop repeating replies</label>
+    <label class="menu-num" title="Reasoning tokens one streamed reply may take before momo stops it and asks the model to act on what it has. 'off' = only the reply cap applies.">Reasoning cap <input data-setting="think_budget" data-zero="off" type="text" data-cmd="/think-budget" size="7" placeholder="8000"> tokens</label>
+    <label title="Stop a reply whose reasoning keeps coming back to the same line, and ask the model to act"><input data-setting="think_repeat" type="checkbox" data-cmd="/think-budget repeat"> Stop repeating reasoning</label>
+    <label title="Stop a reply whose text keeps repeating itself (a looping reply), drop it and ask the model to act"><input data-setting="reply_repeat" type="checkbox" data-cmd="/think-budget reply-repeat"> Stop repeating replies</label>
   </div>
   <div id="cavecat-menu" class="menu think-menu" role="dialog" aria-label="Cavecat" hidden>
     <div class="menu-title">Cavecat <kbd>/cavecat</kbd></div>
-    <label title="The model writes as usual"><input type="radio" name="cavecat" value="off"> off</label>
-    <label title="Telegraphic plans and tool text, no narration between calls, compact command output, short replies"><input type="radio" name="cavecat" value="on"> on</label>
+    <label title="The model writes as usual"><input data-setting="cavecat" type="radio" name="cavecat" value="off"> off</label>
+    <label title="Telegraphic plans and tool text, no narration between calls, compact command output, short replies"><input data-setting="cavecat" type="radio" name="cavecat" value="on"> on</label>
     <div class="muted menu-note">Saves tokens: plans, tool text and command output are compressed, and replies kept short. Thinking is left alone.</div>
   </div>
   <div id="loop-menu" class="menu think-menu" role="dialog" aria-label="Loop guard" hidden>
     <div class="menu-title">Loop guard <kbd>/loop-guard</kbd></div>
-    <label class="menu-num" title="The same tool call this many times with nothing changed in between, or one error this many times from one tool, is a loop. 'off' = no loop guard.">Repeats <input type="text" id="loop-guard-n" data-cmd="/loop-guard" size="4" placeholder="3"></label>
-    <label class="menu-num" title="How many times per turn momo rewinds a loop and asks for another approach before it stops the turn. 0 = stop at the first loop.">Resets per turn <input type="text" id="loop-guard-resets" data-cmd="/loop-guard resets" size="4" placeholder="2"></label>
+    <label class="menu-num" title="The same tool call this many times with nothing changed in between, or one error this many times from one tool, is a loop. 'off' = no loop guard.">Repeats <input data-setting="loop_guard" data-zero="off" type="text" id="loop-guard-n" data-cmd="/loop-guard" size="4" placeholder="3"></label>
+    <label class="menu-num" title="How many times per turn momo rewinds a loop and asks for another approach before it stops the turn. 0 = stop at the first loop.">Resets per turn <input data-setting="loop_resets" type="text" id="loop-guard-resets" data-cmd="/loop-guard resets" size="4" placeholder="2"></label>
     <div class="muted menu-note">A loop is cut out of the conversation and replaced by the model's own analysis of why it didn't work, so it tries something else. After the resets, the next loop stops the turn.</div>
   </div>
   <div id="run-menu" class="menu chip-menu" role="dialog" aria-label="Running commands" hidden></div>
@@ -293,56 +293,56 @@
     </details>
     <details data-section="companion">
       <summary>Companion</summary>
-      <label><input type="checkbox" id="idle-recap" data-cmd="/companion-idle-recap"> Recap when I'm idle <kbd>/companion-idle-recap</kbd></label>
-      <label class="menu-num">Idle for <input type="number" id="idle-recap-secs" min="10" step="10" value="90"> seconds</label>
+      <label><input data-setting="idle_recap" type="checkbox" id="idle-recap" data-cmd="/companion-idle-recap"> Recap when I'm idle <kbd>/companion-idle-recap</kbd></label>
+      <label class="menu-num">Idle for <input data-setting="idle_recap_secs" type="number" id="idle-recap-secs" min="10" step="10" value="90"> seconds</label>
     </details>
     <details data-section="context">
       <summary>Context</summary>
-      <label><input type="checkbox" id="guides" data-cmd="/guides"> Load AGENTS.md / CLAUDE.md <kbd>/guides</kbd></label>
-      <label class="menu-num" title="Most tokens one model reply may take, reasoning included — stops a model stuck in a loop. 'off' = no cap.">Reply cap <input type="text" id="max-output-tokens" data-cmd="/max-output-tokens" size="7" placeholder="25000"> tokens</label>
-      <label class="menu-num" title="Reasoning tokens one streamed reply may take before momo stops it and asks the model to act on what it has. 'off' = only the reply cap applies.">Reasoning cap <input type="text" data-cmd="/think-budget" size="7" placeholder="8000"> tokens <kbd>/think-budget</kbd></label>
-      <label title="Stop a reply whose reasoning keeps coming back to the same line, and ask the model to act"><input type="checkbox" data-cmd="/think-budget repeat"> Stop repeating reasoning <kbd>/think-budget repeat</kbd></label>
-      <label title="Stop a reply whose text keeps repeating itself (a looping reply), drop it and ask the model to act"><input type="checkbox" data-cmd="/think-budget reply-repeat"> Stop repeating replies <kbd>/think-budget reply-repeat</kbd></label>
-      <label title="After many tool calls in a row with no change, no question to you and no plan (12-25 depending on the mode), momo asks the model to act on what it has found. At most twice per turn."><input type="checkbox" data-cmd="/progress-note"> Nudge after many calls without progress <kbd>/progress-note</kbd></label>
-      <label title="In plan mode, a first plan made before any question to you is sent back once, so the planner works out the options and asks you about the decisions that shape the plan first."><input type="checkbox" data-cmd="/plan questions"> Planner asks before planning <kbd>/plan questions</kbd></label>
-      <label class="menu-num" title="Stories plans: review each phase's stories before they run, or let them run without asking (a change to later phases still asks).">Stories <select id="stories-approve"><option value="each">ask each phase</option><option value="auto">run without asking</option></select> <kbd>/plan stories approve</kbd></label>
-      <label class="menu-num" title="Stories plans: the turns one story may take before it counts as stuck (5-100).">Turns per story <input type="text" data-cmd="/plan stories cap" size="4" placeholder="40"> <kbd>/plan stories cap</kbd></label>
-      <label class="menu-num" title="The same tool call this many times with nothing changed in between, or one error this many times from one tool, is a loop. 'off' = no loop guard.">Loop after <input type="text" data-cmd="/loop-guard" size="4" placeholder="3"> repeats <kbd>/loop-guard</kbd></label>
-      <label class="menu-num" title="How many times per turn momo rewinds a loop and asks for another approach before it stops the turn. 0 = stop at the first loop.">Resets per turn <input type="text" data-cmd="/loop-guard resets" size="4" placeholder="2"></label>
+      <label><input data-setting="guides" type="checkbox" id="guides" data-cmd="/guides"> Load AGENTS.md / CLAUDE.md <kbd>/guides</kbd></label>
+      <label class="menu-num" title="Most tokens one model reply may take, reasoning included — stops a model stuck in a loop. 'off' = no cap.">Reply cap <input data-setting="max_output_tokens" data-zero="off" type="text" id="max-output-tokens" data-cmd="/max-output-tokens" size="7" placeholder="25000"> tokens</label>
+      <label class="menu-num" title="Reasoning tokens one streamed reply may take before momo stops it and asks the model to act on what it has. 'off' = only the reply cap applies.">Reasoning cap <input data-setting="think_budget" data-zero="off" type="text" data-cmd="/think-budget" size="7" placeholder="8000"> tokens <kbd>/think-budget</kbd></label>
+      <label title="Stop a reply whose reasoning keeps coming back to the same line, and ask the model to act"><input data-setting="think_repeat" type="checkbox" data-cmd="/think-budget repeat"> Stop repeating reasoning <kbd>/think-budget repeat</kbd></label>
+      <label title="Stop a reply whose text keeps repeating itself (a looping reply), drop it and ask the model to act"><input data-setting="reply_repeat" type="checkbox" data-cmd="/think-budget reply-repeat"> Stop repeating replies <kbd>/think-budget reply-repeat</kbd></label>
+      <label title="After many tool calls in a row with no change, no question to you and no plan (12-25 depending on the mode), momo asks the model to act on what it has found. At most twice per turn."><input data-setting="progress_note" type="checkbox" data-cmd="/progress-note"> Nudge after many calls without progress <kbd>/progress-note</kbd></label>
+      <label title="In plan mode, a first plan made before any question to you is sent back once, so the planner works out the options and asks you about the decisions that shape the plan first."><input data-setting="plan_questions" type="checkbox" data-cmd="/plan questions"> Planner asks before planning <kbd>/plan questions</kbd></label>
+      <label class="menu-num" title="Stories plans: review each phase's stories before they run, or let them run without asking (a change to later phases still asks).">Stories <select data-setting="stories_approve" id="stories-approve"><option value="each">ask each phase</option><option value="auto">run without asking</option></select> <kbd>/plan stories approve</kbd></label>
+      <label class="menu-num" title="Stories plans: the turns one story may take before it counts as stuck (5-100).">Turns per story <input data-setting="stories_cap" type="text" data-cmd="/plan stories cap" size="4" placeholder="40"> <kbd>/plan stories cap</kbd></label>
+      <label class="menu-num" title="The same tool call this many times with nothing changed in between, or one error this many times from one tool, is a loop. 'off' = no loop guard.">Loop after <input data-setting="loop_guard" data-zero="off" type="text" data-cmd="/loop-guard" size="4" placeholder="3"> repeats <kbd>/loop-guard</kbd></label>
+      <label class="menu-num" title="How many times per turn momo rewinds a loop and asks for another approach before it stops the turn. 0 = stop at the first loop.">Resets per turn <input data-setting="loop_resets" type="text" data-cmd="/loop-guard resets" size="4" placeholder="2"></label>
       <div class="menu-sub">Cavecat <kbd>/cavecat</kbd></div>
       <div class="seg" role="radiogroup" aria-label="Cavecat">
-        <label title="The model writes as usual"><input type="radio" name="cavecat-view" value="off"> off</label>
-        <label title="Telegraphic plans and tool text, no narration between calls, compact command output, short replies"><input type="radio" name="cavecat-view" value="on"> on</label>
+        <label title="The model writes as usual"><input data-setting="cavecat" type="radio" name="cavecat-view" value="off"> off</label>
+        <label title="Telegraphic plans and tool text, no narration between calls, compact command output, short replies"><input data-setting="cavecat" type="radio" name="cavecat-view" value="on"> on</label>
       </div>
       <div class="menu-sub">Tool reference in the prompt <kbd>/tool-ref</kbd></div>
       <div class="seg" role="radiogroup" aria-label="Tool reference">
-        <label title="Only how to write a call by hand; the tool schemas carry the tools (the smallest prompt)"><input type="radio" name="tool-ref" value="minimal"> minimal</label>
-        <label title="One line and an example call per tool, for a model that keeps writing calls as text"><input type="radio" name="tool-ref" value="compact"> compact</label>
-        <label title="Every description and parameter table, repeating the tool schemas"><input type="radio" name="tool-ref" value="full"> full</label>
+        <label title="Only how to write a call by hand; the tool schemas carry the tools (the smallest prompt)"><input data-setting="tool_ref" type="radio" name="tool-ref" value="minimal"> minimal</label>
+        <label title="One line and an example call per tool, for a model that keeps writing calls as text"><input data-setting="tool_ref" type="radio" name="tool-ref" value="compact"> compact</label>
+        <label title="Every description and parameter table, repeating the tool schemas"><input data-setting="tool_ref" type="radio" name="tool-ref" value="full"> full</label>
       </div>
     </details>
     <details data-section="run">
       <summary>Running commands</summary>
       <label><input type="checkbox" id="run-confirm" data-cmd="/run-confirm"> Ask before each command <kbd>Shift+P</kbd></label>
-      <label><input type="checkbox" id="run-mode" data-cmd="/run-mode"> Save command output, return a view <kbd>/run-mode</kbd></label>
-      <label class="menu-num">Command view <input type="text" id="run-output-limit" data-cmd="/run-output-limit" size="7" placeholder="off"> chars</label>
+      <label><input data-setting="run_mode" data-on="new" type="checkbox" id="run-mode" data-cmd="/run-mode"> Save command output, return a view <kbd>/run-mode</kbd></label>
+      <label class="menu-num">Command view <input data-setting="run_output_limit" data-zero="off" type="text" id="run-output-limit" data-cmd="/run-output-limit" size="7" placeholder="off"> chars</label>
     </details>
     <details data-section="network">
       <summary>Network</summary>
       <label><input type="checkbox" id="net-on"> Internet access <kbd>/net</kbd></label>
       <label><input type="checkbox" id="net-local"> Allow localhost and LAN <kbd>/net local</kbd></label>
       <label><input type="checkbox" id="net-confirm" data-cmd="/net-confirm"> Confirm POST/PUT/DELETE <kbd>/net-confirm</kbd></label>
-      <label class="menu-num">Max download <input type="text" id="net-max-bytes" data-cmd="/net-max-bytes" size="7" placeholder="2mb"></label>
-      <label class="menu-num">Text per fetch <input type="text" id="net-max-chars" data-cmd="/net-max-chars" size="7" placeholder="24000"></label>
+      <label class="menu-num">Max download <input data-setting="net_max_bytes" data-fmt="size" type="text" id="net-max-bytes" data-cmd="/net-max-bytes" size="7" placeholder="2mb"></label>
+      <label class="menu-num">Text per fetch <input data-setting="net_max_chars" type="text" id="net-max-chars" data-cmd="/net-max-chars" size="7" placeholder="24000"></label>
     </details>
     <details data-section="index">
       <summary>Code index</summary>
       <label><input type="checkbox" id="index-on" data-cmd="/index"> Code index <kbd>/index</kbd></label>
-      <label><input type="checkbox" id="index-persist" data-cmd="/index-persist"> Save/load to disk <kbd>/index-persist</kbd></label>
-      <label><input type="checkbox" id="index-route" data-cmd="/index-route"> Answer grep/find from the index <kbd>/index-route</kbd></label>
-      <label class="menu-num">Memory budget <input type="text" id="index-max-mem" data-cmd="/index-max-mem" size="7" placeholder="100mb"></label>
-      <label class="menu-num">Max files <input type="text" id="index-max-files" data-cmd="/index-max-files" size="7" placeholder="100000"></label>
-      <label class="menu-num">Build workers <input type="text" id="index-workers" data-cmd="/index-workers" size="7" placeholder="auto"></label>
+      <label><input data-setting="index_persist" type="checkbox" id="index-persist" data-cmd="/index-persist"> Save/load to disk <kbd>/index-persist</kbd></label>
+      <label><input data-setting="index_route" type="checkbox" id="index-route" data-cmd="/index-route"> Answer grep/find from the index <kbd>/index-route</kbd></label>
+      <label class="menu-num">Memory budget <input data-setting="index_max_bytes" data-fmt="size" type="text" id="index-max-mem" data-cmd="/index-max-mem" size="7" placeholder="100mb"></label>
+      <label class="menu-num">Max files <input data-setting="index_max_files" type="text" id="index-max-files" data-cmd="/index-max-files" size="7" placeholder="100000"></label>
+      <label class="menu-num">Build workers <input data-setting="index_workers" data-zero="auto" type="text" id="index-workers" data-cmd="/index-workers" size="7" placeholder="auto"></label>
       <div class="menu-row">
         <button type="button" id="index-save" class="link-btn">Save now</button>
         <button type="button" id="index-load" class="link-btn">Load</button>
@@ -351,7 +351,7 @@
     </details>
     <details data-section="mcp">
       <summary>MCP servers</summary>
-      <label><input type="checkbox" id="mcp-on" data-cmd="/mcp"> Connect MCP servers <kbd>/mcp</kbd></label>
+      <label><input data-setting="mcp_enabled" type="checkbox" id="mcp-on" data-cmd="/mcp"> Connect MCP servers <kbd>/mcp</kbd></label>
       <label><input type="checkbox" id="mcp-confirm" data-cmd="/mcp-confirm"> Ask before calls, per server policy <kbd>/mcp-confirm</kbd></label>
       <div id="mcp-servers" class="mcp-servers"></div>
       <div id="mcp-add-box"></div>
@@ -370,7 +370,7 @@
       <button type="button" id="prompt-open" class="link-btn"><svg class="icon sm" aria-hidden="true"><use href="#i-file"/></svg> System prompt… <kbd>/system-prompt</kbd></button>
       <a id="export-link" class="link-btn" href="api/export" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download conversation (.md)</a>
       <a id="export-full-link" class="link-btn" href="api/export?full=1" download><svg class="icon sm" aria-hidden="true"><use href="#i-download"/></svg> Download full log (.md)</a>
-      <label class="menu-num" title="How many turns of file changes undo can go back (the Changes drawer, /undo) before the oldest is dropped. 'off' = back to the last keep.">Undo history <input type="text" id="undo-max" data-cmd="/undo-max" size="5" placeholder="20"> turns <kbd>/undo-max</kbd></label>
+      <label class="menu-num" title="How many turns of file changes undo can go back (the Changes drawer, /undo) before the oldest is dropped. 'off' = back to the last keep.">Undo history <input data-setting="undo_max" data-zero="off" type="text" id="undo-max" data-cmd="/undo-max" size="5" placeholder="20"> turns <kbd>/undo-max</kbd></label>
     </details>
   </div>
 </aside>

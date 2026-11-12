@@ -3442,9 +3442,12 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.event_queue.put(self.status_event())
 
     def status_event(self) -> StatusEvent:
-        """Snapshot of the status-bar fields (also served to the web UI)."""
+        """Snapshot of the status-bar fields (also served to the web UI).  The
+        saved settings come from settings.SETTINGS, by attribute name."""
+        from . import settings as settings_mod     # it imports this module
         pct = self._ctx_pct()
         return StatusEvent(
+            **settings_mod.status_fields(self),
             mode=self.mode,
             model=self.client.model,
             context_limit=self.context_limit,
@@ -3454,22 +3457,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             ctx_color=self._ctx_color(pct),
             tools_enabled=self.tools_enabled,
             run_confirm=self.run_confirm,
-            run_mode=self.run_mode,
-            run_output_limit=self.run_output_limit,
-            max_output_tokens=self.max_output_tokens,
-            think_budget=self.think_budget,
-            think_repeat=self.think_repeat,
-            reply_repeat=self.reply_repeat,
-            progress_note=self.progress_note,
-            plan_questions=self.plan_questions,
-            undo_max=self.undo_max,
-            loop_guard=self.loop_guard,
-            loop_resets=self.loop_resets,
             **self.changes_summary(),
             net_access=self.net_access,
             net_confirm=self.net_confirm,
-            net_max_bytes=self.net_max_bytes,
-            net_max_chars=self.net_max_chars,
             net_cache=net_mod.cache_snapshot(),
             net_cache_max=(cache := net_mod.cache_stats())["max"],
             net_cache_max_bytes=cache["max_bytes"],
@@ -3477,20 +3467,11 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             provider=self.provider,
             plan_progress=self._plan_progress(),
             plan_kind=self._plan_kind_shown(),
-            stories_approve=self.stories_approve,
-            stories_cap=self.stories_cap,
             title=self.title,
-            guides=self.guides,
-            think_level=self.think_level,
             think_effective=self.effective_think(),
             think_choices=self.think_choices(),
             think_known=self.client.thinking_caps().known,
-            think_history=self.think_history,
-            cavecat=self.cavecat,
-            think_keep=self.think_keep,
-            tool_ref=self.tool_ref,
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
-            tools_discover=self.tools_discover,
             tools_loaded=len(self.loaded_tools),
             tools_listed=len(self._tool_catalog()),
             workspace_pending=[t.name for t in self.workspace_tools.by_status("pending")],
@@ -3501,9 +3482,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
 
     def _index_status_fields(self) -> dict:
         idx = self.index
-        base = {"index_enabled": self.index_enabled, "index_max_bytes": self.index_max_bytes,
-                "index_max_files": self.index_max_files, "index_workers": self.index_workers,
-                "index_persist": self.index_persist, "index_route": self.index_route,
+        base = {"index_enabled": self.index_enabled,
                 "index_unavailable": not code_nav.any_grammar()}
         if idx is None:
             return {**base, "index_state": "off"}

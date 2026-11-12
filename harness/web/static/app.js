@@ -663,34 +663,39 @@ function applyStatus(s) {
   $("#net-local").checked = s.net_access === "local";
   $("#net-local").disabled = !netOn;
   $("#net-confirm").checked = s.net_confirm;
-  $("#guides").checked = s.guides;
-  $("#run-mode").checked = s.run_mode !== "classic";
-  const rl = $("#run-output-limit");
-  if (document.activeElement !== rl && s.run_output_limit != null)
-    rl.value = s.run_output_limit ? String(s.run_output_limit) : "off";
-  const um = $("#undo-max");
-  if (document.activeElement !== um && s.undo_max != null) um.value = s.undo_max ? String(s.undo_max) : "off";
-  const mo = $("#max-output-tokens");
-  if (document.activeElement !== mo && s.max_output_tokens != null)
-    mo.value = s.max_output_tokens ? String(s.max_output_tokens) : "off";
   $("#net-confirm").disabled = !netOn;
-  const mb = $("#net-max-bytes");
-  if (document.activeElement !== mb) mb.value = formatSize(s.net_max_bytes);
-  mb.disabled = !netOn;
-  const mc = $("#net-max-chars");
-  if (document.activeElement !== mc) mc.value = s.net_max_chars ?? "";
-  mc.disabled = !netOn;
+  $("#net-max-bytes").disabled = !netOn;
+  $("#net-max-chars").disabled = !netOn;
+  applySettingFields(s);
   applyIndexStatus(s);
   applyThinkStatus(s);
   applyCavecatStatus(s);
   applyLoopStatus(s);
-  applyWatchStatus(s);
   applyMcpStatus(s);
   applySkillsStatus(s);
   refreshChipMenus();
   updateTitle();
   if (planChanged) refreshState();
   else if (!$("#plan-drawer").hidden) schedulePlanRefresh();
+}
+
+// Settings controls name the status field they show in data-setting — a
+// setting's Harness attribute from harness/settings.py, which the status event
+// carries for every saved setting.  A checkbox is on when the value is true (or
+// equals data-on), a radio when it equals the radio's value; a field shows the
+// value, data-zero's word for 0, or a size with data-fmt="size".  A field
+// being typed in is left alone.
+function applySettingFields(s) {
+  for (const f of document.querySelectorAll("[data-setting]")) {
+    const v = s[f.dataset.setting];
+    if (v === undefined || v === null) continue;
+    if (f.type === "checkbox") f.checked = f.dataset.on ? v === f.dataset.on : !!v;
+    else if (f.type === "radio") f.checked = f.value === String(v);
+    else if (document.activeElement !== f) {
+      f.value = f.dataset.fmt === "size" ? formatSize(v)
+        : v === 0 && f.dataset.zero ? f.dataset.zero : String(v);
+    }
+  }
 }
 
 // The THINK badge and its menu: the chosen level, what the model is actually
@@ -713,15 +718,6 @@ function applyThinkStatus(s) {
   badge.title = `Thinking level (/think) — ${note}`;
   $("#think-note").textContent = note;
   const values = choices.includes(level) ? choices : [...choices, level];
-  for (const r of document.querySelectorAll("input[name=think-history]")) {
-    r.checked = r.value === (s.think_history || "turn");
-  }
-  for (const r of document.querySelectorAll("input[name=think-keep]")) {
-    r.checked = r.value === (s.think_keep || "off");
-  }
-  for (const r of document.querySelectorAll("input[name=tool-ref]")) {
-    r.checked = r.value === (s.tool_ref || "minimal");
-  }
   $("#think-levels").replaceChildren(...values.map((v) => {
     const r = el("input");
     r.type = "radio"; r.name = "think-level"; r.value = v; r.checked = v === level;
@@ -736,19 +732,17 @@ function applyThinkStatus(s) {
   }));
 }
 
-// The CAVECAT chip, its menu and the View → Context radios: one setting, /cavecat.
+// The CAVECAT chip (its menu's radios and Settings → Context's are data-setting).
 function applyCavecatStatus(s) {
   const level = s.cavecat || "off";
   const chip = $("#cavecat-badge");
   chip.textContent = `CAVECAT: ${level}`;
   chip.classList.toggle("active", level !== "off");
-  for (const r of document.querySelectorAll("input[name=cavecat], input[name=cavecat-view]")) {
-    r.checked = r.value === level;
-  }
 }
 
-// The LOOP chip, its menu and the Settings → Context fields: /loop-guard and
-// /loop-guard resets.  Off is the less safe setting, so it warns.
+// The LOOP chip: /loop-guard and /loop-guard resets (the fields are data-setting;
+// resets is greyed out while the guard is off).  Off is the less safe setting,
+// so it warns.
 function applyLoopStatus(s) {
   const n = s.loop_guard ?? 3, r = s.loop_resets ?? 2;
   const chip = $("#loop-badge");
@@ -757,39 +751,7 @@ function applyLoopStatus(s) {
   chip.title = !n ? "Loop guard (/loop-guard): off — a repeating model runs until the iteration cap"
     : `Loop guard (/loop-guard): the same call ${n} times, or one error ${n} times, is a loop · `
       + (r ? `${r} reset${r === 1 ? "" : "s"} per turn, then the turn stops` : "the first loop stops the turn");
-  for (const f of document.querySelectorAll('input[data-cmd="/loop-guard"]')) {
-    if (document.activeElement !== f) f.value = n ? String(n) : "off";
-  }
-  for (const f of document.querySelectorAll('input[data-cmd="/loop-guard resets"]')) {
-    if (document.activeElement !== f) f.value = String(r);
-    f.disabled = !n;
-  }
-}
-
-// The reasoning watch, the progress note and plan questions, in the thinking menu
-// and Settings → Context: /think-budget, /think-budget repeat, /think-budget
-// reply-repeat, /progress-note and /plan questions.
-function applyWatchStatus(s) {
-  const n = s.think_budget ?? 8000;
-  for (const f of document.querySelectorAll('input[data-cmd="/think-budget"]')) {
-    if (document.activeElement !== f) f.value = n ? String(n) : "off";
-  }
-  for (const f of document.querySelectorAll('input[data-cmd="/think-budget repeat"]')) {
-    f.checked = s.think_repeat ?? true;
-  }
-  for (const f of document.querySelectorAll('input[data-cmd="/think-budget reply-repeat"]')) {
-    f.checked = s.reply_repeat ?? true;
-  }
-  for (const f of document.querySelectorAll('input[data-cmd="/progress-note"]')) {
-    f.checked = s.progress_note ?? true;
-  }
-  for (const f of document.querySelectorAll('input[data-cmd="/plan questions"]')) {
-    f.checked = s.plan_questions ?? true;
-  }
-  if (s.stories_approve) $("#stories-approve").value = s.stories_approve;
-  for (const f of document.querySelectorAll('input[data-cmd="/plan stories cap"]')) {
-    if (document.activeElement !== f && s.stories_cap != null) f.value = String(s.stories_cap);
-  }
+  for (const f of document.querySelectorAll('input[data-setting="loop_resets"]')) f.disabled = !n;
 }
 
 const INDEX_INSTALL_HINT = "no tree-sitter packages are installed. "
@@ -813,14 +775,6 @@ function applyIndexStatus(s) {
       + "Code index — what it holds";
   $("#index-on").checked = on;
   $("#index-on").disabled = missing;
-  $("#index-persist").checked = !!s.index_persist;
-  $("#index-route").checked = s.index_route !== false;
-  const im = $("#index-max-mem");
-  if (document.activeElement !== im) im.value = formatSize(s.index_max_bytes);
-  const imf = $("#index-max-files");
-  if (document.activeElement !== imf && s.index_max_files) imf.value = String(s.index_max_files);
-  const iw = $("#index-workers");
-  if (document.activeElement !== iw) iw.value = s.index_workers ? String(s.index_workers) : "auto";
   $("#index-save").disabled = !on;
   $("#index-load").disabled = !on;
 }

@@ -218,16 +218,33 @@ Harness default; a bad flag is a usage error. That replaced ~150 lines of
 per-setting parsing. New flags that were missing: `--think-repeat`,
 `--session-titles`. `--mode` takes its choices from `MODES`. The test fails if
 code saves a prefs key that is not in the table (or the table lists one nothing saves).
-Still per-setting: the `/commands` keep their own parsing and messages (they save
-with the table's pref keys, which the test checks), and `StatusEvent` / the web
-settings drawer are unchanged. Moving the commands onto the table's parsers is
-the natural next step.
+**B1 follow-up (2026-11-12): commands, status event and drawer on the table.**
+- The setting `/commands` read what you type with the table's parser
+  (`settings.parse`) and set and save it with `settings.store`, through
+  `commands._set` / `_set_result`. A bad value gives the same error as the flag.
+  Each command keeps its own wording for the state it shows, and its context-dependent
+  words: `/loop-guard on` and `/think-budget on` mean the current or default value.
+- The parsers take what the commands took: `25,000` and `25_000`, `off`/`none` for 0,
+  `yes`/`1` for on, and `on`/`off` for `/run-mode`.
+  `--max-output-tokens`, `--think-budget`, `--run-output-limit` and `--undo-max`
+  accept `off` as well. A typed `--net-max-bytes` above the hard limit is refused
+  rather than cut; a saved one is still cut.
+- `Harness.status_event` takes every setting from `settings.status_fields`, by
+  attribute name. That drops the hand-copied fields from `status_event`,
+  `_index_status_fields` and `_mcp_status_fields`. `StatusEvent` gained
+  `max_tool_result`, `idle_recap`, `idle_recap_secs` and `session_titles`.
+- Web drawer: each control names its setting with `data-setting`, which can be
+  combined with `data-zero`, `data-fmt="size"` or `data-on`. One function,
+  `applySettingFields` in `app.js`, fills them all, replacing `applyWatchStatus`
+  and the per-field code in `applyStatus`, `applyIndexStatus`, `applyLoopStatus`,
+  `applyThinkStatus`, `applyCavecatStatus` and `mcp.js`.
+- Tests (`tests/test_settings.py`): every table attribute is a `StatusEvent` field,
+  every `data-setting` names a table attribute, the commands set and save valid
+  values, and a bad value matches the parser's error.
 
-**Found while testing, not fixed:** `tests/test_tool_registry_golden.py` already
-fails on HEAD (216 configs, all system-prompt hashes). The role prompts changed in
-the recent story-planning commits without `MOMO_REGEN_GOLDEN=1`. These changes
-leave it exactly as it was (same 216, prompt text only). Regenerate it once the
-role edits are confirmed intended.
+**Golden test:** the note above, that `tests/test_tool_registry_golden.py` failed on HEAD,
+was wrong by 2026-11-12. The fixture was regenerated in `803e77f`, and the test
+passes (264 subtests), so nothing needed regenerating.
 
 ## Verification
 
