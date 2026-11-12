@@ -17,6 +17,6 @@ TOOL = Tool(
          "options": {"type": "array", "items": {"type": "string"},
                      "description": "2-6 short, distinct answers"}},
         ["question", "options"]),
-    harness=True, order=411, group="ask & plan", modes=ALL_ROLES - {"story-writer", "story-verifier"}, keeps_green=True,
+    harness=True, order=411, group="ask & plan", modes=ALL_ROLES - {"story-writer", "story-verifier", "explorer"}, keeps_green=True,
     example={"question": "Which test framework should I use?",
              "options": ["pytest", "unittest"]})

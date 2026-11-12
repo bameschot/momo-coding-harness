@@ -220,7 +220,7 @@ class Categories(_Workspace):
         self.assertEqual(self.roles("t_read"), set(registry.ROLES))
         self.assertEqual(self.roles("t_write"), {"coding", "momo", "plan-exec", "story-exec"})
         self.assertEqual(self.roles("t_run"), {"coding", "momo", "plan-exec", "story-exec", "plan",
-                                                "story-writer", "story-verifier"})
+                                                "story-writer", "story-verifier", "explorer"})
         self.assertEqual(self.roles("t_none"), {"coding", "momo", "plan-exec", "story-exec"})
         self.assertEqual(self.roles("t_nonsense"), {"coding", "momo", "plan-exec", "story-exec"})
         self.assertIn("treated as write", " ".join(self.status("t_nonsense").notes))

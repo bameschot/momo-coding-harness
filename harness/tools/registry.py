@@ -22,9 +22,11 @@ from dataclasses import dataclass, field, replace
 # it executes (it runs with the coding tools and the step-tracking tools), and
 # the parts of a stories plan's phase: the story writer (investigates, like
 # plan mode), a story being implemented (the coding tools), and its verifier
-# (investigates, runs commands, writes only its acceptance tests).
+# (investigates, runs commands, writes only its acceptance tests); and the
+# explorer, the sub-agent `explore` runs in a fresh context (investigates and
+# runs read-only commands, then reports).
 ROLES = ("design", "chat", "plan", "coding", "momo", "plan-exec", "story-writer", "story-exec",
-         "story-verifier")
+         "story-verifier", "explorer")
 # /tools discover: which tools are listed in the prompt and declared only once
 # loaded.  "off" (the default): none, every tool is declared; "extensions":
 # custom, workspace and MCP tools (every built-in stays declared); "all": also
@@ -43,7 +45,7 @@ ALL_ROLES = frozenset(ROLES)
 WRITE_ROLES = frozenset({"coding", "momo", "plan-exec", "story-exec"})
 # Roles that investigate before anything is written: they run commands (tests,
 # one-off checks) but do not edit.
-INVESTIGATE_ROLES = frozenset({"plan", "story-writer", "story-verifier"})
+INVESTIGATE_ROLES = frozenset({"plan", "story-writer", "story-verifier", "explorer"})
 
 
 def tool_schema(name: str, description: str, properties: dict, required) -> dict:

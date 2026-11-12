@@ -5,8 +5,8 @@
 A review of the harness and its tools (2026-11-11), with a comparison against other
 coding harnesses. Section A lists defects confirmed by reading the code, section B
 structural inconsistencies, section C features other harnesses have that momo lacks,
-section D the recommended order. Status: D1 (the A fixes) and D2 (the B1 settings
-table) are implemented; everything else is a proposal.
+section D the recommended order. Status: D1 (the A fixes), D2 (the B1 settings
+table) and C3 (the `explore` sub-agent) are implemented; everything else is a proposal.
 
 **Coverage, so you know what the findings rest on.** Read in full: `harness.py`,
 `controller.py`, `session.py`, `checkpoints.py`, `main.py`, `paths.py`,
@@ -245,6 +245,32 @@ code saves a prefs key that is not in the table (or the table lists one nothing 
 **Golden test:** the note above, that `tests/test_tool_registry_golden.py` failed on HEAD,
 was wrong by 2026-11-12. The fixture was regenerated in `803e77f`, and the test
 passes (264 subtests), so nothing needed regenerating.
+
+**C3 `explore` sub-agent (2026-11-12)**, `harness/explorer.py` (`ExploreMixin`), tests in
+`tests/test_explore.py`:
+- A harness-answered tool `explore(question, paths?)`, offered in design, chat, plan,
+  coding, momo and plan-exec (on by default; `/tools` turns it off per role).
+- A new tool role `explorer` (`roles/explorer.md`, `prompts._explorer_prompt`, entries in
+  `_NAV_FIRST`/`_INDEX_FIRST`). It gets the read, nav, index and net read tools, plus
+  `run_command`/`command_output`/`stop_command` behind `_read_only_shell_guard`. It has no
+  `ask_user`/`ask_choice`, no `scratch_write`, no `add_search_source`, no `explore`, and only
+  read-only MCP tools. A call to a tool it wasn't offered (a text-recovered `write_file`) is refused.
+- The run follows `_verifier_pass`: it saves the caller's turn state (`messages`, `compacted`,
+  `_turn_user`, `_step_summary`, `_last_run*`, token figures, `_syntax_watch`,
+  `loaded_tools`), runs `_run_loop` in a fresh context (cap 30), and restores everything in a
+  `finally`. The report is the final text reply, or the round cap's summary, cut at 6,000 chars, plus
+  "Files it looked at". The explorer's context, together with what its own compactions
+  removed, goes into the caller's archive just before the explore result (`by="explore"`).
+  It has its own archive while it runs, because `archive_compaction` re-maps every existing
+  record to the history it is given. Note that `_verifier_pass` calls it with the verifier's
+  short history, which looks like the same re-mapping problem for story runs (not changed here).
+- Insulation: while `_explore` is set, `_plan_investigating`/`_plan_executing` are False
+  (no step tick, TDD tracking, planner nudges or plan prompt), steering stays queued for the
+  caller, the design-mode nudges stand aside, `_ends_turn_checked` is on, and
+  `_emit_reply` keeps the explorer's text out of the chat (the report is the tool result).
+  `_loop_role()`/`_sub_role()` replace the copied `story_role or …` expressions.
+- Golden fixture regenerated: `explore` in the six roles' schemas, tool reference and nav
+  section, plus 24 new `explorer` configs. The story roles are unchanged.
 
 ## Verification
 

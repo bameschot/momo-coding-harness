@@ -28,7 +28,7 @@ from test_run_output import _Scripted
 
 FIXTURE = Path(__file__).parent / "golden" / "tool_golden.json"
 ROLES = ("design", "chat", "plan", "plan-tdd", "coding", "momo", "plan-exec", "plan-exec-tdd",
-         "plan-stories", "story-writer", "story-exec")
+         "plan-stories", "story-writer", "story-exec", "explorer")
 RUN_MODES = ("new", "classic")
 EDIT_SETS = {"default": EDIT_FEATURES, "none": frozenset(), "match-only": frozenset({"match"})}
 # Prompts that are stored whole (the rest by hash), so a mismatch can be read.
@@ -68,7 +68,11 @@ class _Golden:
         h = self.h
         h.plan, h.plan_phase, h.plan_kind = None, "investigating", "normal"
         h.story_role = None
-        if role.startswith("story-"):
+        h._explore = None
+        if role == "explorer":
+            h.mode = "coding"
+            h._explore = {"question": "q", "paths": []}
+        elif role.startswith("story-"):
             h.mode = "coding"
             h.plan = Plan(title="P", steps=[Step(title="s", outcome="o")],
                           kind="stories")

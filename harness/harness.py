@@ -22,6 +22,7 @@ from .plan_runner import TDD_MAX_REFUSALS, PlanRunnerMixin, keeps_green
 from .story_runner import DEFAULT_STORIES_CAP, STORY_NUDGES, StoryRunnerMixin
 from .plan_runner import PLAN_MAX_RESTARTS
 from .mcp_mixin import MCPMixin
+from .explorer import ExploreMixin
 from .tools import (DIFF_TOOLS, INDEX_REPLACES, INDEX_TOOL_NAMES, INDEX_TOOLS, LOCKED_TOOLS,
                     NET_TOOL_NAMES, RUN_STORE_TOOLS, ToolContext, ToolRunContext, dispatch,
                     registry, render_tool_reference)
@@ -49,7 +50,7 @@ from .prompts import (_index_banner, MODES,
                       _PLAN_TDD_RULES, _STORY_EXECUTION_RULES,
                       _ROLE_LOADERS, _coding_prompt, _environment,
                       _cavecat_rules, _load_role, _nav_rules, _net_rules, _story_writer_prompt,
-                      _story_verifier_prompt,
+                      _story_verifier_prompt, _explorer_prompt,
                       planner_for_tdd)
 from .toolcall_text import (_derive_write_path, _extract_and_strip_thinking,
                             _extract_text_tool_calls, _has_write_intent, _strip_text_tool_calls,
@@ -370,13 +371,13 @@ _REPLY_REPEAT_TAIL = ("\n\nNever write code or tool calls out as text in your re
 # with every call, while some edit-suite runs used up the time cap without
 # making an edit (evals/README.md, multipart round 4).
 _IDLE_AFTER = {"coding": 15, "plan-exec": 15, "story-exec": 15, "momo": 12, "chat": 15,
-               "design": 15, "plan": 25, "story-writer": 25, "story-verifier": 15}
+               "design": 15, "plan": 25, "story-writer": 25, "story-verifier": 15, "explorer": 20}
 _IDLE_NOTES = 2
 # Calls that move the work on even though they write no file.
 _PROGRESS_TOOLS = frozenset({"ask_user", "ask_choice", "create_plan", "revise_plan",
                              "complete_step", "plan_stories", "write_story", "finish_stories",
                              "complete_story", "report_defect", "save_acceptance_test",
-                             "finish_verification", "write_phase", "finish_plan"})
+                             "finish_verification", "write_phase", "finish_plan", "explore"})
 _IDLE_NOTE = "[Note from the harness, not the user] {n} tool calls in a row without {since}. {act}"
 _IDLE_ACT = {
     "coding": ("a change", "If the user asked a question, answer it now. If they asked for a "
@@ -394,6 +395,8 @@ _IDLE_ACT = {
     "plan-exec": ("a change", "Make the step's change now if you know enough, or get the one "
                   "fact you still need in one call. Once the step is done and verified, call "
                   "complete_step."),
+    "explorer": ("a report", "Reply with your report now, from what you found; name in it "
+                 "anything you did not get to check."),
     "story-exec": ("a change", "Make the story's change now if you know enough, or get the one "
                    "fact you still need in one call. Once it is built and its examples give "
                    "what they expect, call complete_story."),
@@ -451,7 +454,7 @@ def _has_model(available: list[str], name: str) -> bool:
     return name in available or f"{name}:latest" in available
 
 
-class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
+class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, ExploreMixin):
     def __init__(self, host: str, model: str, workdir: Path, provider: str = "ollama"):
         self.workdir = workdir.resolve()
         self.mode = "design"
@@ -586,6 +589,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.stories_cap: int = DEFAULT_STORIES_CAP
         self._writing: dict | None = None    # a story-writing pass: its phase and mode
         self._verifying: dict | None = None  # a verifier pass: the story, its expectations, tests
+        # An explore call at work (explorer.py): its question, start time and
+        # calls.  Its sub-agent replaces the role (tools and prompt) for that while.
+        self._explore: dict | None = None
         self._story: dict | None = None      # the story running: phase, id, refusals, …
         self._story_failure: str = ""
         # A running TDD stage: test files as the stage started (audited at the
@@ -1040,7 +1046,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         the run mode, edit features, code index, internet and a TDD plan."""
         executing = self._plan_executing()
         stories = self.mode == "plan" and self.plan_kind == "stories"
-        if self.story_role:
+        if self._explore is not None:
+            role, tdd, stories = "explorer", False, False
+        elif self.story_role:
             role, tdd, stories = self.story_role, False, True
         elif executing:
             role, tdd = "plan-exec", self.plan.tdd
@@ -1469,7 +1477,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
 
     def _dispatch(self, name: str, args: dict) -> str:
         err = (self._wait_index(name) or template_leak(name, args)
-               or (getattr(self, "story_role", None) == "story-verifier"
+               or (ExploreMixin._sub_role(self) == "story-verifier"
                    and self._verifier_guard(name, args))
                or (name == "run_command" and hasattr(self, "_read_only_shell_guard")
                    and self._read_only_shell_guard(name, args)))
@@ -1493,7 +1501,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                             run_compact=self.cavecat != "off",
                             # a story leaves no server behind for the next one (run 6:
                             # 17 "Address already in use" from `python3 server.py &`)
-                            run_reap=getattr(self, "story_role", None) is not None,
+                            run_reap=ExploreMixin._sub_role(self) is not None,
                             checkpoints=self.checkpoints)
         except Exception as e:
             return f"ERROR: {name} failed: {type(e).__name__}: {e}"
@@ -1505,10 +1513,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         """Planning, writing stories and verifying change no project files, and
         run_command must not do it for them through the shell: the scratch
         folder (and, for the verifier, its acceptance tests) only."""
-        role = getattr(self, "story_role", None)
+        role = ExploreMixin._sub_role(self)
         planning = getattr(self, "mode", "") == "plan" and not role and not self._plan_executing()
         if name != "run_command" or not isinstance(args, dict) or not (
-                planning or role in ("story-writer", "story-verifier")):
+                planning or role in ("story-writer", "story-verifier", "explorer")):
             return ""
         from .tools.shell import shell_writes
         allowed = (".momo/scratch/", "$MOMO_SCRATCH", "/tmp/", "/private/tmp/", "/dev/") + (
@@ -1669,7 +1677,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             # First and last (the navigation section), where a small model
             # weighs it most.
             add("index", "Code index banner", _index_banner(names))
-        if self.story_role == "story-writer":
+        if self._explore is not None:
+            role = _explorer_prompt(str(self.workdir))
+            label = "Role: explorer"
+        elif self.story_role == "story-writer":
             role = _story_writer_prompt(str(self.workdir))
             label = "Role: story writer"
         elif self.story_role == "story-verifier":
@@ -1706,7 +1717,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                          "call create_plan again with the complete plan.\n\n"
                          + self.plan.render_for_prompt())
         add("role", label, role, sep="\n\n")
-        role_name = self.story_role or ("plan-exec" if self._plan_executing() else self.mode)
+        role_name = self._loop_role()
         # Next to the role, so a small model weighs it; nav keeps the last slot.
         if (cave := _cavecat_rules(self.cavecat, role_name)):
             add("cavecat", "Cavecat", cave)
@@ -2143,7 +2154,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.messages.append({"role": "assistant", "content": text})
         self.event_queue.put(ChatEvent("system",
             "The model replied only in its reasoning; showing that as its answer."))
-        self.event_queue.put(ChatEvent("assistant", text))
+        self._emit_reply(text)
 
     def cancel(self):
         """Interrupt the running LLM call immediately."""
@@ -2306,7 +2317,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         overflow_compacted = False   # one compaction per turn after "prompt too long"
         idle_calls = 0         # tool calls in a row that changed nothing (/progress-note)
         idle_notes = 0         # notes about them, at most _IDLE_NOTES
-        loop_role = self.story_role or ("plan-exec" if executing else self.mode)
+        loop_role = self._loop_role()
         next_notes = 0         # "you announced a step but took none" notes, at most _NEXT_STEP_NOTES
         compact_notice = ""    # last auto-compaction notice, to not repeat a no-op one
         while True:
@@ -2319,12 +2330,13 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             iteration += 1
             # Messages the user typed while this turn ran (steer): before the next
             # request, as their own message (pi's steering, crush's queue).
-            if (queued := self.take_steer()):
+            # An explorer leaves them for the turn that called it.
+            if self._explore is None and (queued := self.take_steer()):
                 for text in queued:
                     self._append_user(text)
                 guard.bump()                 # the user said something: a new epoch
                 idle_calls = 0
-            if self._plan_draft is not None:
+            if self._plan_draft is not None and self._explore is None:
                 self._plan_draft["turns"] = iteration     # write_phase: one phase per turn
             if self._story or self._writing or self._verifying:
                 self._story_tick(iteration)     # the plan view counts turns
@@ -2516,7 +2528,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             # result, making the response look cut off.
             if content:
                 tool_only_turns = 0
-                self.event_queue.put(ChatEvent("assistant", content))
+                self._emit_reply(content)
 
             if not _calls:
                 if cut_call is not None:
@@ -2575,7 +2587,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                                 reason = "thinking_only"
                             else:
                                 reason = "empty"
-                            role = ("design" if self.mode == "design"
+                            role = ("design" if self.mode == "design" and self._explore is None
                                     else "investigating" if investigating else "other")
                             retry_text = _RETRY_TEXT[reason, role]
                             # Bridge a tool→user gap: Qwen3 expects an assistant turn
@@ -2606,7 +2618,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     return "done"
                 # Design mode: model announced it would write but produced no tool call.
                 # Inject one targeted nudge and continue the loop so it can comply.
-                if (self.mode == "design"
+                if (self.mode == "design" and self._explore is None
                         and _has_write_intent(content)
                         and not _write_nudged):
                     _write_nudged = True
@@ -2634,7 +2646,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                 # and the turn ended).  A question to the user still ends the turn.
                 draft = getattr(self, "_plan_draft", None)
                 if (draft is not None and self.mode == "plan" and self.plan is None
-                        and draft.get("nudges", 0) < STORY_NUDGES
+                        and self._explore is None and draft.get("nudges", 0) < STORY_NUDGES
                         and (content or "").strip() and not content.rstrip().endswith("?")):
                     draft["nudges"] = draft.get("nudges", 0) + 1
                     self.event_queue.put(ChatEvent(
@@ -2770,6 +2782,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     # Offered no schema, but a text-recovered call or an older
                     # context can still name it.
                     result = f"ERROR: {name} is turned off for this role by the user."
+                elif self._explore is not None and name not in {t["function"]["name"] for t in tools}:
+                    # A text-recovered call can name any tool: the explorer only reads.
+                    result = (f"ERROR: {name} is not available to the explorer, which changes "
+                              "nothing. Use the tools you were given, then reply with your report.")
                 elif leak:
                     # the harness's own tools never reach _dispatch, which checks the rest
                     result = leak
@@ -2833,6 +2849,9 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     result = self._handle_save_acceptance_test(args if isinstance(args, dict) else {})
                 elif name == "finish_verification":
                     result = self._handle_finish_verification(args if isinstance(args, dict) else {})
+                elif name == "explore":
+                    result = self._handle_explore(args if isinstance(args, dict) else {})
+                    guard.bump()       # the explorer's reads are not this context's
                 else:
                     # run_command confirmation: when enabled, block on a y/N prompt
                     # (reusing the ask_user input plumbing) before executing.
@@ -3016,7 +3035,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
                     "If the user asked a direct question, answer it now in plain text. "
                     "If you are interviewing for a design: ask your next question with ask_user, "
                     "or, once you have enough, call write_file with both 'path' (the file path to write) and 'content' (the complete spec)."
-                    if self.mode == "design" else
+                    if self.mode == "design" and self._explore is None else
                     "You have been calling tools for several turns without a text response. "
                     "If your investigation is complete, ask the user about the open decisions "
                     "with ask_choice, or call create_plan once they are settled. "
@@ -3157,7 +3176,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
             return False
         analysed = bool(analysis)
         if analysed:
-            self.event_queue.put(ChatEvent("assistant", analysis))
+            self._emit_reply(analysis)
         else:
             # The model gave nothing usable: the facts still make the point.
             last = hit.result.strip()
@@ -3285,6 +3304,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         """Whether a final reply is checked for an announced next step: coding,
         momo and chat mode (chat: "Let me read X." with no lookup).  A plan step and a story
         end with their own tools."""
+        if self._explore is not None:
+            return True
         return (self.mode in ("coding", "momo", "chat") and not self.story_role
                 and not self._plan_executing()
                 and not (self._story or self._writing or self._verifying))
@@ -3375,7 +3396,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin):
         self.event_queue.put(ChatEvent("system",
             f"Stopped after {rounds} rounds, the limit for one turn — the model's summary:"))
         self.messages.append({"role": "assistant", "content": reply})   # after the tool results
-        self.event_queue.put(ChatEvent("assistant", reply))
+        self._emit_reply(reply)
 
     def _no_tool_reply(self, prompt: str) -> str:
         """One request with the history in view, this prompt after it and no tools

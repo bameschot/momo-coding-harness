@@ -107,7 +107,8 @@ class MCPMixin:
     def _mcp_read_only_role(self) -> bool:
         """Roles that don't change things get only read-only MCP tools
         (readOnlyHint), which keeps design/chat/plan investigation read-only."""
-        return self.mode != "coding" and not self._plan_executing()
+        return (getattr(self, "_explore", None) is not None
+                or (self.mode != "coding" and not self._plan_executing()))
 
     def _mcp_tools(self) -> list[dict]:
         """The MCP tools declared to the model: with /tools discover on, those

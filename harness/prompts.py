@@ -89,6 +89,19 @@ def _story_verifier_prompt(workdir: str) -> str:
     )
 
 
+def _explorer_prompt(workdir: str) -> str:
+    raw = _load_role("explorer")
+    if raw:
+        return raw.replace("{workdir}", workdir)
+    return (
+        "You are a code explorer. Another agent handed you one research question about the "
+        "project; you start with a fresh context. Investigate with the read tools (read-only "
+        "commands only), then reply with no tool call: the answer, the evidence with path:line "
+        "references, and what you did not check. Change nothing. "
+        f"Working directory: {workdir}"
+    )
+
+
 # The planner role's closing-verification rule, which a TDD plan replaces: its
 # acceptance stage runs the suite, and with the rule in place the 9B added a
 # "run the full test suite" step in 3 of 3 runs.
@@ -136,6 +149,9 @@ _NAV_FIRST = {
                  "matter rather than whole files.",
     "design":    "Map an existing project with code_outline on a directory before you "
                  "interview, and read the definitions that matter rather than whole files.",
+    "explorer":  "Find what the question names with find_symbol or a grep, outline the files "
+                 "it leads to, and read_symbol only the definitions that answer it; "
+                 "find_references follows a name to its callers.",
 }
 
 # What to reach for first, per role, with the index on.
@@ -159,6 +175,8 @@ _INDEX_FIRST = {
                  "index_text (any text) before reading files.",
     "design":    "Look things up with index_search (definitions, config keys, CSS rules, files) "
                  "and index_text (any text) before reading files.",
+    "explorer":  "Find what the question names with index_search or index_text, follow it with "
+                 "index_callers and index_file, and read_symbol only the definitions that answer it.",
 }
 
 
@@ -237,6 +255,11 @@ def _nav_rules(role: str, tool_names: set[str], index: bool) -> str:
             parts.append("`replace_symbol` rewrites a whole definition by name")
         bullets.append("**Editing code:** " + "; ".join(parts) + ". They show the changed lines "
                        "with their new line numbers — no need to read the files again to check.")
+    if has("explore"):
+        bullets.append("**A broad question that needs many reads** (how a flow works end to end, "
+                       "every place that does X): `explore` hands it to a sub-agent with a fresh "
+                       "context, and only its report lands in yours. One file or one symbol: "
+                       "look it up yourself.")
     if has("run_command"):
         bullets.append(_NO_SHELL_SEARCH)
     return "\n\n".join(out) + "\n\n" + "\n".join(f"- {b}" for b in bullets)

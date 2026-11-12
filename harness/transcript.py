@@ -60,6 +60,8 @@ def _note(r: dict) -> str:
         return f"full original; trimmed in context by compaction #{r['n']}{when}"
     if r.get("by") == "loop":
         return f"removed from context by loop reset #{r['n']}{when}"
+    if r.get("by") == "explore":
+        return f"the explorer's own context (explore call{when})"
     return f"removed from context by compaction #{r['n']}{when}"
 
 

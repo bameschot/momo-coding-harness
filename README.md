@@ -841,6 +841,16 @@ Offered while the [code index](#code-index) is on, which it is unless you turn i
 
 Chat mode also has `ask_user` but not `write_file`.
 
+### Explorer sub-agent (design, chat, plan, coding, momo, an executing plan)
+
+| Tool | Description |
+|---|---|
+| `explore` | Hand a research question (`question`, optionally `paths` to start from) to a sub-agent that starts from a fresh context. It investigates and returns a short report with `path:line` evidence and a list of the files it looked at. Only the call and the report stay in the main context, which helps a small window on broad questions like "how does X work end to end". |
+
+The explorer runs on the same model with its own prompt (`roles/explorer.md`), for at most 30 rounds. Its tools are the read, code-navigation, index and internet read tools, plus `run_command` behind the same read-only shell guard that plan mode uses: a command that writes project files is refused, and so is any call to a tool it wasn't given. It can't ask you anything, and it can't start another explorer. In the chat, a `🔍 Exploring: …` line opens the run, its tool calls show in the tool log as usual, and a `🔍 Explorer done — N tool calls, T s` line closes it. The report appears as the `explore` result, not as a chat message. Messages you type while it runs go to the main turn once it is done. Esc stops it along with the turn. `/export full` keeps the explorer's context at the point where it was called. Turn it off for a role with `/tools`.
+
+On llama.cpp and Ollama, the main conversation's prompt may need reprocessing after an explore, because the server's cache held the explorer's context. Whether this costs time depends on how many cache slots the server keeps.
+
 ### Scratchpad (all modes)
 
 | Tool | Description |

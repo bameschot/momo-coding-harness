@@ -25,7 +25,7 @@ TOOL = Tool(
          "save":       {"type": "boolean", "description": "Ask the user to keep the source for future sessions (default false)"}},
         ["spec", "test_query"]),
     discoverable=True,
-    run=search.add_search_source, order=820, group="net", modes=ALL_ROLES, needs_net=True,
+    run=search.add_search_source, order=820, group="net", modes=ALL_ROLES - {"explorer"}, needs_net=True,
     inject=("net_access", "net_max_bytes", "cancel", "search_sources"),
     example={"spec": {"name": "docsrs", "description": "Rust crate docs on docs.rs",
                       "url": "https://crates.io/api/v1/crates?q={query}&per_page={n}",

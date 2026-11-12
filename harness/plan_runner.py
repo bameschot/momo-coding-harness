@@ -267,13 +267,16 @@ class PlanRunnerMixin:
     loop that executes it one step at a time through Harness._run_loop."""
 
     def _plan_investigating(self) -> bool:
-        return self.mode == "plan" and self.plan_phase != "executing"
+        # An explorer (explorer.py) runs inside the turn but is not the planner.
+        return (self.mode == "plan" and self.plan_phase != "executing"
+                and getattr(self, "_explore", None) is None)
 
     def _plan_executing(self) -> bool:
         # An approved plan runs in coding mode: the coder's role, tools and tool
         # choices, and once it is done the next message is a coding turn, not a
         # new plan.  In any other mode the plan is dormant (paused).
-        return self.mode == "coding" and self.plan_phase == "executing" and self.plan is not None
+        return (self.mode == "coding" and self.plan_phase == "executing" and self.plan is not None
+                and getattr(self, "_explore", None) is None)
 
     def _plan_kind_shown(self) -> str:
         """The plan type in force: the running plan's own, else the next plan's."""

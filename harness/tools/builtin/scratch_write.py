@@ -41,6 +41,6 @@ TOOL = Tool(
          "content": {"type": "string",  "description": "Raw file content (no markdown fences around code)."},
          "append":  {"type": "boolean", "description": "Add to the end of the file instead of overwriting it (default false)"}},
         ["path", "content"]),
-    run=scratch_write, order=610, group="edit & shell", modes=ALL_ROLES, keeps_green=True,
+    run=scratch_write, order=610, group="edit & shell", modes=ALL_ROLES - {"explorer"}, keeps_green=True,
     body_arg="content",
     example={"path": "probe.py", "content": "import json\nprint(json.load(open('config.json')).keys())\n"})
