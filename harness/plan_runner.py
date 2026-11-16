@@ -790,7 +790,8 @@ class PlanRunnerMixin:
         self.plan = plan
         self._sync_plan_file()
         self.event_queue.put(ChatEvent("assistant", self.plan.to_markdown()))
-        answer = self._ask_user(
+        answer = self._ask_as(
+            "approve",
             f"Execute this plan? y = run it · n = keep it for later (/plan run) · "
             f"anything else = feedback to revise it. You can edit {PLAN_FILENAME} before answering."
             + approve_note
@@ -1063,7 +1064,8 @@ class PlanRunnerMixin:
         guidance or to pause.  Returns the text to add to the refusal."""
         n = self._tdd_refusals
         tail = "\n".join(report.splitlines()[-15:])
-        answer = self._ask_user(
+        answer = self._ask_as(
+            "guidance",
             f"Plan step {self.plan.progress()} still does not pass its gate after {n} attempts:\n"
             f"{tail}\n\nReply with guidance for the model, or 'pause' to stop the plan here."
         ).strip()

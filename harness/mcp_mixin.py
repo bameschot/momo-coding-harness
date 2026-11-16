@@ -160,7 +160,7 @@ class MCPMixin:
             return (f"ERROR: {name} can change things, so it is only offered in coding mode; "
                     f"this is {self.mode} mode.")
         if (q := self._mcp_confirm_prompt(name, args)):
-            answer = self._ask_user(q).strip().lower()
+            answer = self._ask_as("confirm", q).strip().lower()
             if answer in ("a", "always"):
                 self.mcp.allowed.add(name)
             elif answer not in ("y", "yes"):

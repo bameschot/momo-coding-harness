@@ -73,7 +73,8 @@ Options:
 | `--web-tls` | `off` | `auto`: serve the web UI over HTTPS with momo's own local CA (needs the `openssl` command, see [HTTPS](#https)) |
 | `--web-cert` / `--web-key` | — | Serve the web UI over HTTPS with your own certificate |
 | `--web-insecure` | off | Plain HTTP **without** an access token, even off loopback (trusted networks only) |
-| `--headless` | off | Run only the web UI, without the terminal UI |
+| `--web-only` | off | Run only the web UI, without the terminal UI (`--headless` is its old name, still accepted) |
+| `-p` / `--prompt` | — | Run one prompt without any UI and exit. See [Headless runs](#headless-runs) |
 
 The chosen provider is saved and reused on the next launch (and restored per session). The status bar shows the active backend as `VIA: <provider>`.
 
@@ -88,6 +89,32 @@ Example targeting a local llama.cpp server:
 ```bash
 python momo-coding-harness.py --provider llamacpp --host http://localhost:8080 --workdir ~/projects/myapp
 ```
+
+## Headless runs
+
+`-p TEXT` runs one prompt to completion without the TUI or the web UI, for scripts, CI jobs and git hooks:
+
+```bash
+python momo-coding-harness.py -p "why does test_parse fail?" --mode coding
+pytest -x 2>&1 | python momo-coding-harness.py -p "explain this failure"   # piped stdin is attached
+python momo-coding-harness.py -p - < task.md                               # the prompt itself from stdin
+```
+
+- **Output:** the final answer goes to stdout, so it can be piped or captured. Progress (tool calls, file edits, notes, questions and their automatic answers) goes to stderr. `--quiet` turns the progress off.
+- **Questions:** nobody is there to answer them, so momo answers automatically and nothing blocks. Confirmations (`/run-confirm`, network writes, MCP and tool approvals) answer **no**, and `--yes` makes them answer yes. A question from the model gets "no user is available, decide yourself", and `ask_choice` lets the model pick. In plan mode the plan is approved and runs, and a TDD gate that keeps failing pauses the plan. The system prompt also tells the model it is a non-interactive run.
+- **Mode:** the same rule as a fresh start: `--mode`, else the last mode you used, else design (read-only). Pass `--mode coding` for a run that should edit files.
+- **Session:** each run starts a new session, saved like any other, so you can open it later in the TUI or the web UI. `--continue` continues the workspace's last session, and `--session NAME` continues a given one.
+- **Stdin:** with `-p TEXT`, a pipe or a redirected file on stdin is attached to the prompt. A pipe that sends nothing within 3 s is skipped with a note, so a CI runner that leaves stdin open can't hang the run.
+- **`--timeout SECS`** stops the run after that many seconds.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | The run finished |
+| `1` | Error: the backend is unreachable, the server returned an error, or momo crashed |
+| `2` | Bad command-line arguments |
+| `3` | An approved plan stopped before its last step (paused, or a TDD gate kept failing) |
+| `124` | `--timeout` reached |
+| `130` | Interrupted (Ctrl+C or SIGTERM); the session is still saved |
 
 ## Connecting to a remote Ollama host
 
@@ -120,7 +147,7 @@ The web UI has **no external dependencies**. It is plain HTML/CSS/JavaScript ser
 |---|---|
 | `python momo-coding-harness.py` | TUI **and** web UI (default) |
 | `python momo-coding-harness.py --no-web` | TUI only, no server |
-| `python momo-coding-harness.py --headless` | Web UI only, no TUI. Prints the URL. Ctrl+C (or SIGTERM) saves the session and stops |
+| `python momo-coding-harness.py --web-only` | Web UI only, no TUI. Prints the URL. Ctrl+C (or SIGTERM) saves the session and stops |
 | `python momo-coding-harness.py --web-port 9000` | Serve on another port |
 | `python momo-coding-harness.py --web-host 0.0.0.0` | Reachable from other machines. Requires an access token (see [Security](#security)) |
 
@@ -133,9 +160,9 @@ The web UI has **no external dependencies**. It is plain HTML/CSS/JavaScript ser
 | `--web-tls auto` | off | HTTPS with momo's own local CA; `--web-tls-name NAME` adds a name or IP to the certificate |
 | `--web-cert PEM` / `--web-key PEM` | — | HTTPS with your own certificate (the key may be inside the certificate file) |
 | `--web-insecure` | off | Plain HTTP without a token; `--web-allow-host NAME` adds a name the Host check accepts |
-| `--headless` | off | Run the web UI without the terminal UI |
+| `--web-only` | off | Run the web UI without the terminal UI |
 
-If the port is already in use, the TUI still starts and shows `Web UI failed to start on …` in the chat pane. In `--headless` mode the harness exits with an error.
+If the port is already in use, the TUI still starts and shows `Web UI failed to start on …` in the chat pane. In `--web-only` mode the harness exits with an error.
 
 ### One session, two windows
 
@@ -348,7 +375,7 @@ Typing the TUI command in the browser (e.g. `/think-output off`) has the same ef
 
 ### What differs from the TUI
 
-- `/exit` and `/quit` don't work from the browser. Close the tab, or quit from the terminal (or press Ctrl+C in `--headless` mode).
+- `/exit` and `/quit` don't work from the browser. Close the tab, or quit from the terminal (or press Ctrl+C in `--web-only` mode).
 - `/copy` copies to the clipboard of the machine running the harness, not the browser's. To copy code into your browser's clipboard, use the **Copy** button on a code block.
 - `/export` writes into the workspace on the machine running the harness.
 - Diffs of file edits are display-only and aren't stored in the session, same as in the TUI. After a restart, an edit shows its plain tool result instead.

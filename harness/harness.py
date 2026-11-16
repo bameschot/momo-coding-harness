@@ -218,6 +218,16 @@ _MOMO_LINES_MAX = 30      # remembered recap lines per session
 # interrupts instead of answering.
 _CANCELLED = object()
 
+# Headless runs (`momo -p`, Harness.unattended): what _ask_user answers when no
+# person is there, by the kind of question asked.  The ask_user tool's answer is a
+# tool result, where a hint reaches the model best.
+NO_USER_ANSWER = ("No user is available — this is a non-interactive run. Don't ask again: "
+                  "make the most reasonable choice, state the assumption in your answer, "
+                  "and finish the task.")
+NO_USER_CHOICE = ("No user is available (non-interactive run): pick the option you judge "
+                  "best, say which, and continue.")
+ASK_KINDS = ("question", "confirm", "approve", "guidance")
+
 # The one retry prompt after an empty reply: (why it was empty, whose turn).
 _RETRY_TEXT = {
     ('cut_off', 'design'):
@@ -499,6 +509,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
         self.tools_discover: str = registry.DEFAULT_DISCOVER
         self.loaded_tools: set[str] = set()
         self.run_confirm: bool = False  # when True, prompt y/N before each run_command; toggle via /run-confirm or Shift+P
+        # Headless (`momo -p`): None = a person answers questions; "decline" =
+        # nobody does, confirms answer no; "yes" = confirms answer yes (--yes).
+        # Session-only, never saved: see _unattended_answer.
+        self.unattended: str | None = None
         # /run-mode: "new" saves run_command output to a log and returns a view of
         # it (tail / grep / head+tail) plus command_output; "classic" returns it all.
         self.run_mode: str = "new"
@@ -699,12 +713,42 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
 
     def _confirm(self, question: str) -> bool:
         """A y/N question through the ask_user plumbing; only y / yes allows."""
-        return self._ask_user(question).strip().lower() in ("y", "yes")
+        return self._ask_as("confirm", question).strip().lower() in ("y", "yes")
+
+    def _unattended_answer(self, kind: str) -> str:
+        """The answer a headless run gives in place of a person."""
+        if kind == "confirm":
+            return "y" if self.unattended == "yes" else "n"
+        if kind == "approve":       # the run was asked to do the task: run its plan
+            return "y"
+        if kind == "guidance":      # nobody can help past the TDD gate: stop the plan
+            return "pause"
+        return NO_USER_ANSWER
+
+    def _answer_unattended(self, question: str, options: list[str] | None, kind: str) -> str:
+        """No person to ask: answer at once.  The question and the answer still go
+        to the event bus, so the headless output and the session log show them."""
+        if self._cancel.is_set():
+            return ""
+        answer = self._unattended_answer(kind)
+        self.event_queue.put(AskUserEvent(question, list(options or [])))
+        self.event_queue.put(ChatEvent("system", f"(no user) answered: {answer}"))
+        return answer
+
+    def _ask_as(self, kind: str, question: str) -> str:
+        """_ask_user for a question that wants a particular kind of answer
+        (ASK_KINDS); the kind only matters when `unattended` is set."""
+        if self.unattended:
+            return self._answer_unattended(question, None, kind)
+        return self._ask_user(question)
 
     def _ask_user(self, question: str, options: list[str] | None = None) -> str:
         """Emit an AskUserEvent and block the worker thread until a frontend
         answers.  Interrupted (Esc while waiting, cancel_question) it returns ""
-        with _cancel set, which ends the turn at the loop's next check."""
+        with _cancel set, which ends the turn at the loop's next check.
+        Unattended (headless) it answers a "question" at once instead."""
+        if self.unattended:
+            return self._answer_unattended(question, options, "question")
         # A cancel sentinel left from an earlier question is stale; an answer
         # already queued (typed ahead, or a test's) still answers this one.
         kept = []
@@ -1756,7 +1800,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
         # across projects and days.  (A recurrent or hybrid model, e.g. Ornith or
         # Qwen3.5, only resumes from checkpoints at earlier prompt ends: no gain or
         # loss there.)  Nav keeps the last slot.
-        add("env", "Environment", _environment(self.workdir, names, self.net_access))
+        add("env", "Environment",
+            _environment(self.workdir, names, self.net_access, bool(self.unattended)))
         add("nav", "Navigating code" + (" (code index)" if index_on else ""),
             _nav_rules(role_name, names, index_on))
         return secs
@@ -3321,6 +3366,10 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
         if options is None:
             return "ERROR: ask_choice needs 'options': a list of 2-6 non-empty strings."
         notes: list[str] = []
+        if self.unattended:         # the rewrite rounds would each cost a model call
+            self.event_queue.put(AskUserEvent(question, list(options)))
+            self.event_queue.put(ChatEvent("system", "(no user) answered: the model picks"))
+            return NO_USER_CHOICE
         for rounds in range(_CHOICE_MAX_ROUNDS + 1):
             answer = self._ask_user(question, options)
             if self._cancel.is_set():

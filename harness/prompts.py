@@ -394,7 +394,8 @@ def _python_line() -> str | None:
     return "run it as `python3` (there is no `python` command)"
 
 
-def _environment(workdir: Path, tool_names: set[str], net_access: str) -> str:
+def _environment(workdir: Path, tool_names: set[str], net_access: str,
+                 unattended: bool = False) -> str:
     lines = [f"- Working directory: `{workdir}`. Every path is relative to it; a path that "
              "escapes it with `..` is rejected.",
              f"- Today: {date.today().isoformat()}"]
@@ -416,6 +417,8 @@ def _environment(workdir: Path, tool_names: set[str], net_access: str) -> str:
                      + "; never curl or wget a page.")
     else:
         lines.append("- Internet: off — if a task needs the web, say so; do not try curl or wget.")
+    if unattended:      # headless `momo -p`: questions get an automatic answer
+        lines.append("- Non-interactive run: nobody will answer questions; finish the task on your own.")
     return "## Environment\n\n" + "\n".join(lines)
 
 

@@ -665,7 +665,8 @@ class StoryRunnerMixin:
                              for cid, why in retire)))
         if self.stories_approve == "each":
             todo = len([s for s in sset.stories if not s.finished])
-            answer = self._ask_user(
+            answer = self._ask_as(
+                "approve",
                 f"Run these {todo} stor{'y' if todo == 1 else 'ies'} for phase {n}? y = run them · "
                 f"anything else = feedback for the story writer. You can edit {self._stories_rel(n)} "
                 "before answering.").strip()
@@ -722,7 +723,8 @@ class StoryRunnerMixin:
         requirements the revision names, then any left past the last phase
         onto it (they would otherwise never be due or checked)."""
         shown = "\n".join(f"{n + i}. {p.title} — {p.outcome}" for i, p in enumerate(phases, 1))
-        answer = self._ask_user(
+        answer = self._ask_as(
+            "confirm",
             f"The story writer proposes changing the phases after phase {n}:\n"
             f"{revision.get('reason', '')}\n\n{shown}\n\nApply this change? y / n").strip()
         if answer.lower().rstrip(".!") not in _YES:

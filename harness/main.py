@@ -1,12 +1,17 @@
 import argparse
 import curses
+import os
 import secrets
+import select
 import signal
+import stat
 import sys
 import threading
 import time
 from pathlib import Path
 
+from . import attachments as attach_mod
+from . import headless as headless_mod
 from . import session as session_mod
 from . import settings as settings_mod
 from .controller import Controller
@@ -84,12 +89,53 @@ def main():
                              "Anyone who can reach the address can run commands as you")
     parser.add_argument("--web-allow-host", action="append", default=[], metavar="NAME",
                         help="Extra name accepted in the Host header with --web-insecure (repeatable)")
-    parser.add_argument("--headless", action="store_true", default=False,
+    parser.add_argument("--web-only", action="store_true", default=False,
                         help="Run only the web UI (no terminal UI)")
+    # The old name of --web-only: "headless" now means -p.
+    parser.add_argument("--headless", action="store_true", default=False,
+                        help=argparse.SUPPRESS)
+    headless = parser.add_argument_group(
+        "headless run", "Run one prompt without a UI: the answer goes to stdout, progress "
+        "to stderr. Questions get automatic answers (confirmations: no, unless --yes).")
+    headless.add_argument("-p", "--prompt", default=None, metavar="TEXT",
+                          help="Run this prompt and exit ('-' reads it from stdin; piped "
+                               "stdin with TEXT is attached to it)")
+    headless.add_argument("--yes", action="store_true", default=False,
+                          help="With -p: answer yes to confirmations (run-confirm, network "
+                               "writes, MCP and tool approvals)")
+    headless.add_argument("--quiet", action="store_true", default=False,
+                          help="With -p: no progress on stderr")
+    headless.add_argument("--timeout", default=None, type=float, metavar="SECS",
+                          help="With -p: stop the run after SECS seconds (exit code 124)")
+    headless.add_argument("--continue", dest="continue_session", action="store_true",
+                          default=False,
+                          help="With -p: continue the workspace's last session instead of a new one")
+    headless.add_argument("--session", default=None, metavar="NAME",
+                          help="With -p: continue this saved session")
     settings_mod.add_arguments(parser)    # the saved settings' flags (settings.py)
     args = parser.parse_args()
-    if args.headless and not args.web:
-        parser.error("--headless needs the web UI; drop --no-web")
+    if args.headless:
+        print("note: --headless is now --web-only (momo -p runs headless)", file=sys.stderr)
+        args.web_only = True
+    one_shot = args.prompt is not None
+    if not one_shot:
+        given_only = [flag for flag, on in (("--yes", args.yes), ("--quiet", args.quiet),
+                                            ("--timeout", args.timeout is not None),
+                                            ("--continue", args.continue_session),
+                                            ("--session", args.session is not None)) if on]
+        if given_only:
+            parser.error(f"{', '.join(given_only)} only applies with -p/--prompt")
+    else:
+        if args.web_only:
+            parser.error("-p runs without any UI; drop --web-only")
+        if args.continue_session and args.session:
+            parser.error("--continue and --session both pick a session; use one")
+        if args.fresh and (args.continue_session or args.session):
+            parser.error("--fresh contradicts --continue/--session")
+        if args.timeout is not None and args.timeout <= 0:
+            parser.error("--timeout: expected a positive number of seconds")
+    if args.web_only and not args.web:
+        parser.error("--web-only needs the web UI; drop --no-web")
     if args.web_tls == "auto" and args.web_cert:
         parser.error("--web-tls auto makes its own certificate; drop --web-cert or --web-tls auto")
     if args.web_key and not args.web_cert:
@@ -109,7 +155,19 @@ def main():
         sys.exit(1)
     # What to reopen: the last session in its workspace, or with --workspace that
     # workspace's last session (session.restore_target); --fresh reopens nothing.
-    last, remembered = (None, None) if args.fresh else session_mod.restore_target(given)
+    # A -p run starts a new session unless --continue or --session says otherwise.
+    if one_shot:
+        prompt = _headless_prompt(args.prompt, parser)
+        if args.session:
+            last, remembered = session_mod.find_session(args.session), None
+            if last is None:
+                parser.error(f"--session: no saved session matches {args.session!r}")
+        elif args.continue_session:
+            last, remembered = session_mod.restore_target(given)
+        else:
+            last, remembered = None, None
+    else:
+        last, remembered = (None, None) if args.fresh else session_mod.restore_target(given)
     workdir = given or remembered or Path(".").resolve()
 
     if args.context is not None and args.context < 256:
@@ -146,6 +204,8 @@ def main():
     # Session-only by design: never saved, so a flag or the safe default.
     harness.net_access = args.net
     harness.net_confirm = args.net_confirm == "on"
+    if one_shot:    # nobody will answer questions (the system prompt says so too)
+        harness.unattended = "yes" if args.yes else "decline"
     harness.rebuild_system_prompt()     # the run_command schema depends on run_mode
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 
@@ -195,13 +255,24 @@ def main():
     if (mcp_note := harness.start_mcp([Path(p).expanduser() for p in args.mcp_config])):
         harness.event_queue.put(ChatEvent("system", mcp_note))
 
-    # One Controller drives the harness for every frontend (TUI and web).
-    controller = Controller(harness)
     if (guides_note := harness.guides_summary()):
         harness.event_queue.put(ChatEvent("system", guides_note))
     for tools_note in (harness.custom_tools.summary(), harness.workspace_tools.summary()):
         if tools_note:
             harness.event_queue.put(ChatEvent("system", tools_note))
+
+    if one_shot:    # no frontend, so no Controller, web server or curses
+        code = headless_mod.EXIT_ERROR
+        try:
+            code = headless_mod.run(harness, prompt, quiet=args.quiet, timeout=args.timeout)
+        finally:
+            harness.shutdown_index()
+            harness.shutdown_mcp()
+            harness.logger.close()
+        sys.exit(code)
+
+    # One Controller drives the harness for every frontend (TUI and web).
+    controller = Controller(harness)
 
     web = None
     web_notes: list[str] = []
@@ -238,13 +309,13 @@ def main():
                 harness.event_queue.put(ChatEvent("system", note))
         except OSError as e:
             msg = f"Web UI failed to start on {args.web_host}:{args.web_port}: {e}"
-            if args.headless:
+            if args.web_only:
                 print(f"error: {msg}", file=sys.stderr)
                 sys.exit(1)
             harness.event_queue.put(ChatEvent("system", msg))
 
     try:
-        if args.headless:
+        if args.web_only:
             # Treat SIGTERM (service managers, `kill`) like Ctrl+C so the session is saved.
             def _on_term(signum, frame):
                 raise KeyboardInterrupt
@@ -265,6 +336,56 @@ def main():
         harness.shutdown_index()
         harness.shutdown_mcp()
         harness.logger.close()
+
+
+# How long `momo -p TEXT` waits for piped stdin to deliver anything (data or EOF)
+# before it runs without it.  A non-TTY stdin that never closes (a CI runner, a
+# parent process holding the pipe open) would otherwise block the run forever.
+_STDIN_WAIT = 3.0
+
+
+def _stdin_to_attach() -> str | None:
+    """Piped stdin to attach to a -p TEXT prompt, or None.  Only a pipe or a
+    regular file is read (`cmd | momo -p`, `momo -p … < file`): a TTY is the
+    user's terminal, and a character device or socket is whatever the parent
+    left there."""
+    stdin = sys.stdin
+    if stdin is None:
+        return None
+    try:
+        mode = os.fstat(stdin.fileno()).st_mode
+    except (OSError, ValueError, AttributeError):
+        return None
+    if stat.S_ISREG(mode):
+        return stdin.read()
+    if not stat.S_ISFIFO(mode):
+        return None
+    ready, _, _ = select.select([stdin], [], [], _STDIN_WAIT)
+    if not ready:
+        print(f"note: nothing arrived on stdin within {_STDIN_WAIT:g} s, so it is not "
+              "attached (redirect it with `< file`, or use `-p -` to wait for it)",
+              file=sys.stderr, flush=True)
+        return None
+    return stdin.read()
+
+
+def _headless_prompt(text: str, parser: argparse.ArgumentParser) -> str:
+    """The -p prompt: TEXT, stdin for '-', or TEXT with piped stdin attached
+    (`pytest 2>&1 | momo -p "why does this fail?"`)."""
+    try:
+        if text == "-":
+            piped = sys.stdin.read() if sys.stdin is not None else ""
+            if not piped.strip():
+                parser.error("-p -: stdin is empty")
+            return piped
+        piped = _stdin_to_attach()
+    except (OSError, UnicodeDecodeError) as e:
+        parser.error(f"-p: could not read stdin: {e}")
+    if not text.strip() and not (piped or "").strip():
+        parser.error("-p: the prompt is empty")
+    if piped and piped.strip():
+        return attach_mod.compose(text, [{"name": "stdin", "text": piped}])
+    return text
 
 
 if __name__ == "__main__":

@@ -741,7 +741,7 @@ python momo-coding-harness.py --provider llamacpp --host http://localhost:8080</
 
   <section id="running" data-voice="running">
     <h2>Running against a backend</h2>
-    <p>Pick a backend with <code>--provider ollama</code> (default) or <code>--provider llamacpp</code>, then use the recipe for where your model runs. Add <code>--workdir ~/projects/myapp</code> to open a project, or <code>--headless</code> for the web UI only.</p>
+    <p>Pick a backend with <code>--provider ollama</code> (default) or <code>--provider llamacpp</code>, then use the recipe for where your model runs. Add <code>--workdir ~/projects/myapp</code> to open a project, or <code>--web-only</code> for the web UI only.</p>
 
     <div class="recipes">
       <div class="recipe">
@@ -822,6 +822,12 @@ ollama serve</code></pre></div>
       <li><strong>Server down?</strong> The status bar shows <code>offline</code>. momo checks again before every message, so just restart the server.</li>
       <li><strong>No context window detected?</strong> Set one with <code>--context 16384</code>.</li>
     </ul>
+
+    <h3 id="headless">Headless runs</h3>
+    <p><code>-p "&lt;prompt&gt;"</code> runs one prompt without any UI and exits, for scripts, CI and git hooks. The answer goes to <strong>stdout</strong>, progress goes to <strong>stderr</strong> (<code>--quiet</code> turns it off), and a pipe or file on stdin is attached to the prompt (<code>-p -</code> reads the prompt itself from stdin).</p>
+    <pre><code>pytest -x 2&gt;&amp;1 | momo -p "explain this failure"
+momo -p "fix the failing test" --mode coding --timeout 600</code></pre>
+    <p>Nobody is there to answer questions, so momo answers them itself. Confirmations answer <em>no</em> (<code>--yes</code> makes them answer yes), the model is told to decide on its own, and a plan is approved and runs. Each run is a new saved session: <code>--continue</code> or <code>--session NAME</code> picks one up again. Exit codes: <code>0</code> done, <code>1</code> error, <code>2</code> bad arguments, <code>3</code> plan stopped early, <code>124</code> timeout, <code>130</code> interrupted.</p>
   </section>
 
   <section id="requirements" data-voice="requirements">
@@ -1170,7 +1176,7 @@ ollama serve</code></pre></div>
 
   <section id="web" data-voice="web">
     <h2>Web UI</h2>
-    <p>It starts with the TUI at <code>http://127.0.0.1:8765</code>, reachable from this machine only. <code>--headless</code> runs it alone, <code>--no-web</code> turns it off. To open it from another device, see <a href="#security">Access &amp; security</a> and <a href="#https">HTTPS &amp; certificates</a>.</p>
+    <p>It starts with the TUI at <code>http://127.0.0.1:8765</code>, reachable from this machine only. <code>--web-only</code> runs it alone, <code>--no-web</code> turns it off. To open it from another device, see <a href="#security">Access &amp; security</a> and <a href="#https">HTTPS &amp; certificates</a>.</p>
     <p>The browser and terminal show the same session: answer the model in either. View options, such as hiding thinking, are per window.</p>
     <h3>What's in it</h3>
     <ul>
@@ -2155,7 +2161,7 @@ modified: shop/pricing.py
       <tr><td class="wrap">Other devices on your LAN, plain HTTP</td><td class="wrap"><code>--web-host 0.0.0.0</code></td><td>yes</td><td class="wrap"><strong>no</strong>: the token is visible on the network</td></tr>
       <tr><td class="wrap">A fully trusted network, no login</td><td class="wrap"><code>--web-host 0.0.0.0 --web-insecure</code></td><td><strong>none</strong></td><td class="wrap"><strong>no</strong>: anyone who can reach it controls momo</td></tr>
     </table></div>
-    <p>Add <code>--headless</code> or <code>--web-port</code> to any row. Without <code>--web-token</code>, each start makes a new token. The HTTPS rows are explained in <a href="#https">HTTPS &amp; certificates</a>.</p>
+    <p>Add <code>--web-only</code> or <code>--web-port</code> to any row. Without <code>--web-token</code>, each start makes a new token. The HTTPS rows are explained in <a href="#https">HTTPS &amp; certificates</a>.</p>
 
     <h3 id="protections">What protects it</h3>
     <ul>
@@ -2226,7 +2232,11 @@ modified: shop/pricing.py
       <tr><td><code>--web-tls auto</code></td><td>off</td><td class="wrap">HTTPS with momo's own certificate. See <a href="#https">HTTPS</a>.</td></tr>
       <tr><td><code>--web-cert</code> / <code>--web-key</code></td><td>—</td><td class="wrap">Serve HTTPS with your own certificate</td></tr>
       <tr><td><code>--web-insecure</code></td><td>off</td><td class="wrap">Plain HTTP with <strong>no</strong> token, even off loopback. Trusted networks only.</td></tr>
-      <tr><td><code>--headless</code></td><td>off</td><td class="wrap">Web UI only, with no terminal UI</td></tr>
+      <tr><td><code>--web-only</code></td><td>off</td><td class="wrap">Web UI only, with no terminal UI (old name: <code>--headless</code>)</td></tr>
+      <tr><td><code>-p</code> / <code>--prompt</code></td><td>—</td><td class="wrap">Run one prompt without any UI and exit. See <a href="#headless">Headless runs</a>.</td></tr>
+      <tr><td><code>--yes</code> / <code>--quiet</code></td><td>off</td><td class="wrap">With <code>-p</code>: confirmations answer yes / no progress on stderr</td></tr>
+      <tr><td><code>--timeout</code></td><td>—</td><td class="wrap">With <code>-p</code>: stop after this many seconds (exit 124)</td></tr>
+      <tr><td><code>--continue</code> / <code>--session</code></td><td>new session</td><td class="wrap">With <code>-p</code>: continue the workspace's last session, or a named one</td></tr>
       <tr><td><code>--no-index</code></td><td>index on</td><td class="wrap">Start with the code index off</td></tr>
       <tr><td><code>--net</code></td><td><code>off</code></td><td class="wrap"><code>off</code>, <code>on</code> or <code>local</code> at startup</td></tr>
       <tr><td><code>--mcp</code> / <code>--no-mcp</code></td><td>last used / on</td><td class="wrap">Start the configured <a href="#mcp">MCP servers</a></td></tr>
@@ -2305,7 +2315,7 @@ HTTPS: trust momo's local CA once per device — ~/.momo-harness/tls/momo-ca.pem
       <li><strong>The key must not have a password.</strong> Leave out <code>--web-key</code> if the key is inside the certificate file.</li>
       <li><strong>You handle renewal.</strong> Replace the files and restart momo.</li>
     </ul>
-    <p>A certificate that can't be loaded stops the web UI at startup with <code>Web UI failed to start …</code> (with <code>--headless</code>, momo exits). <code>--web-cert</code> can't be combined with <code>--web-tls auto</code>.</p>
+    <p>A certificate that can't be loaded stops the web UI at startup with <code>Web UI failed to start …</code> (with <code>--web-only</code>, momo exits). <code>--web-cert</code> can't be combined with <code>--web-tls auto</code>.</p>
 
     <h3 id="tls-self">Making a self-signed certificate</h3>
     <p>If you'd rather not use momo's CA, you can make a single self-signed certificate with <code>openssl</code>. Replace the names and IP with the ones you use:</p>
@@ -2700,7 +2710,7 @@ const SPEECH = {
   docs: ["< the fine print, purrr", "< reference time!", "< pick a section~", "< readme, but prettier"],
   start: [
     "< python 3.14 please!", "< jinja templates on? good", "< pip install -r ...",
-    "< web ui on port 8765", "< --headless for web only",
+    "< web ui on port 8765", "< --web-only for web only",
     "< tokens never touch disk", "< --mode design is default",
   ],
   requirements: [
@@ -2790,7 +2800,7 @@ const SPEECH = {
   "system-prompt": [
     "< banner first, rules last", "< /prompt shows it all", "< never a tool you can't call",
   ],
-  flags: ["< --fresh for a clean slate", "< --headless, no tui", "< --net on, if you trust it"],
+  flags: ["< --fresh for a clean slate", "< --web-only, no tui", "< --net on, if you trust it"],
   api: ["< curl me!", "< /api/events streams~", "< bearer token from afar"],
   net: [
     "< off by default!", "< /net local for the lan", "< 127.1 is still blocked",
