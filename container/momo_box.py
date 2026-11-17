@@ -232,6 +232,42 @@ def llm_hint(url: str, runtime: str, system: str | None = None) -> str:
     return f"Check that the server is running on this machine at port {parts.port}."
 
 
+_PROBE = {"ollama": "/api/tags", "llamacpp": "/v1/models"}
+
+
+def _probe(url: str, path: str, timeout: float) -> int | str:
+    """The HTTP status the server answers `path` with, or why nothing answered."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # never via a proxy
+    try:
+        with opener.open(url.rstrip("/") + path, timeout=timeout) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except (OSError, ValueError) as e:
+        return str(getattr(e, "reason", e))
+
+
+def llm_preflight(url: str, provider: str, *, defaulted: bool,
+                  timeout: float = 3.0) -> str | None:
+    """None when the model server answers like `provider`; else a warning that
+    says what is wrong and which flags fix it.  Asked from this machine, before
+    the box is built: the box reaches the same server through the gateway.
+    `defaulted`: neither --llm nor --provider was given (a lost line of a
+    multi-line command, for one)."""
+    flags = ("; pass --llm URL --provider ollama|llamacpp" if defaulted else "")
+    what = f"{provider} at {url}" + (" (the default: no --llm/--provider given)" if defaulted else "")
+    got = _probe(url, _PROBE[provider], timeout)
+    if got == 200:
+        return None
+    if isinstance(got, str):
+        return f"nothing answers at {url} ({got}): the box expects {what}{flags}."
+    other = "llamacpp" if provider == "ollama" else "ollama"
+    if got == 404 and _probe(url, _PROBE[other], timeout) == 200:
+        return (f"{url} answers like {other}, not {provider}: pass --provider {other} "
+                "(the gateway lets only the provider's own requests through).")
+    return None     # it answered (401, 500…): momo reports the details itself
+
+
 class Engine:
     """Thin wrapper over the docker / podman CLI (same syntax for what we use)."""
 
@@ -635,9 +671,25 @@ def _local_ref(line: str) -> str:
     return line[len("localhost/"):] if line.startswith("localhost/") else line
 
 
+def check_builder(eng: Engine):
+    """The Dockerfile keeps its offline steps offline with `RUN --network=none`,
+    which Docker's legacy builder refuses ("requires BuildKit") halfway through a
+    build: say so before starting.  Podman's builder (buildah) supports it."""
+    if eng.rt != "docker" or eng.dry_run:
+        return
+    if os.environ.get("DOCKER_BUILDKIT") == "0":
+        raise BoxError("DOCKER_BUILDKIT=0 selects Docker's legacy builder, which can't build "
+                       "the momo-box image (it needs BuildKit for RUN --network=none); unset it")
+    if not eng.ok("buildx", "version"):
+        raise BoxError("Docker's BuildKit plugin (buildx) is missing; the momo-box image needs "
+                       "it (RUN --network=none). Install it (Debian/Ubuntu: docker-buildx-plugin "
+                       "or docker-buildx; Docker Desktop has it) or use Podman (--runtime podman)")
+
+
 def build_image(eng: Engine, res: detect.Resolved, tree, tag: str, *, pull: bool = False,
                 with_extras: bool = True) -> str:
     """Build `tag`: [devcontainer Dockerfile →] base + momo overlay [→ project Dockerfile]."""
+    check_builder(eng)
     base = qualify_image(res.base) if eng.rt == "podman" else res.base
     with tempfile.TemporaryDirectory(prefix="momo-box-ctx-") as tmp:
         ctx = Path(tmp) / "ctx"
@@ -832,7 +884,7 @@ class Box:
 
     def momo_argv(self) -> list[str]:
         """`run` for momo itself."""
-        argv = ["run", "--name", self.container, "--hostname", "momo-box",
+        argv = ["run", "--pull=never", "--name", self.container, "--hostname", "momo-box",
                 "--label", "momo-box=1", "--label", f"momo-box.name={self.name}",
                 "--stop-timeout", "30", *self._hardening(), *self._volumes()]
         _, add_host = self.llm_in_box()
@@ -858,7 +910,7 @@ class Box:
         is the gateway for a prefetch only: no model server, no web UI."""
         proxy = self.net == "pull" if proxy is None else proxy
         host, port, _alias = self.llm_target()
-        argv = ["run", "-d", "--name", self.gw, "--label", "momo-box=1",
+        argv = ["run", "--pull=never", "-d", "--name", self.gw, "--label", "momo-box=1",
                 "--label", f"momo-box.name={self.name}", *self._hardening(),
                 # non-root, no capabilities: an https alias listens on the server's own port
                 "--sysctl", "net.ipv4.ip_unprivileged_port_start=0",
@@ -913,7 +965,8 @@ class Box:
             env["MOMO_REF_NAME"] = self.ref_name
         if force:
             env["MOMO_PREPARE_FORCE"] = "1"
-        argv = ["run", "--rm", "--name", f"momo-{self.name}-prepare", "--label", "momo-box=1",
+        argv = ["run", "--pull=never", "--rm", "--name", f"momo-{self.name}-prepare",
+                "--label", "momo-box=1",
                 *self._hardening(), *self._volumes(), *network]
         for k, v in sorted(env.items()):
             argv += ["-e", f"{k}={v}"]
@@ -1169,6 +1222,12 @@ def setup_box(args, ui: str) -> tuple[Engine, Box, Source, detect.Resolved, bool
     eng = _engine(args)
     if args.name and not _NAME_RE.match(args.name):
         raise BoxError(f"--name: {_NAME_HELP}")
+    if not eng.dry_run:     # seconds now rather than a box that can't think, after the build
+        provider = args.provider or "ollama"
+        note = llm_preflight(args.llm or _DEFAULT_LLM[provider], provider,
+                             defaulted=args.llm is None and args.provider is None)
+        if note:
+            say(f"warning: {note}")
     provisional = args.name or "box"
     src = resolve_source(args.repo, args.ref, args.empty, args.land_repo, provisional)
     name = args.name or _auto_name(src)
@@ -2278,6 +2337,9 @@ def cmd_prepare(args) -> int:
     check_approval(res, args.yes)
     net = meta.get("net") if meta.get("net") in ("open", "pull", "locked") else "open"
     gated = net in ("pull", "locked")
+    if not eng.dry_run and not eng.ok("image", "inspect", meta["image"]):
+        raise BoxError(f"box {args.name}'s image {meta['image']} is gone (a newer build of the "
+                       f"project replaced it); `momo-box start {args.name}` rebuilds it")
     box = Box(name=args.name, ui="prompt", net=net, image=meta["image"],
               gw_image=default_image(eng) if gated else "",
               runtime=eng.rt, llm="http://localhost:1", provider="ollama",
@@ -2402,7 +2464,9 @@ def _box_flags(p: argparse.ArgumentParser):
                    help="Inference server as seen from this machine (default by provider)")
     p.add_argument("--provider", choices=("ollama", "llamacpp"), default=None)
     p.add_argument("--model", default=None)
-    p.add_argument("--image", default=None, help="Use this image instead of building one")
+    p.add_argument("--image", default=None,
+                   help="Use this local image instead of building one (pull it yourself "
+                        "first: momo-box never pulls the image it runs)")
     p.add_argument("--pull", action="store_true", help="Refresh the base image")
     p.add_argument("--no-prepare", action="store_true", help="Skip the dependency prefetch")
     p.add_argument("--memory", default=None, help="Memory limit, e.g. 8g (low-memory mode: 1g)")

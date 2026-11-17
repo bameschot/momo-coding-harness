@@ -205,6 +205,34 @@ class Detection(TmpDir):
         with self.assertRaisesRegex(detect.ConfigError, "not in the repo"):
             self.resolve({".momo/box.json": '{"dockerfile": ".momo/nope.Dockerfile"}'})
 
+    def test_package_names_are_names_not_options(self):
+        """A '-' name would be a package-manager option (--allow-unauthenticated)."""
+        for bad in ('["--allow-unauthenticated", "foo"]', '["-o", "APT::Get::x=1"]', '["*"]',
+                    '["a;rm"]', '["$(id)"]', '[""]', '"cmake --force-yes"'):
+            with self.subTest(bad=bad), self.assertRaisesRegex(detect.ConfigError,
+                                                                "not a package name"):
+                self.resolve({".momo/box.json": f'{{"packages": {bad}}}'})
+        with self.assertRaisesRegex(detect.ConfigError, "--packages: not a package name"):
+            self.resolve({}, packages=["--allow-downgrades"])
+        ok = self.resolve({".momo/box.json": '{"packages": ["cmake=3.25.1-1", "libc6:arm64", '
+                                             '"g++", "libfoo1.2~rc"]}'})
+        self.assertEqual(ok.packages, ["cmake=3.25.1-1", "libc6:arm64", "g++", "libfoo1.2~rc"])
+        for kind, table in PRESETS["presets"].items():                  # our own lists pass
+            detect.check_packages(table.get("packages", []) + table.get("debian", []), kind)
+
+    def test_pkg_install_refuses_options(self):
+        script = REPO / "container" / "pkg-install.sh"
+        for bad in ("--allow-unauthenticated", "-y", "a b", "*", ""):
+            r = subprocess.run(["/bin/sh", str(script), "git", bad], capture_output=True, text=True,
+                               env={"PATH": "/nonexistent"})      # never reaches a package manager
+            self.assertEqual(r.returncode, 1, bad)
+            self.assertIn("not a package name", r.stderr, bad)
+        r = subprocess.run(["/bin/sh", str(script), "git", "cmake=3.25.1-1"], capture_output=True,
+                           text=True, env={"PATH": "/nonexistent"})
+        self.assertIn("no known package manager", r.stderr)            # names passed the check
+        self.assertIn("set -f; sh /usr/local/bin/momo-pkg-install",
+                      (REPO / "container" / "Dockerfile").read_text())
+
     def test_flags_beat_box_json(self):
         r = self.resolve({".momo/box.json": '{"base": "x:1"}'}, preset="rust")
         self.assertEqual((r.source, r.base), ("flags", "rust:1-slim-bookworm"))
@@ -1183,13 +1211,72 @@ class ExistingBox(TmpDir):
 
     def test_a_running_box_is_not_set_up_again(self):
         a = self.repo(self.tmp / "a", {"README.md": "a"})
-        eng = SimpleNamespace(ok=lambda *a: True, running=lambda c: c == "momo-x", rt="docker")
+        eng = SimpleNamespace(ok=lambda *a: True, running=lambda c: c == "momo-x", rt="docker",
+                              dry_run=True)
         args = SimpleNamespace(name="x", repo=str(a), ref=None, empty=False, land_repo=None)
         with mock.patch.object(momo_box, "_engine", lambda a: eng), \
                 mock.patch.object(momo_box, "check_same_source") as check:
             with self.assertRaisesRegex(momo_box.BoxError, "box x is running"):
                 momo_box.setup_box(args, "prompt")       # run --name x on a live web box
         check.assert_not_called()
+
+    def _model_server(self, routes: dict[str, int]) -> str:
+        """A local HTTP server answering each path with its status (404 otherwise)."""
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(routes.get(self.path, 404))
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return f"http://localhost:{srv.server_address[1]}"
+
+    def test_llm_preflight(self):
+        f = momo_box.llm_preflight
+        llama = self._model_server({"/v1/models": 200, "/health": 200})
+        ollama = self._model_server({"/api/tags": 200, "/v1/models": 200})
+        broken = self._model_server({"/v1/models": 500})
+        self.assertIsNone(f(llama, "llamacpp", defaulted=False))
+        self.assertIsNone(f(ollama, "ollama", defaulted=False))
+        self.assertIsNone(f(broken, "llamacpp", defaulted=False))       # it answered
+        wrong = f(llama, "ollama", defaulted=False)
+        self.assertIn("answers like llamacpp", wrong)
+        self.assertIn("--provider llamacpp", wrong)
+        with socket.socket() as s:                                   # a port nobody listens on
+            s.bind(("127.0.0.1", 0))
+            closed = f"http://localhost:{s.getsockname()[1]}"
+        lost = f(closed, "ollama", defaulted=True)                  # the user's lost flags
+        self.assertIn(f"nothing answers at {closed}", lost)
+        self.assertIn("the default: no --llm/--provider given", lost)
+        self.assertIn("pass --llm URL --provider ollama|llamacpp", lost)
+        self.assertNotIn("the default", f(closed, "llamacpp", defaulted=False))
+
+    def test_setup_warns_before_building(self):
+        """The check runs first: a build takes minutes, a wrong server shows in seconds."""
+        order = []
+        eng = SimpleNamespace(dry_run=False, rt="docker")
+        args = SimpleNamespace(name="x", llm=None, provider=None, repo=".", ref=None,
+                               empty=False, land_repo=None)
+        with mock.patch.object(momo_box, "_engine", lambda a: eng), \
+                mock.patch.object(momo_box, "llm_preflight",
+                                  lambda url, p, defaulted: order.append(("probe", url, p,
+                                                                          defaulted)) or "x"), \
+                mock.patch.object(momo_box, "say", lambda m: order.append(("say", m))), \
+                mock.patch.object(momo_box, "resolve_source",
+                                  side_effect=lambda *a: (order.append(("source",)),
+                                                          (_ for _ in ()).throw(RuntimeError()))):
+            with self.assertRaises(RuntimeError):
+                momo_box.setup_box(args, "web")
+        self.assertEqual(order, [("probe", "http://localhost:11434", "ollama", True),
+                                 ("say", "warning: x"), ("source",)])
 
     def test_the_record_keeps_what_a_kept_box_was_given(self):
         land = self.repo(self.tmp / "land", {"README.md": "l"})
@@ -1240,7 +1327,9 @@ class ExistingBox(TmpDir):
                 "args": {"preset": "gradle", "base": None, "packages": None, "full_base": True,
                          "ref": "old"}}
         seen = {}
-        eng = SimpleNamespace(running=lambda c: False, dry_run=False, rt="docker")
+        images = {"img"}
+        eng = SimpleNamespace(running=lambda c: False, dry_run=False, rt="docker",
+                              ok=lambda *a: a[:2] == ("image", "inspect") and a[2] in images)
 
         def resolve(args, tree):
             seen["flags"] = (args.preset, args.full_base)
@@ -1259,7 +1348,47 @@ class ExistingBox(TmpDir):
                 mock.patch.object(momo_box, "check_approval"), \
                 mock.patch.object(momo_box, "say"):
             self.assertEqual(momo_box.cmd_prepare(args), 0)
-        self.assertEqual(seen, {"flags": ("gradle", True), "ref": None, "pinned": "a" * 40})
+            self.assertEqual(seen, {"flags": ("gradle", True), "ref": None, "pinned": "a" * 40})
+            # The saved image was pruned: refuse, never let the engine look for it elsewhere
+            # (momo-box/<project> is a namespace anyone can register on Docker Hub).
+            images.clear()
+            with self.assertRaisesRegex(momo_box.BoxError, "image img is gone.*momo-box start x"):
+                momo_box.cmd_prepare(args)
+
+    def test_docker_needs_buildkit_before_building(self):
+        class Eng:
+            dry_run = False
+
+            def __init__(self, rt, buildx):
+                self.rt, self.buildx, self.calls = rt, buildx, []
+
+            def ok(self, *args):
+                return args == ("buildx", "version") and self.buildx
+
+            def run(self, *args, **kw):
+                self.calls.append(args)
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        res = detect.Resolved(source="default", base="debian:bookworm-slim")
+        with mock.patch.object(momo_box, "say"), mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DOCKER_BUILDKIT", None)
+            no = Eng("docker", False)
+            with self.assertRaisesRegex(momo_box.BoxError, "buildx"):
+                momo_box.build_image(no, res, None, "momo-harness:abc")
+            self.assertEqual(no.calls, [])                                  # nothing started
+            momo_box.build_image(Eng("docker", True), res, None, "momo-harness:abc")
+            momo_box.build_image(Eng("podman", False), res, None, "momo-harness:abc")
+            os.environ["DOCKER_BUILDKIT"] = "0"
+            with self.assertRaisesRegex(momo_box.BoxError, "legacy builder"):
+                momo_box.build_image(Eng("docker", True), res, None, "momo-harness:abc")
+
+    def test_containers_start_only_from_local_images(self):
+        b = box(net="pull", status=Path("/cache/st"))
+        for argv in (b.momo_argv(), b.gw_argv(), b.prepare_argv(),
+                     box(ui="prompt", interactive=True).momo_argv()):
+            self.assertEqual(argv[0], "run")
+            self.assertIn("--pull=never", argv)
+            self.assertLess(argv.index("--pull=never"), argv.index(b.image if b.image in argv
+                                                                     else b.gw_image))
 
     def test_start_uses_the_saved_commit_not_the_saved_ref(self):
         with tempfile.TemporaryDirectory() as d, \
@@ -1324,6 +1453,9 @@ class Launcher(unittest.TestCase):
 
         def __init__(self, rt, images=b""):
             self.rt, self.images, self.calls = rt, images, []
+
+        def ok(self, *args):
+            return True
 
         def run(self, *args, **kw):
             self.calls.append(args)
@@ -2458,6 +2590,15 @@ class MomoPython(unittest.TestCase):
             self.assertNotIn(gone, self.dockerfile)
         self.assertIn("bundle-python.sh /usr/local /opt/momo/python", self.dockerfile)
         self.assertIn("GLIBC_FLOOR", self.dockerfile)                 # the smoke test names it
+
+    def test_only_the_package_managers_reach_the_network(self):
+        """Every RUN but the two package-manager steps is --network=none (F4)."""
+        runs = [ln for ln in self.dockerfile.splitlines() if ln.startswith("RUN ")]
+        online = [ln for ln in runs if not ln.startswith("RUN --network=none ")]
+        self.assertEqual(len(online), 2, online)
+        self.assertTrue(online[0].startswith("RUN apt-get update"), online)       # patchelf
+        self.assertIn("momo-pkg-install", online[1])
+        self.assertGreaterEqual(len(runs) - len(online), 6)
 
     def test_bundle_script_checks_its_work(self):
         script = (REPO / "container" / "bundle-python.sh").read_text()

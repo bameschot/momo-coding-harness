@@ -17,6 +17,9 @@ ARG PY_VERSION=3.14.10
 ARG PY_IMAGE=docker.io/library/python:3.14.10-slim-bookworm@sha256:3fe1a0b6c2d6b2ebb572906cdabeca75aeb558c0c17db5ffefbcf8094871c32b
 
 # ── stage 1: momo + a self-contained CPython ─────────────────────────────────
+# Only the two package-manager steps (patchelf here, momo-pkg-install in stage
+# 2) reach the network; every other RUN has --network=none, so the engine, not a
+# flag, keeps them offline (pip's --no-index included).
 FROM ${PY_IMAGE} AS momo-runtime
 ARG TARGETARCH
 ARG WITH_EXTRAS=1
@@ -24,14 +27,14 @@ RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends patchelf \
  && rm -rf /var/lib/apt/lists/*
 COPY container/bundle-python.sh /tmp/bundle-python.sh
-RUN sh /tmp/bundle-python.sh /usr/local /opt/momo/python
+RUN --network=none sh /tmp/bundle-python.sh /usr/local /opt/momo/python
 # The optional extras (tree-sitter grammars, pypdf) go into momo's own Python, from
 # the wheels committed in container/wheels/<arch>: no index is asked, and every file
 # must match its hash in requirements.lock (container/wheels/update.py refreshes
 # them).  A grammar with no wheel for this platform is left out there, and momo
 # runs without it.
 COPY container/wheels /tmp/wheels
-RUN set -eu; \
+RUN --network=none set -eu; \
     if [ "$WITH_EXTRAS" = "1" ]; then \
       arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
       [ -f "/tmp/wheels/$arch/requirements.lock" ] \
@@ -49,24 +52,25 @@ COPY search_sources /opt/momo/app/search_sources
 COPY container /opt/momo/app/container
 # The root filesystem is read-only at run time: compile now.
 # (the wheels were installed above: not shipped twice)
-RUN rm -rf /opt/momo/app/container/wheels \
+RUN --network=none rm -rf /opt/momo/app/container/wheels \
  && /opt/momo/python/bin/python3 -m compileall -q /opt/momo/app /opt/momo/python/lib >/dev/null || true
 
 # ── stage 2: the toolchain base + momo ───────────────────────────────────────
 FROM ${BASE}
 ARG PACKAGES=""
 USER root
-RUN if ls /lib/ld-musl-* >/dev/null 2>&1; then \
+RUN --network=none if ls /lib/ld-musl-* >/dev/null 2>&1; then \
       echo "momo-box: this base image uses musl (Alpine); use a glibc base (Debian, Ubuntu, Fedora…)" >&2; \
       exit 1; \
     fi
 COPY container/pkg-install.sh /usr/local/bin/momo-pkg-install
-RUN sh /usr/local/bin/momo-pkg-install git ca-certificates $PACKAGES
+# set -f: $PACKAGES is split into names but never glob-expanded.
+RUN set -f; sh /usr/local/bin/momo-pkg-install git ca-certificates $PACKAGES
 # uid 1000 runs momo: a new user `momo`, or the image's own uid-1000 user (node,
 # ubuntu, gradle…) with its home moved to /home/momo. The passwd entry matters, not
 # just $HOME: Java takes user.home from it (Maven's ~/.m2, Gradle's ~/.gradle), and
 # the rest of the root filesystem is read-only at run time.
-RUN set -eu; \
+RUN --network=none set -eu; \
     if u="$(getent passwd 1000 | cut -d: -f1)" && [ -n "$u" ]; then \
       usermod -d /home/momo "$u" 2>/dev/null \
         || sed -i "s#^\($u:[^:]*:1000:[^:]*:[^:]*:\)[^:]*#\1/home/momo#" /etc/passwd; \
@@ -80,7 +84,7 @@ COPY --from=momo-runtime /opt/momo /opt/momo
 # /usr/lib/ssl, which only Debian and Ubuntu have; elsewhere point it at /etc/ssl.
 # Then a smoke test: the bundled Python needs at least the glibc in
 # /opt/momo/python/GLIBC_FLOOR (bundle-python.sh measured it).
-RUN [ -e /usr/lib/ssl ] || ln -s /etc/ssl /usr/lib/ssl; \
+RUN --network=none [ -e /usr/lib/ssl ] || ln -s /etc/ssl /usr/lib/ssl; \
     /opt/momo/python/bin/python3 -S -c 'import ssl, sqlite3, ctypes, lzma, bz2, zlib, json, hashlib; ssl.create_default_context()' \
       || { echo "momo-box: momo's Python needs glibc $(cat /opt/momo/python/GLIBC_FLOOR) or newer and does not run on this base image ($(ldd --version 2>&1 | head -1)); pick a newer base" >&2; exit 1; }
 ENV HOME=/home/momo

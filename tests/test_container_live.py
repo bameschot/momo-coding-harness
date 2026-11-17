@@ -45,6 +45,23 @@ def _engine() -> str | None:
 ENGINE = _engine() if os.environ.get("MOMO_BOX_LIVE") == "1" else None
 
 
+def _docker_connection() -> dict:
+    """The scratch HOME below hides ~/.docker too: the CLI would lose Docker
+    Desktop's context (and fall back to /var/run/docker.sock) and its buildx
+    plugin (and fall back to the legacy builder).  Keep both."""
+    if not ENGINE or os.path.basename(ENGINE) != "docker":
+        return {}
+    env = {}
+    if not os.environ.get("DOCKER_HOST"):
+        r = subprocess.run([ENGINE, "context", "inspect", "--format",
+                            "{{.Endpoints.docker.Host}}"], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            env["DOCKER_HOST"] = r.stdout.strip()
+    if not os.environ.get("DOCKER_CONFIG"):
+        env["DOCKER_CONFIG"] = os.path.expanduser("~/.docker")
+    return env
+
+
 def _podman_connection() -> dict:
     """Podman finds its machine through ~/.config/containers, which the scratch
     HOME below hides: hand the default connection over as CONTAINER_HOST."""
@@ -122,6 +139,7 @@ class LiveBox(unittest.TestCase):
                    "XDG_CACHE_HOME": str(cls.tmp / "cache"),
                    "PATH": f"{os.path.dirname(ENGINE)}:{os.environ.get('PATH', '')}"}
         cls.env.update(_podman_connection())
+        cls.env.update(_docker_connection())
         (cls.tmp / "home").mkdir()
         cls.src = cls.tmp / "src"
         cls.src.mkdir()

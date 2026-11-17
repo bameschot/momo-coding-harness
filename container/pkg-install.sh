@@ -3,6 +3,15 @@
 # Used by container/Dockerfile: momo-pkg-install git ca-certificates cmake …
 set -eu
 [ "$#" -gt 0 ] || exit 0
+# Names only: an argument starting with '-' would be an option to the package
+# manager (detect.py checks this too; this is the last line of defence).
+for name in "$@"; do
+    case "$name" in
+        -*|*[!A-Za-z0-9.+_:~=-]*|'')
+            echo "momo-box: not a package name: '$name'" >&2
+            exit 1 ;;
+    esac
+done
 if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq

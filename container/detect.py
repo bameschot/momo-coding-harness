@@ -355,6 +355,21 @@ def _strip_jsonc(text: str) -> str:
     return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
 
 
+# A system package name, optionally with an apt version or architecture
+# (`cmake=3.25.1-1`, `libc6:arm64`).  Names go to the package manager as
+# arguments: one that starts with '-' would be an option (`--allow-unauthenticated`
+# turns off apt's signature check), and shell characters would be expanded.
+_PACKAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_:~=-]*")
+
+
+def check_packages(names: list[str], where: str) -> list[str]:
+    bad = [n for n in names if not _PACKAGE_RE.fullmatch(n) or len(n) > 200]
+    if bad:
+        raise ConfigError(f"{where}: not a package name: {', '.join(repr(n[:60]) for n in bad)} "
+                          "(letters, digits and . + _ : ~ = -, not starting with '-')")
+    return names
+
+
 def _str_list(cfg: dict, key: str) -> list[str]:
     v = cfg.get(key, [])
     if isinstance(v, str):
@@ -385,6 +400,8 @@ def load_box_json(tree) -> tuple[dict | None, str]:
     for key in ("packages", "prepare", "prepare_inputs", "pull_hosts"):
         if key in cfg:
             cfg[key] = _str_list(cfg, key)
+    if "packages" in cfg:
+        check_packages(cfg["packages"], f"{BOX_JSON} packages")
     if "full_base" in cfg and not isinstance(cfg["full_base"], bool):
         raise ConfigError(f"{BOX_JSON}: 'full_base' must be true or false")
     env = cfg.get("env", {})
@@ -719,8 +736,10 @@ def resolve(tree, presets: dict | None = None, *, preset: str | None = None,
     """The box's toolchain for this tree (see the module docstring for the order),
     with the repo's network rules, which apply whatever the toolchain source is."""
     presets = presets or load_presets()
+    check_packages(packages or [], "--packages")
     res = _resolve(tree, presets, preset=preset, base=base, packages=packages,
                    full_base=full_base)
+    check_packages(res.packages, "the box's packages")      # presets included: one rule
     rules, raw = load_network_json(tree, presets)
     if rules is not None:
         res.network = rules
