@@ -172,16 +172,19 @@ function node(svg, { x, y, w, hgt, cls, title, lines, state }) {
 // An edge is a straight line or, with `via`, a route of horizontal and
 // vertical segments through the gaps between nodes: [x, y] corner points.
 // Every corner is a right angle and no segment crosses a node.
-function edge(svg, { x1, y1, x2, y2, via = [], cls = "", label, lx, ly, blocked }) {
+// `tone`: "restricted" (orange: only some of the outside) or "off" (red, dashed;
+// with `cross`, a ✕: no way out at all).
+function edge(svg, { x1, y1, x2, y2, via = [], cls = "", label, lx, ly, tone, cross = true }) {
   const pts = [[x1, y1], ...via, [x2, y2]];
   for (let i = 1; i < pts.length; i++) {
     const [ax, ay] = pts[i - 1], [bx, by] = pts[i];
     if (ax !== bx && ay !== by) console.warn(`setup diagram: diagonal segment ${ax},${ay} → ${bx},${by}`);
   }
-  svg.append(s("path", { class: `${blocked ? "blocked" : `link ${cls}`}`, fill: "none",
+  const off = tone === "off";
+  svg.append(s("path", { class: off ? "blocked" : `link ${cls}${tone ? ` ${tone}` : ""}`, fill: "none",
                          d: "M" + pts.map(([x, y]) => `${x} ${y}`).join(" L"),
-                         "marker-end": blocked ? null : "url(#su-arrow)" }));
-  if (blocked) svg.append(s("text", { class: "x", x: (x1 + x2) / 2, y: (y1 + y2) / 2 + 5 }, "✕"));
+                         "marker-end": `url(#su-arrow${tone ? `-${tone}` : ""})` }));
+  if (off && cross) svg.append(s("text", { class: "x", x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 6 }, "✕"));
   if (label) svg.append(s("text", { class: "sub", x: lx ?? (x1 + x2) / 2, y: ly ?? (y1 + y2) / 2 - 7 }, label));
 }
 
@@ -197,6 +200,12 @@ function svgRoot(height, label) {
                          markerHeight: 7, orient: "auto-start-reverse" });
   m.append(s("path", { class: "ah", d: "M0 0 10 5 0 10z" }));
   defs.append(m);
+  for (const tone of ["restricted", "off"]) {        // a marker can't take its line's colour
+    const t = s("marker", { id: `su-arrow-${tone}`, viewBox: "0 0 10 10", refX: 9, refY: 5,
+                            markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" });
+    t.append(s("path", { class: `ah ah-${tone}`, d: "M0 0 10 5 0 10z" }));
+    defs.append(t);
+  }
   svg.append(defs);
   return svg;
 }
@@ -258,8 +267,10 @@ function localDiagram(v, now) {
     `web tools: ${net}`, "shell commands: any host",
     (v.network?.recent || []).length ? `${v.network.recent.length} host(s) fetched` : "",
   ] });
-  edge(svg, { x1: 300, y1: 188, via: [[300, 201], [653, 201]], x2: 653, y2: 212,
-    cls: net === "off" ? "ext dash" : "ext",
+  // /net: off is red, but without a ✕: momo isn't isolated, shell commands still go
+  // anywhere; on (public sites only) is orange; local (also the LAN) stays grey.
+  edge(svg, { x1: 300, y1: 188, via: [[300, 201], [653, 201]], x2: 653, y2: 212, cls: "ext",
+    tone: net === "off" ? "off" : net === "on" ? "restricted" : undefined, cross: false,
     label: net === "off" ? "commands only" : "web tools + commands", lx: 440, ly: 218 });
   return svg;
 }
@@ -314,7 +325,9 @@ function boxDiagram(v, now) {
         `${rules.filter((r) => r.kind === "!").length} denied on purpose`,
         `${b.recent_denied || 0} refused, last 10 min`,
       ] : ["nothing: locked", "deps came from prepare"] });
-    edge(svg, { x1: 508, y1: 268, x2: 554, y2: 268, cls: "ext", blocked: mode !== "pull" });
+    // the way out: orange through the allowlist (pull), red when there is none (locked)
+    edge(svg, { x1: 508, y1: 268, x2: 554, y2: 268, cls: "ext",
+                tone: mode === "pull" ? "restricted" : "off" });
     // the model server
     if (near) {
       node(svg, { x: 24, y: 214, w: 196, hgt: 108, cls: "box-c", title: m.provider || "model", state: mState,

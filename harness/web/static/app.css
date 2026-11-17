@@ -18,6 +18,7 @@
   --think:      light-dark(#c0610a, #f09a4a);
   --ok:         light-dark(#1f8a3a, #5fce7a);
   --warn:       light-dark(#b07900, #e2b640);
+  --restricted: light-dark(#c0610a, #f09a4a);   /* a way out through an allowlist */
   --danger:     light-dark(#c62f2f, #f06b6b);
   --add:        light-dark(#1f8a3a, #6fdc8c);
   --add-bg:     light-dark(#e6f4ea, #14301d);
@@ -1054,7 +1055,9 @@ mark.find-hit.current { background: var(--warn); color: var(--surface); }
 .su-topo .link.dash { stroke-dasharray: 5 3; }
 .su-topo .link.st-warn { stroke: var(--warn); } .su-topo .link.st-bad { stroke: var(--danger); }
 .su-topo .ah { fill: var(--muted); }
-.su-topo .blocked { stroke: var(--danger); stroke-width: 1.5; stroke-dasharray: 3 3; fill: none; }
+.su-topo .link.restricted { stroke: var(--restricted); stroke-width: 2; }
+.su-topo .ah-restricted { fill: var(--restricted); } .su-topo .ah-off { fill: var(--danger); }
+.su-topo .blocked { stroke: var(--danger); stroke-width: 2; stroke-dasharray: 3 3; fill: none; }
 .su-topo .x { fill: var(--danger); font: 700 14px var(--sans); text-anchor: middle; }
 .su-topo .sub { fill: var(--muted); font-size: 11px; text-anchor: middle; }
 .su-topo circle.st { fill: var(--muted); stroke: var(--surface); stroke-width: 1.5; }
