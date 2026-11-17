@@ -238,6 +238,8 @@ class BoxStatus:
             if key == self._key:
                 return self._data
         data = {}
+        with self._lock:
+            before = self._data
         for name in BOX_FILES:
             path = self.folder / f"{name}.json"
             try:
@@ -245,6 +247,11 @@ class BoxStatus:
                     continue
                 got = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError, UnicodeDecodeError):
+                # The host replaces these files whole; on Podman's macOS file
+                # sharing a replaced file is missing for a few seconds.  Keep what
+                # we had (sync.json's alive_ts still ages, so a dead syncer shows).
+                if name in before:
+                    data[name] = before[name]
                 continue
             if isinstance(got, dict) and got.get("schema") == SCHEMA:
                 data[name] = sanitize(got)

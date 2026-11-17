@@ -43,6 +43,25 @@ def _engine() -> str | None:
 
 
 ENGINE = _engine() if os.environ.get("MOMO_BOX_LIVE") == "1" else None
+
+
+def _podman_connection() -> dict:
+    """Podman finds its machine through ~/.config/containers, which the scratch
+    HOME below hides: hand the default connection over as CONTAINER_HOST."""
+    if not ENGINE or os.path.basename(ENGINE) != "podman" or os.environ.get("CONTAINER_HOST"):
+        return {}
+    r = subprocess.run([ENGINE, "system", "connection", "list", "--format", "json"],
+                       capture_output=True, text=True)
+    try:
+        conns = json.loads(r.stdout or "[]")
+    except ValueError:
+        return {}
+    for c in sorted(conns, key=lambda c: not c.get("Default")):
+        env = {"CONTAINER_HOST": c["URI"]}
+        if c.get("Identity"):
+            env["CONTAINER_SSHKEY"] = c["Identity"]
+        return env
+    return {}
 ANSWER = "stub-model-says-hello"
 
 
@@ -102,6 +121,7 @@ class LiveBox(unittest.TestCase):
         cls.env = {**os.environ, "HOME": str(cls.tmp / "home"),
                    "XDG_CACHE_HOME": str(cls.tmp / "cache"),
                    "PATH": f"{os.path.dirname(ENGINE)}:{os.environ.get('PATH', '')}"}
+        cls.env.update(_podman_connection())
         (cls.tmp / "home").mkdir()
         cls.src = cls.tmp / "src"
         cls.src.mkdir()
@@ -208,9 +228,15 @@ print("models=%s delete=%s" % (code("GET", "http://gw:9000/v1/models"),
         self.assertEqual(self.git("branch", "--show-current"), "main")       # checkout untouched
         self.assertEqual(self.git("status", "--porcelain"), "")
         # the Setup panel: host-written status, read-only inside the box
+        # (Podman's macOS file sharing hides a replaced file for a few seconds)
         ro = self.inside(name, '''
-import json
-print(json.load(open("/run/momo-box/setup.json"))["name"])
+import json, time
+for _ in range(60):
+    try:
+        print(json.load(open("/run/momo-box/setup.json"))["name"])
+        break
+    except OSError:
+        time.sleep(0.25)
 try:
     open("/run/momo-box/x", "w")
 except OSError as e:

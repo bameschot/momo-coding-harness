@@ -236,7 +236,13 @@ def safeguards(net: str, inspect: dict | None, internal: bool | None, *,
         "only /workspace, /home/momo and /tmp are writable")
     drop = [str(c).upper() for c in hc.get("CapDrop") or []]
     added = [str(c) for c in hc.get("CapAdd") or []]
-    add("cap-drop", ("ALL" in drop or "CAP_ALL" in drop) and not added, "no capabilities",
+    # Docker records `--cap-drop ALL` as ALL.  Podman lists each dropped capability
+    # and reports what is left in BoundingCaps (null: none); its EffectiveCaps is
+    # null for any non-root user, so it can't tell a partial drop from a full one.
+    none_left = "ALL" in drop or "CAP_ALL" in drop or (
+        "BoundingCaps" in inspect and not inspect.get("BoundingCaps")
+        and not inspect.get("EffectiveCaps"))
+    add("cap-drop", none_left and not added, "no capabilities",
         "all dropped" + (f", but added: {', '.join(added)}" if added else ""))
     sec = [str(o) for o in hc.get("SecurityOpt") or []]
     add("no-new-privileges", any(o.startswith("no-new-privileges") and not o.endswith("false")
@@ -415,7 +421,9 @@ def parse_mem_usage(text: str) -> dict | None:
 
 
 def docker_stats(lines: str) -> dict[str, dict]:
-    """`docker stats --no-stream --format '{{json .}}'` output → {name: {current, max}}."""
+    """`docker stats --no-stream --format '{{json .}}'` output → {name: {current, max}}.
+    Docker gives MemUsage as text ('19.57MiB / 1GiB'), Podman as bytes, with
+    MemLimit beside it."""
     out = {}
     for line in lines.splitlines():
         try:
@@ -423,7 +431,12 @@ def docker_stats(lines: str) -> dict[str, dict]:
         except ValueError:
             continue
         if isinstance(row, dict) and isinstance(row.get("Name"), str):
-            mem = parse_mem_usage(row.get("MemUsage", ""))
+            used, limit = row.get("MemUsage", ""), row.get("MemLimit")
+            if isinstance(used, (int, float)) and not isinstance(used, bool) and used >= 0:
+                ok = isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0
+                mem = {"current": int(used), "max": int(limit) if ok else None}
+            else:
+                mem = parse_mem_usage(used)
             if mem is not None:
                 out[clean(row["Name"], 100)] = mem
     return out

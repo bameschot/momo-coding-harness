@@ -7,51 +7,40 @@
 # The launcher (container/momo_box.py) picks BASE and PACKAGES from the project
 # (.momo/box.json, devcontainer.json or detection) and builds this for you.
 #
-# momo lives entirely under /opt/momo with its own Python (python-build-standalone),
-# which is NOT on PATH: the model's run_command sees the base image's tools only.
-ARG BASE=debian:bookworm-slim
-
-# ── stage 1: momo + a relocatable CPython ────────────────────────────────────
-FROM debian:bookworm-slim AS momo-runtime
-ARG TARGETARCH
-ARG PBS_TAG=20261026
+# momo lives entirely under /opt/momo with its own Python, which is NOT on PATH: the
+# model's run_command sees the base image's tools only.  That Python is the
+# official image's (Docker Official Images, like the Debian base), pinned by
+# digest, made self-contained by container/bundle-python.sh: nothing is
+# downloaded for it.  `container/wheels/update.py --python-image` moves the pin.
+ARG BASE=docker.io/library/debian:bookworm-slim
 ARG PY_VERSION=3.14.10
-ARG PBS_SHA256_AMD64=4d3c16c59ed0802a3d1d34d8bce504b15ceeaff39d62dadecc6a9fa803412aed
-ARG PBS_SHA256_ARM64=90f48337bc3dd4ae6eda81e001e4c981236d403b6b5a07778bbdf94ee423dc00
+ARG PY_IMAGE=docker.io/library/python:3.14.10-slim-bookworm@sha256:3fe1a0b6c2d6b2ebb572906cdabeca75aeb558c0c17db5ffefbcf8094871c32b
+
+# ── stage 1: momo + a self-contained CPython ─────────────────────────────────
+FROM ${PY_IMAGE} AS momo-runtime
+ARG TARGETARCH
 ARG WITH_EXTRAS=1
 RUN apt-get update -qq \
- && apt-get install -y -qq --no-install-recommends ca-certificates curl \
+ && apt-get install -y -qq --no-install-recommends patchelf \
  && rm -rf /var/lib/apt/lists/*
+COPY container/bundle-python.sh /tmp/bundle-python.sh
+RUN sh /tmp/bundle-python.sh /usr/local /opt/momo/python
+# The optional extras (tree-sitter grammars, pypdf) go into momo's own Python, from
+# the wheels committed in container/wheels/<arch>: no index is asked, and every file
+# must match its hash in requirements.lock (container/wheels/update.py refreshes
+# them).  A grammar with no wheel for this platform is left out there, and momo
+# runs without it.
+COPY container/wheels /tmp/wheels
 RUN set -eu; \
-    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
-    case "$arch" in \
-      amd64) triple=x86_64-unknown-linux-gnu;  sum="$PBS_SHA256_AMD64" ;; \
-      arm64) triple=aarch64-unknown-linux-gnu; sum="$PBS_SHA256_ARM64" ;; \
-      *) echo "momo-box: unsupported architecture $arch" >&2; exit 1 ;; \
-    esac; \
-    url="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/cpython-${PY_VERSION}+${PBS_TAG}-${triple}-install_only_stripped.tar.gz"; \
-    curl -fsSL "$url" -o /tmp/python.tar.gz; \
-    echo "$sum  /tmp/python.tar.gz" | sha256sum -c -; \
-    mkdir -p /opt/momo; \
-    tar -xzf /tmp/python.tar.gz -C /opt/momo; \
-    rm /tmp/python.tar.gz
-COPY requirements.txt /opt/momo/app/requirements.txt
-# The optional extras (tree-sitter grammars, pypdf) go into momo's own Python.
-# Wheels only (no compiler here).  A grammar without a wheel for this platform
-# (e.g. tree-sitter-dockerfile on linux/arm64) is skipped and momo runs without it;
-# tree-sitter itself failing (no network, a broken index) fails the build.
-RUN if [ "$WITH_EXTRAS" = "1" ]; then \
-      pip="/opt/momo/python/bin/python3 -m pip install -q --no-cache-dir --disable-pip-version-check --only-binary :all:"; \
-      $pip -r /opt/momo/app/requirements.txt 2>/dev/null || { \
-        echo "momo-box: installing the extras one at a time" >&2; \
-        sed -e 's/#.*//' -e '/^[[:space:]]*$/d' /opt/momo/app/requirements.txt | while read -r req; do \
-          $pip "$req" || case "$req" in \
-            tree-sitter[!-]*|tree-sitter) echo "momo-box: tree-sitter could not be installed (see the error above)" >&2; exit 1 ;; \
-            *) echo "momo-box: optional $req skipped (no wheel for this platform)" >&2 ;; \
-          esac; \
-        done || exit 1; \
-      }; \
-    fi
+    if [ "$WITH_EXTRAS" = "1" ]; then \
+      arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+      [ -f "/tmp/wheels/$arch/requirements.lock" ] \
+        || { echo "momo-box: no vendored wheels for $arch (container/wheels/update.py)" >&2; exit 1; }; \
+      /opt/momo/python/bin/python3 -m pip install -q --no-cache-dir --disable-pip-version-check \
+        --no-index --find-links "/tmp/wheels/$arch" --only-binary :all: --require-hashes \
+        -r "/tmp/wheels/$arch/requirements.lock"; \
+    fi; \
+    rm -rf /tmp/wheels
 COPY momo-coding-harness.py /opt/momo/app/
 COPY harness /opt/momo/app/harness
 COPY roles /opt/momo/app/roles
@@ -59,7 +48,9 @@ COPY skills /opt/momo/app/skills
 COPY search_sources /opt/momo/app/search_sources
 COPY container /opt/momo/app/container
 # The root filesystem is read-only at run time: compile now.
-RUN /opt/momo/python/bin/python3 -m compileall -q /opt/momo/app /opt/momo/python/lib >/dev/null || true
+# (the wheels were installed above: not shipped twice)
+RUN rm -rf /opt/momo/app/container/wheels \
+ && /opt/momo/python/bin/python3 -m compileall -q /opt/momo/app /opt/momo/python/lib >/dev/null || true
 
 # ── stage 2: the toolchain base + momo ───────────────────────────────────────
 FROM ${BASE}
@@ -85,6 +76,13 @@ RUN set -eu; \
     mkdir -p /home/momo /workspace /gw /in; \
     chown 1000:1000 /home/momo /workspace /gw
 COPY --from=momo-runtime /opt/momo /opt/momo
+# Debian's OpenSSL (bundled with momo's Python) looks for CA certificates under
+# /usr/lib/ssl, which only Debian and Ubuntu have; elsewhere point it at /etc/ssl.
+# Then a smoke test: the bundled Python needs at least the glibc in
+# /opt/momo/python/GLIBC_FLOOR (bundle-python.sh measured it).
+RUN [ -e /usr/lib/ssl ] || ln -s /etc/ssl /usr/lib/ssl; \
+    /opt/momo/python/bin/python3 -S -c 'import ssl, sqlite3, ctypes, lzma, bz2, zlib, json, hashlib; ssl.create_default_context()' \
+      || { echo "momo-box: momo's Python needs glibc $(cat /opt/momo/python/GLIBC_FLOOR) or newer and does not run on this base image ($(ldd --version 2>&1 | head -1)); pick a newer base" >&2; exit 1; }
 ENV HOME=/home/momo
 USER 1000:1000
 WORKDIR /workspace

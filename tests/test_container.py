@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -840,6 +841,74 @@ class Gateway(unittest.TestCase):
         self.addCleanup(srv.close)
         return srv.getsockname()[1]
 
+    @staticmethod
+    def _dns_reply(query: bytes, records: list[tuple[int, bytes]], rcode: int = 0) -> bytes:
+        """A reply to `query` with (type, rdata) answers, each owner a pointer to the question."""
+        head = query[:2] + (0x8180 | rcode).to_bytes(2, "big") + b"\x00\x01" \
+            + len(records).to_bytes(2, "big") + b"\x00\x00\x00\x00"
+        body = query[12:]
+        for rtype, rdata in records:
+            body += b"\xc0\x0c" + rtype.to_bytes(2, "big") + b"\x00\x01\x00\x00\x00\x3c" \
+                + len(rdata).to_bytes(2, "big") + rdata
+        return head + body
+
+    def test_dns_reply_parsing(self):
+        q = forward._dns_query_packet("example.com", 1, 0xBEEF)
+        self.assertEqual(q[:2], b"\xbe\xef")
+        cname = (5, b"\x03www\xc0\x0c")
+        ok = self._dns_reply(q, [cname, (1, bytes([93, 184, 215, 14])), (28, bytes(16))])
+        self.assertEqual(forward._dns_answers(ok, 0xBEEF, 1), ["93.184.215.14"])
+        self.assertEqual(forward._dns_answers(ok, 0xBEEF, 28), ["::"])
+        self.assertEqual(forward._dns_answers(ok, 0x1111, 1), [])               # wrong id
+        self.assertEqual(forward._dns_answers(self._dns_reply(q, [], rcode=3), 0xBEEF, 1), [])
+        self.assertEqual(forward._dns_answers(ok[:30], 0xBEEF, 1), [])          # truncated
+        with self.assertRaises(ValueError):
+            forward._dns_query_packet("a..b", 1, 1)
+
+    def test_dns_lookup_over_udp(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        srv.bind(("127.0.0.1", 0))
+        self.addCleanup(srv.close)
+
+        def answer():
+            data, addr = srv.recvfrom(512)
+            srv.sendto(b"\x00\x00junk", addr)                                  # someone else's
+            srv.sendto(self._dns_reply(data, [(1, bytes([10, 0, 0, 7]))]), addr)
+        threading.Thread(target=answer, daemon=True).start()
+        self.assertEqual(forward._dns_lookup("127.0.0.1", "registry.npmjs.org", 1, timeout=3,
+                                             port=srv.getsockname()[1]), ["10.0.0.7"])
+
+    def test_outside_names_skip_the_box_networks_dns(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc = Path(d) / "resolv.conf"
+            rc.write_text("search home\nnameserver 10.89.0.1\nnameserver 192.168.127.1\n")
+            self.assertEqual(forward._resolv_servers(str(rc)), ["10.89.0.1", "192.168.127.1"])
+        asked = []
+
+        def lookup(server, name, qtype, **kw):
+            asked.append((server, qtype))
+            return ["93.184.215.14"] if qtype == 1 else []
+        servers = ["10.89.0.1", "192.168.127.1"]
+        with mock.patch.object(forward, "_dns_lookup", lookup):
+            self.assertEqual(forward._fallback_addrs("example.com", servers), ["93.184.215.14"])
+            self.assertEqual(asked, [("192.168.127.1", 1), ("192.168.127.1", 28)])
+            for host in ("momo", "gw", "10.0.0.1", "[::1]"):                   # never asked out
+                self.assertEqual(forward._fallback_addrs(host, servers), [])
+            self.assertEqual(forward._fallback_addrs("example.com", ["127.0.0.11"]), [])
+        echo, port = _echo_server()
+        self.addCleanup(echo.close)
+        nxdomain = socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        real = socket.create_connection
+        with mock.patch.object(forward.socket, "create_connection",
+                               side_effect=lambda a, **kw: (_ for _ in ()).throw(nxdomain)
+                               if a[0] == "example.com" else real(a, **kw)), \
+                mock.patch.object(forward, "_fallback_addrs", return_value=["127.0.0.1"]):
+            forward._connect("example.com", port).close()
+        with mock.patch.object(forward.socket, "create_connection", side_effect=nxdomain), \
+                mock.patch.object(forward, "_fallback_addrs", return_value=[]):
+            with self.assertRaises(socket.gaierror):
+                forward._connect("nowhere.example", port)
+
     def test_forwarder_relays_and_half_closes(self):
         echo, port = _echo_server()
         self.addCleanup(echo.close)
@@ -1240,6 +1309,51 @@ class Launcher(unittest.TestCase):
                                                                           base="debian"), [], "r"))
         self.assertNotIn("limited", notes)
         self.assertNotIn("--full-base", notes)
+
+    def test_qualify_image(self):
+        q = momo_box.qualify_image
+        self.assertEqual(q("debian:bookworm-slim"), "docker.io/library/debian:bookworm-slim")
+        self.assertEqual(q("gradle:8-jdk21"), "docker.io/library/gradle:8-jdk21")
+        self.assertEqual(q("user/img:1"), "docker.io/user/img:1")
+        for ref in ("ghcr.io/x/y:1", "docker.io/library/node:22", "localhost/momo:1",
+                    "registry:5000/img", "quay.io/a/b@sha256:abc"):
+            self.assertEqual(q(ref), ref)
+
+    class _RecEng:
+        dry_run = False
+
+        def __init__(self, rt, images=b""):
+            self.rt, self.images, self.calls = rt, images, []
+
+        def run(self, *args, **kw):
+            self.calls.append(args)
+            out = self.images if args[0] == "images" else b""
+            return SimpleNamespace(returncode=0, stdout=out, stderr=b"")
+
+    def test_podman_builds_from_a_qualified_base(self):
+        res = detect.Resolved(source="detected", base="gradle:8-jdk21")
+        for rt, want in (("podman", "BASE=docker.io/library/gradle:8-jdk21"),
+                         ("docker", "BASE=gradle:8-jdk21")):
+            eng = self._RecEng(rt)
+            with mock.patch.object(momo_box, "say"):
+                momo_box.build_image(eng, res, None, "momo-harness:abc")
+            build = next(c for c in eng.calls if c[0] == "build")
+            self.assertIn(want, build)
+
+    def test_podman_read_only_matches_docker(self):
+        argv = box(runtime="podman").momo_argv()
+        self.assertIn("--read-only-tmpfs=false", argv)
+        self.assertIn("/dev/shm:rw,nosuid,nodev,noexec,size=64m", argv)
+        self.assertNotIn("--read-only-tmpfs=false", box().momo_argv())
+
+    def test_prune_keeps_podmans_localhost_image(self):
+        rows = (b"localhost/momo-harness:new\nlocalhost/momo-harness:old\n"
+                b"localhost/momo-harness:latest\n")
+        eng = self._RecEng("podman", rows)
+        momo_box.prune_images(eng, "momo-harness:new")
+        removed = {c[1] for c in eng.calls if c[0] == "rmi"}
+        self.assertEqual(removed, {"momo-harness:old", "momo-harness-overlay:old",
+                                   "momo-harness-devbase:old"})
 
     def test_finds_an_engine_that_is_not_on_path(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1955,6 +2069,40 @@ class BoxStatusFiles(TmpDir):
         self.assertFalse(rows["proxy"]["ok"])
         self.assertTrue(rows["read-only-root"]["ok"])
 
+    def test_safeguards_read_podmans_inspect(self):
+        """Podman lists every dropped capability and reports what is left in
+        BoundingCaps (shapes captured from podman 6.1 inspect, uid 1000)."""
+        pod = json.loads(json.dumps(INSPECT_OK))
+        pod["HostConfig"]["CapDrop"] = ["CAP_CHOWN", "CAP_KILL", "CAP_SETUID"]
+        pod.update(EffectiveCaps=None, BoundingCaps=None)        # --cap-drop ALL
+        ok = lambda d: {r["id"]: r["ok"] for r in boxstatus.safeguards(      # noqa: E731
+            "pull", d, True, llm_filtered=True, llm_paths=["/x"], llm_https=False)}["cap-drop"]
+        self.assertTrue(ok(pod))
+        pod["BoundingCaps"] = ["CAP_DAC_OVERRIDE", "CAP_KILL"]   # --cap-drop CHOWN only
+        self.assertFalse(ok(pod))
+        pod.update(BoundingCaps=["CAP_NET_RAW"], EffectiveCaps=["CAP_NET_RAW"])
+        self.assertFalse(ok(pod))
+        del pod["BoundingCaps"], pod["EffectiveCaps"]           # no report at all
+        self.assertFalse(ok(pod))
+
+    def test_podman_networks_internal_flag(self):
+        b = box(net="pull", status=self.tmp / "st", runtime="podman")
+        seen = {}
+
+        class Eng:
+            rt, dry_run = "podman", False
+
+            def run(self, *args, **kw):
+                out = {"container": [INSPECT_OK], "network": [{"name": b.network, "internal": True}]}
+                kind = args[2] if len(args) > 2 and args[0] == "inspect" else None
+                return SimpleNamespace(returncode=0, stderr=b"",
+                                       stdout=json.dumps(out[kind]).encode() if kind else b"1")
+        src = SimpleNamespace(label="r", kind="local", sha="a" * 40, ref_name="main", land=self.tmp)
+        with mock.patch.object(momo_box, "setup_status",
+                               side_effect=lambda *a: seen.setdefault("internal", a[4]) and {}):
+            momo_box.write_setup_status(Eng(), b, src, None, inspect=True)
+        self.assertIs(seen["internal"], True)
+
     def test_status_folder_is_mounted_read_only(self):
         argv = box(status=Path("/cache/status")).momo_argv()
         self.assertIn("/cache/status:/run/momo-box:ro", argv)
@@ -2089,6 +2237,13 @@ class MemoryStats(TmpDir):
         got = boxstatus.docker_stats('{"Name":"a","MemUsage":"1MiB / 2MiB"}\nnot json\n'
                                      '{"Name":"b","MemUsage":"??"}\n')
         self.assertEqual(got, {"a": {"current": 1024 ** 2, "max": 2 * 1024 ** 2}})
+        # podman 6.1: bytes, not text (captured from `podman stats --format '{{json .}}'`)
+        podman = ('{"Name":"momo-t-gw","CPU":3.57,"MemUsage":249856,"MemLimit":268435456,'
+                  '"MemPerc":0.093,"PIDs":1}\n{"Name":"c","MemUsage":-1,"MemLimit":0}\n'
+                  '{"Name":"d","MemUsage":true}\n{"Name":"e","MemUsage":10,"MemLimit":0}')
+        self.assertEqual(boxstatus.docker_stats(podman),
+                         {"momo-t-gw": {"current": 249856, "max": 268435456},
+                          "e": {"current": 10, "max": None}})
 
     def test_stats_thread_writes_the_gateways_memory(self):
         w = boxstatus.StatusWriter(self.tmp / "status")
@@ -2209,3 +2364,122 @@ class Dash(TmpDir):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _load_wheels_update():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("wheels_update",
+                                                  REPO / "container" / "wheels" / "update.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class VendoredWheels(unittest.TestCase):
+    """The image's extras come from container/wheels only, each file pinned by hash."""
+
+    def setUp(self):
+        self.up = _load_wheels_update()
+
+    def test_committed_folders_are_consistent(self):
+        python = self.up.py_version()
+        for arch in self.up.ARCHES:
+            with self.subTest(arch=arch):
+                self.assertEqual(self.up.check(self.up.HERE / arch, python), [])
+                pins, _ = self.up.read_lock(self.up.HERE / arch)
+                self.assertIn("tree-sitter", pins)                 # the parser core is never skipped
+
+    def test_pins_satisfy_requirements_txt(self):
+        try:
+            from packaging.requirements import Requirement
+        except ImportError:                                        # pragma: no cover
+            from pip._vendor.packaging.requirements import Requirement
+        for arch in self.up.ARCHES:
+            pins, _ = self.up.read_lock(self.up.HERE / arch)
+            for line in self.up.requirement_lines():
+                req = Requirement(line)
+                if (name := self.up.norm(req.name)) in pins:
+                    self.assertIn(pins[name][0], req.specifier, f"{arch}: {line}")
+
+    def test_dockerfile_installs_offline_with_hashes(self):
+        text = (REPO / "container" / "Dockerfile").read_text()
+        for flag in ("--no-index", "--require-hashes", "--only-binary :all:", "requirements.lock"):
+            self.assertIn(flag, text)
+        self.assertNotIn("COPY requirements.txt", text)
+        self.assertIn("rm -rf /opt/momo/app/container/wheels", text)
+
+    def test_check_catches_tampering_and_drift(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            whl = folder / "tree_sitter-0.26.1-cp314-cp314-manylinux2014_aarch64.whl"
+            whl.write_bytes(b"real")
+            (folder / "pypdf-6.21.4-py3-none-any.whl").write_bytes(b"pdf")
+            with mock.patch.object(self.up, "requirement_lines",
+                                   return_value=["tree-sitter>=0.25", "pypdf>=6",
+                                                 "tree-sitter-dockerfile>=0.2"]):
+                self.up.write_lock(folder, ["tree-sitter-dockerfile>=0.2"], "3.14", "arm64")
+                self.assertEqual(self.up.check(folder, "3.14"), [])
+                whl.write_bytes(b"swapped")                         # same name, other bytes
+                self.assertTrue(any("does not match" in p for p in self.up.check(folder, "3.14")))
+                self.up.write_lock(folder, [], "3.14", "arm64")       # skip list lost
+                self.assertTrue(any("tree-sitter-dockerfile" in p
+                                    for p in self.up.check(folder, "3.14")))
+                self.up.write_lock(folder, ["tree-sitter-dockerfile>=0.2"], "3.15", "arm64")
+                self.assertTrue(any("CPython 3.14" in p for p in self.up.check(folder, "3.15")))
+                (folder / "extra-1.0-py3-none-any.whl").write_bytes(b"x")
+                self.assertTrue(any("not in requirements.lock" in p
+                                    for p in self.up.check(folder, "3.14")))
+
+    def test_wheel_names(self):
+        self.assertEqual(self.up.wheel_info("tree_sitter_cpp-0.23.4-cp39-abi3-manylinux2014_x86_64.whl"),
+                         ("tree-sitter-cpp", "0.23.4", "abi3"))
+        self.assertEqual(self.up.req_name("tree-sitter-dockerfile>=0.2"), "tree-sitter-dockerfile")
+        with self.assertRaises(ValueError):
+            self.up.wheel_info("notawheel.tar.gz")
+
+
+class MomoPython(unittest.TestCase):
+    """momo's Python: the official image pinned by digest, made self-contained in stage 1."""
+
+    def setUp(self):
+        self.up = _load_wheels_update()
+        self.dockerfile = (REPO / "container" / "Dockerfile").read_text()
+
+    def test_pinned_by_digest_and_matches_py_version(self):
+        tag, digest = self.up.py_image()
+        self.assertTrue(tag.startswith(self.up.py_version() + "."), tag)
+        version = re.search(r"^ARG PY_VERSION=(\S+)$", self.dockerfile, re.M).group(1)
+        self.assertTrue(tag.startswith(version + "-"), (tag, version))
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertIn("FROM ${PY_IMAGE} AS momo-runtime", self.dockerfile)
+
+    def test_nothing_is_downloaded_for_it(self):
+        for gone in ("python-build-standalone", "curl ", "github.com", "PBS_"):
+            self.assertNotIn(gone, self.dockerfile)
+        self.assertIn("bundle-python.sh /usr/local /opt/momo/python", self.dockerfile)
+        self.assertIn("GLIBC_FLOOR", self.dockerfile)                 # the smoke test names it
+
+    def test_bundle_script_checks_its_work(self):
+        script = (REPO / "container" / "bundle-python.sh").read_text()
+        self.assertIn("patchelf --set-rpath '$ORIGIN/../..'", script)
+        self.assertIn("from the build image", script)                 # the leak check
+        self.assertIn("not found", script)
+        self.assertNotIn("LD_LIBRARY_PATH", self.dockerfile)          # would reach the model's commands
+        r = subprocess.run(["sh", "-n", str(REPO / "container" / "bundle-python.sh")])
+        self.assertEqual(r.returncode, 0)
+
+    def test_repin_rewrites_both_args(self):
+        with tempfile.TemporaryDirectory() as d:
+            df = Path(d) / "Dockerfile"
+            df.write_text("ARG PY_VERSION=3.14.10\nARG PY_IMAGE=docker.io/library/python:"
+                          "3.14.10-slim-bookworm@sha256:" + "a" * 64 + "\nFROM ${PY_IMAGE}\n")
+            asked = []
+            with mock.patch.object(self.up, "registry_digest",
+                                   side_effect=lambda tag: asked.append(tag) or "sha256:" + "b" * 64), \
+                    mock.patch("builtins.print"):
+                self.assertFalse(self.up.set_python_image(None, df))
+                self.assertTrue(self.up.set_python_image("3.15.0", df))
+            self.assertEqual(asked, ["3.14.10-slim-bookworm", "3.15.0-slim-bookworm"])
+            text = df.read_text()
+            self.assertIn("ARG PY_VERSION=3.15.0\n", text)
+            self.assertIn("python:3.15.0-slim-bookworm@sha256:" + "b" * 64, text)

@@ -221,17 +221,25 @@ A box itself needs little: momo, a small supervisor, the sync watcher and the ga
 
 ### What the box isolates
 
-The model runs as an unprivileged user (uid 1000) with no capabilities, `no-new-privileges` and a read-only root filesystem. It can write only to the workspace, its home folder (sessions, caches) and `/tmp`. It cannot see your files, keys or other projects, and in `pull`/`locked` mode it cannot reach your network. The engine's own isolation (Docker Desktop's VM, rootless Podman) is the outer boundary.
+The model runs as an unprivileged user (uid 1000) with no capabilities, `no-new-privileges` and a read-only root filesystem. It can write only to the workspace, its home folder (sessions, caches) and `/tmp`. It cannot see your files, keys or other projects, and in `pull`/`locked` mode it cannot reach your network. The engine's own isolation (Docker Desktop's VM, Podman's machine on macOS, rootless Podman on Linux) is the outer boundary.
 
 What it does not do:
 
 - **Inside the box the model is unrestricted.** It runs as the same user as momo, so it could read the web token or change momo's settings there. The token keeps other local processes and pages out of the UI, not the model.
 - **A landed branch is untrusted code.** momo-box checks the objects it fetches and never runs anything from them, but review `momo/<name>` before you build or merge it, as you would a pull request.
 - **Base images are yours to trust.** They are pulled by tag unless you pin a digest.
+- **What momo-box adds to the image is pinned.** momo's own Python is the official `python` image's (Docker Official Images, like the Debian base), pinned by digest and made self-contained by `container/bundle-python.sh`, so nothing is downloaded for it; it needs glibc 2.35 or newer in the base image (Ubuntu 22.04, Debian 12 and later), and the build says so when a base is older. `update.py --python-image [X.Y.Z]` moves the pin. Its extras (tree-sitter grammars, pypdf) are wheels committed in `container/wheels/<arch>/` and installed with `pip --no-index --require-hashes`, so a build never asks PyPI for anything. `.venv/bin/python container/wheels/update.py` refreshes them from `requirements.txt` (review the diff: what you commit is what every box runs), and `--check` verifies them without downloading.
 
 momo-box finds Docker Desktop's CLI (and the Podman installer's) in their usual folders when `docker` is not on your `PATH`, for example when `/usr/local/bin/docker` is a broken link to Docker's installer image.
 
-Tested on Docker Desktop (macOS). Not yet tested: Podman, Docker on Linux reaching a model server on the host, and an `https://` model server in `pull`/`locked` mode. `MOMO_BOX_LIVE=1 .venv/bin/python -m pytest tests/test_container_live.py` runs a scripted check against your engine.
+**Podman** works in place of Docker: momo-box uses Docker when it finds it, else Podman, and `--runtime podman` (or `MOMO_BOX_RUNTIME=podman`) picks Podman when both are installed. On macOS, run `podman machine init --memory 4096 && podman machine start` once; with less than 4 GB the box runs in low-memory mode, as on Docker. momo-box handles where Podman differs from Docker for you:
+
+- Base images go to Podman fully named (`docker.io/library/gradle:8-jdk21`), so its short-name rules never stop to ask. A Dockerfile of your own (`.momo/box.json`, devcontainer) is built as written, so name its `FROM` images in full.
+- `--read-only` gets `--read-only-tmpfs=false` and a 64 MB `/dev/shm`, so the same folders are writable as on Docker.
+- The gateway resolves outside names past the box network's DNS (Podman's internal networks answer "no such name" for them); the box itself still resolves nothing outside.
+- Podman's macOS file sharing hides a status file for a few seconds after the host replaces it; the Setup panel keeps the last copy in the meantime.
+
+Tested on Docker Desktop and on Podman 6.1 (macOS, arm64, the machine's default rootful mode). Not yet tested: rootless Podman on Linux, Docker on Linux reaching a model server on the host, and an `https://` model server in `pull`/`locked` mode. `MOMO_BOX_LIVE=1 .venv/bin/python -m pytest tests/test_container_live.py` runs a scripted check against your engine (`MOMO_BOX_RUNTIME=podman` for Podman).
 
 `container/compose.yaml` (plus `compose.locked.yaml`) does the same with Docker Compose, without the automatic sync. `momo-box sync NAME --container C --land-repo PATH` lands such a container's work.
 

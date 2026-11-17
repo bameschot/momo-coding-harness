@@ -619,10 +619,26 @@ def _extract(tar: tarfile.TarFile, dest: Path, has_filter: bool | None = None):
     tar.extractall(dest, members=members)
 
 
+def qualify_image(ref: str) -> str:
+    """A Docker Hub short name with its registry spelled out (`gradle:8` →
+    `docker.io/library/gradle:8`, `user/img` → `docker.io/user/img`).  Docker
+    assumes Docker Hub; Podman's short-name rules may refuse, or stop to ask on a
+    terminal, when its registry list has more than one entry."""
+    first, sep, _ = ref.partition("/")
+    if sep and ("." in first or ":" in first or first == "localhost"):
+        return ref
+    return f"docker.io/{ref}" if sep else f"docker.io/library/{ref}"
+
+
+def _local_ref(line: str) -> str:
+    """An `images` row without Podman's `localhost/` prefix for images built here."""
+    return line[len("localhost/"):] if line.startswith("localhost/") else line
+
+
 def build_image(eng: Engine, res: detect.Resolved, tree, tag: str, *, pull: bool = False,
                 with_extras: bool = True) -> str:
     """Build `tag`: [devcontainer Dockerfile →] base + momo overlay [→ project Dockerfile]."""
-    base = res.base
+    base = qualify_image(res.base) if eng.rt == "podman" else res.base
     with tempfile.TemporaryDirectory(prefix="momo-box-ctx-") as tmp:
         ctx = Path(tmp) / "ctx"
         if res.base_dockerfile or res.dockerfile:
@@ -665,6 +681,7 @@ def prune_images(eng: Engine, keep: str):
     repo = keep.rsplit(":", 1)[0]
     r = eng.run("images", repo, "--format", "{{.Repository}}:{{.Tag}}", check=False)
     for line in (r.stdout or b"").decode().split():
+        line = _local_ref(line)
         if line not in (keep, f"{repo}:latest") and not line.endswith(":<none>"):
             for suffix in ("", "-overlay", "-devbase"):
                 eng.run("rmi", line.replace(":", f"{suffix}:", 1) if suffix else line,
@@ -769,6 +786,11 @@ class Box:
         out = ["--init", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                "--read-only", "--tmpfs", f"/tmp:rw,exec,mode=1777,size={self.tmp_size}",
                "--pids-limit", str(self.pids)]
+        if self.runtime == "podman":
+            # Podman's --read-only also leaves /run and /var/tmp writable; turning
+            # that off makes /dev/shm read-only too, which Docker keeps (64 MB).
+            out += ["--read-only-tmpfs=false",
+                    "--tmpfs", "/dev/shm:rw,nosuid,nodev,noexec,size=64m"]
         if self.memory:
             out += ["--memory", self.memory]
         if self.cpus:
@@ -1088,7 +1110,7 @@ def _same_source(meta: dict, src: Source) -> bool:
     return top.resolve() == Path(src.repo).resolve()
 
 
-def check_same_source(name: str, src: Source) -> dict:
+def check_same_source(name: str, src: Source, runtime: str = "docker") -> dict:
     """An existing box (its workspace volume is there) keeps its workspace.
     Starting it with another repo would run the new repo's toolchain and prepare
     (./mvnw …) on the old checkout, and land the old checkout's work in the new
@@ -1100,7 +1122,7 @@ def check_same_source(name: str, src: Source) -> dict:
             f"a workspace volume momo-{name}-ws exists, but momo-box has no record of box "
             f"{name} (in {box_dir(name)}), so it can't tell which repo it holds.\n"
             f"  another repo:  pick a new --name\n"
-            f"  start over:    docker volume rm momo-{name}-ws momo-{name}-home "
+            f"  start over:    {runtime} volume rm momo-{name}-ws momo-{name}-home "
             "(this deletes what is in it)") from None
     if _same_source(meta, src):
         return meta
@@ -1160,7 +1182,7 @@ def setup_box(args, ui: str) -> tuple[Engine, Box, Source, detect.Resolved, bool
         if eng.running(f"momo-{name}"):
             raise BoxError(f"box {name} is running (`momo-box url {name}`); "
                            f"`momo-box stop {name}` first")
-        prior = check_same_source(name, src)
+        prior = check_same_source(name, src, eng.rt)
         pin_to_saved(src, prior, args)
     tree = _tree_for(src)
     res = _resolve_toolchain(args, tree)
@@ -1388,7 +1410,7 @@ def write_setup_status(eng: Engine, box: Box, src: Source, res: detect.Resolved,
             details = _inspect(eng, "--type", "container", box.container) or {}
             if box.gated:
                 netinfo = _inspect(eng, "--type", "network", box.network) or {}
-                internal = netinfo.get("Internal") is True
+                internal = True in (netinfo.get("Internal"), netinfo.get("internal"))  # docker, podman
         setup = setup_status(box, src, res, details, internal)
         setup["engine_memory"] = engine_memory(eng)     # the Setup panel's "of N GB"
         boxstatus.StatusWriter(box.status).write_setup(setup)

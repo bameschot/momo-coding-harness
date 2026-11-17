@@ -2433,7 +2433,7 @@ git diff main momo/fix-auth                                   <span class="com">
     <h2>Box setup &amp; commands</h2>
     <h3>What you need</h3>
     <ul>
-      <li><strong>Docker or Podman</strong>, running. momo-box uses Docker if it finds it, else Podman; <code>--runtime</code> or <code>$MOMO_BOX_RUNTIME</code> picks one.</li>
+      <li><strong>Docker or Podman</strong>, running. momo-box uses Docker if it finds it, else Podman; <code>--runtime</code> or <code>$MOMO_BOX_RUNTIME</code> picks one. On macOS, Podman needs <code>podman machine init --memory 4096 &amp;&amp; podman machine start</code> once. momo-box handles Podman's differences itself: fully named base images, Docker's set of writable folders under <code>--read-only</code>, and the gateway's name lookups past the internal network's DNS. A Dockerfile of your own is built as written, so name its <code>FROM</code> images in full.</li>
       <li><strong>Python 3.10 or newer, and git</strong>, on the host. The launcher uses only the standard library, so there is nothing to install. Inside the box momo brings its own Python.</li>
       <li><strong>A model server</strong> the host can reach, as for momo itself.</li>
     </ul>
@@ -2724,7 +2724,7 @@ docker compose -f container/compose.yaml -f container/compose.locked.yaml up -d 
         <div class="box harness"><div class="flow-who">layer 3</div>User 1000<small>the image's own uid-1000 user (<code>ubuntu</code>, <code>node</code>, <code>gradle</code> …) with its home moved to <code>/home/momo</code>, or a new user <code>momo</code></small></div>
         <div class="side">Java reads <code>user.home</code> from <code>passwd</code>, so this keeps <code>~/.m2</code> and <code>~/.gradle</code> writable</div>
         <div class="down" aria-hidden="true">↓</div>
-        <div class="box model"><div class="flow-who">layer 4</div>momo under <code>/opt/momo</code><small>with its own CPython (python-build-standalone, sha256-checked), kept off <code>PATH</code>: the model's commands see only the project's tools</small></div>
+        <div class="box model"><div class="flow-who">layer 4</div>momo under <code>/opt/momo</code><small>with its own CPython (the official image's, pinned by digest), kept off <code>PATH</code>: the model's commands see only the project's tools</small></div>
         <div class="down" aria-hidden="true">↓</div>
         <div class="box you cond"><div class="flow-who">optional</div>Your Dockerfile<small><code>box.json</code> <code>"dockerfile"</code>, built on top for anything more (SDKs, vcpkg); it starts with <code>ARG MOMO_BOX_BASE</code> / <code>FROM ${MOMO_BOX_BASE}</code></small></div>
       </div>
@@ -2785,7 +2785,7 @@ docker compose -f container/compose.yaml -f container/compose.locked.yaml up -d 
     <p>The threat model: <strong>the model, and any code it or the repo brings, is untrusted.</strong> What is protected is your machine, your network, your credentials and your source repo. The protections are layered, so no single one has to hold on its own.</p>
 
     <figure class="rings" aria-label="The layers around the model">
-      <div class="ring r1"><span class="ring-t">container engine</span><small>Docker Desktop's VM, or rootless Podman: the outer boundary</small>
+      <div class="ring r1"><span class="ring-t">container engine</span><small>Docker Desktop's VM, or Podman's: the outer boundary</small>
         <div class="ring r2"><span class="ring-t">internal network (pull, locked)</span><small>no route out, no DNS; the gateway is the only way through, and it forwards inference requests and allowed registries only</small>
           <div class="ring r3"><span class="ring-t">container</span><small>read-only root filesystem · no capabilities · <code>no-new-privileges</code> · at most 512 processes · a 2 GB <code>/tmp</code> · only <code>/in</code> from the host, read-only</small>
             <div class="ring r4"><span class="ring-t">user 1000</span><small>not root; writes only to <code>/workspace</code>, <code>/home/momo</code> and <code>/tmp</code></small>
@@ -2830,14 +2830,15 @@ docker compose -f container/compose.yaml -f container/compose.locked.yaml up -d 
       <li><strong>Inside the box the model is unrestricted.</strong> It runs as the same user as momo, so it could read the web token or change momo's settings there. The token keeps other local processes and pages out of the UI, not the model.</li>
       <li><strong>A landed branch is untrusted code.</strong> momo-box never runs anything from it, but review <code>momo/&lt;name&gt;</code> before you build or merge it, as you would a pull request.</li>
       <li><strong>Base images are yours to trust.</strong> They are pulled by tag unless you pin a digest.</li>
+      <li><strong>What momo-box adds is pinned.</strong> momo's own Python comes from the official <code>python</code> image pinned by digest (nothing downloaded; glibc 2.35+ bases), and its extras are wheels committed in <code>container/wheels/</code>, installed with <code>pip --no-index --require-hashes</code>: a build never asks PyPI. <code>container/wheels/update.py</code> refreshes them; review that diff like code.</li>
       <li><strong><code>pull</code> is not leak-proof</strong>, and an <code>https://</code> model server can't be filtered. See <a href="#box-network">Network modes</a>.</li>
       <li><strong>Disk use</strong> of the workspace and caches is not limited.</li>
     </ul>
-    <p class="note sys"><strong>Tested</strong> on Docker Desktop (macOS, arm64) with a real model:
+    <p class="note sys"><strong>Tested</strong> on Docker Desktop (macOS, arm64) with a real model, and with the scripted live check on Podman 6.1 (macOS, arm64):
       <br>• <strong>Isolation:</strong> <code>locked</code> and <code>pull</code> boxes had no route or DNS out, the gateway filter refused <code>/api/delete</code> while chat streamed, and a blocked npm <code>postinstall</code> could not download.
       <br>• <strong>Syncing:</strong> work landed after each turn, and an interrupted <code>run</code> still landed its work.
-      <br><strong>Not yet tested:</strong> Podman, Docker on Linux reaching a model server on the host, an <code>https://</code> model server in <code>pull</code>/<code>locked</code> mode, and Ollama behind the filter.
-      <br><code>MOMO_BOX_LIVE=1 .venv/bin/python -m pytest tests/test_container_live.py</code> runs a scripted check against your own engine.</p>
+      <br><strong>Not yet tested:</strong> rootless Podman on Linux, Docker on Linux reaching a model server on the host, an <code>https://</code> model server in <code>pull</code>/<code>locked</code> mode, and Ollama behind the filter.
+      <br><code>MOMO_BOX_LIVE=1 .venv/bin/python -m pytest tests/test_container_live.py</code> runs a scripted check against your own engine (add <code>MOMO_BOX_RUNTIME=podman</code> for Podman).</p>
   </section>
 
   <section id="flags" data-group="Reference" data-voice="flags">

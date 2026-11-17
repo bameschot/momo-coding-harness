@@ -82,9 +82,142 @@ def relay(a: socket.socket, b: socket.socket, initial: bytes = b""):
 
 
 def _connect(host: str, port: int) -> socket.socket:
-    s = socket.create_connection((host, port), timeout=_TIMEOUT)
+    try:
+        s = socket.create_connection((host, port), timeout=_TIMEOUT)
+    except socket.gaierror as e:
+        addrs = _fallback_addrs(host) if e.errno in _NO_NAME else []
+        if not addrs:
+            raise
+        s = _connect_any(addrs, port)
     s.settimeout(None)
     return s
+
+
+# ── name lookup past the box network's DNS (Podman) ──────────────────────────
+# On Podman the gateway's first nameserver is the box network's (aardvark-dns),
+# which answers NXDOMAIN for every outside name on an --internal network, and the
+# C resolver stops there.  The outside resolver is next in resolv.conf: a name
+# the first one did not know is asked there directly.  The box itself has only
+# the internal network, so it still resolves nothing outside.  Docker's embedded
+# DNS forwards for the gateway itself and never gets here.
+
+_NO_NAME = {getattr(socket, n) for n in ("EAI_NONAME", "EAI_NODATA") if hasattr(socket, n)}
+_DNS_TIMEOUT = 3.0
+
+
+def _resolv_servers(path: str = "/etc/resolv.conf") -> list[str]:
+    out = []
+    try:
+        lines = Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "nameserver":
+            try:
+                out.append(ipaddress.ip_address(parts[1].split("%")[0]).compressed)
+            except ValueError:
+                pass
+    return out
+
+
+def _dns_query_packet(name: str, qtype: int, qid: int) -> bytes:
+    labels = name.rstrip(".").split(".")
+    if not name or any(not 0 < len(p) < 64 for p in labels):
+        raise ValueError(f"not a DNS name: {name!r}")
+    qname = b"".join(bytes([len(p)]) + p.encode("ascii") for p in labels) + b"\0"
+    return qid.to_bytes(2, "big") + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + qname \
+        + qtype.to_bytes(2, "big") + b"\x00\x01"
+
+
+def _skip_name(data: bytes, i: int) -> int:
+    while True:
+        if i >= len(data):
+            raise ValueError("truncated name")
+        n = data[i]
+        if n & 0xC0 == 0xC0:                  # compression pointer: two bytes, done
+            return i + 2
+        if n == 0:
+            return i + 1
+        i += 1 + n
+
+
+def _dns_answers(data: bytes, qid: int, qtype: int) -> list[str]:
+    """The A or AAAA addresses in a reply (CNAME chains are followed by the
+    server, so every record of the asked type counts)."""
+    if len(data) < 12 or int.from_bytes(data[:2], "big") != qid:
+        return []
+    flags = int.from_bytes(data[2:4], "big")
+    if not flags & 0x8000 or flags & 0x000F:            # not a reply, or an error
+        return []
+    qd, an = int.from_bytes(data[4:6], "big"), int.from_bytes(data[6:8], "big")
+    i, out = 12, []
+    try:
+        for _ in range(qd):
+            i = _skip_name(data, i) + 4
+        for _ in range(an):
+            i = _skip_name(data, i)
+            rtype, rlen = int.from_bytes(data[i:i + 2], "big"), int.from_bytes(data[i + 8:i + 10], "big")
+            rdata = data[i + 10:i + 10 + rlen]
+            i += 10 + rlen
+            if rtype == qtype and len(rdata) == (4 if qtype == 1 else 16):
+                out.append(ipaddress.ip_address(rdata).compressed)
+    except (ValueError, IndexError):
+        pass
+    return out
+
+
+def _dns_lookup(server: str, name: str, qtype: int, timeout: float = _DNS_TIMEOUT,
+                port: int = 53) -> list[str]:
+    qid = int.from_bytes(os.urandom(2), "big")
+    fam = socket.AF_INET6 if ":" in server else socket.AF_INET
+    with socket.socket(fam, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout)
+        s.connect((server, port))               # replies from anyone else are dropped
+        s.send(_dns_query_packet(name, qtype, qid))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            data = s.recv(4096)
+            got = _dns_answers(data, qid, qtype)
+            if got or (len(data) >= 2 and int.from_bytes(data[:2], "big") == qid):
+                return got
+    return []
+
+
+def _fallback_addrs(host: str, servers: list[str] | None = None) -> list[str]:
+    """Addresses for an outside name from the nameservers after the first; [] for
+    a short name (a container on the box network) or an IP address."""
+    if "." not in host.strip(".") or _is_ip(host):
+        return []
+    servers = _resolv_servers() if servers is None else servers
+    for server in servers[1:]:
+        addrs = []
+        for qtype in (1, 28):                   # A first: IPv6 may not route out of the VM
+            try:
+                addrs += _dns_lookup(server, host, qtype)
+            except (OSError, ValueError):
+                pass
+        if addrs:
+            return addrs
+    return []
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def _connect_any(addrs: list[str], port: int) -> socket.socket:
+    err: OSError | None = None
+    for a in addrs:
+        try:
+            return socket.create_connection((a, port), timeout=_TIMEOUT)
+        except OSError as e:
+            err = e
+    raise err or OSError(f"no address for port {port}")
 
 
 def serve(port: int, handler, host: str = "0.0.0.0") -> socket.socket:

@@ -246,6 +246,30 @@ class LocalView(_HarnessCase):
         self.assertFalse(self.h.setup_tick(probe=False))     # nothing new
 
 
+class BoxStatusRead(unittest.TestCase):
+    def test_a_file_that_is_briefly_gone_keeps_its_last_value(self):
+        """Podman's macOS file sharing hides a file for seconds after the host
+        replaces it; a half-read file looks the same.  Neither blanks the panel."""
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+
+            def put(name, data):
+                (folder / f"{name}.json").write_text(json.dumps({**data, "schema": sv.SCHEMA}))
+            put("setup", {"name": "fix"})
+            put("sync", {"turn": 1})
+            st = sv.BoxStatus(folder)
+            self.assertEqual(st.read()["setup"]["name"], "fix")
+            (folder / "setup.json").unlink()
+            (folder / "sync.json").write_text('{"turn": 2, "sch')
+            got = st.read()
+            self.assertEqual((got["setup"]["name"], got["sync"]["turn"]), ("fix", 1))
+            put("setup", {"name": "fix2"})
+            put("sync", {"turn": 3})
+            got = st.read()
+            self.assertEqual((got["setup"]["name"], got["sync"]["turn"]), ("fix2", 3))
+            self.assertNotIn("net", sv.BoxStatus(folder).read())       # never seen: absent
+
+
 class BoxView(_HarnessCase):
     def setUp(self):
         super().setUp()
