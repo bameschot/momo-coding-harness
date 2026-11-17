@@ -34,6 +34,7 @@ from .editing import EDIT_FEATURES
 from . import run_store as run_store_mod
 from . import checkpoints as checkpoints_mod
 from . import net as net_mod
+from . import setup_view as setup_mod
 from . import search as search_mod
 from . import tools as tools_mod
 from .syntax_watch import SyntaxWatch
@@ -513,6 +514,25 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
         # nobody does, confirms answer no; "yes" = confirms answer yes (--yes).
         # Session-only, never saved: see _unattended_answer.
         self.unattended: str | None = None
+        # Session-only, from the command line (momo-box sets both): extra lines for
+        # the system prompt's environment block, and a file rewritten after every
+        # finished turn so a watcher outside the process knows when to look.
+        self.environment_notes: list[str] = []
+        self.turn_marker: Path | None = None
+        # The web UI's Setup panel (setup_view.py): inside a momo-box, the
+        # read-only folder the host writes the box's status to (--box-status);
+        # the main chat calls' speed; the model server's latency and load.
+        self.box_status_dir: Path | None = None
+        self._box_status: setup_mod.BoxStatus | None = None
+        self.perf = setup_mod.PerfRing()
+        self.latency = setup_mod.Latency()
+        self._load_cache = setup_mod.Cached(setup_mod.LOAD_TTL)
+        self._git_cache = setup_mod.Cached(5.0)
+        self._prepare_cache = setup_mod.Cached(30.0)
+        self._first_delta_at: float | None = None
+        self.mem_ring = setup_mod.MemRing()       # the Setup panel's memory sparkline
+        self._machine_mem = setup_mod.Cached(3600.0)
+        self.cgroup_root = setup_mod.CGROUP        # a box's own cgroup (tests point it elsewhere)
         # /run-mode: "new" saves run_command output to a log and returns a view of
         # it (tail / grep / head+tail) plus command_output; "classic" returns it all.
         self.run_mode: str = "new"
@@ -1801,7 +1821,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
         # Qwen3.5, only resumes from checkpoints at earlier prompt ends: no gain or
         # loss there.)  Nav keeps the last slot.
         add("env", "Environment",
-            _environment(self.workdir, names, self.net_access, bool(self.unattended)))
+            _environment(self.workdir, names, self.net_access, bool(self.unattended),
+                         self.environment_notes))
         add("nav", "Navigating code" + (" (code index)" if index_on else ""),
             _nav_rules(role_name, names, index_on))
         return secs
@@ -1980,6 +2001,22 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
 
     def user_turns(self) -> int:
         return self._turn_count
+
+    def mark_turn(self):
+        """Rewrite --turn-marker (if set) after a finished turn: momo-box's host-side
+        syncer polls it to land the workspace as a git branch.  Never raises."""
+        if self.turn_marker is None:
+            return
+        try:
+            self._turn_marks = getattr(self, "_turn_marks", 0) + 1
+            session_mod.atomic_write(self.turn_marker, json.dumps({
+                "turn": self.user_turns(), "seq": self._turn_marks,
+                "session": str(self._ts), "ts": time.time()}))
+        except Exception as e:
+            try:
+                self.logger.log_error("turn marker", e)
+            except Exception:
+                pass
 
     def _recap_context(self, turns: int, budget_tokens: int) -> str:
         """The conversation since the last recap: the last `turns` user turns (capped at
@@ -2436,9 +2473,13 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
                 stream_kw = ({"on_delta": self._delta_sink(watch, reply_watch)}
                              if self.stream else {})
                 try:
+                    self._first_delta_at = None
+                    began = time.monotonic()
                     response = self.client.chat(api_messages, tools,
                                                 think=think_this_turn,
                                                 num_ctx=num_ctx, **stream_kw)
+                    self.perf.record(began, self._first_delta_at, time.monotonic(),
+                                     getattr(response, "eval_tokens", None))
                 finally:
                     if stream_kw:
                         stream_kw["on_delta"].flush()
@@ -3140,6 +3181,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
         def emit(kind: str, text: str):
             if not text:
                 return
+            if self._first_delta_at is None:
+                self._first_delta_at = time.monotonic()     # the Setup panel's TTFT
             if kind != state["kind"]:
                 flush()
                 state["kind"] = kind
@@ -3548,7 +3591,159 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
             skills=list(self.active_skills),
             **self._index_status_fields(),
             **self._mcp_status_fields(),
+            **self._setup_status_fields(),
         )
+
+    # ── the web UI's Setup panel (setup_view.py) ─────────────────────────────
+
+    def _box_data(self) -> dict | None:
+        """The host-written status files of the momo-box this runs in; None
+        outside a box."""
+        if self.box_status_dir is None:
+            return None
+        if self._box_status is None:
+            self._box_status = setup_mod.BoxStatus(self.box_status_dir)
+        return self._box_status.read()
+
+    def _setup_status_fields(self) -> dict:
+        """The header badge: local or box, a label and one state (ok, warn,
+        bad, unknown).  Never touches the network; the probe is setup_tick's."""
+        lat = self.latency.view()
+        down = self.backend_reachable is False or lat["ok"] is False
+        slow = lat["ms"] is not None and lat["ms"] > setup_mod.SLOW_MS
+        data = self._box_data()
+        if data is None:
+            state = "bad" if down else "warn" if slow else "ok"
+            return {"setup_kind": "local", "setup_label": self.client.provider_name,
+                    "setup_state": state, "setup_sync": "", "setup_latency_ms": lat["ms"],
+                    "box_sync_ts": None, "box_denied_recent": 0,
+                    "setup_mem_pct": None, "setup_mem_oom": False}
+        mem = setup_mod.cgroup_memory(self.cgroup_root)     # a few small files, no /proc walk
+        mem_pct, mem_oom, mem_state = setup_mod.mem_state(mem)
+        setup, sync = data.get("setup") or {}, data.get("sync")
+        sync_state = setup_mod.sync_state(sync, self._turn_count)
+        if down or sync_state in ("error", "syncer-silent") or mem_state == "bad":
+            state = "bad"
+        elif slow or sync_state == "incoming" or mem_state == "warn":
+            state = "warn"
+        else:
+            state = "unknown" if not data else "ok"
+        last = (sync or {}).get("last") if isinstance((sync or {}).get("last"), dict) else {}
+        name, net = setup.get("name") or "box", setup.get("net") or "?"
+        return {"setup_kind": "box", "setup_label": setup_mod.clean(f"{name} · {net}", 80),
+                "setup_state": state, "setup_sync": sync_state, "setup_latency_ms": lat["ms"],
+                "box_sync_ts": last.get("ts"),
+                "box_denied_recent": setup_mod.recent_denied(data.get("net")),
+                "setup_mem_pct": mem_pct, "setup_mem_oom": mem_oom}
+
+    def setup_tick(self, probe: bool) -> bool:
+        """The controller's idle check: measure the model server's latency
+        (only while a web page watches) and re-read the box's files; True when
+        the badge's fields changed."""
+        if probe:
+            self.latency.probe(self.client, busy=False)
+        self.mem_ring.add(self._memory_now())
+        fields = self._setup_status_fields()
+        changed = fields != getattr(self, "_setup_last", None)
+        self._setup_last = fields
+        return changed
+
+    def _memory_now(self) -> int | None:
+        """The box's memory use (its cgroup), else momo's own process."""
+        if self.box_status_dir is not None:
+            mem = setup_mod.cgroup_memory(self.cgroup_root)
+            return mem["current"] if mem else None
+        return setup_mod.self_memory()["current"]
+
+    def memory_view(self, data: dict | None) -> dict:
+        """The Setup panel's Memory section."""
+        stats = (data or {}).get("stats") or {}
+        setup = (data or {}).get("setup") or {}
+        gw = stats.get("gateway") if isinstance(stats.get("gateway"), dict) else None
+        engine = setup.get("engine_memory") if isinstance(setup.get("engine_memory"), int) else None
+        if data is not None:
+            mem = setup_mod.cgroup_memory(self.cgroup_root) or {}
+            self.mem_ring.add(mem.get("current"))
+            pct, oom, state = setup_mod.mem_state(mem)
+            return {"kind": "box", **mem, "pct": pct, "state": state,
+                    "processes": setup_mod.process_memory(),
+                    "history": self.mem_ring.rows(), "gateway": gw, "engine_total": engine,
+                    "available": bool(mem)}
+        own = setup_mod.self_memory()
+        self.mem_ring.add(own["current"])
+        return {"kind": "local", "current": own["current"], "peak": own["peak"], "max": None,
+                "pct": None, "state": "ok", "processes": [], "history": self.mem_ring.rows(),
+                "machine_total": self._machine_mem.get(setup_mod.machine_memory),
+                "available": own["current"] is not None}
+
+    def server_load(self) -> dict | None:
+        """What the model server is busy with (Ollama /api/ps, llama.cpp
+        /slots), reused for LOAD_TTL seconds."""
+        in_box = self.box_status_dir is not None
+
+        def compute():
+            try:
+                return self.client.server_load(in_box=in_box)
+            except Exception:
+                return None
+        return self._load_cache.get(compute)
+
+    def setup_view(self, web: dict | None = None, busy: bool = False) -> dict:
+        """GET /api/setup: where momo runs, where its model server runs and,
+        in a box, the box's setup, network and sync status."""
+        if not busy:
+            self.latency.probe(self.client, busy=False)
+        data = self._box_data()
+        in_box = data is not None
+        setup = (data or {}).get("setup") or {}
+        llm = setup.get("llm") if isinstance(setup.get("llm"), dict) else {}
+        location = (llm.get("location") if isinstance(llm.get("location"), dict)
+                    else setup_mod.locate(self.client.host))
+        perf = self.perf
+        model = {
+            "provider": self.client.provider_name,
+            "url": setup_mod.display_url(self.client.host),
+            "model": setup_mod.clean(self.client.model or "", 200),
+            "location": location,
+            "reachable": self.backend_reachable,
+            "latency": self.latency.view(),
+            "context": {"window": self.model_max_ctx, "limit": self.context_limit,
+                        "used": self._token_estimate + self._stream_tokens,
+                        "pct": self._ctx_pct()},
+            "perf": {"rows": perf.rows(), **perf.summary()},
+            "load": None if busy else self.server_load(),
+        }
+        mcp = [{"name": r["name"], "transport": r["transport"], "target": r["target"],
+                "state": r["state"], "tools": r["tools"]} for r in self.mcp.status_rows()]
+        view = {
+            "kind": "box" if in_box else "local",
+            "machine": setup_mod.machine_view(),
+            "web": web,
+            "workspace": {"path": setup_mod.clean(str(self.workdir), 300),
+                          "git": self._git_cache.get(lambda: setup_mod.git_view(self.workdir)),
+                          **self.changes_summary()},
+            "network": {"web_tools": self.net_access, "net_confirm": self.net_confirm,
+                        "mcp": mcp, "recent": net_mod.recent_hosts()},
+            "model": model,
+            "safeguards": (setup.get("safeguards") if in_box
+                           else setup_mod.local_safeguards(self, web)),
+            "turn": self._turn_count,
+            "box": None,
+            "memory": self.memory_view(data),
+        }
+        if in_box:
+            sync = data.get("sync")
+            toolchain = setup.get("toolchain") if isinstance(setup.get("toolchain"), dict) else {}
+            view["box"] = {
+                "available": bool(data),
+                "folder": (self.box_status_dir.is_dir() if self.box_status_dir else False),
+                "setup": setup, "sync": sync, "net": data.get("net"),
+                "sync_state": setup_mod.sync_state(sync, self._turn_count, running=busy),
+                "recent_denied": setup_mod.recent_denied(data.get("net")),
+                "prepare": self._prepare_cache.get(lambda: setup_mod.prepare_view(
+                    toolchain, Path.home() / ".momo-box" / "prepare.json", self.workdir)),
+            }
+        return view
 
     def _index_status_fields(self) -> dict:
         idx = self.index

@@ -250,6 +250,24 @@ class OllamaClient(LLMClient):
         except Exception:
             return []
 
+    def server_load(self, in_box: bool = False) -> dict | None:
+        """/api/ps: each model in memory with its size, the part in VRAM and
+        when Ollama unloads it."""
+        try:
+            models = self._client.request_json("GET", "/api/ps").get("models") or []
+        except Exception:
+            return None
+        rows = []
+        for m in models[:20]:
+            if not isinstance(m, dict):
+                continue
+            num = lambda k: m.get(k) if isinstance(m.get(k), int) else None  # noqa: E731
+            rows.append({"name": str(m.get("model") or m.get("name") or "")[:200],
+                         "size": num("size"), "vram": num("size_vram"),
+                         "context": num("context_length"),
+                         "expires": str(m.get("expires_at") or "")[:40]})
+        return {"kind": "ollama", "models": rows}
+
     def list_models(self) -> list[str]:
         """Return the available model names, or an empty list if the host is
         unreachable.  The caller (/model) reports the failure — an error string

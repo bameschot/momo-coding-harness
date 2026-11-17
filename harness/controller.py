@@ -61,6 +61,9 @@ _TITLE_EVERY = 5
 # A llama.cpp server can be relaunched with another model or context size while
 # momo runs; re-read it this often while idle so both UIs follow without a turn.
 _BACKEND_POLL = 10.0
+# The Setup badge: the model server's latency and the box's status files, this
+# often, and only while a web page is connected (nobody else shows them).
+_SETUP_POLL = 10.0
 
 
 @dataclass
@@ -118,6 +121,8 @@ class Controller:
         self._pending_confirm: Callable[[], str | None] | None = None
         self._pending_decline: Callable[[], str | None] | None = None   # on a "no", if set
         self.web_url: str | None = None  # set by main when the web server is up
+        self.web_viewers = 0             # open event streams (web pages); the server counts them
+        self._last_setup_check = 0.0
         # Idle recap state (see _idle_tick).
         self._last_activity = time.monotonic()
         self._idle = False
@@ -149,10 +154,13 @@ class Controller:
 
     def _set_busy(self, busy: bool):
         with self._lock:
+            ended = self._busy and not busy
             self._busy = busy
             if not busy:
                 self._last_activity = time.monotonic()  # idle time counts from the reply's end
             self._emit_busy()
+        if ended:     # a turn, plan run or command finished: --turn-marker watchers sync
+            self.harness.mark_turn()
 
     def _emit_companion(self):
         h = self.harness
@@ -251,9 +259,29 @@ class Controller:
         if h.refresh_backend():
             h.emit_status()
 
+    def add_viewer(self, n: int):
+        with self._lock:
+            self.web_viewers = max(0, self.web_viewers + n)
+
+    def _setup_tick(self):
+        """Refresh the Setup badge between turns while a web page is open."""
+        h = self.harness
+        with self._lock:
+            now = time.monotonic()
+            if (self.web_viewers <= 0 or now - self._last_setup_check < _SETUP_POLL
+                    or self._busy or self._pending_confirm is not None):
+                return
+            self._last_setup_check = now
+        if h.setup_tick(probe=True):
+            h.emit_status()
+
     def _idle_tick(self):
         try:
             self._backend_tick()
+        except Exception:
+            pass
+        try:
+            self._setup_tick()
         except Exception:
             pass
         try:

@@ -120,6 +120,11 @@ code { font: .88em var(--mono); background: var(--code-bg); border-radius: 4px; 
 .chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
 .chip.sys { color: var(--system); border-color: color-mix(in srgb, var(--system) 50%, transparent); }
 a.chip { text-decoration: none; }
+.chip.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; margin: .6em 0; }
+.topo .st { stroke: var(--surface); stroke-width: 1.5; }
+#setup-a .ah { fill: var(--muted); }
+.topo .st.ok { fill: var(--ok); } .topo .st.warn { fill: var(--warn); } .topo .st.bad { fill: var(--danger); }
 a.chip:hover { border-color: currentColor; }
 .collapse { }
 
@@ -376,6 +381,54 @@ table { border-collapse: collapse; font-size: 14px; width: 100%; }
 .seq .frame { fill: none; stroke: var(--border); stroke-width: 1.2; }
 .seq .frame-tab { fill: var(--code-bg); stroke: var(--border); }
 .seq .frame-t { fill: var(--muted); font: 600 11px var(--sans); }
+/* .topo: topology diagrams (momo-box); scrolls inside itself on a phone */
+.topo { margin: 1em 0; }
+.topo figcaption { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.topo svg { display: block; width: 100%; min-width: 620px; max-width: 780px; height: auto; font: 12px var(--sans); }
+.topo .host  { --gen: var(--user); }
+.topo .box-c { --gen: var(--assistant); }
+.topo .gw    { --gen: var(--tool); }
+.topo .ext   { --gen: var(--muted); }
+.topo .zone { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 6 4; }
+.topo .zone.vm { stroke-dasharray: none; fill: color-mix(in srgb, var(--surface-2) 55%, transparent); }
+.topo .zone-t { fill: var(--muted); font: 600 10.5px var(--sans); letter-spacing: .06em; text-transform: uppercase; }
+.topo .node rect { fill: color-mix(in srgb, var(--gen) 10%, var(--surface)); stroke: var(--gen); stroke-width: 1.5; }
+.topo .node .t { fill: var(--gen); font: 600 11px var(--sans); letter-spacing: .06em; text-transform: uppercase; }
+.topo .node .s { fill: var(--text); font: 11.5px var(--mono); white-space: pre; }
+.topo .node .m { fill: var(--muted); font-size: 11px; }
+.topo .link { stroke: var(--gen); stroke-width: 1.5; fill: none; }
+.topo .link.dash { stroke-dasharray: 5 3; }
+.topo .ah { fill: var(--gen); }
+.topo .blocked { stroke: var(--danger); stroke-width: 1.5; stroke-dasharray: 3 3; fill: none; }
+.topo .x { fill: var(--danger); font: 700 14px var(--sans); text-anchor: middle; }
+.topo .sub { fill: var(--muted); font-size: 11px; text-anchor: middle; }
+.topo .flow-legend .blk::before { --gen: var(--danger); border-style: dashed; background: transparent; }
+/* .reach: what each network mode can reach */
+.reach { margin: 1em 0; }
+.reach figcaption { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.reach-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 10px; }
+.reach-card { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 10px 12px; }
+.reach-card .name { font: 700 13px var(--mono); color: var(--user); }
+.reach-card .name small { font: 11.5px var(--sans); color: var(--muted); font-weight: 400; margin-left: 6px; }
+.reach-card ul { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
+.reach-card li { display: flex; gap: 6px; align-items: baseline; margin: 3px 0; }
+.reach-card li::before { font-weight: 700; width: 1em; flex: none; }
+.reach-card li.y::before { content: "✓"; content: "✓" / "yes: "; color: var(--ok); }
+.reach-card li.n::before { content: "✕"; content: "✕" / "no: "; color: var(--danger); }
+.reach-card li.n { color: var(--muted); }
+.reach-card li small { color: var(--muted); font-size: 11.5px; }
+/* .rings: nested isolation layers */
+.rings { margin: 1em 0; max-width: 680px; font-size: 13px; }
+.rings figcaption { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.ring { --gen: var(--border); border: 1.5px solid var(--gen); border-radius: 10px; padding: 6px 10px 10px; background: color-mix(in srgb, var(--gen) 6%, var(--surface)); }
+.ring .ring { margin-top: 6px; }
+.ring-t { font: 600 10.5px var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--gen); }
+.ring small { display: block; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.ring.r1 { --gen: var(--muted); }
+.ring.r2 { --gen: var(--tool); border-style: dashed; }
+.ring.r3 { --gen: var(--system); }
+.ring.r4 { --gen: var(--user); }
+.ring.core { --gen: var(--assistant); text-align: center; font-weight: 600; padding: 8px; color: var(--assistant); }
 /* .flow: step diagrams (agent loop, fetch_url guard, plan lifecycle) */
 .flow { margin: 1em 0; font-size: 13.5px; --gen: var(--border); }
 .flow figcaption { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
@@ -660,6 +713,11 @@ footer.site .wrap { display: flex; flex-wrap: wrap; gap: 12px; align-items: cent
       <p>File tools stay inside the working directory. Shell commands can reach further, so <code>/run-confirm on</code> lets you approve each one.</p>
       <a class="more" href="#security">Security →</a>
     </div>
+    <div class="card" style="--c: var(--tool)">
+      <h3><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>Run it in a box</h3>
+      <p><code>momo-box</code> runs momo in a container with a clean clone of the project, no credentials and, by default, only the package registries for a network. The work comes back as a git branch for you to review.</p>
+      <a class="more" href="#box">Containers →</a>
+    </div>
     <div class="card" style="--c: var(--user)">
       <h3><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg>Sessions &amp; context</h3>
       <p>Sessions save after every reply, and the next launch reopens the last one in its workspace. When the context fills up, old tool output goes first and the rest is summarised.</p>
@@ -828,6 +886,7 @@ ollama serve</code></pre></div>
     <pre><code>pytest -x 2&gt;&amp;1 | momo -p "explain this failure"
 momo -p "fix the failing test" --mode coding --timeout 600</code></pre>
     <p>Nobody is there to answer questions, so momo answers them itself. Confirmations answer <em>no</em> (<code>--yes</code> makes them answer yes), the model is told to decide on its own, and a plan is approved and runs. Each run is a new saved session: <code>--continue</code> or <code>--session NAME</code> picks one up again. Exit codes: <code>0</code> done, <code>1</code> error, <code>2</code> bad arguments, <code>3</code> plan stopped early, <code>124</code> timeout, <code>130</code> interrupted.</p>
+    <p><code>momo-box run -p "…"</code> does the same in a container, with the work landing as a git branch. See <a href="#box">Running momo in a box</a>.</p>
   </section>
 
   <section id="requirements" data-voice="requirements">
@@ -1183,6 +1242,7 @@ momo -p "fix the failing test" --mode coding --timeout 600</code></pre>
       <li><strong>Status bar:</strong> sessions, file browser, <a href="#changes">changes</a>, mode and model pickers, the CTX meter (click for a breakdown), setting badges, and buttons for <a href="#mcp">MCP</a>, <a href="#tool-choices">tools</a> and <a href="#skills">skills</a>.</li>
       <li><strong>Transcript:</strong> streamed replies, collapsible thinking and tool calls, coloured diffs and Yes/No question cards.</li>
       <li><strong>Changes drawer:</strong> every file momo changed since the last keep, per turn, with diffs, undo and keep. See <a href="#changes">The Changes drawer</a>.</li>
+      <li><strong>Setup badge and drawer:</strong> where momo and its model server run, the server's speed and load, and in a box its network and sync. See <a href="#setup-panel">The Setup panel</a>.</li>
       <li><strong>Input:</strong> <kbd>/</kbd> command and <kbd>@</kbd> path autocomplete, messages that steer a running turn (the model reads them after its current step), a queue while offline, and Retry / Edit.</li>
       <li><strong>Attachments:</strong> drag, paste or pick files; text and PDFs become text.</li>
       <li><strong>Notifications:</strong> a kitten mew and optional desktop notifications.</li>
@@ -1198,6 +1258,71 @@ momo -p "fix the failing test" --mode coding --timeout 600</code></pre>
       <tr><td><kbd>Shift+T</kbd> / <kbd>M</kbd> / <kbd>D</kbd> / <kbd>Q</kbd> / <kbd>P</kbd> / <kbd>C</kbd></td><td>outside the input</td><td class="wrap">Same as in the <a href="#tui">TUI</a></td></tr>
     </table></div>
     <p><strong>Differences from the TUI:</strong> <code>/exit</code> doesn't work from the browser. <code>/copy</code> and <code>/export</code> act on the machine running momo; use the <strong>Copy</strong> buttons and View → <strong>Download conversation</strong> instead.</p>
+  </section>
+
+  <section id="setup-panel" data-voice="setup-panel">
+    <h2>The Setup panel</h2>
+    <p>A badge in the web UI's header says where momo runs and how it is doing. Clicking it opens the <strong>Setup</strong> drawer: a live picture of the setup, with the details in tabs. It only shows things; nothing in it changes a setting.</p>
+    <div class="badges" aria-label="Badge examples">
+      <span class="chip">LOCAL · llama.cpp · 42 ms</span>
+      <span class="chip bad">LOCAL · ollama · down</span>
+      <span class="chip">BOX fix-auth · pull · synced 2m</span>
+      <span class="chip warn">BOX fix-auth · pull · landed beside · 3 refused</span>
+      <span class="chip bad">BOX fix-auth · pull · syncer stopped</span>
+    </div>
+    <p>Amber means slow (over a second to answer), or a box's work landed on <code>momo/&lt;name&gt;-incoming</code>. Red means the model server can't be reached, a sync failed, or a box's background sync has been silent for a minute.</p>
+
+    <figure class="topo" aria-label="The Setup panel's picture of local momo">
+      <div class="seq-scroll">
+      <svg viewBox="0 0 760 330" role="img" aria-labelledby="setup-local-title">
+        <title id="setup-local-title">Local momo: one machine holds momo, its web UI, the workspace and the MCP servers. An arrow leads to the model server on the same machine, with its latency and speed. A dashed arrow leads to the internet: shell commands reach it unfiltered, and momo's web tools when they are on.</title>
+        <defs><marker id="setup-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0 10 5 0 10z"/></marker></defs>
+        <rect class="zone vm" x="10" y="8" width="520" height="312" rx="10"/>
+        <text class="zone-t" x="24" y="26">this machine</text>
+        <text class="zone-t" x="556" y="26">outside</text>
+        <g class="node host"><rect x="26" y="40" width="300" height="148" rx="8"/>
+          <text class="t" x="38" y="59">momo</text><circle class="st ok" cx="312" cy="54" r="5"/>
+          <text class="s" x="38" y="79">macOS · pid 4121 · up 2h</text>
+          <text class="s" x="38" y="96">web UI 127.0.0.1:8765 · token</text>
+          <text class="s" x="38" y="113">workspace app</text>
+          <text class="s" x="38" y="130">git main · 3 changed</text>
+          <text class="s" x="38" y="147">commands run as you</text>
+          <text class="s" x="38" y="164">not isolated</text></g>
+        <g class="node ext"><rect x="26" y="214" width="300" height="92" rx="8"/>
+          <text class="t" x="38" y="233">MCP servers</text><circle class="st ok" cx="312" cy="228" r="5"/>
+          <text class="s" x="38" y="253">fs · stdio · ready</text>
+          <text class="s" x="38" y="270">docs · http · ready</text></g>
+        <line class="link host" x1="176" y1="188" x2="176" y2="212" marker-end="url(#setup-a)"/>
+        <g class="node box-c"><rect x="346" y="40" width="170" height="148" rx="8"/>
+          <text class="t" x="358" y="59">llama.cpp</text><circle class="st ok" cx="502" cy="54" r="5"/>
+          <text class="s" x="358" y="79">same machine</text>
+          <text class="s" x="358" y="96">localhost:9931</text>
+          <text class="s" x="358" y="113">gemma-4-26B</text>
+          <text class="s" x="358" y="130">ctx 130k · 13%</text>
+          <text class="s" x="358" y="147">42 ms · 58 tok/s</text></g>
+        <line class="link box-c" x1="326" y1="110" x2="344" y2="110" marker-end="url(#setup-a)"/>
+        <g class="node ext"><rect x="556" y="214" width="194" height="92" rx="8"/>
+          <text class="t" x="568" y="233">internet</text>
+          <text class="s" x="568" y="253">web tools: off</text>
+          <text class="s" x="568" y="270">shell commands: any host</text></g>
+        <path class="link ext dash" d="M300 188 L300 201 L653 201 L653 212" fill="none" marker-end="url(#setup-a)"/>
+        <text class="sub" x="440" y="218">commands only</text>
+      </svg>
+      </div>
+      <figcaption>Local momo, as the Setup tab draws it. Each node has a state dot; the model server sits outside this machine's frame when it is on your network or the internet.</figcaption>
+    </figure>
+
+    <div class="table-scroll"><table>
+      <tr><th>Tab</th><th>Running locally</th><th>In a <a href="#box">momo-box</a></th></tr>
+      <tr><td><strong>Setup</strong></td><td class="wrap">The picture above, plus host, OS, web UI address and isolation (none)</td><td class="wrap">The <a href="#box">box diagram</a>, live: your repo and when work last landed, the box, its gateway, the model server and the allowed hosts</td></tr>
+      <tr><td><strong>Network</strong></td><td class="wrap">momo's web tools, the hosts they reached lately, MCP endpoints. Shell commands are not filtered, and the tab says so.</td><td class="wrap">The allowlist with each rule's reason and source, the repo's instructions, the most refused hosts with a ready-to-copy <code>momo-box allow</code>, a per-host table and the latest decisions</td></tr>
+      <tr><td><strong>Workspace / Sync</strong></td><td class="wrap">Branch, changed files, last commit, momo's checkpoints</td><td class="wrap">Sync state, the last land and a history, with the reason when one went to <code>-incoming</code></td></tr>
+      <tr><td><strong>Model</strong></td><td class="wrap">Where the server is (same machine, your network, the internet; https or not), latency, model, context use, speed over the last replies, and the server's load: Ollama's models in memory, llama.cpp's busy slots</td><td class="wrap">The same, with the server's real address, plus what the gateway passed and refused</td></tr>
+      <tr><td><strong>Toolchain</strong></td><td>—</td><td class="wrap">Where the toolchain came from, base image and packages, and whether <code>prepare</code> is up to date with its input files</td></tr>
+      <tr><td><strong>Safeguards</strong></td><td class="wrap">An honest list: not isolated, shell commands run as you with your network and files, which confirmations are on</td><td class="wrap">The <a href="#box-safeguards">isolation rings</a>, each ticked against the running container (<code>docker inspect</code>)</td></tr>
+    </table></div>
+    <p><strong>Memory</strong> sits at the bottom of the Setup tab. Locally it shows momo's process and this machine's RAM. In a box it shows the container against its cap: peak, programs versus file cache, swap (Docker lets a <code>--memory 1g</code> box swap another 1 GB), the biggest processes by name, the gateway and the engine total, with a ten-minute graph. The badge adds <code>mem 85%</code> from 80% of the cap, or when the box swaps; it turns red at 95% or after an OOM kill.</p>
+    <p>The latency check is a list-models request every 10 seconds, only while a web page is open and never during a turn. Inside a box, llama.cpp's <code>/slots</code> is not asked: on a shared server it can show other clients' prompts.</p>
   </section>
 
   <section id="skills" data-voice="skills">
@@ -2195,7 +2320,524 @@ modified: shop/pricing.py
       <li>Treat the token like a password: anyone with it controls momo.</li>
       <li>Use HTTPS on any network you don't fully trust.</li>
       <li>Turn on <code>/run-confirm on</code> when others can reach the UI or the internet tools are on.</li>
+      <li>To let the model run commands away from your files, keys and network, run momo in a box. See <a href="#box-safeguards">Box safeguards</a>.</li>
     </ul>
+  </section>
+
+  <section id="box" data-group="Containers" data-voice="box">
+    <h2>Running momo in a box</h2>
+    <p><code>momo-box</code> runs momo in a container (Docker or Podman) that holds a clean clone of one workspace and nothing else: no home folder, no SSH keys or tokens, no other projects. It serves a <a href="#headless">headless run</a> or the <a href="#web">web UI</a>, talks to your model server (local or remote), and hands the model's work back as a git branch, <code>momo/&lt;name&gt;</code>. It never writes to your files.</p>
+    <p>Use it to let the model build and run code without it touching your machine: for someone else's project, for unattended runs, or for work that must not reach the internet.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>./momo-box run -p "why does test_parse fail?" --llm http://localhost:9931 --provider llamacpp -- --mode coding
+./momo-box web --name fix-auth --llm http://localhost:11434   <span class="com"># prints the web UI address</span>
+./momo-box stop fix-auth                                      <span class="com"># final sync; keeps the box</span>
+./momo-box start fix-auth                                     <span class="com"># again, with the same settings</span>
+git diff main momo/fix-auth                                   <span class="com"># review what it did</span></code></pre></div>
+
+    <figure class="topo" aria-label="Where a box sits and what it can reach">
+      <div class="seq-scroll">
+      <svg viewBox="0 0 780 420" role="img" aria-labelledby="topo-arch-title">
+        <title id="topo-arch-title">The launcher on your machine passes the source into the box as a read-only bundle and lands the work as a branch. The box sits on an internal network whose only way out is a gateway. The gateway forwards inference requests to the model server and registry traffic to an allowlist (pull mode), and it publishes the web UI to 127.0.0.1. The box has no route to the internet, your machine or your LAN.</title>
+        <defs>
+          <marker id="topo-a-host" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah host" d="M0 0 10 5 0 10z"/></marker>
+          <marker id="topo-a-box" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah box-c" d="M0 0 10 5 0 10z"/></marker>
+          <marker id="topo-a-gw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah gw" d="M0 0 10 5 0 10z"/></marker>
+        </defs>
+
+        <!-- zones -->
+        <text class="zone-t" x="20" y="40">on your machine</text>
+        <text class="zone-t" x="650" y="40">outside</text>
+        <rect class="zone vm" x="268" y="16" width="356" height="336" rx="10"/>
+        <text class="zone-t" x="282" y="36">container engine</text>
+        <rect class="zone" x="284" y="50" width="324" height="274" rx="8"/>
+        <text class="zone-t" x="298" y="68">internal network · no route out</text>
+
+        <!-- the box and its gateway -->
+        <g class="node box-c">
+          <rect x="300" y="80" width="292" height="112" rx="8"/>
+          <text class="t" x="314" y="100">the box</text>
+          <text class="s" x="314" y="122">momo · uid 1000 · read-only root</text>
+          <text class="s" x="314" y="141">/workspace   volume</text>
+          <text class="s" x="314" y="160">/home/momo   volume</text>
+          <text class="s" x="314" y="179">/in          bundle, read-only</text>
+        </g>
+        <g class="node gw">
+          <rect x="300" y="224" width="292" height="88" rx="8"/>
+          <text class="t" x="314" y="244">gateway</text>
+          <text class="s" x="314" y="264">:9000  model server, filtered</text>
+          <text class="s" x="314" y="283">:3128  registry proxy (pull)</text>
+          <text class="s" x="314" y="302">:8765  web UI → 127.0.0.1</text>
+        </g>
+        <line class="link gw" x1="446" y1="195" x2="446" y2="221" marker-start="url(#topo-a-gw)" marker-end="url(#topo-a-gw)"/>
+        <text class="sub" x="525" y="212">the only way through</text>
+
+        <!-- your machine -->
+        <g class="node host">
+          <rect x="20" y="80" width="212" height="56" rx="8"/>
+          <text class="t" x="34" y="100">momo-box launcher</text>
+          <text class="m" x="34" y="122">builds, starts, lands the work</text>
+        </g>
+        <g class="node host">
+          <rect x="20" y="168" width="212" height="56" rx="8"/>
+          <text class="t" x="34" y="188">source repo</text>
+          <text class="m" x="34" y="210">your checkout is never touched</text>
+        </g>
+        <g class="node host">
+          <rect x="20" y="256" width="212" height="56" rx="8"/>
+          <text class="t" x="34" y="276">model server</text>
+          <text class="m" x="34" y="298">llama.cpp or Ollama</text>
+        </g>
+        <g class="node host">
+          <rect x="20" y="352" width="212" height="56" rx="8"/>
+          <text class="t" x="34" y="372">your browser</text>
+          <text class="m" x="34" y="394">127.0.0.1 + access token</text>
+        </g>
+
+        <!-- routes -->
+        <line class="link host" x1="232" y1="104" x2="297" y2="104" marker-end="url(#topo-a-host)"/>
+        <text class="sub" x="265" y="97">bundle in</text>
+        <line class="link box-c dash" x1="300" y1="120" x2="235" y2="120" marker-end="url(#topo-a-box)"/>
+        <text class="sub" x="265" y="134">work out</text>
+        <line class="link host" x1="126" y1="139" x2="126" y2="165" marker-start="url(#topo-a-host)" marker-end="url(#topo-a-host)"/>
+        <text class="sub" x="134" y="156" style="text-anchor: start">commit in · branch out</text>
+        <line class="link gw" x1="300" y1="270" x2="235" y2="270" marker-end="url(#topo-a-gw)"/>
+        <text class="sub" x="265" y="263">inference</text>
+        <path class="link host" d="M232 380H446V315" marker-end="url(#topo-a-host)"/>
+        <text class="sub" x="340" y="374">web UI</text>
+
+        <!-- outside -->
+        <g class="node ext">
+          <rect x="650" y="80" width="120" height="56" rx="8"/>
+          <text class="t" x="662" y="100">internet</text>
+          <text class="m" x="662" y="122">LAN · host ports</text>
+        </g>
+        <g class="node ext">
+          <rect x="650" y="252" width="120" height="56" rx="8"/>
+          <text class="t" x="662" y="272">registries</text>
+          <text class="m" x="662" y="294">npm, Maven, …</text>
+        </g>
+        <line class="blocked" x1="592" y1="108" x2="648" y2="108"/>
+        <text class="x" x="630" y="102">✕</text>
+        <line class="link gw" x1="592" y1="280" x2="647" y2="280" marker-end="url(#topo-a-gw)"/>
+        <text class="sub" x="621" y="273">pull</text>
+      </svg>
+      </div>
+      <div class="flow-legend"><span class="host">your machine</span><span class="box-c">box</span><span class="gw">gateway</span><span class="ext">outside</span><span class="blk">no route</span></div>
+      <figcaption>A <code>pull</code> or <code>locked</code> box. The only host folder it sees is the bundle at <code>/in</code>. In <code>open</code> mode the box is on the engine's normal network instead, with no gateway.</figcaption>
+    </figure>
+
+    <p>Read on for <a href="#box-setup">setup and commands</a>, <a href="#box-sync">how code goes in and out</a>, the <a href="#box-network">network modes</a>, <a href="#box-toolchains">toolchains</a> and the <a href="#box-safeguards">safeguards</a>.</p>
+  </section>
+
+  <section id="box-setup" data-voice="box-setup">
+    <h2>Box setup &amp; commands</h2>
+    <h3>What you need</h3>
+    <ul>
+      <li><strong>Docker or Podman</strong>, running. momo-box uses Docker if it finds it, else Podman; <code>--runtime</code> or <code>$MOMO_BOX_RUNTIME</code> picks one.</li>
+      <li><strong>Python 3.10 or newer, and git</strong>, on the host. The launcher uses only the standard library, so there is nothing to install. Inside the box momo brings its own Python.</li>
+      <li><strong>A model server</strong> the host can reach, as for momo itself.</li>
+    </ul>
+    <p><code>./momo-box</code> is in momo's checkout. Run it from your project's folder, or pass <code>--repo</code>. It finds its own files through a symlink, so <code>ln -s ~/momo-coding-harness/momo-box ~/bin/momo-box</code> puts it on your <code>PATH</code>.</p>
+
+    <h3>The first run</h3>
+    <ol>
+      <li><strong>Image.</strong> momo-box works out the project's toolchain (<a href="#box-toolchains">how</a>) and builds an image for it. That takes a few minutes the first time; later runs reuse the image until the toolchain changes. <code>momo-box detect</code> shows what it would use, and <code>momo-box build --project</code> builds it ahead of time.</li>
+      <li><strong>Approval.</strong> If the toolchain comes from the repo (<code>.momo/box.json</code> or a devcontainer), momo-box shows it and asks once per version.</li>
+      <li><strong>Prepare.</strong> The project's dependencies are fetched in a throwaway container (<a href="#box-prepare">prepare</a>).</li>
+      <li><strong>Start.</strong> The box and its gateway start. <code>web</code> prints the address with its token once momo answers. <code>run</code> streams progress to stderr and the answer to stdout.</li>
+    </ol>
+
+    <h3>The model server</h3>
+    <p><code>--llm</code> is the server's URL as seen from <em>this</em> machine. <code>localhost</code> is rewritten to the container host's name for you. <code>--provider</code> and <code>--model</code> work as they do in momo. On Linux with Docker, the server must listen on <code>0.0.0.0</code> or the docker bridge, not only on <code>127.0.0.1</code>, because the container reaches the host over the bridge.</p>
+
+    <h3>Commands</h3>
+    <div class="table-scroll"><table>
+      <tr><th>Command</th><th>Description</th></tr>
+      <tr><td><code>run -p TEXT</code></td><td class="wrap">One prompt, headless, like <a href="#headless"><code>momo -p</code></a>. Without <code>--name</code> the box is removed afterwards, once its work has landed. <code>-p -</code> reads the prompt from stdin.</td></tr>
+      <tr><td><code>web</code></td><td class="wrap">Serve the web UI from a box on <code>127.0.0.1:--port</code> (default 8765). Each finished turn lands in the background.</td></tr>
+      <tr><td><code>ls</code></td><td class="wrap">Boxes and their state. Restarts the background sync of a running web box if it died.</td></tr>
+      <tr><td><code>dash [--port P] [--no-open]</code></td><td class="wrap">A page on <code>127.0.0.1</code> showing every box: its diagram, network, sync, safeguards and memory, with a link to its UI. Read-only; restarts a dead background sync like <code>ls</code>. See <a href="#box-watch">Watching a box</a>.</td></tr>
+      <tr><td><code>url NAME</code></td><td class="wrap">Print a web box's address again, with its token</td></tr>
+      <tr><td><code>logs NAME [-f]</code></td><td class="wrap">momo's output from the box</td></tr>
+      <tr><td><code>sync NAME [--follow]</code></td><td class="wrap">Land the work as <code>momo/NAME</code> now; <code>--follow</code> keeps doing it after every turn</td></tr>
+      <tr><td><code>stop NAME</code></td><td class="wrap">A final sync, then stop. The workspace and sessions are kept.</td></tr>
+      <tr><td><code>start NAME</code></td><td class="wrap">Start a stopped web box again, with the settings it was created with</td></tr>
+      <tr><td><code>prepare NAME</code></td><td class="wrap">Re-run a stopped box's dependency prefetch</td></tr>
+      <tr><td><code>allow NAME HOST…</code></td><td class="wrap">Allow more hosts in a running <code>pull</code> box, also over a deny in the repo's <code>.momo/network.json</code></td></tr>
+      <tr><td><code>netlog NAME [-n N]</code></td><td class="wrap">What a <code>pull</code> box's proxy allowed and refused, with the deciding rule, and the requests the model filter passed or refused</td></tr>
+      <tr><td><code>detect [--write]</code></td><td class="wrap">Show the toolchain it would use and why; <code>--write</code> saves it as <code>.momo/box.json</code></td></tr>
+      <tr><td><code>build [--project]</code></td><td class="wrap">Build the momo image, or the repo's toolchain image</td></tr>
+      <tr><td><code>rm NAME [--yes]</code></td><td class="wrap">Remove a box with its workspace and sessions. Branch <code>momo/NAME</code> stays in your repo.</td></tr>
+    </table></div>
+
+    <h3 id="box-flags">Flags for <code>run</code> and <code>web</code></h3>
+    <div class="table-scroll"><table>
+      <tr><th>Flag</th><th>Default</th><th>Description</th></tr>
+      <tr><td><code>--repo PATH|URL</code></td><td><code>.</code></td><td class="wrap">The workspace: a local repo, or a git URL cloned on the host with your credentials</td></tr>
+      <tr><td><code>--ref</code></td><td><code>HEAD</code></td><td class="wrap">Commit, branch or tag to start from</td></tr>
+      <tr><td><code>--with-uncommitted</code></td><td>off</td><td class="wrap">Also bring your uncommitted changes, as a commit of their own</td></tr>
+      <tr><td><code>--empty</code></td><td>off</td><td class="wrap">Start from an empty repository</td></tr>
+      <tr><td><code>--all-refs</code></td><td>off</td><td class="wrap">Bring every branch and tag, not only the starting commit</td></tr>
+      <tr><td><code>--land-repo PATH</code></td><td>the source repo</td><td class="wrap">Where branch <code>momo/NAME</code> is created</td></tr>
+      <tr><td><code>--name</code></td><td>none</td><td class="wrap">Keep the box under this name. Without it the box is thrown away after the run.</td></tr>
+      <tr><td><code>--net</code></td><td><code>pull</code></td><td class="wrap"><code>pull</code>, <code>locked</code> or <code>open</code>; see <a href="#box-network">Network modes</a></td></tr>
+      <tr><td><code>--prepare-net</code></td><td><code>pull</code></td><td class="wrap">Where a <code>pull</code> or <code>locked</code> box prefetches: through the allowlist, or <code>open</code></td></tr>
+      <tr><td><code>--llm-filter</code></td><td><code>on</code></td><td class="wrap">Forward only inference requests to an <code>http://</code> model server; <code>off</code> forwards its whole API</td></tr>
+      <tr><td><code>--allow-host HOST</code></td><td></td><td class="wrap">An extra host for <code>pull</code> (repeatable; <code>github</code> adds GitHub's hosts)</td></tr>
+      <tr><td><code>--llm URL</code></td><td>by provider</td><td class="wrap">The model server as seen from this machine</td></tr>
+      <tr><td><code>--provider</code></td><td><code>ollama</code></td><td class="wrap"><code>ollama</code> or <code>llamacpp</code></td></tr>
+      <tr><td><code>--model</code></td><td>momo's default</td><td class="wrap">Model name (Ollama only), as in momo</td></tr>
+      <tr><td><code>--preset</code></td><td>detected</td><td class="wrap"><code>java</code>, <code>gradle</code>, <code>cpp</code>, <code>node</code>, <code>rust</code>, <code>go</code> or <code>python</code></td></tr>
+      <tr><td><code>--base IMAGE</code>, <code>--packages "…"</code></td><td>detected</td><td class="wrap">A base image of your own, and extra system packages</td></tr>
+      <tr><td><code>--image IMAGE</code></td><td></td><td class="wrap">Use this image instead of building one</td></tr>
+      <tr><td><code>--pull</code></td><td>off</td><td class="wrap">Refresh the base image</td></tr>
+      <tr><td><code>--no-prepare</code></td><td>off</td><td class="wrap">Skip the dependency prefetch</td></tr>
+      <tr><td><code>--yes</code></td><td>off</td><td class="wrap">Approve a repo's box configuration without asking</td></tr>
+      <tr><td><code>--memory</code>, <code>--cpus</code></td><td>no limit</td><td class="wrap">e.g. <code>8g</code>, <code>4</code>; <code>1g</code> in low-memory mode</td></tr>
+      <tr><td><code>--low-mem</code> / <code>--no-low-mem</code></td><td>on below 4 GB</td><td class="wrap">A 1 GB cap, Gradle without a daemon and Kotlin in-process, a 32 MB code index. On by itself when the engine has under 4 GB; it says so.</td></tr>
+      <tr><td><code>--full-base</code></td><td>off</td><td class="wrap">The Python, Node and Rust presets use slim images, 600–800 MB smaller but without a C compiler; this brings back the full image. Also <code>"full_base": true</code> in <code>.momo/box.json</code>.</td></tr>
+      <tr><td><code>--pids</code></td><td><code>512</code></td><td class="wrap">Processes and threads in the box</td></tr>
+      <tr><td><code>--tmp-size</code></td><td><code>2g</code></td><td class="wrap">Size of the box's <code>/tmp</code></td></tr>
+      <tr><td><code>--port</code></td><td><code>8765</code></td><td class="wrap"><code>web</code> only: the port on <code>127.0.0.1</code></td></tr>
+      <tr><td><code>-v</code></td><td>off</td><td class="wrap">Show why the toolchain was chosen</td></tr>
+      <tr><td><code>-- …</code></td><td></td><td class="wrap">Everything after it goes to momo itself: <code>--mode coding</code>, <code>--yes</code>, <code>--timeout 600</code>, …</td></tr>
+    </table></div>
+    <p>Disk use of the workspace and caches is not limited.</p>
+
+    <h3>A box's life</h3>
+    <figure class="flow" aria-label="The life of a named box">
+      <div class="flow-row">
+        <div class="box you"><div class="flow-who">you</div><code>web --name X</code><small>builds the image if needed, prefetches, starts momo and the gateway</small></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="box harness"><div class="flow-who">running</div>turns land<small>every finished turn lands as <code>momo/X</code></small></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="box you"><div class="flow-who">you</div><code>stop X</code><small>a final sync; workspace and sessions kept</small></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="box you"><div class="flow-who">you</div><code>start X</code><small>the same settings; prepare runs again only if the build files changed</small></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="box end"><div class="flow-who">you</div><code>rm X</code><small>containers and volumes gone; the branch stays</small></div>
+      </div>
+      <ul class="flow-edges">
+        <li><span class="from">run</span><span class="via">without --name</span>→<span class="to">land, then remove</span> Ctrl-C or a closed terminal stops the box and lands what it had first. If landing fails, the box is kept so that <code>momo-box sync NAME</code> can retry.</li>
+        <li><span class="from">run</span><span class="via">--name X … -- --continue</span>→<span class="to">picks up the same session</span></li>
+      </ul>
+      <figcaption>A named box keeps its workspace, sessions and dependency caches until <code>rm</code>. It stays tied to the repo and commit it was made from: another <code>--repo</code> under the same name is refused, and <code>rm</code> keeps its <code>momo/NAME</code> branch.</figcaption>
+    </figure>
+
+    <h3>Docker Compose</h3>
+    <p><code>container/compose.yaml</code> runs the same image with Compose. <code>compose.locked.yaml</code>, layered on top, puts it on an internal network behind the gateway. There is no automatic sync; land the work yourself:</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">bash</span></div><pre><code>git bundle create container/in/source.bundle --all
+export MOMO_WEB_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
+docker compose -f container/compose.yaml -f container/compose.locked.yaml up -d --build
+./momo-box sync compose --container momo-box-momo-1 --land-repo .   <span class="com"># → branch momo/compose</span></code></pre></div>
+  </section>
+
+  <section id="box-sync" data-voice="box-sync">
+    <h2>How code goes in and out</h2>
+    <p>No folder of yours is mounted into the box. The source goes in as a git bundle and the work comes out as one, so the box never writes to your files, and you review its work like a pull request.</p>
+
+    <figure class="seq" aria-label="Sequence of a box's sync">
+      <div class="seq-scroll">
+      <svg viewBox="0 0 680 600" role="img" aria-labelledby="boxseq-title">
+        <title id="boxseq-title">The launcher bundles one commit from the source repo and mounts it read-only in the box, which fetches it into a fresh repo. After each finished turn the box reports it, the launcher asks for an export since the last landed commit, the box snapshots its work into a bundle, and the launcher copies the bundle out, checks it and fetches it into branch momo/name. If that branch moved or is checked out, it lands on momo/name-incoming instead.</title>
+        <defs>
+          <marker id="boxseq-a-you" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah you" d="M0 0 10 5 0 10z"/></marker>
+          <marker id="boxseq-a-harness" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah harness" d="M0 0 10 5 0 10z"/></marker>
+          <marker id="boxseq-a-model" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah model" d="M0 0 10 5 0 10z"/></marker>
+        </defs>
+
+        <!-- lanes -->
+        <g class="lane you"><rect x="30" y="12" width="140" height="36" rx="8"/><text x="100" y="35">source repo</text><line x1="100" y1="48" x2="100" y2="588"/></g>
+        <g class="lane harness"><rect x="255" y="12" width="150" height="36" rx="8"/><text x="330" y="35">launcher</text><line x1="330" y1="48" x2="330" y2="588"/></g>
+        <g class="lane model"><rect x="500" y="12" width="140" height="36" rx="8"/><text x="570" y="35">box</text><line x1="570" y1="48" x2="570" y2="588"/></g>
+
+        <!-- in -->
+        <text class="lbl" x="215" y="80">one commit's history</text>
+        <line class="msg you" x1="100" y1="86" x2="328" y2="86" marker-end="url(#boxseq-a-you)"/>
+        <text class="sub" x="215" y="102">via refs/momo-box-src/&lt;name&gt;</text>
+        <text class="lbl" x="450" y="130">bundle at /in, read-only</text>
+        <line class="msg harness" x1="330" y1="136" x2="568" y2="136" marker-end="url(#boxseq-a-harness)"/>
+        <text class="sub" x="450" y="152">git init + fetch, not clone</text>
+        <rect class="act model" x="500" y="170" width="140" height="30" rx="6"/>
+        <text class="act-t" x="570" y="189">momo works</text>
+
+        <!-- out, per turn -->
+        <rect class="frame" x="20" y="222" width="640" height="260" rx="4"/>
+        <path class="frame-tab" d="M20 222h300v14l-8 8H20z"/>
+        <text class="frame-t" x="28" y="237">loop · each finished turn, and at the end</text>
+        <text class="lbl" x="450" y="270">turn finished</text>
+        <line class="msg model reply" x1="570" y1="276" x2="332" y2="276" marker-end="url(#boxseq-a-model)"/>
+        <text class="sub" x="450" y="292">one watch line, no polling</text>
+        <text class="lbl c" x="450" y="322">export --since &lt;last landed&gt;</text>
+        <line class="msg harness" x1="330" y1="328" x2="568" y2="328" marker-end="url(#boxseq-a-harness)"/>
+        <rect class="act model" x="495" y="344" width="150" height="30" rx="6"/>
+        <text class="act-t" x="570" y="363">snapshot its work</text>
+        <text class="lbl" x="450" y="398">a bundle of the new commits</text>
+        <line class="msg model reply" x1="570" y1="404" x2="332" y2="404" marker-end="url(#boxseq-a-model)"/>
+        <text class="sub" x="450" y="420">streamed out, size-capped</text>
+        <text class="lbl c" x="215" y="446">fetch, fsckObjects</text>
+        <line class="msg harness" x1="330" y1="452" x2="102" y2="452" marker-end="url(#boxseq-a-harness)"/>
+        <text class="sub" x="215" y="468">→ branch momo/&lt;name&gt;</text>
+
+        <!-- conflict -->
+        <rect class="frame" x="20" y="500" width="640" height="76" rx="4"/>
+        <path class="frame-tab" d="M20 500h300v14l-8 8H20z"/>
+        <text class="frame-t" x="28" y="515">alt · you moved it or have it checked out</text>
+        <text class="lbl c" x="215" y="546">→ momo/&lt;name&gt;-incoming</text>
+        <line class="msg harness" x1="330" y1="552" x2="102" y2="552" marker-end="url(#boxseq-a-harness)"/>
+        <text class="sub" x="215" y="568">your branch is left alone</text>
+      </svg>
+      </div>
+      <div class="flow-legend"><span class="you">source repo</span><span class="harness">launcher</span><span class="model">box</span></div>
+      <figcaption>Solid arrows are what the launcher sends or asks for; dashed ones are what the box answers. The launcher keeps a ref of its own, <code>refs/momo-box/&lt;name&gt;</code>, to know what it landed last.</figcaption>
+    </figure>
+
+    <h3>In</h3>
+    <ul>
+      <li><strong>One commit's history.</strong> momo-box points a temporary ref at the commit to start from (<code>--ref</code>, default <code>HEAD</code>), bundles it and deletes the ref. Other branches, tags and stashes stay out; <code>--all-refs</code> brings them.</li>
+      <li><strong>Read-only.</strong> The bundle is mounted at <code>/in</code>, read-only. The box makes a repo of its own with <code>git init</code> and <code>fetch</code>, so your repo's config, hooks and remotes don't come along.</li>
+      <li><strong>A URL</strong> is mirrored on the host first, with your credentials, so private repos work and the box never holds a key.</li>
+      <li><strong><code>--with-uncommitted</code></strong> adds your uncommitted changes as a commit of their own. <code>--empty</code> starts from nothing.</li>
+      <li><strong>Not carried:</strong> git submodules and Git LFS content. The box gets empty folders and pointer files, and momo-box warns when it sees them.</li>
+    </ul>
+    <h3>Out</h3>
+    <ul>
+      <li><strong>When:</strong> after every finished turn in a web box, at the end of a <code>run</code>, on <code>stop</code>, and on <code>momo-box sync NAME</code>. A turn lands within about a second: a background process waits on one <code>docker exec</code> that reports each finished turn, rather than polling.</li>
+      <li><strong>What:</strong> the model's own commits as they are, plus one commit for anything uncommitted. Files over 10 MB and git-ignored files stay out.</li>
+      <li><strong>Where:</strong> branch <code>momo/&lt;name&gt;</code> in the source repo (or <code>--land-repo</code>). Your checkout, index and current branch are not touched. Review with <code>git diff main momo/&lt;name&gt;</code> and merge as usual.</li>
+      <li><strong>Never over your work:</strong> if you committed on <code>momo/&lt;name&gt;</code> yourself, or have it checked out, the sync goes to <code>momo/&lt;name&gt;-incoming</code> instead.</li>
+      <li><strong>Small:</strong> each sync sends only the commits the source repo doesn't have yet. If that bundle doesn't apply, the launcher falls back to a full one.</li>
+    </ul>
+  </section>
+
+  <section id="box-network" data-voice="box-net">
+    <h2>Box network modes</h2>
+    <div class="table-scroll"><table>
+      <tr><th><code>--net</code></th><th>The model can reach</th><th>For</th></tr>
+      <tr><td><code>pull</code> <em>(default)</em></td><td class="wrap">the package registries of the project's toolchains, through an allowlist proxy that is already set up for pip, npm, Maven, Gradle, cargo, go and git</td><td class="wrap">everyday work: building, updating versions, adding dependencies</td></tr>
+      <tr><td><code>locked</code></td><td class="wrap">nothing but the model server; dependencies come from <a href="#box-prepare">prepare</a></td><td class="wrap">the strongest isolation</td></tr>
+      <tr><td><code>open</code></td><td class="wrap">the internet, every port on this machine, and your local network</td><td class="wrap">when isolation doesn't matter</td></tr>
+    </table></div>
+
+    <figure class="reach" aria-label="What each network mode can reach">
+      <div class="reach-grid">
+        <div class="reach-card"><div class="name">pull<small>default</small></div><ul>
+          <li class="y">model server <small>inference only</small></li>
+          <li class="y">web UI, from 127.0.0.1</li>
+          <li class="y">its toolchains' registries</li>
+          <li class="n">any other host</li>
+          <li class="n">your machine and LAN</li>
+          <li class="n">DNS</li>
+        </ul></div>
+        <div class="reach-card"><div class="name">locked</div><ul>
+          <li class="y">model server <small>inference only</small></li>
+          <li class="y">web UI, from 127.0.0.1</li>
+          <li class="n">registries <small>only during prepare</small></li>
+          <li class="n">any other host</li>
+          <li class="n">your machine and LAN</li>
+          <li class="n">DNS</li>
+        </ul></div>
+        <div class="reach-card"><div class="name">open</div><ul>
+          <li class="y">model server <small>its whole API</small></li>
+          <li class="y">web UI, from 127.0.0.1</li>
+          <li class="y">registries</li>
+          <li class="y">the internet</li>
+          <li class="y">your machine and LAN</li>
+          <li class="y">DNS</li>
+        </ul></div>
+      </div>
+      <figcaption>The web UI is published on 127.0.0.1 in every mode, with an access token.</figcaption>
+    </figure>
+
+    <h3 id="box-gateway">The gateway</h3>
+    <p>In <code>pull</code> and <code>locked</code> mode the box sits on an internal network with no route out and no DNS. A small gateway container is on that network and on the engine's normal one, and it is the only way through. It runs with the same hardening as the box and does three things:</p>
+    <ul>
+      <li><strong>Model server (<code>:9000</code>).</strong> For an <code>http://</code> server it forwards <strong>inference requests only</strong>: <code>GET</code> and <code>POST</code> on the paths momo uses, one request per connection, with the <code>Host</code> header set to the real server. Anything else gets a <code>403</code> that names the path, so the box can't pull, delete or push models on Ollama, or reach llama.cpp's <code>/slots</code>. An <code>https://</code> server is tunnelled as is, because it can't be inspected without breaking TLS. <code>--llm-filter off</code> forwards everything.</li>
+      <li><strong>Web UI (<code>:8765</code>).</strong> It publishes momo's UI on <code>127.0.0.1:--port</code>.</li>
+      <li><strong>Registries (<code>:3128</code>, <code>pull</code> only).</strong> An HTTPS proxy that checks each host name against the allowlist. It does not inspect TLS.</li>
+    </ul>
+    <div class="table-scroll"><table>
+      <tr><th>Provider</th><th>Paths the filter lets through</th></tr>
+      <tr><td><code>llamacpp</code></td><td class="wrap"><code>/v1/chat/completions</code>, <code>/chat/completions</code>, <code>/v1/models</code>, <code>/models</code>, <code>/props</code>, <code>/tokenize</code>, <code>/health</code>, <code>/v1/health</code></td></tr>
+      <tr><td><code>ollama</code></td><td class="wrap"><code>/api/chat</code>, <code>/api/show</code>, <code>/api/tags</code>, <code>/api/ps</code>, <code>/api/version</code></td></tr>
+    </table></div>
+
+    <h3 id="box-allowlist">The allowlist</h3>
+    <p>A <code>pull</code> box may reach the registries of the toolchains it detected. A project with no recognised build files gets all of them.</p>
+    <div class="table-scroll"><table>
+      <tr><th>Toolchain</th><th>Hosts</th></tr>
+      <tr><td>Maven (<code>java</code>)</td><td class="wrap"><code>repo.maven.apache.org</code>, <code>repo1.maven.org</code></td></tr>
+      <tr><td>Gradle</td><td class="wrap">Maven Central, <code>plugins.gradle.org</code>, <code>plugins-artifacts.gradle.org</code>, <code>services.gradle.org</code>, <code>downloads.gradle.org</code>, <code>dl.google.com</code>, <code>maven.google.com</code></td></tr>
+      <tr><td>Node</td><td class="wrap"><code>registry.npmjs.org</code></td></tr>
+      <tr><td>Python</td><td class="wrap"><code>pypi.org</code>, <code>files.pythonhosted.org</code></td></tr>
+      <tr><td>Rust</td><td class="wrap"><code>crates.io</code>, <code>index.crates.io</code>, <code>static.crates.io</code></td></tr>
+      <tr><td>Go</td><td class="wrap"><code>proxy.golang.org</code>, <code>sum.golang.org</code></td></tr>
+    </table></div>
+    <ul>
+      <li><strong>More hosts:</strong> the repo lists them in <a href="#box-network-rules"><code>.momo/network.json</code></a>; you pass <code>--allow-host</code>, or run <code>momo-box allow NAME HOST</code>, which takes effect at once and is saved with the box (<code>github</code> adds GitHub's hosts).</li>
+      <li><strong>A refused host</strong> gets a <code>403</code> that says how to allow it. <code>momo-box netlog NAME</code> shows what was allowed and refused, and which rule decided.</li>
+      <li><strong>Build wrappers:</strong> if <code>gradlew</code> or <code>mvnw</code> downloads from a host momo-box doesn't know, that host is not allowed automatically. momo-box names it so you can decide.</li>
+    </ul>
+    <p class="note"><strong>What <code>pull</code> does and doesn't stop.</strong> It stops the box from reaching arbitrary hosts, your machine and your network. It does not make leaking impossible: the proxy doesn't inspect TLS, so anything an allowed registry accepts can be sent to it. Registries have upload APIs, and a token for one could reach the box through text the model reads. For source you can't afford to leak, use <code>locked</code>.</p>
+
+    <h3 id="box-network-rules">Network rules in the repo</h3>
+    <p>A repo can say which hosts its box may reach, and what the model should know about the network, in <code>.momo/network.json</code>. Use it for a company mirror, an internal git server or an artifact CDN, or to keep a public registry out.</p>
+<div class="code-block"><div class="code-bar"><span class="code-lang">.momo/network.json</span></div><pre><code>{
+  "instructions": "Maven resolves through our Nexus mirror; ask the user if a dependency is missing.",
+  "replace_defaults": true,                      <span class="com">// drop the toolchains' public registries</span>
+  "allow": {                                     <span class="com">// host → reason (a plain list works too)</span>
+    "nexus.corp.example": "company Maven and npm mirror",
+    "git.corp.example:7999": "internal git over HTTPS",
+    "*.cdn.corp.example": "artifact CDN",
+    "github": "GitHub's hosts"                   <span class="com">// a group</span>
+  },
+  "deny": {"repo1.maven.org": "use the Nexus mirror"}
+}</code></pre></div>
+    <ul>
+      <li><strong>Entries:</strong> a host, <code>*.domain</code> (the domain and everything under it), <code>host:port</code>, an IP address, a group or an <code>http(s)://</code> URL. A URL counts as its host: the proxy sees only the host of an HTTPS request, so a path can't be enforced, and momo-box says so. A plain host opens port 443 (80 for plain HTTP); <code>host:port</code> opens that port only.</li>
+      <li><strong>For the model:</strong> the instructions go into its environment note, with the hosts the project allows and why, and the hosts it refuses on purpose. A denied host's <code>403</code> carries the deny's reason.</li>
+      <li><strong>Approval:</strong> the file widens what the box may reach and talks to the model, so momo-box shows it with a summary of the rules and asks once per version. It doesn't affect <a href="#box-toolchains">toolchain detection</a>.</li>
+      <li><strong>Where it applies:</strong> <code>pull</code> boxes, and the prefetch of <code>pull</code> and <code>locked</code> boxes. An <code>open</code> box has no proxy, so only the instructions apply. Git over SSH never goes through the proxy; use HTTPS remotes.</li>
+    </ul>
+    <p>When rules disagree, the strongest wins:</p>
+    <ol>
+      <li><strong>Your own hosts:</strong> <code>--allow-host</code> and <code>momo-box allow</code>.</li>
+      <li><strong>The repo's <code>deny</code>.</strong> An <code>allow</code> it overrides has no effect, and momo-box warns about it.</li>
+      <li><strong>The repo's <code>allow</code></strong>, and <code>box.json</code> <code>"pull_hosts"</code>.</li>
+      <li><strong>The toolchains' registries</strong>, unless <code>"replace_defaults": true</code> drops them.</li>
+    </ol>
+    <p><code>momo-box detect</code> prints the effective allowlist with each entry's reason.</p>
+  </section>
+
+  <section id="box-toolchains" data-voice="box-tool">
+    <h2>Box toolchains &amp; prepare</h2>
+    <p>The box image is the project's own toolchain image with momo added on top, so the tools the model sees are the project's tools: the right JDK, Node, Rust or CMake.</p>
+
+    <figure class="flow" aria-label="How a box image is built, layer by layer">
+      <div class="flow-col">
+        <div class="box harness"><div class="flow-who">layer 1</div>Base image<small>the project's toolchain, e.g. <code>maven:3.9-eclipse-temurin-21</code> for a Maven project; a devcontainer's image or Dockerfile; or <code>debian:bookworm-slim</code></small></div>
+        <div class="side"><b>pin</b> it by digest (<code>image@sha256:…</code>) · <b>glibc only</b>: Alpine is refused</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">layer 2</div>System packages<small><code>git</code>, <code>ca-certificates</code> and any <code>--packages</code>, installed with apt, dnf, microdnf, yum or zypper</small></div>
+        <div class="side">in a mixed repo, the other toolchains are added here as Debian packages</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">layer 3</div>User 1000<small>the image's own uid-1000 user (<code>ubuntu</code>, <code>node</code>, <code>gradle</code> …) with its home moved to <code>/home/momo</code>, or a new user <code>momo</code></small></div>
+        <div class="side">Java reads <code>user.home</code> from <code>passwd</code>, so this keeps <code>~/.m2</code> and <code>~/.gradle</code> writable</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">layer 4</div>momo under <code>/opt/momo</code><small>with its own CPython (python-build-standalone, sha256-checked), kept off <code>PATH</code>: the model's commands see only the project's tools</small></div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box you cond"><div class="flow-who">optional</div>Your Dockerfile<small><code>box.json</code> <code>"dockerfile"</code>, built on top for anything more (SDKs, vcpkg); it starts with <code>ARG MOMO_BOX_BASE</code> / <code>FROM ${MOMO_BOX_BASE}</code></small></div>
+      </div>
+      <div class="flow-legend"><span class="harness">the toolchain</span><span class="model">momo</span><span class="you cond">yours</span></div>
+      <figcaption>Images are tagged by a hash of the toolchain and rebuild only when it changes. Older builds are removed when a new one is built.</figcaption>
+    </figure>
+
+    <h3>Where the toolchain comes from</h3>
+    <p>The first match wins:</p>
+    <ol>
+      <li><strong>Flags:</strong> <code>--preset java|gradle|cpp|node|rust|go|python</code>, <code>--base IMAGE</code>, <code>--packages "cmake ninja-build"</code>.</li>
+      <li><strong><code>.momo/box.json</code></strong> in the repo (below).</li>
+      <li><strong><code>.devcontainer/devcontainer.json</code>:</strong> its <code>image</code>, or its Dockerfile. Features are not supported.</li>
+      <li><strong>Detection from the build files:</strong>
+        <ul>
+          <li><code>pom.xml</code> → Maven, with the JDK from <code>&lt;maven.compiler.release&gt;</code></li>
+          <li><code>build.gradle(.kts)</code> → Gradle, with the JDK from <code>jvmToolchain(N)</code></li>
+          <li><code>CMakeLists.txt</code> → gcc + cmake/ninja</li>
+          <li><code>package.json</code> → Node (<code>.nvmrc</code>, <code>engines</code>)</li>
+          <li><code>Cargo.toml</code>, <code>go.mod</code>, <code>pyproject.toml</code></li>
+          <li><code>.tool-versions</code> is read too</li>
+        </ul></li>
+      <li><strong>Plain Debian</strong> with git.</li>
+    </ol>
+<div class="code-block"><div class="code-bar"><span class="code-lang">.momo/box.json</span></div><pre><code>{"base": "maven:3.9-eclipse-temurin-21", "packages": ["cmake"],
+ "prepare": ["mvn -B -q dependency:go-offline"], "pull_hosts": ["github"],
+ "env": {"MAVEN_OPTS": "-Xmx1g"}, "dockerfile": ".momo/box.Dockerfile"}</code></pre></div>
+    <p><code>momo-box detect</code> shows what it would use and why. <code>detect --write</code> saves it as <code>.momo/box.json</code> for you to pin and commit.</p>
+    <p>A <code>box.json</code> or devcontainer comes from the repo, and building it runs its code. So momo-box shows it to you, with any Dockerfile it names, and asks once per version. Approvals are kept in <code>~/.momo-harness/box-approved.json</code>; <code>--yes</code> skips the question.</p>
+
+    <h3 id="box-prepare">Prepare</h3>
+    <p><code>prepare</code> pre-fetches dependencies in a throwaway container before momo starts: for example <code>mvn dependency:go-offline</code>, <code>npm ci</code>, <code>cargo fetch</code> or <code>go mod download</code>, or the commands in <code>box.json</code>. In a <code>pull</code> or <code>locked</code> box it reaches only the registries on the allowlist, so the project's build scripts never run with the open internet.</p>
+    <figure class="flow" aria-label="Prepare in a locked box">
+      <div class="flow-col">
+        <div class="box harness"><div class="flow-who">harness</div>1 Network and a gateway for prepare<small>the internal network, and a gateway with only the registry proxy: no model server, no web UI</small></div>
+        <div class="side"><b>open</b> boxes and <code>--prepare-net open</code> skip this and prepare on the open network</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">throwaway container</div>2 Prepare<small>the project image on the internal network, with the proxy already set up for pip, npm, Maven, Gradle, cargo, go and git</small></div>
+        <div class="side"><b>refused</b>: a host off the allowlist gets a 403, and a failed prepare names the hosts it refused and how to allow them</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box harness"><div class="flow-who">harness</div>3 Gateway for the run<small>recreated with the model server and the web UI; in a <code>locked</code> box, without the proxy</small></div>
+        <div class="side"><b>pull</b> keeps the proxy for the model</div>
+        <div class="down" aria-hidden="true">↓</div>
+        <div class="box model"><div class="flow-who">model</div>4 momo starts<small>with the dependencies in the box's volumes; a <code>locked</code> box builds offline (<code>mvn -o</code>, <code>gradle --offline</code>, …)</small></div>
+      </div>
+      <div class="flow-legend"><span class="harness">harness</span><span class="model">model</span></div>
+      <figcaption>The order for a <code>locked</code> box. Registry access ends before the model gets control.</figcaption>
+    </figure>
+    <ul>
+      <li><strong>Best effort:</strong> a command with a leading <code>-</code> may fail. The Maven and Gradle presets run the tests once that way, because <code>go-offline</code> misses test-time artifacts such as Surefire's JUnit provider, and the project's tests may fail at that point.</li>
+      <li><strong>When it runs:</strong> on the first start, and again only when its commands or the build files they depend on change, or on <code>momo-box prepare NAME</code>.</li>
+      <li><code>--no-prepare</code> skips it.</li>
+    </ul>
+  </section>
+
+  <section id="box-safeguards" data-voice="box-safe">
+    <h2>Box safeguards</h2>
+    <p>The threat model: <strong>the model, and any code it or the repo brings, is untrusted.</strong> What is protected is your machine, your network, your credentials and your source repo. The protections are layered, so no single one has to hold on its own.</p>
+
+    <figure class="rings" aria-label="The layers around the model">
+      <div class="ring r1"><span class="ring-t">container engine</span><small>Docker Desktop's VM, or rootless Podman: the outer boundary</small>
+        <div class="ring r2"><span class="ring-t">internal network (pull, locked)</span><small>no route out, no DNS; the gateway is the only way through, and it forwards inference requests and allowed registries only</small>
+          <div class="ring r3"><span class="ring-t">container</span><small>read-only root filesystem · no capabilities · <code>no-new-privileges</code> · at most 512 processes · a 2 GB <code>/tmp</code> · only <code>/in</code> from the host, read-only</small>
+            <div class="ring r4"><span class="ring-t">user 1000</span><small>not root; writes only to <code>/workspace</code>, <code>/home/momo</code> and <code>/tmp</code></small>
+              <div class="ring core">the model and its commands</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <figcaption>From the outside in. On the host side, the launcher checks everything that comes back before it touches your repo.</figcaption>
+    </figure>
+
+    <div class="table-scroll"><table>
+      <tr><th>Protects</th><th>How</th></tr>
+      <tr><td>Your machine</td><td class="wrap">An unprivileged user (uid 1000), <code>--cap-drop ALL</code>, <code>no-new-privileges</code>, a read-only root filesystem, <code>--init</code>, a size-limited <code>/tmp</code> (<code>--tmp-size</code>), a process limit (<code>--pids</code>), and optional <code>--memory</code> and <code>--cpus</code>. The gateway gets the same.</td></tr>
+      <tr><td>Your files and keys</td><td class="wrap">The only host mount is the source bundle at <code>/in</code>, read-only. The workspace and home are volumes of the box's own. No home folder, SSH or cloud keys, git credentials or Docker socket go in. A URL repo is cloned on the host, so the box never holds a key.</td></tr>
+      <tr><td>Your network</td><td class="wrap">In <code>pull</code> and <code>locked</code> mode: an internal network with no route out and no DNS. The gateway is the only exit. A <code>locked</code> box's registry proxy is gone before momo starts.</td></tr>
+      <tr><td>Your model server</td><td class="wrap">Only inference requests on the paths momo uses get through (<a href="#box-gateway">the gateway</a>). The rest of its API, such as deleting or pulling models, gets a 403.</td></tr>
+      <tr><td>Your other work</td><td class="wrap">Only the starting commit's history goes in: no other branches, tags or stashes unless you pass <code>--all-refs</code>.</td></tr>
+      <tr><td>Your repo</td><td class="wrap">What comes back is untrusted:
+        <ul>
+          <li><strong>Objects are checked.</strong> They are fetched with <code>fetch.fsckObjects</code>.</li>
+          <li><strong>Copies are capped.</strong> They stream out with a size cap (2 GB; <code>MOMO_BOX_MAX_BUNDLE</code> raises it), and symlinks are never followed.</li>
+          <li><strong>Text is cleaned.</strong> Anything the box reports is stripped of control characters before it is printed.</li>
+          <li><strong>Your branches are safe.</strong> Landing writes only <code>momo/&lt;name&gt;</code>, as a compare-and-swap against what it landed last, and never your checkout. If you committed on it or have it checked out, the work goes to <code>momo/&lt;name&gt;-incoming</code>.</li>
+        </ul></td></tr>
+      <tr><td>The web UI</td><td class="wrap">Published on <code>127.0.0.1</code> only, with an access token. The token is passed to the container by name, from the environment, so it never appears on a command line other users can see. Each box's folder on the host is private to you (<code>0700</code>).</td></tr>
+      <tr><td>Your trust decisions</td><td class="wrap">A repo's <code>box.json</code>, <a href="#box-network-rules"><code>network.json</code></a>, devcontainer and the Dockerfiles they name are shown and approved once per version before anything is built or allowed. A build wrapper's download host is never allowed automatically.</td></tr>
+      <tr><td>The work itself</td><td class="wrap">Ctrl-C, SIGTERM or a closed terminal during <code>run</code> stops the box gracefully and lands its work before cleaning up. If landing fails, the box is kept.</td></tr>
+    </table></div>
+
+    <h3 id="box-watch">Watching a box</h3>
+    <p>Inside a box, the web UI's <a href="#setup-panel">Setup badge and drawer</a> show it: the box diagram drawn live, the allowlist and the gateway's decisions as they happen, the sync history, the toolchain and these safeguards, each checked against the running container. On your machine, <code>momo-box dash</code> shows every box the same way on one page.</p>
+    <ul>
+      <li><strong>Where it comes from:</strong> momo-box writes <code>~/.cache/momo-box/boxes/&lt;name&gt;/status/</code>: <code>setup.json</code> when the box starts (with <code>docker inspect</code>'s view of it), <code>sync.json</code> after every sync and as a heartbeat, and <code>net.json</code> from the gateway's decision log, which it follows over one <code>exec</code>.</li>
+      <li><strong>Read-only for the model:</strong> the folder is mounted at <code>/run/momo-box</code> read-only, so the model can read its own status but cannot fake it. It holds no token and no paths on your machine.</li>
+      <li><strong>Show only:</strong> refused hosts come with a <code>momo-box allow NAME HOST</code> to copy, to run on your machine. Nothing in the box can widen its own network.</li>
+      <li>A box created before this version has no status folder; recreate it to see one.</li>
+    </ul>
+
+    <h3>What it does not protect</h3>
+    <ul>
+      <li><strong>Inside the box the model is unrestricted.</strong> It runs as the same user as momo, so it could read the web token or change momo's settings there. The token keeps other local processes and pages out of the UI, not the model.</li>
+      <li><strong>A landed branch is untrusted code.</strong> momo-box never runs anything from it, but review <code>momo/&lt;name&gt;</code> before you build or merge it, as you would a pull request.</li>
+      <li><strong>Base images are yours to trust.</strong> They are pulled by tag unless you pin a digest.</li>
+      <li><strong><code>pull</code> is not leak-proof</strong>, and an <code>https://</code> model server can't be filtered. See <a href="#box-network">Network modes</a>.</li>
+      <li><strong>Disk use</strong> of the workspace and caches is not limited.</li>
+    </ul>
+    <p class="note sys"><strong>Tested</strong> on Docker Desktop (macOS, arm64) with a real model:
+      <br>• <strong>Isolation:</strong> <code>locked</code> and <code>pull</code> boxes had no route or DNS out, the gateway filter refused <code>/api/delete</code> while chat streamed, and a blocked npm <code>postinstall</code> could not download.
+      <br>• <strong>Syncing:</strong> work landed after each turn, and an interrupted <code>run</code> still landed its work.
+      <br><strong>Not yet tested:</strong> Podman, Docker on Linux reaching a model server on the host, an <code>https://</code> model server in <code>pull</code>/<code>locked</code> mode, and Ollama behind the filter.
+      <br><code>MOMO_BOX_LIVE=1 .venv/bin/python -m pytest tests/test_container_live.py</code> runs a scripted check against your own engine.</p>
   </section>
 
   <section id="flags" data-group="Reference" data-voice="flags">
@@ -2816,6 +3458,10 @@ const SPEECH = {
     "< docs.rs for your crate~", "< /search-sources suggest", "< novels need thesauri too",
     "< save all to keep them", "< 0 results? not added",
   ],
+  "setup-panel": [
+    "< click the badge, see it all", "< same machine? 42 ms~", "< red = can't reach me",
+    "< tok/s, a tiny sparkline", "< not isolated, said plainly", "< mem 85%? time to slim down",
+  ],
   web: [
     "< one session, two windows", "< no cdn, no build step", "< @ for paths, / for cmds",
     "< a mew rises for questions", "< loopback only by default", "< ssh -L for remote~",
@@ -2825,6 +3471,32 @@ const SPEECH = {
     "< only this computer by default", "< ssh -L beats open ports", "< the token hides in the url",
     "< ?token= once, cookie after", "< --web-tls auto for https~",
     "< bearer token for curl~", "< --web-insecure? trust all!", "< /run-confirm on, pls",
+  ],
+  box: [
+    "< your code, in a box~", "< no keys come in, purrr", "< work lands as momo/<name>",
+    "< your checkout? untouched", "< docker or podman, both ok",
+  ],
+  "box-setup": [
+    "< stop keeps the box~", "< start remembers the flags", "< momo-box ls, purrr",
+    "< no --name? thrown away", "< -- passes flags to me",
+  ],
+  "box-sync": [
+    "< one commit goes in", "< a bundle, read-only", "< lands after every turn~",
+    "< fsck checks every object", "< moved it? -incoming!", "< git diff main momo/x",
+  ],
+  "box-net": [
+    "< pull is the default", "< no route out, purrr", "< /api/delete? 403!",
+    "< npm only for node~", "< momo-box netlog NAME", "< locked for secrets",
+    "< network.json: your mirror~", "< a deny says why",
+  ],
+  "box-tool": [
+    "< your jdk, my python", "< alpine? no glibc, no box", "< locked = offline after prepare",
+    "< box.json asks first", "< detect --write to pin",
+  ],
+  "box-safe": [
+    "< uid 1000, no caps", "< read-only root, purrr", "< review the branch first!",
+    "< inside the box i'm free~", "< pin by digest pls",
+    "< momo-box dash: every box", "< /run/momo-box? read-only",
   ],
   https: [
     "< trust momo's ca once, purrr", "< --web-tls-name for vpn~", "< never share momo-ca.key!",

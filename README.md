@@ -74,7 +74,10 @@ Options:
 | `--web-cert` / `--web-key` | — | Serve the web UI over HTTPS with your own certificate |
 | `--web-insecure` | off | Plain HTTP **without** an access token, even off loopback (trusted networks only) |
 | `--web-only` | off | Run only the web UI, without the terminal UI (`--headless` is its old name, still accepted) |
+| `--web-public-url` | — | The address to show for the web UI when it is reached through a port mapping or proxy (momo-box sets it) |
 | `-p` / `--prompt` | — | Run one prompt without any UI and exit. See [Headless runs](#headless-runs) |
+| `--environment-note` | — | An extra line for the system prompt's environment block (repeatable, not saved). See [Containers](#containers-momo-box) |
+| `--turn-marker` | — | A JSON file rewritten after every finished turn, for a watcher outside momo (momo-box's sync) |
 
 The chosen provider is saved and reused on the next launch (and restored per session). The status bar shows the active backend as `VIA: <provider>`.
 
@@ -115,6 +118,122 @@ python momo-coding-harness.py -p - < task.md                               # the
 | `3` | An approved plan stopped before its last step (paused, or a TDD gate kept failing) |
 | `124` | `--timeout` reached |
 | `130` | Interrupted (Ctrl+C or SIGTERM); the session is still saved |
+
+## Containers (momo-box)
+
+`./momo-box` runs momo in a container (Docker or Podman). The container holds a clean clone of a workspace and nothing else: no home folder, credentials or other files from your machine. It serves either a headless run or the web UI, and it talks to your inference server, local or remote. The model's work comes back as a git branch, never as writes to your files.
+
+```bash
+./momo-box run -p "why does test_parse fail?" --llm http://localhost:9931 --provider llamacpp -- --mode coding
+./momo-box web --name fix-auth --llm http://localhost:11434               # prints the web UI address
+./momo-box stop fix-auth                                                   # final sync; keeps the box
+./momo-box start fix-auth                                                  # again, with the same settings
+```
+
+- **In:** the source repo (`--repo PATH|URL`, default `.`, at `--ref`, default HEAD) goes in as a git bundle of that one commit's history. Other branches, tags and stashes stay out unless you pass `--all-refs`. A URL is cloned on the host first, using your credentials, so private repos work and the container never holds a key. `--with-uncommitted` also brings your uncommitted changes, as a commit of their own. `--empty` starts from an empty repo. Git submodules and Git LFS content do not travel in a bundle: the box gets empty folders and pointer files, and momo-box says so when it sees them.
+- **Out:** after every finished turn (web) or at the end (`run`), the box's work lands as branch **`momo/<name>`** in the source repo. The model's commits are kept, and uncommitted work becomes one extra commit. Your checkout is never touched, so review with `git diff main momo/<name>` and merge as usual. If you committed on `momo/<name>` yourself, or have it checked out, the sync goes to `momo/<name>-incoming` instead. `momo-box sync NAME` syncs on demand. Files over 10 MB and git-ignored files stay out. Interrupting a `run` (Ctrl-C, or closing the terminal) stops the box and lands what it had. If landing fails, the box is kept so that `momo-box sync NAME` can retry.
+- **Model server:** `--llm` is the URL as seen from this machine; `localhost` is rewritten to the container host's name for you. On Linux with Docker the server must listen on `0.0.0.0` or the docker bridge, not only `127.0.0.1`.
+- **Web UI:** published on `127.0.0.1:--port` (default 8765) with an access token. `momo-box url NAME` prints the address again.
+- **Boxes:** without `--name` a box is thrown away after the run. With `--name` its workspace and sessions are kept: `momo-box run --name X -p … -- --continue` picks up where it left off. A kept box stays what it was made from: the repo and the commit (`--name X --repo other` stops with an error, so use a new name for another repo), and later `start` and `prepare` detect its toolchain from that commit, not from your current checkout. `rm X` keeps the `momo/X` branch; a new box called X then lands on `momo/X-incoming` rather than moving it. A box name can't end in `-incoming`. `momo-box ls` lists boxes (and restarts the background sync of a running web box if it died), `logs NAME`, `stop NAME`, `start NAME`, `rm NAME`.
+- **Limits:** `--memory 8g`, `--cpus 4`, `--pids 512` (processes and threads) and `--tmp-size 2g` (the box's `/tmp`). Disk use of the workspace and caches is not limited. See [Low memory](#low-memory) for small machines.
+- Everything after `--` goes to momo itself (`--mode coding`, `--yes`, `--timeout 600`, …).
+
+### Network modes
+
+| `--net` | The model can reach | For |
+|---|---|---|
+| `pull` (default) | the package registries of the project's toolchains (Maven Central, Gradle, npm, PyPI, crates.io, Go, …), through an allowlist proxy that is already configured for pip, npm, Maven, Gradle, cargo, go and git | everyday work: building, updating versions, adding dependencies |
+| `locked` | nothing but the model server | the strongest isolation; dependencies come from `prepare` |
+| `open` | the internet, every port on this machine, and your local network | when isolation does not matter |
+
+In every mode the web UI comes in and the model server is reachable. In `pull` and `locked` mode the box sits on an internal network with no route out, and a small gateway container is the only way through. The gateway does three things:
+
+- **Model server:** it forwards inference requests only (`--llm-filter on`, the default for an `http://` server). The box can chat, list models and count tokens, but not reach the rest of the server's API, such as pulling, deleting or pushing models on Ollama. An `https://` server is tunnelled as is and cannot be filtered. `--llm-filter off` forwards everything.
+- **Web UI:** it publishes the UI to `127.0.0.1`.
+- **Registries (`pull`):** it runs the allowlist proxy. A Maven project gets Maven's registries, a Node project npm's, and so on; a project with no recognised build files gets them all. A refused host gets a 403 that says how to allow it: add it to `.momo/network.json` (below), pass `--allow-host`, or run `momo-box allow NAME HOST` (at once while the box runs; it is saved with the box, so it also holds after a restart). `momo-box netlog NAME` shows what was allowed and refused, and which rule decided, as well as the requests the model filter passed or refused. A build wrapper that downloads from a host momo-box does not know is not allowed automatically; momo-box names the host so you can decide.
+
+**What `pull` does and does not stop.** It stops the box from reaching arbitrary hosts, your machine and your network. It does not make leaking impossible: the proxy does not inspect TLS, so anything an allowed registry accepts can be sent to it. Registries have upload APIs, and a token for one could arrive in the box through text the model reads. For source you cannot afford to leak, use `locked`.
+
+### Network rules in the repo
+
+A repo can state which hosts its box may reach, and what the model should know about the network, in `.momo/network.json`:
+
+```jsonc
+{
+  "instructions": "Maven and npm resolve through our Nexus mirror. Never add <repositories> to pom.xml or registries to .npmrc; ask the user if a dependency is missing.",
+  "replace_defaults": true,                       // drop the toolchains' public registries
+  "allow": {                                      // host → reason (a plain list works too)
+    "nexus.corp.example": "company Maven and npm mirror",
+    "git.corp.example:7999": "internal git over HTTPS",
+    "*.cdn.corp.example": "artifact CDN",
+    "github": "GitHub's hosts"                    // a group
+  },
+  "deny": {"repo1.maven.org": "use the Nexus mirror"}
+}
+```
+
+- **Entries** are a host, `*.domain` (the domain and everything under it), `host:port`, an IP address, a group (`github`) or an `http(s)://` URL. A URL counts as its host: the proxy sees only the host of an HTTPS request, so a path in it can't be enforced, and momo-box says so. A plain host opens port 443 (and 80 for plain HTTP); `host:port` opens that port only.
+- **Precedence**, strongest first: your own hosts (`--allow-host`, `momo-box allow`), then the repo's `deny`, then its `allow` (and `box.json` `"pull_hosts"`), then the toolchains' registries, which `"replace_defaults": true` drops. An `allow` that one of the repo's own denies overrides has no effect, and momo-box warns about it.
+- **Instructions** go to the model with the rest of its environment note, with the hosts the project allows and their reasons, and the hosts it refuses on purpose. A denied host's 403 carries the deny's reason.
+- **Approval:** the file widens what the box may reach and talks to the model, so momo-box shows it, with a summary of the rules, and asks once per version, like `box.json`. It is read whatever the toolchain source is, so it does not stop toolchain detection.
+- **Where it applies:** a `pull` box and the dependency prefetch of `pull` and `locked` boxes. An `open` box has no proxy, so only the instructions apply there. Git over SSH never goes through the proxy; use HTTPS remotes.
+
+`momo-box detect` prints the effective allowlist with each entry's reason.
+
+### Watching a box
+
+- **In the box's web UI** the header badge and the [Setup panel](#setup-panel) show the box: its diagram, allowlist and live network decisions, sync history, toolchain and safeguards.
+- **`momo-box dash`** serves a page on `127.0.0.1` (with its own token) that shows every box on this machine the same way, with a link to each box's UI, each box's and gateway's memory (`docker stats`), and how much of the engine's memory the boxes use together. It only reads, and like `ls` it restarts the background sync of a running box if it died. `--port` picks the port, `--no-open` prints the address instead of opening a browser.
+
+The data comes from `~/.cache/momo-box/boxes/<name>/status/`, which momo-box writes: `setup.json` when the box starts, `sync.json` after every sync attempt (plus a heartbeat), `net.json` from the gateway's decision log, which also records the model filter's requests, and `stats.json` with the gateway's memory every 15 s (the box reads its own memory from its cgroup). The folder is mounted read-only at `/run/momo-box`: the model can read it but cannot fake it. It holds no token and no paths on your machine. A box created before this version has no such folder; recreate it to see it.
+
+### Toolchains
+
+The box image is the project's own toolchain image with momo added on top. momo brings its own Python under `/opt/momo`, kept off `PATH`, so any glibc base image works and the project's tools are what the model sees. Where the toolchain comes from, first match wins:
+
+1. `--preset java|gradle|cpp|node|rust|go|python`, `--base IMAGE`, `--packages "cmake ninja-build"`
+2. `.momo/box.json` in the repo:
+   ```json
+   {"base": "maven:3.9-eclipse-temurin-21", "packages": ["cmake"],
+    "prepare": ["mvn -B -q dependency:go-offline"], "pull_hosts": ["github"],
+    "env": {"MAVEN_OPTS": "-Xmx1g"}, "dockerfile": ".momo/box.Dockerfile"}
+   ```
+   `dockerfile` is for anything more (SDKs, vcpkg): it starts with `ARG MOMO_BOX_BASE` / `FROM ${MOMO_BOX_BASE}` and is built on top. `base` may be pinned by digest (`image@sha256:…`).
+3. `.devcontainer/devcontainer.json`: its `image`, or its Dockerfile. Features are not supported.
+4. Detection from the build files: `pom.xml` → Maven + the JDK from `<maven.compiler.release>`, `build.gradle(.kts)` → Gradle + the JDK from `jvmToolchain(N)`, `CMakeLists.txt` → gcc + cmake/ninja, `package.json` → Node (`.nvmrc`, `engines`), `Cargo.toml`, `go.mod`, `pyproject.toml`. `.tool-versions` is read too. In a mixed repo, the other toolchains are added as Debian packages.
+5. Plain Debian with git.
+
+The base image needs glibc and a package manager (apt, dnf, microdnf, yum or zypper); Alpine is refused. Its existing uid-1000 user (`ubuntu`, `node`, `gradle`, …) runs momo, with its home moved to `/home/momo` so that Java's `user.home` is writable. Older builds of an image are removed when a new one is built.
+
+`momo-box detect` shows what it would use and why; `detect --write` saves it as `.momo/box.json` for you to pin and commit. Images are cached under a hash of the toolchain, so they rebuild only when it changes. A `box.json` or devcontainer comes from the repo, and building it runs its code, so momo-box shows it, with any Dockerfile it names, and asks once per version. The approval is kept in `~/.momo-harness/box-approved.json`, and `--yes` skips the question.
+
+**`prepare`** pre-fetches dependencies in a throwaway container before momo starts. In a `pull` or `locked` box it reaches only the registries on the allowlist, through the gateway, so the project's build scripts never run with the open internet; a `locked` box loses that access again before momo starts. `--prepare-net open` runs it on the open network instead, and an `open` box always does. A command with a leading `-` is best effort: the Maven and Gradle presets run the tests once that way, because `go-offline` misses test-time artifacts such as Surefire's JUnit provider, and the project's tests may fail at that point. It runs again only when its commands or the build files they depend on change, or on `momo-box prepare NAME`. A `locked` box can then build offline (`mvn -o`, `gradle --offline`, …). `--no-prepare` skips it.
+
+### Low memory
+
+A box itself needs little: momo, a small supervisor, the sync watcher and the gateway take about 100 MB together. What fills memory is the project's build: a JVM or Node sizes its heap from the memory it sees, and Gradle leaves a daemon running after every build. On a small machine:
+
+- **`--low-mem`** caps the box at 1 GB (unless you pass `--memory`), so the JVM and Node size their heaps to that, and the box can't starve your other containers. Gradle runs without a daemon and Kotlin compiles in-process, with a 512 MB build heap. momo's code index gets 32 MB instead of 100 MB. The model is told that memory is tight.
+- It turns itself on when the container engine has less than 4 GB (Docker Desktop's default VM is 2–8 GB; Settings → Resources sets it), and says so. `--no-low-mem` turns it off. `start` and `prepare` keep the box's setting.
+- In every box, momo builds its code index in its own process, not in a pool of worker processes (up to 8, one per core the engine reports). `-- --index-workers N` brings the pool back.
+- **Slim base images:** the Python, Node and Rust presets use their `-slim` images, roughly 600–800 MB smaller. They have no C compiler, so a dependency that builds native code (some pip and npm packages) fails until you start the box with **`--full-base`**, set `"full_base": true` in `.momo/box.json`, or add `build-essential` to its `packages`. The model is told so as well.
+- **Disk:** every momo or toolchain change builds a new image, and Docker keeps the build cache. `docker builder prune` frees it; `docker system df` shows how much there is.
+
+### What the box isolates
+
+The model runs as an unprivileged user (uid 1000) with no capabilities, `no-new-privileges` and a read-only root filesystem. It can write only to the workspace, its home folder (sessions, caches) and `/tmp`. It cannot see your files, keys or other projects, and in `pull`/`locked` mode it cannot reach your network. The engine's own isolation (Docker Desktop's VM, rootless Podman) is the outer boundary.
+
+What it does not do:
+
+- **Inside the box the model is unrestricted.** It runs as the same user as momo, so it could read the web token or change momo's settings there. The token keeps other local processes and pages out of the UI, not the model.
+- **A landed branch is untrusted code.** momo-box checks the objects it fetches and never runs anything from them, but review `momo/<name>` before you build or merge it, as you would a pull request.
+- **Base images are yours to trust.** They are pulled by tag unless you pin a digest.
+
+momo-box finds Docker Desktop's CLI (and the Podman installer's) in their usual folders when `docker` is not on your `PATH`, for example when `/usr/local/bin/docker` is a broken link to Docker's installer image.
+
+Tested on Docker Desktop (macOS). Not yet tested: Podman, Docker on Linux reaching a model server on the host, and an `https://` model server in `pull`/`locked` mode. `MOMO_BOX_LIVE=1 .venv/bin/python -m pytest tests/test_container_live.py` runs a scripted check against your engine.
+
+`container/compose.yaml` (plus `compose.locked.yaml`) does the same with Docker Compose, without the automatic sync. `momo-box sync NAME --container C --land-repo PATH` lands such a container's work.
 
 ## Connecting to a remote Ollama host
 
@@ -307,6 +426,30 @@ Clicking a file opens a preview with line numbers and syntax highlighting. PDFs 
 - **Copy** the contents
 
 The browser can't leave the workspace: `..` paths and symlinks pointing outside are refused. Files over 5 MB aren't previewed, and binary files show an error.
+
+### Setup panel
+
+The badge in the header says where momo runs and how it is doing: `LOCAL · llama.cpp · 42 ms` on your machine, or `BOX fix-auth · pull · synced 2m · 3 refused` inside a [momo-box](#containers-momo-box). It turns amber or red when the model server is slow or unreachable, when a box's work could not land or went to `momo/<name>-incoming`, or when a box's background sync stopped. Clicking it opens the **Setup** drawer, which only shows things: it changes no setting.
+
+| Tab | Running locally | In a momo-box |
+|---|---|---|
+| **Setup** | A diagram of this machine (momo, its web UI, the workspace and its git state, MCP servers) and where the model server is | The docsite's box diagram, live: your repo and when work last landed, the box, its gateway, the model server and the allowed hosts, each with a state dot |
+| **Network** | momo's web tools (on or off), the hosts they reached lately, MCP endpoints. Shell commands are not filtered, and the tab says so | The allowlist with each rule's reason and source (yours, the repo's `network.json`, the toolchain), the instructions, the hosts refused most with a ready-to-copy `momo-box allow NAME HOST`, a per-host table and the latest decisions |
+| **Workspace / Sync** | Branch, changed files, the last commit, momo's checkpoints | The sync state, the last land (branch, commits, diffstat, files left out) and a history of lands, with the reason when one went to `-incoming` |
+| **Model** | Where the server is (same machine, your network or the internet; https or not), latency, model, context use, speed over the last replies (tokens per second, time to the first token) and the server's load: the models Ollama holds in memory, or llama.cpp's busy slots (`/slots`) | The same, with the server's real address, plus what the gateway passed and refused |
+| **Toolchain** | — | Where the toolchain came from, the base image and packages, and whether `prepare` is up to date with its input files |
+| **Safeguards** | An honest list: momo is not isolated, shell commands run as you with your network and files, plus the confirmations that are on | The box's isolation layers, each checked against the running container (`docker inspect`), not against the flags momo-box meant to pass |
+
+**Memory** is at the bottom of the Setup tab. Locally it shows momo's own process (now and at its peak) and this machine's RAM. In a box it shows the box's container as the kernel counts it, against its cap (or the engine's memory when there is none):
+- the peak since the box started, with how much is programs and how much is file cache (which the kernel gives back when it needs room);
+- swap: Docker lets a box with `--memory 1g` swap another 1 GB;
+- the processes using the most memory (by name only: `momo`, `supervisor`, `java (gradle daemon)`…);
+- the gateway container, and the engine's total;
+- a graph of the last ten minutes.
+
+The badge adds `mem 85%` and turns amber at 80% of the cap or when the box swaps more than a tenth of it; it turns red at 95% or after the kernel killed a process for lack of memory (`OOM killed`).
+
+The latency check is a list-models request every 10 s, made only while a web page is open and never during a turn. llama.cpp's `/slots` is never asked from inside a box: on a shared server it can show other clients' prompts.
 
 ### Syntax highlighting
 

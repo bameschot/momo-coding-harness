@@ -199,6 +199,12 @@ class LLMClient(ABC):
         when it can't say.  Used at startup when the saved model is gone."""
         return []
 
+    def server_load(self, in_box: bool = False) -> dict | None:
+        """What the server is doing right now, for the web UI's Setup panel
+        (models in memory, busy slots); None when it can't say.  `in_box`: momo
+        runs in a momo-box, whose gateway passes inference requests only."""
+        return None
+
     def count_tokens(self, texts: list[str]) -> list[int] | None:
         """The model's own token count of each text, or None when the server
         has no tokenizer endpoint (callers then estimate)."""

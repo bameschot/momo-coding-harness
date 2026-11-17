@@ -1226,6 +1226,7 @@ class PlanRunnerMixin:
                 plan.steps[cur].note = note[:200] + ("…" if len(note) > 200 else "")
             self._sync_plan_file()
             self._autosave()
+            self.mark_turn()     # a long plan lands step by step, not only at its end
 
         total = len(plan.steps)
         self.plan = None

@@ -1,0 +1,50 @@
+# momo-box with Docker Compose (the launcher, ./momo-box, does all of this for you).
+#
+#   git bundle create container/in/source.bundle --all        # the workspace to clone
+#   export MOMO_WEB_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
+#   docker compose -f container/compose.yaml up -d --build
+#   open "http://127.0.0.1:8765/?token=$MOMO_WEB_TOKEN"
+#   ./momo-box sync compose --container momo-box-momo-1 --land-repo .   # → branch momo/compose
+#
+# Locked network (only the model server is reachable), add the override:
+#   docker compose -f container/compose.yaml -f container/compose.locked.yaml up -d --build
+#
+# MOMO_HOST is the inference server as the container sees it: the host machine is
+# host.docker.internal (on Linux the server must listen on 0.0.0.0, not 127.0.0.1).
+name: momo-box
+
+x-hardening: &hardening
+  init: true
+  read_only: true
+  tmpfs: ["/tmp:rw,exec,mode=1777"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 512
+
+services:
+  momo:
+    <<: *hardening
+    image: momo-harness:latest
+    build:
+      context: ..
+      dockerfile: container/Dockerfile
+    stop_grace_period: 30s
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      MOMO_UI: web
+      MOMO_NET: open
+      MOMO_PROVIDER: ${MOMO_PROVIDER:-llamacpp}
+      MOMO_HOST: ${MOMO_HOST:-http://host.docker.internal:8080}
+      MOMO_MODEL: ${MOMO_MODEL:-}
+      MOMO_WEB_TOKEN: ${MOMO_WEB_TOKEN:?set MOMO_WEB_TOKEN (see the top of this file)}
+      MOMO_WEB_PUBLIC_URL: http://127.0.0.1:${MOMO_PORT:-8765}/
+      MOMO_BOX_NAME: compose
+    ports: ["127.0.0.1:${MOMO_PORT:-8765}:8765"]
+    volumes:
+      - ws:/workspace
+      - home:/home/momo
+      - ./in:/in:ro
+
+volumes:
+  ws: {}
+  home: {}

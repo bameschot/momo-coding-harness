@@ -395,7 +395,7 @@ def _python_line() -> str | None:
 
 
 def _environment(workdir: Path, tool_names: set[str], net_access: str,
-                 unattended: bool = False) -> str:
+                 unattended: bool = False, notes: tuple[str, ...] | list[str] = ()) -> str:
     lines = [f"- Working directory: `{workdir}`. Every path is relative to it; a path that "
              "escapes it with `..` is rejected.",
              f"- Today: {date.today().isoformat()}"]
@@ -419,6 +419,9 @@ def _environment(workdir: Path, tool_names: set[str], net_access: str,
         lines.append("- Internet: off — if a task needs the web, say so; do not try curl or wget.")
     if unattended:      # headless `momo -p`: questions get an automatic answer
         lines.append("- Non-interactive run: nobody will answer questions; finish the task on your own.")
+    # --environment-note: facts the launcher knows and the model can't see, e.g.
+    # momo-box's container, toolchain and network rules.
+    lines.extend(f"- {note.strip()}" for note in notes if note.strip())
     return "## Environment\n\n" + "\n".join(lines)
 
 

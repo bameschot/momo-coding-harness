@@ -291,6 +291,24 @@ class LlamaCppClient(LLMClient):
             pass
         return None
 
+    def server_load(self, in_box: bool = False) -> dict | None:
+        """/slots: how many of the server's slots are generating.  Not asked
+        from inside a momo-box: /slots can show other clients' prompts on a
+        shared server, so the box's gateway does not pass it."""
+        if in_box:
+            return {"kind": "llama.cpp", "slots": None,
+                    "note": "not available inside a box (the gateway passes inference only)"}
+        try:
+            slots = self._client.request_json("GET", "/slots")
+        except Exception:
+            return {"kind": "llama.cpp", "slots": None,
+                    "note": "the server's /slots endpoint is off (llama-server --slots turns it on)"}
+        if not isinstance(slots, list):
+            return None
+        busy = sum(1 for s in slots if isinstance(s, dict)
+                   and (s.get("is_processing") or s.get("state") == 1))
+        return {"kind": "llama.cpp", "slots": len(slots), "busy": busy}
+
     def count_tokens(self, texts: list[str]) -> list[int] | None:
         """/tokenize, one request per text; None on any failure."""
         try:

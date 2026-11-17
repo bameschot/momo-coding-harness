@@ -1,0 +1,11 @@
+# The momo-box image needs only momo itself (see container/Dockerfile).
+*
+!harness
+!roles
+!skills
+!search_sources
+!container
+!momo-coding-harness.py
+!requirements.txt
+**/__pycache__
+container/in

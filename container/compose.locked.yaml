@@ -1,0 +1,37 @@
+# Override for container/compose.yaml: momo on an internal network with no egress;
+# the gateway forwards the model server (MOMO_LLM_TARGET, host:port as the gateway
+# sees it) and publishes the web UI.
+services:
+  momo:
+    networks:
+      box:
+        aliases: [momo]
+    ports: !reset []
+    extra_hosts: !reset []
+    environment:
+      MOMO_NET: locked
+      MOMO_HOST: http://gw:9000
+
+  gw:
+    image: momo-harness:latest
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    tmpfs: ["/tmp:rw,exec,mode=1777"]
+    pids_limit: 512
+    # --filter: only inference requests reach the model server (MOMO_LLM_PATHS: the
+    # paths momo uses, here llama.cpp's; for Ollama: /api/chat,/api/show,/api/tags,/api/ps).
+    command: ["gw", "--filter", "9000=${MOMO_LLM_TARGET:-host.docker.internal:8080}",
+              "--paths", "${MOMO_LLM_PATHS:-/v1/chat/completions,/v1/models,/props,/tokenize,/health}",
+              "8765=momo:8765"]
+    ports: ["127.0.0.1:${MOMO_PORT:-8765}:8765"]
+    networks:
+      default: {}
+      box:
+        aliases: [gw]
+
+networks:
+  box:
+    internal: true

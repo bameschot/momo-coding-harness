@@ -89,6 +89,9 @@ def main():
                              "Anyone who can reach the address can run commands as you")
     parser.add_argument("--web-allow-host", action="append", default=[], metavar="NAME",
                         help="Extra name accepted in the Host header with --web-insecure (repeatable)")
+    parser.add_argument("--web-public-url", default=None, metavar="URL",
+                        help="The address to show for the web UI, when it is reached through a "
+                             "port mapping or proxy (e.g. a container's published port)")
     parser.add_argument("--web-only", action="store_true", default=False,
                         help="Run only the web UI (no terminal UI)")
     # The old name of --web-only: "headless" now means -p.
@@ -112,6 +115,15 @@ def main():
                           help="With -p: continue the workspace's last session instead of a new one")
     headless.add_argument("--session", default=None, metavar="NAME",
                           help="With -p: continue this saved session")
+    parser.add_argument("--environment-note", action="append", default=[], metavar="TEXT",
+                        help="An extra line for the system prompt's environment block, e.g. what "
+                             "a container provides (repeatable; not saved)")
+    parser.add_argument("--turn-marker", default=None, metavar="PATH",
+                        help="Rewrite this JSON file after every finished turn, for a watcher "
+                             "outside momo (momo-box uses it to sync the workspace)")
+    parser.add_argument("--box-status", default=None, metavar="DIR",
+                        help="The read-only folder where momo-box writes the box's status "
+                             "(setup, sync, network) for the web UI's Setup panel")
     settings_mod.add_arguments(parser)    # the saved settings' flags (settings.py)
     args = parser.parse_args()
     if args.headless:
@@ -145,6 +157,10 @@ def main():
     if args.web_insecure and (args.web_token or args.web_cert or args.web_tls == "auto"):
         parser.error("--web-insecure is plain HTTP without a token; "
                      "it can't be combined with --web-token, --web-cert or --web-tls auto")
+    if args.web_public_url and not args.web:
+        parser.error("--web-public-url needs the web UI; drop --no-web")
+    if args.web_public_url and not args.web_public_url.startswith(("http://", "https://")):
+        parser.error("--web-public-url: expected an http:// or https:// URL")
     if args.web_allow_host and not args.web_insecure:
         parser.error("--web-allow-host only applies to --web-insecure "
                      "(with a token, the Host header is not restricted)")
@@ -206,6 +222,11 @@ def main():
     harness.net_confirm = args.net_confirm == "on"
     if one_shot:    # nobody will answer questions (the system prompt says so too)
         harness.unattended = "yes" if args.yes else "decline"
+    harness.environment_notes = [n for n in args.environment_note if n.strip()]
+    if args.turn_marker:
+        harness.turn_marker = Path(args.turn_marker).expanduser()
+    if args.box_status:
+        harness.box_status_dir = Path(args.box_status).expanduser()
     harness.rebuild_system_prompt()     # the run_command schema depends on run_mode
     harness.reload_guides()   # load_session re-reads them for a restored workdir
 
@@ -294,8 +315,9 @@ def main():
                 extra_hosts = tls_mod.local_names(args.web_host, args.web_allow_host)
             web = start_web_server(controller, args.web_host, args.web_port, token,
                                    cert=cert, key=key, ca_pem=ca, extra_hosts=extra_hosts)
-            controller.web_url = web.url
-            line = f"Web UI: {web.url}"
+            shown = _public_url(args.web_public_url, token) if args.web_public_url else web.url
+            controller.web_url = shown
+            line = f"Web UI: {shown}"
             if args.web_insecure and not is_loopback(args.web_host):
                 line += (" — no access token: anyone who can reach this address can read "
                          "the conversation and run commands as you.")
@@ -303,7 +325,7 @@ def main():
             if auto is not None:
                 web_notes.append(
                     f"HTTPS: trust momo's local CA once per device — {auto.ca} "
-                    f"(also at {web.url.split('?')[0]}momo-ca.pem), "
+                    f"(also at {shown.split('?')[0]}momo-ca.pem), "
                     f"SHA-256 {auto.ca_fingerprint}")
             for note in web_notes:
                 harness.event_queue.put(ChatEvent("system", note))
@@ -336,6 +358,12 @@ def main():
         harness.shutdown_index()
         harness.shutdown_mcp()
         harness.logger.close()
+
+
+def _public_url(base: str, token: str | None) -> str:
+    """--web-public-url as the address to open: a trailing slash, plus the token."""
+    url = base.split("?", 1)[0].rstrip("/") + "/"
+    return url + (f"?token={token}" if token else "")
 
 
 # How long `momo -p TEXT` waits for piped stdin to deliver anything (data or EOF)

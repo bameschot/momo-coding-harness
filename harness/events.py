@@ -114,6 +114,16 @@ class StatusEvent:
     mcp_total: int = 0            # servers configured
     mcp_attention: bool = False   # one failed, waits for approval, or a config error
     mcp: list = field(default_factory=list)  # [{name, state, tools, error}]
+    # The web UI's Setup badge (setup_view.py): local momo or a momo-box.
+    setup_kind: str = "local"     # "local" | "box"
+    setup_label: str = ""         # provider name, or "<box> · <net mode>"
+    setup_state: str = "ok"       # ok | warn | bad | unknown
+    setup_sync: str = ""          # in a box: setup_view.sync_state()
+    setup_latency_ms: int | None = None   # the model server's last probe
+    box_sync_ts: float | None = None      # when the box's work last landed
+    box_denied_recent: int = 0            # gateway refusals in the last 10 minutes
+    setup_mem_pct: int | None = None      # in a box: memory use as % of its cap
+    setup_mem_oom: bool = False           # in a box: a process was OOM-killed
 
 @dataclass
 class ErrorEvent:

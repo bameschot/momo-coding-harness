@@ -85,6 +85,7 @@
     <button id="loop-badge" class="chip button" type="button" title="Loop guard (/loop-guard)" aria-haspopup="dialog" aria-expanded="false">LOOP: 3×</button>
     <button id="tools-badge" class="chip button warn" type="button" title="Tool calls are off" aria-haspopup="dialog" aria-expanded="false" hidden>TOOLS: off</button>
     <button id="run-badge" class="chip button" type="button" title="Running commands" aria-haspopup="dialog" aria-expanded="false">RUN: auto</button>
+    <button id="setup-badge" class="chip button setup-badge" type="button" title="Where momo and its model server run" aria-haspopup="dialog" hidden>LOCAL</button>
     <button id="net-badge" class="chip button" type="button" title="Internet access" aria-haspopup="dialog" aria-expanded="false">NET: off</button>
     <button id="index-badge" class="chip button" type="button" title="Code index" aria-haspopup="dialog" aria-expanded="false">INDEX: off</button>
   </div>
@@ -266,6 +267,16 @@
   </div>
   <p class="filter-hint muted small">Exactly what the model gets as its system message, part by part. Token counts are estimates (~4 chars/token).</p>
   <div id="prompt-body"></div>
+</aside>
+
+<aside id="setup-drawer" class="side-drawer" aria-label="Setup" hidden>
+  <div class="drawer-head">
+    <strong>Setup</strong>
+    <span id="setup-kind" class="chip"></span>
+    <span class="spacer"></span>
+    <button id="setup-close" class="icon-btn" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <div id="setup-body" class="drawer-body"></div>
 </aside>
 
 <aside id="settings-drawer" class="side-drawer" aria-label="Settings" hidden>

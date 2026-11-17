@@ -11,3 +11,6 @@ evals/.cache/
 
 # macOS Finder metadata
 .DS_Store
+
+# momo-box compose inbox (container/compose.yaml)
+container/in/

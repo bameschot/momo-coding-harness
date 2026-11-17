@@ -25,6 +25,7 @@ guard in front of it matters more than the fetch itself:
 from __future__ import annotations
 
 import codecs
+import collections
 import gzip
 import http.client
 import io
@@ -1082,10 +1083,36 @@ def cache_drop(n: int) -> str | None:
 
 # ── the tool ──────────────────────────────────────────────────────────────────
 
-def _get(url: str, *, method: str = "GET", headers: dict | None = None,
-         data: bytes | None = None, allow_private: bool, max_bytes: int,
-         timeout: int, cancel=None, check=None, pins: dict | None = None,
-         cap_label: str = "") -> dict | str:
+# The hosts momo's web tools reached lately, for the web UI's Setup panel:
+# (time, host, ok) — ok is False for a refused or failed request.
+_RECENT_HOSTS: collections.deque = collections.deque(maxlen=50)
+
+
+def recent_hosts() -> list[dict]:
+    """The latest request per host, newest first, with how many were made."""
+    seen: dict[str, dict] = {}
+    for ts, host, ok in list(_RECENT_HOSTS):
+        row = seen.setdefault(host, {"host": host, "count": 0})
+        row.update(ts=ts, ok=ok)
+        row["count"] += 1
+    return sorted(seen.values(), key=lambda r: -r["ts"])
+
+
+def _get(url: str, **kw) -> dict | str:
+    got = _get_once(url, **kw)
+    try:
+        host = (urlsplit(url.strip()).hostname or "")[:200]
+    except ValueError:
+        host = ""
+    if host:
+        _RECENT_HOSTS.append((time.time(), host, isinstance(got, dict)))
+    return got
+
+
+def _get_once(url: str, *, method: str = "GET", headers: dict | None = None,
+              data: bytes | None = None, allow_private: bool, max_bytes: int,
+              timeout: int, cancel=None, check=None, pins: dict | None = None,
+              cap_label: str = "") -> dict | str:
     """One guarded request: the ERROR string, or the response as a dict with
     raw (decompressed), headers, status, reason, final_url, hops, notes and at.
 

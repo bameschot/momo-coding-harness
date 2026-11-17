@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""momo-box: run momo in a container (see container/momo_box.py)."""
+import os
+import runpy
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+sys.argv[0] = "momo-box"
+runpy.run_path(os.path.join(here, "container", "momo_box.py"), run_name="__main__")

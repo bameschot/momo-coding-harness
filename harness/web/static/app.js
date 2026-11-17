@@ -6,6 +6,7 @@
 import { initChips, refreshChipMenus, renderChipMenu } from "./chips.js";
 import { applyMcpStatus, initMcp, refreshMcpMenu } from "./mcp.js";
 import { applySkillsStatus, initSkills, refreshSkillsMenu } from "./skills.js";
+import { applySetupStatus, closeSetup, initSetup } from "./setup.js";
 import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
 import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, formatSize, icon, loadJSON,
          makeResizable, openLayer, saveJSON, toast } from "./dom.js";
@@ -673,6 +674,7 @@ function applyStatus(s) {
   applyLoopStatus(s);
   applyMcpStatus(s);
   applySkillsStatus(s);
+  applySetupStatus(s);
   refreshChipMenus();
   updateTitle();
   if (planChanged) refreshState();
@@ -2309,6 +2311,7 @@ const DRAWERS = {
   "#sessions-drawer": hideDrawer("#sessions-drawer"),
   "#files-drawer": hideDrawer("#files-drawer"),
   "#changes-drawer": hideDrawer("#changes-drawer"),
+  "#setup-drawer": closeSetup,
 };
 
 // The left drawers (sessions, workspace files) share one slot: opening one
@@ -2324,7 +2327,7 @@ function openDrawer(id) {
 }
 // The right drawers (settings, system prompt, plan) share theirs the same way;
 // an index filter with unsaved edits stays until it is closed on purpose.
-const RIGHT = ["#settings-drawer", "#prompt-drawer", "#plan-drawer"];
+const RIGHT = ["#settings-drawer", "#prompt-drawer", "#plan-drawer", "#setup-drawer"];
 function openRight(id, focusFirst = true) {
   for (const d of RIGHT) if (d !== id) closeLayer($(d));
   if ($(id).hidden) openLayer($(id), undefined, focusFirst);
@@ -2535,6 +2538,7 @@ initMcp({
   attach: (f) => { attachments.push({ id: ++attSeq, status: "ready", ...f }); renderChips(); },
 });
 initSkills({ send, status: () => status, closeMenu, openPrompt: openPromptDrawer, changed: refreshState });
+initSetup({ status: () => status, open: () => openRight("#setup-drawer", false) });
 initFind();
 initPalette({
   commands: () => state?.commands || [],
@@ -2543,7 +2547,7 @@ initPalette({
   fill: (text) => { input.value = text; autosize(); input.focus(); },
 });
 makeResizable($("#sessions-drawer"), "right", "momo.sessionsWidth", 320);
-for (const [id, min] of [["#settings-drawer", 360], ["#prompt-drawer", 420], ["#plan-drawer", 360], ["#filter-drawer", 420]]) {
+for (const [id, min] of [["#settings-drawer", 360], ["#prompt-drawer", 420], ["#plan-drawer", 360], ["#filter-drawer", 420], ["#setup-drawer", 420]]) {
   makeResizable($(id), "left", `momo.width.${id.slice(1)}`, min);
 }
 initSessions({ send, post, close: DRAWERS["#sessions-drawer"] });

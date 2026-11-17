@@ -1,0 +1,100 @@
+{
+  "_comment": "momo-box toolchain presets. base: an image template, {slot} filled from the project's version pins (else defaults); versions: tags known to exist, a pin rounds up to the next one; debian: packages that approximate this toolchain when another one is the primary; prepare: the suggested dependency prefetch (a leading - marks a best-effort command: running the tests once fetches what go-offline misses, e.g. the Surefire provider, and may fail); wrapper_prepare: used instead when the project has a wrapper script; prepare_without_lock: used when none of lockfiles is at the root. pull_hosts (per preset): the registries a pull box of that toolchain may reach; aliases: old preset names; llm_paths: the only request paths the gateway lets through to an http model server, per provider (GET and POST).",
+  "default_base": "debian:bookworm-slim",
+  "aliases": {"kotlin": "gradle"},
+  "presets": {
+    "java": {
+      "base": "maven:3.9-eclipse-temurin-{jdk}",
+      "defaults": {"jdk": "21"},
+      "versions": {
+        "jdk": ["8", "11", "17", "21", "25"]
+      },
+      "packages": [],
+      "debian": ["default-jdk-headless", "maven"],
+      "prepare": ["mvn -B -q dependency:go-offline", "-mvn -B -q test -Dmaven.test.failure.ignore=true"],
+      "wrapper_prepare": ["./mvnw -B -q dependency:go-offline", "-./mvnw -B -q test -Dmaven.test.failure.ignore=true"],
+      "offline_hint": "Maven: use `mvn -o` (offline)",
+      "pull_hosts": ["repo.maven.apache.org", "repo1.maven.org"]
+    },
+    "gradle": {
+      "base": "gradle:8-jdk{jdk}",
+      "defaults": {"jdk": "21"},
+      "versions": {
+        "jdk": ["8", "11", "17", "21"]
+      },
+      "packages": [],
+      "debian": ["default-jdk-headless"],
+      "prepare": ["gradle build -x test --no-daemon -q", "-gradle test --no-daemon -q --continue"],
+      "wrapper_prepare": ["./gradlew build -x test --no-daemon -q", "-./gradlew test --no-daemon -q --continue"],
+      "offline_hint": "Gradle: use `--offline`",
+      "pull_hosts": ["repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org", "plugins-artifacts.gradle.org", "services.gradle.org", "downloads.gradle.org", "dl.google.com", "maven.google.com"]
+    },
+    "cpp": {
+      "base": "gcc:{gcc}",
+      "defaults": {"gcc": "14"},
+      "versions": {},
+      "packages": ["cmake", "ninja-build", "gdb"],
+      "debian": ["g++", "make", "cmake", "ninja-build"],
+      "prepare": [],
+      "offline_hint": "",
+      "pull_hosts": []
+    },
+    "node": {
+      "base": "node:{node}-bookworm-slim",
+      "base_full": "node:{node}-bookworm",
+      "defaults": {"node": "22"},
+      "versions": {
+        "node": ["18", "20", "22", "24"]
+      },
+      "packages": [],
+      "debian": ["nodejs", "npm"],
+      "prepare": ["npm ci --no-audit --no-fund"],
+      "lockfiles": ["package-lock.json", "npm-shrinkwrap.json"],
+      "prepare_without_lock": ["npm install --no-audit --no-fund"],
+      "offline_hint": "npm: use `--offline`",
+      "pull_hosts": ["registry.npmjs.org"]
+    },
+    "rust": {
+      "base": "rust:{rust}-slim-bookworm",
+      "base_full": "rust:{rust}-bookworm",
+      "defaults": {"rust": "1"},
+      "versions": {},
+      "packages": [],
+      "debian": ["cargo"],
+      "prepare": ["cargo fetch"],
+      "offline_hint": "Cargo: use `--offline`",
+      "pull_hosts": ["crates.io", "index.crates.io", "static.crates.io"]
+    },
+    "go": {
+      "base": "golang:{go}-bookworm",
+      "defaults": {"go": "1"},
+      "versions": {},
+      "packages": [],
+      "debian": ["golang"],
+      "prepare": ["go mod download"],
+      "offline_hint": "Go: set `GOFLAGS=-mod=mod GOPROXY=off`",
+      "pull_hosts": ["proxy.golang.org", "sum.golang.org"]
+    },
+    "python": {
+      "base": "python:{python}-slim-bookworm",
+      "base_full": "python:{python}-bookworm",
+      "defaults": {"python": "3.13"},
+      "versions": {
+        "python": ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+      },
+      "packages": [],
+      "debian": ["python3", "python3-venv", "python3-pip"],
+      "prepare": [],
+      "offline_hint": "pip: use `--no-index` against the pre-fetched packages",
+      "pull_hosts": ["pypi.org", "files.pythonhosted.org"]
+    }
+  },
+  "pull_hosts": {
+    "default": ["repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org", "plugins-artifacts.gradle.org", "services.gradle.org", "downloads.gradle.org", "dl.google.com", "maven.google.com", "registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "index.crates.io", "static.crates.io", "proxy.golang.org", "sum.golang.org"],
+    "github": ["github.com", "codeload.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "raw.githubusercontent.com"]
+  },
+  "llm_paths": {
+    "ollama": ["/api/chat", "/api/show", "/api/tags", "/api/ps", "/api/version"],
+    "llamacpp": ["/v1/chat/completions", "/chat/completions", "/v1/models", "/models", "/props", "/tokenize", "/health", "/v1/health"]
+  }
+}

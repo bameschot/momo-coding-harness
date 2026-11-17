@@ -93,7 +93,8 @@ _STATIC_FILES = {
     **{f"/{name}": (name, "text/javascript; charset=utf-8")
        for name in ("app.js", "dom.js", "markdown.js", "highlight.js", "notify.js",
                     "companion.js", "sessions.js", "files.js", "chips.js", "palette.js", "find.js",
-                    "mcp.js", "skills.js", "diff.js", "changes.js", "planview.js")},
+                    "mcp.js", "skills.js", "diff.js", "changes.js", "planview.js",
+                    "setup.js", "setup-render.js")},
 }
 _MODES = list(MODES)
 _MAX_BODY = 16_000_000  # JSON bodies; a submit carries attachment text
@@ -298,7 +299,15 @@ class WebServer:
             "confirm_suffix": CONFIRM_SUFFIX,
             "session": h.session_path().stem,
             "mcp_servers": list(h.mcp.clients),
+            "setup": {"kind": "box" if h.box_status_dir is not None else "local"},
         }
+
+    def setup_web(self) -> dict:
+        """This web server, for the Setup panel: never the token itself."""
+        bind = self.host.strip("[]")
+        return {"bind": bind, "port": self.port, "tls": self.tls,
+                "token": self.token is not None, "loopback": is_loopback(bind),
+                "url": (self.controller.web_url or self.url).split("?", 1)[0]}
 
     def _make_handler(self):
         web = self
@@ -443,6 +452,8 @@ class WebServer:
                     self._json(h.system_prompt_view())
                 elif path == "/api/mcp":
                     self._json(h.mcp_view())
+                elif path == "/api/setup":
+                    self._json(h.setup_view(web=web.setup_web(), busy=web.controller.busy))
                 elif path in ("/api/mcp/resources", "/api/mcp/resource"):
                     try:
                         if path == "/api/mcp/resources":
@@ -548,6 +559,7 @@ class WebServer:
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
                 sub = web.controller.bus.subscribe(replay=True)
+                web.controller.add_viewer(1)
                 try:
                     while not web._stopping.is_set():
                         try:
@@ -573,6 +585,7 @@ class WebServer:
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                     pass
                 finally:
+                    web.controller.add_viewer(-1)
                     sub.close()
                     self.close_connection = True
 

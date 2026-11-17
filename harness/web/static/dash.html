@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>momo-box dashboard</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body class="dash">
+<header class="dash-head">
+  <strong>momo-box</strong>
+  <span class="muted">every box on this machine · read-only</span>
+  <span class="spacer"></span>
+  <span id="dash-updated" class="muted small" role="status"></span>
+</header>
+<main id="dash-boxes" class="dash-boxes" aria-live="polite"></main>
+<script type="module" src="dash.js"></script>
+</body>
+</html>
