@@ -1269,19 +1269,28 @@ function autosize() {
 
 // What you were typing survives a reload, per session (not while editing a
 // sent message: that text is already in the conversation).
+// Saved 300 ms after the last keystroke; a send saves at once, so a state
+// refresh right after it can't find the sent text still stored.  Restored only
+// when a session is first shown — not on every refresh (the plan drawer
+// refreshes on each status event), which used to put sent text back.
 const draftKey = () => (state?.session ? `momo.draft.${state.session}` : null);
 let draftTimer = null;
-function saveDraft() {
+let draftShownFor = null;   // the session whose draft was last restored
+function saveDraft(now = false) {
   if (editing) return;
   clearTimeout(draftTimer);
-  draftTimer = setTimeout(() => {
+  const save = () => {
     const key = draftKey();
     if (key) saveJSON(key, input.value.trim() ? input.value : undefined);
-  }, 300);
+  };
+  if (now) save();
+  else draftTimer = setTimeout(save, 300);
 }
 function restoreDraft() {
   const key = draftKey();
-  if (!key || input.value || editing) return;
+  if (!key || key === draftShownFor) return;
+  draftShownFor = key;
+  if (input.value || editing) return;
   const draft = loadJSON(key, "");
   if (draft) { input.value = draft; autosize(); }
 }
@@ -1323,6 +1332,7 @@ async function submitInput() {
   input.value = "";
   histIdx = -1; histStash = "";
   autosize();
+  saveDraft(true);
   closeSuggest();
   // Commands never carry attachments; they stay queued for the next message.
   const atts = isCmd ? [] : ready.map((a) => ({ name: a.name, text: a.text }));
@@ -1342,7 +1352,7 @@ function queueMessage(text, ready, offline) {
   if (offline) toast("Queued — it is sent when the connection is back.");
   queue.push({ text, atts: ready.map((a) => ({ name: a.name, text: a.text })) });
   attachments = attachments.filter((a) => a.status !== "ready");
-  if (input.value === text) input.value = "";
+  if (input.value === text) { input.value = ""; saveDraft(true); }
   histIdx = -1; histStash = "";
   autosize();
   closeSuggest();
