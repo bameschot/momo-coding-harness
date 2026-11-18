@@ -43,6 +43,8 @@
   --base-fs: 15px;
   --fs-xs: calc(var(--base-fs) - 4px); --fs-sm: calc(var(--base-fs) - 3px);
   --fs: calc(var(--base-fs) - 2px); --fs-md: calc(var(--base-fs) - 1px);
+  /* One height for every header control (icon buttons, selects, chips, CTX). */
+  --ctl-h: 30px;
 }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"]  { color-scheme: dark; }
@@ -80,17 +82,39 @@ kbd { font: var(--fs-xs) var(--mono); color: var(--muted); border: 1px solid var
   z-index: 5;
 }
 .status-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.status-row .icon-btn + .brand { margin-left: 4px; }
-.status-row.second { margin-top: 4px; }
+.status-row.second { margin-top: 6px; flex-wrap: wrap; row-gap: 6px; }
+/* Header controls come in groups: a group never splits, row 2 wraps whole
+   groups on a narrow window, and a hairline separates neighbouring groups. */
+.ctl-group { display: inline-flex; align-items: center; gap: 6px; flex: none; min-width: 0; }
+.status-row > .ctl-group + .ctl-group { border-left: 1px solid var(--border); padding-left: 8px; }
+.status-row:first-child > .ctl-group:first-child { gap: 2px; }
+/* Row 2 wraps, so every group carries its divider and the row is shifted left
+   by one divider's width, with that first pixel column clipped: a group that
+   starts a line loses its divider, the others keep theirs. */
+.status-row.second { margin-left: -9px; clip-path: inset(-8px -8px -8px 1px); }
+.status-row.second > .ctl-group, .status-row.second > .chip-grid { border-left: 1px solid var(--border); padding-left: 8px; }
+/* Row 2 is a little lower than row 1: its controls take --ctl-h from here. */
+.status-row.second { --ctl-h: 26px; align-items: flex-start; }
+/* The toggles: equal columns, so when they don't fit on one line they wrap
+   into rows that line up under each other.  The grid uses the chips' own font,
+   so --chip-w (in ch) means the same width in the columns and in the chips.
+   It takes the rest of row 2 and moves to its own line below three columns. */
+.chip-grid {
+  --chip-w: 14ch;
+  display: grid; grid-template-columns: repeat(auto-fill, var(--chip-w)); gap: 6px;
+  flex: 1 1 calc(var(--chip-w) * 3 + 12px); min-width: calc(var(--chip-w) * 3 + 21px);
+  font: var(--fs-sm) var(--mono);
+}
+.chip-grid > .ctl-group { display: contents; }
 .brand { font-weight: 700; display: flex; align-items: center; gap: 6px; font-size: var(--fs-md); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); display: inline-block; }
 .dot.on { background: var(--ok); }
 .dot.on.offline { background: var(--warn); }
 .field { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-#workdir { max-width: 60%; text-align: left; unicode-bidi: plaintext; }
+#workdir { flex: 0 1 auto; max-width: 50%; text-align: left; unicode-bidi: plaintext; margin-left: 4px; }
 #mode, #plan-kind {
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-pill);
-  padding: 2px 10px; font-weight: 600; cursor: pointer;
+  height: var(--ctl-h); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-pill);
+  padding: 0 10px; font-weight: 600; cursor: pointer;
 }
 #plan-kind:disabled { cursor: default; opacity: .7; }
 .chip {
@@ -105,6 +129,17 @@ kbd { font: var(--fs-xs) var(--mono); color: var(--muted); border: 1px solid var
 .chip.active { color: var(--focus); border-color: currentColor; }
 .chip.warn { color: var(--warn); border-color: currentColor; }
 .chip.button[aria-expanded="true"] { border-color: var(--focus); }
+#status .chip { height: var(--ctl-h); }
+/* Status chips: a muted key and a short value in one fixed-size cell, so a
+   changing value never moves its neighbours; the detail is in the title and
+   the chip's popover.  The state colour (.active/.warn/.bad) goes to the
+   border and the value. */
+.chip.kv { width: var(--chip-w, 14ch); justify-content: space-between; gap: 6px; padding: 0 8px; }
+.chip.kv .k { color: var(--muted); font-size: var(--fs-xs); letter-spacing: .03em; flex: none; }
+.chip.kv .v { font-weight: 600; overflow: hidden; text-overflow: ellipsis; min-width: 0; color: var(--text); }
+.chip.kv.active .v { color: var(--focus); }
+.chip.kv.warn .v { color: var(--warn); }
+.chip.kv.bad .v { color: var(--danger); }
 /* ── icons (SVG sprite in index.html) ───────────────────────────────────── */
 .icon {
   width: 18px; height: 18px; flex: none; display: block;
@@ -114,7 +149,7 @@ kbd { font: var(--fs-xs) var(--mono); color: var(--muted); border: 1px solid var
 /* Every icon-only button is the same square, so the top bar lines up. */
 .icon-btn {
   display: inline-flex; align-items: center; justify-content: center; flex: none;
-  width: 30px; height: 30px; padding: 0; cursor: pointer; color: var(--muted);
+  width: var(--ctl-h); height: var(--ctl-h); padding: 0; cursor: pointer; color: var(--muted);
   background: none; border: 1px solid transparent; border-radius: var(--r-sm);
 }
 .icon-btn.sm { width: 28px; height: 28px; }
@@ -145,7 +180,7 @@ button:disabled { opacity: .5; cursor: default; }
 .link-btn:disabled { color: var(--muted); }
 .with-icon { display: inline-flex; align-items: center; gap: 6px; }
 .ctx { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); }
-button.ctx { background: none; border: 1px solid transparent; border-radius: var(--r-sm); padding: 2px 4px; cursor: pointer; }
+button.ctx { height: var(--ctl-h); background: none; border: 1px solid transparent; border-radius: var(--r-sm); padding: 0 6px; cursor: pointer; }
 button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border); }
 .ctx-label { color: var(--muted); font-family: var(--mono); }
 .meter { width: 90px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; border: 1px solid var(--border); }
@@ -160,7 +195,7 @@ button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border)
   /* The options outgrow short windows; scroll inside the menu rather than run
      off the bottom, where the last sections (notifications) were unreachable.
      The offset clears the two-row status bar plus a small gap. */
-  max-height: calc(100vh - 110px); max-height: calc(100dvh - 110px);
+  max-height: calc(100vh - var(--status-h, 110px) - 8px); max-height: calc(100dvh - var(--status-h, 110px) - 8px);
   overflow-y: auto; overscroll-behavior: contain;
 }
 .menu label { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
@@ -174,14 +209,14 @@ button.ctx:hover, button.ctx[aria-expanded="true"] { border-color: var(--border)
 
 /* ── status bar popovers (model, context, index, tools) ──────────────────── */
 .model-btn {
-  display: inline-flex; align-items: center; gap: 4px; min-width: 0;
-  background: none; border: 1px solid transparent; border-radius: var(--r-sm); padding: 2px 6px; cursor: pointer; font: inherit; font-weight: 600;
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 28ch; height: var(--ctl-h);
+  background: none; border: 1px solid transparent; border-radius: var(--r-sm); padding: 0 6px; cursor: pointer; font: inherit; font-weight: 600;
 }
 .model-btn #model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-btn .icon { color: var(--muted); }
 .model-btn:hover { border-color: var(--border); background: var(--surface-2); }
 .model-btn.offline #model { color: var(--warn); }
-.model-menu { left: 12px; right: auto; max-height: 60vh; overflow-y: auto; }
+.model-menu { max-height: 60vh; overflow-y: auto; }
 
 /* Context breakdown popover: a stacked bar (share of the limit) + one row per category. */
 .ctx-menu { width: min(340px, calc(100vw - 24px)); }
@@ -492,10 +527,15 @@ details.think.live summary { font-style: italic; }
   .collapse, .hint, .ctx-label { display: none; }
   /* The top row fits a phone without the name; the chips scroll sideways. */
   .status-row { gap: 4px; }
+  .status-row > .ctl-group + .ctl-group { padding-left: 4px; }
   .brand-name { display: none; }
-  .status-row.second { overflow-x: auto; scrollbar-width: none; margin-inline: -16px; padding-inline: 16px; }
+  .status-row.second { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-inline: -16px; padding-inline: 16px; clip-path: none; }
+  .status-row.second > .ctl-group:first-child { border-left: 0; padding-left: 0; }
+  /* A phone keeps the toggles on one line that scrolls sideways. */
+  .chip-grid { display: flex; flex: none; min-width: 0; }
   .status-row.second::-webkit-scrollbar { display: none; }
-  .status-row.second .spacer { display: none; }
+  /* Popovers span the screen on a phone, wherever their button is. */
+  #status .menu { left: 12px !important; right: 12px !important; width: auto; min-width: 0; }
   .meter { width: 50px; }
   .msg.user .bubble { max-width: 92%; }
   #companion { display: none; }
@@ -852,8 +892,11 @@ mark.find-hit.current { background: var(--warn); color: var(--surface); }
 .session-group { font: 600 var(--fs-xs) var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: 10px 10px 2px; }
 /* Touch screens: targets a finger can hit. */
 @media (pointer: coarse) {
+  :root { --ctl-h: 38px; }
+  .status-row.second { --ctl-h: 34px; }
   .icon-btn { width: 40px; height: 40px; }
   .icon-btn.sm { width: 36px; height: 36px; }
+  #status .icon-btn { width: var(--ctl-h); height: var(--ctl-h); }
   .chip { min-height: 32px; padding: 4px 12px; }
   .btn { min-height: 38px; }
   .btn.small, .btn.quiet { min-height: 32px; }

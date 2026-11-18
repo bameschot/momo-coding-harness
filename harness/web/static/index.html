@@ -45,49 +45,67 @@
 </svg>
 <header id="status">
   <div class="status-row">
-    <button id="sessions-btn" class="icon-btn" type="button" title="Sessions" aria-label="Sessions"><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg></button>
-    <button id="files-btn" class="icon-btn" type="button" title="Workspace files" aria-label="Workspace files"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></button>
-    <button id="changes-btn" class="icon-btn" type="button" title="Changes (nothing to undo)" aria-label="Changes"><svg class="icon" aria-hidden="true"><use href="#i-changes"/></svg><span id="changes-count" class="count" hidden></span></button>
+    <span class="ctl-group">
+      <button id="sessions-btn" class="icon-btn" type="button" title="Sessions" aria-label="Sessions"><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg></button>
+      <button id="files-btn" class="icon-btn" type="button" title="Workspace files" aria-label="Workspace files"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></button>
+      <button id="changes-btn" class="icon-btn" type="button" title="Changes (nothing to undo)" aria-label="Changes"><svg class="icon" aria-hidden="true"><use href="#i-changes"/></svg><span id="changes-count" class="count" hidden></span></button>
+    </span>
     <span class="brand"><span id="conn-dot" class="dot" title="Disconnected"></span><span class="brand-name">momo</span></span>
-    <label class="mode-pick">
-      <span class="sr-only">Mode</span>
-      <select id="mode" title="Mode (Shift+Tab cycles)"></select>
-    </label>
-    <label class="mode-pick" id="plan-kind-pick" hidden>
-      <span class="sr-only">Plan type</span>
-      <select id="plan-kind" title="Plan type (/plan normal, /plan tdd, /plan stories): a TDD plan writes the tests first and gates every step on them; a stories plan breaks each phase into small, checked stories when it starts">
-        <option value="normal">normal plan</option>
-        <option value="tdd">TDD plan</option>
-        <option value="stories">stories plan</option>
-      </select>
-    </label>
-    <button id="plan-progress" class="chip button" type="button" title="Show the plan" hidden></button>
-    <button id="model-btn" class="field strong model-btn" type="button" title="Switch model" aria-haspopup="dialog"><span id="model"></span><svg class="icon sm" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+    <button id="workdir" class="field muted mono collapse workdir-btn" type="button" dir="rtl" title="Workspace"></button>
     <span id="host" class="field muted collapse"></span>
     <span class="spacer"></span>
-    <button id="plan-btn" class="icon-btn" type="button" title="Plan" aria-label="Plan"><svg class="icon" aria-hidden="true"><use href="#i-plan"/></svg></button>
-    <button id="theme-btn" class="icon-btn" type="button" title="Switch to dark mode" aria-label="Switch to dark mode"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button>
-    <button id="mcp-btn" class="icon-btn" type="button" title="MCP servers" aria-label="MCP servers" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg><span id="mcp-count" class="count" hidden></span></button>
-    <button id="tools-btn" class="icon-btn" type="button" title="Tools for this mode (/tools)" aria-label="Tools for this mode" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg><span id="tools-off" class="count" hidden></span><span id="tools-pending" class="count pending" hidden></span></button>
-    <button id="skills-btn" class="icon-btn" type="button" title="Skills" aria-label="Skills" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg><span id="skills-count" class="count" hidden></span></button>
-    <button id="view-btn" class="icon-btn" type="button" title="View options" aria-label="View options" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg></button>
+    <span class="ctl-group">
+      <button id="plan-btn" class="icon-btn" type="button" title="Plan" aria-label="Plan"><svg class="icon" aria-hidden="true"><use href="#i-plan"/></svg></button>
+    </span>
+    <span class="ctl-group">
+      <button id="tools-btn" class="icon-btn" type="button" title="Tools for this mode (/tools)" aria-label="Tools for this mode" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg><span id="tools-off" class="count" hidden></span><span id="tools-pending" class="count pending" hidden></span></button>
+      <button id="mcp-btn" class="icon-btn" type="button" title="MCP servers" aria-label="MCP servers" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg><span id="mcp-count" class="count" hidden></span></button>
+      <button id="skills-btn" class="icon-btn" type="button" title="Skills" aria-label="Skills" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg><span id="skills-count" class="count" hidden></span></button>
+    </span>
+    <span class="ctl-group">
+      <button id="view-btn" class="icon-btn" type="button" title="View options" aria-label="View options" aria-haspopup="dialog" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg></button>
+    </span>
   </div>
   <div class="status-row second">
-    <button id="workdir" class="field muted mono collapse workdir-btn" type="button" dir="rtl" title="Workspace"></button>
-    <span class="spacer"></span>
-    <button id="ctx-btn" class="ctx" type="button" title="Context used — click for a breakdown" aria-haspopup="dialog" aria-expanded="false">
-      <span class="ctx-label">CTX</span>
-      <span class="meter"><span id="ctx-fill"></span></span>
-      <span id="ctx-pct" class="mono">0%</span>
-    </button>
-    <button id="think-badge" class="chip button" type="button" title="Thinking level (/think)" aria-haspopup="dialog" aria-expanded="false">THINK: on</button>
-    <button id="cavecat-badge" class="chip button" type="button" title="Cavecat (/cavecat): compress plans, tool text and command output, and keep replies short" aria-haspopup="dialog" aria-expanded="false">CAVECAT: off</button>
-    <button id="loop-badge" class="chip button" type="button" title="Loop guard (/loop-guard)" aria-haspopup="dialog" aria-expanded="false">LOOP: 3×</button>
-    <button id="tools-badge" class="chip button warn" type="button" title="Tool calls are off" aria-haspopup="dialog" aria-expanded="false" hidden>TOOLS: off</button>
-    <button id="run-badge" class="chip button" type="button" title="Running commands" aria-haspopup="dialog" aria-expanded="false">RUN: auto</button>
-    <button id="setup-badge" class="chip button setup-badge" type="button" title="Where momo and its model server run" aria-haspopup="dialog" hidden>LOCAL</button>
-    <button id="net-badge" class="chip button" type="button" title="Internet access" aria-haspopup="dialog" aria-expanded="false">NET: off</button>
-    <button id="index-badge" class="chip button" type="button" title="Code index" aria-haspopup="dialog" aria-expanded="false">INDEX: off</button>
+    <span class="ctl-group">
+      <label class="mode-pick">
+        <span class="sr-only">Mode</span>
+        <select id="mode" title="Mode (Shift+Tab cycles)"></select>
+      </label>
+      <label class="mode-pick" id="plan-kind-pick" hidden>
+        <span class="sr-only">Plan type</span>
+        <select id="plan-kind" title="Plan type (/plan normal, /plan tdd, /plan stories): a TDD plan writes the tests first and gates every step on them; a stories plan breaks each phase into small, checked stories when it starts">
+          <option value="normal">normal plan</option>
+          <option value="tdd">TDD plan</option>
+          <option value="stories">stories plan</option>
+        </select>
+      </label>
+      <button id="plan-progress" class="chip button" type="button" title="Show the plan" hidden></button>
+      <button id="model-btn" class="field strong model-btn" type="button" title="Switch model" aria-haspopup="dialog"><span id="model"></span><svg class="icon sm" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+    </span>
+    <span class="ctl-group">
+      <button id="ctx-btn" class="ctx" type="button" title="Context used — click for a breakdown" aria-haspopup="dialog" aria-expanded="false">
+        <span class="ctx-label">CTX</span>
+        <span class="meter"><span id="ctx-fill"></span></span>
+        <span id="ctx-pct" class="mono">0%</span>
+      </button>
+    </span>
+    <div class="chip-grid">
+    <span class="ctl-group" aria-label="Model behaviour">
+      <button id="think-badge" class="chip kv button" type="button" title="Thinking level (/think)" aria-haspopup="dialog" aria-expanded="false"><span class="k">THINK</span><span class="v">on</span></button>
+      <button id="cavecat-badge" class="chip kv button" type="button" title="Cavecat (/cavecat): compress plans, tool text and command output, and keep replies short" aria-haspopup="dialog" aria-expanded="false"><span class="k">CAVECAT</span><span class="v">off</span></button>
+      <button id="loop-badge" class="chip kv button" type="button" title="Loop guard (/loop-guard)" aria-haspopup="dialog" aria-expanded="false"><span class="k">LOOP</span><span class="v">3×</span></button>
+    </span>
+    <span class="ctl-group" aria-label="Execution">
+      <button id="run-badge" class="chip kv button" type="button" title="Running commands" aria-haspopup="dialog" aria-expanded="false"><span class="k">RUN</span><span class="v">auto</span></button>
+      <button id="net-badge" class="chip kv button" type="button" title="Internet access" aria-haspopup="dialog" aria-expanded="false"><span class="k">NET</span><span class="v">off</span></button>
+      <button id="tools-badge" class="chip kv button warn" type="button" title="Tool calls are off" aria-haspopup="dialog" aria-expanded="false" hidden><span class="k">TOOLS</span><span class="v">off</span></button>
+    </span>
+    <span class="ctl-group" aria-label="Environment">
+      <button id="index-badge" class="chip kv button" type="button" title="Code index" aria-haspopup="dialog" aria-expanded="false"><span class="k">INDEX</span><span class="v">off</span></button>
+      <button id="setup-badge" class="chip kv button setup-badge" type="button" title="Where momo and its model server run" aria-haspopup="dialog" hidden><span class="k">LOCAL</span><span class="v"></span></button>
+    </span>
+    </div>
   </div>
   <div id="view-menu" class="menu" role="dialog" aria-label="View options" hidden>
     <div class="menu-title">View</div>
@@ -107,6 +125,8 @@
       <button type="button" id="expand-all" class="link-btn">Expand all</button>
       <button type="button" id="collapse-all" class="link-btn">Collapse all</button>
     </div>
+    <div class="menu-sub">Theme</div>
+    <button id="theme-btn" class="link-btn" type="button" title="Switch theme" aria-label="Switch theme"><svg class="icon sm" aria-hidden="true"><use href="#i-contrast"/></svg> <span id="theme-label">Theme: system</span></button>
     <div class="menu-foot">
       <button type="button" id="settings-open" class="link-btn"><svg class="icon sm" aria-hidden="true"><use href="#i-sliders"/></svg> All settings…</button>
       <button type="button" id="palette-open" class="link-btn">Commands <kbd>Ctrl+K</kbd></button>

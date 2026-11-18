@@ -830,22 +830,35 @@ export function renderSetup(v, root, opts = {}) {
   return tab;
 }
 
-// The header badge's text and state for a status event.
+// The header badge for a status event: its key (LOCAL / BOX), a short value
+// (the one thing most worth seeing), the full text for its title, and a state.
 export function badge(st, now = Date.now() / 1000) {
   if (st.setup_kind === "box") {
     const sync = st.setup_sync;
-    const parts = [`BOX ${st.setup_label || ""}`];
+    const parts = [`BOX ${st.setup_label || ""}`.trim()];
+    const synced = typeof st.box_sync_ts === "number" ? `synced ${short(st.box_sync_ts, now)}` : null;
     if (sync === "syncer-silent") parts.push("syncer stopped");
     else if (sync === "error") parts.push("sync failed");
     else if (sync === "incoming") parts.push("landed beside");
-    else if (typeof st.box_sync_ts === "number") parts.push(`synced ${short(st.box_sync_ts, now)}`);
-    if (st.box_denied_recent) parts.push(`${st.box_denied_recent} refused`);
-    if (st.setup_mem_oom) parts.push("OOM killed");
-    else if (typeof st.setup_mem_pct === "number" && st.setup_mem_pct >= 80) parts.push(`mem ${st.setup_mem_pct}%`);
-    return { text: parts.join(" · "), state: st.setup_state || "unknown" };
+    else if (synced) parts.push(synced);
+    const refused = st.box_denied_recent ? `${st.box_denied_recent} refused` : null;
+    if (refused) parts.push(refused);
+    const mem = st.setup_mem_oom ? "OOM killed"
+      : typeof st.setup_mem_pct === "number" && st.setup_mem_pct >= 80 ? `mem ${st.setup_mem_pct}%` : null;
+    if (mem) parts.push(mem);
+    const value = (st.setup_mem_oom && "OOM")
+      || (sync === "error" && "sync failed") || (sync === "syncer-silent" && "syncer off")
+      || refused || mem || (sync === "incoming" && "landed")
+      || (synced && synced.replace("just now", "now")) || st.setup_label || "box";
+    return { key: "BOX", value, text: parts.join(" · "), state: st.setup_state || "unknown" };
   }
-  const parts = ["LOCAL", st.setup_label || st.provider || "model"];
-  if (st.backend_reachable === false) parts.push("down");
-  else if (typeof st.setup_latency_ms === "number") parts.push(`${st.setup_latency_ms} ms`);
-  return { text: parts.join(" · "), state: st.setup_state || "ok" };
+  const label = st.setup_label || st.provider || "model";
+  const parts = ["LOCAL", label];
+  let value = label;
+  if (st.backend_reachable === false) { parts.push("down"); value = "down"; }
+  else if (typeof st.setup_latency_ms === "number") {
+    parts.push(`${st.setup_latency_ms} ms`);
+    value = `${st.setup_latency_ms}ms`;
+  }
+  return { key: "LOCAL", value, text: parts.join(" · "), state: st.setup_state || "ok" };
 }

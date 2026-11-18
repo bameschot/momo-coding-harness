@@ -3,7 +3,7 @@
 // reads GET api/setup every few seconds while it is open; the badge follows
 // the status event.  Show-only: nothing here changes a setting.
 
-import { $, closeLayer } from "./dom.js";
+import { $, closeLayer, setChip } from "./dom.js";
 import { badge, renderSetup } from "./setup-render.js";
 
 const hooks = {
@@ -19,14 +19,14 @@ let inflight = false;
 export function applySetupStatus(s) {
   const btn = $("#setup-badge");
   if (!btn || !s) return;
-  const { text, state } = badge(s);
+  const { key, value, text, state } = badge(s);
   btn.hidden = false;
-  btn.textContent = text;
+  setChip(btn, key, value);
   btn.classList.toggle("warn", state === "warn");
   btn.classList.toggle("bad", state === "bad");
-  btn.title = s.setup_kind === "box"
-    ? "This momo runs in a momo-box — click for its setup, network and sync"
-    : "Where momo and its model server run — click for details";
+  btn.title = text + (s.setup_kind === "box"
+    ? "\nThis momo runs in a momo-box — click for its setup, network and sync"
+    : "\nWhere momo and its model server run — click for details");
 }
 
 async function refresh() {

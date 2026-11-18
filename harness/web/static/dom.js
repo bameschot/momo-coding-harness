@@ -94,6 +94,32 @@ export function formatSize(n) {
   return `${n}`;
 }
 
+// A count in at most four characters: 950, 1.2k, 34k, 1.5M.
+export function formatCount(n) {
+  if (n < 1000) return String(n);
+  for (const [unit, size] of [["M", 1e6], ["k", 1e3]]) {
+    if (n >= size) {
+      const v = n / size;
+      return v >= 10 ? `${Math.round(v)}${unit}` : `${v.toFixed(1).replace(/\.0$/, "")}${unit}`;
+    }
+  }
+  return String(n);
+}
+
+// A header status chip: a muted key and a short value in a fixed-size cell
+// (.chip.kv).  The value is cut with an ellipsis, so it also goes in the
+// accessible name; the chip's title carries the detail.
+export function setChip(chip, key, value) {
+  let k = chip.querySelector(".k"), v = chip.querySelector(".v");
+  if (!k || !v) {
+    k = el("span", "k"); v = el("span", "v");
+    chip.replaceChildren(k, v);
+  }
+  if (k.textContent !== key) k.textContent = key;
+  if (v.textContent !== value) v.textContent = value;
+  chip.setAttribute("aria-label", `${key} ${value}`);
+}
+
 // ── transient notes ───────────────────────────────────────────────────────────
 // One place for messages that are not part of the conversation (a setting the
 // server refused, a file that can't be previewed, notification permissions).

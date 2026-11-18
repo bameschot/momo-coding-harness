@@ -8,8 +8,8 @@ import { applyMcpStatus, initMcp, refreshMcpMenu } from "./mcp.js";
 import { applySkillsStatus, initSkills, refreshSkillsMenu } from "./skills.js";
 import { applySetupStatus, closeSetup, initSetup } from "./setup.js";
 import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
-import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, formatSize, icon, loadJSON,
-         makeResizable, openLayer, saveJSON, toast } from "./dom.js";
+import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, formatCount, formatSize, icon, loadJSON,
+         makeResizable, openLayer, saveJSON, setChip, toast } from "./dom.js";
 import { applyChangesStatus, changesDirty, initChanges, openChanges } from "./changes.js";
 import { diffBox } from "./diff.js";
 import { initFiles, openFiles, showFile } from "./files.js";
@@ -49,7 +49,7 @@ function setTheme(choice) {
   saveJSON("momo.theme", themeChoice === "system" ? undefined : themeChoice);
   renderThemeBtn();
 }
-// The button cycles System → Light → Dark; its icon and title say which is on.
+// The View menu's theme button cycles System → Light → Dark; its icon and label say which is on.
 function renderThemeBtn() {
   const next = THEMES[(THEMES.indexOf(themeChoice) + 1) % THEMES.length];
   const now = themeChoice === "system" ? `follows the system (${currentTheme()} now)` : themeChoice;
@@ -59,6 +59,7 @@ function renderThemeBtn() {
   btn.setAttribute("aria-label", label);
   btn.querySelector("use").setAttribute("href",
     { system: "#i-contrast", light: "#i-sun", dark: "#i-moon" }[themeChoice]);
+  $("#theme-label").textContent = `Theme: ${themeChoice} — click for ${next}`;
   for (const r of document.querySelectorAll("input[name=theme]")) r.checked = r.value === themeChoice;
 }
 $("#theme-btn").onclick = () => setTheme(THEMES[(THEMES.indexOf(themeChoice) + 1) % THEMES.length]);
@@ -649,7 +650,7 @@ function applyStatus(s) {
   // less safe than the default.
   const run = $("#run-badge");
   const bg = s.background || [];
-  run.textContent = (s.run_confirm ? "RUN: confirm" : "RUN: auto") + (bg.length ? ` · ${bg.length} bg` : "");
+  setChip(run, "RUN", (s.run_confirm ? "confirm" : "auto") + (bg.length ? ` +${bg.length}` : ""));
   run.classList.toggle("active", s.run_confirm || bg.length > 0);
   run.title = (s.run_confirm ? "Running commands — momo asks before each one" : "Running commands — without asking")
     + (bg.length ? `\n${bg.length} in the background: ${bg.map((r) => `${r.id} ${r.command}`).join("; ")}` : "");
@@ -657,9 +658,10 @@ function applyStatus(s) {
   const net = $("#net-badge");
   net.classList.toggle("active", netOn && s.net_confirm);
   net.classList.toggle("warn", netOn && !s.net_confirm);
-  net.textContent = netOn ? `NET: ${s.net_access}${s.net_confirm ? "" : " (writes: auto)"}` : "NET: off";
+  setChip(net, "NET", netOn ? s.net_access : "off");
   const cached = (s.net_cache || []).length;
   net.title = (netOn ? `Internet access: ${s.net_access === "local" ? "public and local" : "public"}` : "Internet access: off")
+    + (netOn && !s.net_confirm ? " · POST/PUT/DELETE without asking" : "")
     + (cached ? ` · ${cached} page${cached === 1 ? "" : "s"} cached` : "");
   $("#run-confirm").checked = !!s.run_confirm;
   $("#net-on").checked = netOn;
@@ -710,7 +712,7 @@ function applyThinkStatus(s) {
   const choices = s.think_choices || [];
   const badge = $("#think-badge");
   const clamped = eff !== level && eff !== "n/a";
-  badge.textContent = eff === "n/a" ? "THINK: n/a" : clamped ? `THINK: ${level}→${eff}` : `THINK: ${level}`;
+  setChip(badge, "THINK", eff === "n/a" ? "n/a" : clamped ? `${level}→${eff}` : level);
   badge.classList.toggle("warn", clamped);
   badge.classList.toggle("muted", eff === "n/a");
   const levels = choices.filter((c) => !["off", "on"].includes(c));
@@ -740,7 +742,7 @@ function applyThinkStatus(s) {
 function applyCavecatStatus(s) {
   const level = s.cavecat || "off";
   const chip = $("#cavecat-badge");
-  chip.textContent = `CAVECAT: ${level}`;
+  setChip(chip, "CAVECAT", level);
   chip.classList.toggle("active", level !== "off");
 }
 
@@ -750,7 +752,7 @@ function applyCavecatStatus(s) {
 function applyLoopStatus(s) {
   const n = s.loop_guard ?? 3, r = s.loop_resets ?? 2;
   const chip = $("#loop-badge");
-  chip.textContent = n ? `LOOP: ${n}×` : "LOOP: off";
+  setChip(chip, "LOOP", n ? `${n}×` : "off");
   chip.classList.toggle("warn", !n);
   chip.title = !n ? "Loop guard (/loop-guard): off — a repeating model runs until the iteration cap"
     : `Loop guard (/loop-guard): the same call ${n} times, or one error ${n} times, is a loop · `
@@ -768,15 +770,21 @@ function applyIndexStatus(s) {
   const trouble = missing || (on && (s.index_degraded || s.index_state === "stopped"));
   const badge = $("#index-badge");
   badge.classList.toggle("warn", trouble);
-  badge.textContent = missing ? "INDEX: no tree-sitter"
-    : !on ? "INDEX: off"
-    : s.index_progress ? `INDEX: ${s.index_state} ${s.index_progress}`
-    : s.index_state === "stopped" ? "INDEX: stopped"
-    : `INDEX: ${s.index_files} files · ${formatSize(s.index_mem)}/${formatSize(s.index_max_bytes)}`;
+  // "done/total" while it builds; the chip shows the share.
+  const [done, total] = (s.index_progress || "").split("/").map(Number);
+  const pct = total ? `${Math.min(99, Math.floor((done / total) * 100))}%` : s.index_progress;
+  setChip(badge, "INDEX", missing ? "n/a"
+    : !on ? "off"
+    : s.index_progress ? pct
+    : s.index_state === "stopped" ? "stopped"
+    : formatCount(s.index_files || 0));
+  const holds = `${s.index_files} files · ${formatSize(s.index_mem)} of ${formatSize(s.index_max_bytes)}`;
   badge.title = missing ? `Code index unavailable: ${INDEX_INSTALL_HINT}`
     : !on ? "Code index: off"
+    : s.index_progress ? `Code index: ${s.index_state} ${s.index_progress} files`
+    : s.index_state === "stopped" ? "Code index: stopped"
     : (s.index_degraded ? "Code index is over its memory budget and dropped a part. " : "")
-      + "Code index — what it holds";
+      + `Code index: ${holds} — click for what it holds`;
   $("#index-on").checked = on;
   $("#index-on").disabled = missing;
   $("#index-save").disabled = !on;
@@ -1797,8 +1805,24 @@ function toggleMenu(e, menu, title = null, load = null) {
   const button = $(MENUS.find(([, x]) => x === menu)[0]);
   m.hidden = false;                 // loaders check menu.hidden before painting
   load?.();                         // a synchronous painter fills it before focus moves in
+  placeMenu(m, button);
   openLayer(m, button);
   button.setAttribute("aria-expanded", "true");
+}
+// Hang a header popover under the button that opened it: from the button's left
+// edge when it sits in the left half of the bar, from its right edge otherwise,
+// so a menu that grows once its content loads grows away from the window edge.
+// A phone's popovers span the screen instead (app.css).
+function placeMenu(menu, button) {
+  const bar = $("#status").getBoundingClientRect(), b = button.getBoundingClientRect();
+  const fromLeft = b.left + b.width / 2 < bar.left + bar.width / 2;
+  menu.style.left = fromLeft ? `${Math.max(8, b.left - bar.left)}px` : "auto";
+  menu.style.right = fromLeft ? "auto" : `${Math.max(8, bar.right - b.right)}px`;
+  if (!fromLeft) return;
+  requestAnimationFrame(() => {     // a wide menu from a middle chip: keep it on screen
+    const over = menu.getBoundingClientRect().right - (innerWidth - 8);
+    if (over > 0) menu.style.left = `${Math.max(8, parseFloat(menu.style.left) - over)}px`;
+  });
 }
 $("#view-btn").onclick = (e) => toggleMenu(e, "#view-menu");
 document.addEventListener("click", (e) => {
