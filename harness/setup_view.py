@@ -32,6 +32,8 @@ RECENT_DENY_SECS = 600         # denials in the badge: the last ten minutes
 BOX_FILES = ("setup", "sync", "net", "stats")
 MEM_KEEP = 60                  # memory samples the sparkline shows (~10 min at 10 s)
 MEM_EVERY = 5.0                # seconds between two memory samples, at most
+ACTIVITY_KEEP = 5000           # network requests the session activity log keeps
+ACTIVITY_VIEW = 300            # of which the Setup drawer is sent (it polls every 3 s)
 MEM_WARN, MEM_BAD = 80, 95     # % of the memory cap that turns the badge amber / red
 MAX_FILE = 1_000_000           # bytes per status file
 SCHEMA = 1
@@ -149,6 +151,66 @@ class PerfRing:
             vals = sorted(r[key] for r in rows[-5:] if r[key] is not None)
             return vals[len(vals) // 2] if vals else None
         return {"calls": len(rows), "tok_s": median("tok_s"), "ttft": median("ttft")}
+
+
+class ActivityLog:
+    """Every network request this momo saw since it started, up to keep: the
+    web tools' own requests (local) or the box gateway's decisions, merged from
+    each net.json read, whose window holds only the last 100 (box).  The Setup
+    panel's Activity table shows the newest; /setup-export writes all of it."""
+
+    _KEY = ("ts", "kind", "method", "host", "port", "path", "allowed")
+
+    def __init__(self, keep: int = ACTIVITY_KEEP):
+        self.since = time.time()
+        self._rows: deque[dict] = deque(maxlen=keep)
+        self._keys: deque[tuple] = deque(maxlen=keep)
+        self._seen: set[tuple] = set()
+        self._lock = threading.Lock()
+
+    def _key(self, e: dict) -> tuple:
+        return tuple(e.get(k) for k in self._KEY)
+
+    def _append(self, entry: dict) -> bool:
+        key = self._key(entry)
+        if key in self._seen:
+            return False
+        if len(self._keys) == self._keys.maxlen:
+            self._seen.discard(self._keys[0])
+        self._keys.append(key)
+        self._seen.add(key)
+        self._rows.append(entry)
+        return True
+
+    def add(self, entry: dict) -> None:
+        with self._lock:
+            self._append(dict(entry))
+
+    def merge(self, entries) -> int:
+        """Add the entries not seen yet (a net.json window overlaps the last
+        one), oldest first; how many were new."""
+        if not isinstance(entries, list):
+            return 0
+        rows = sorted((e for e in entries if isinstance(e, dict) and isinstance(e.get("ts"), (int, float))),
+                      key=lambda e: e["ts"])
+        with self._lock:
+            return sum(self._append(dict(e)) for e in rows)
+
+    def rows(self, limit: int | None = None) -> list[dict]:
+        """Newest first; limit keeps only the newest that many."""
+        with self._lock:
+            rows = list(self._rows)
+        rows.reverse()
+        return rows if limit is None else rows[:limit]
+
+    @property
+    def total(self) -> int:
+        with self._lock:
+            return len(self._rows)
+
+    def view(self, source: str, limit: int = ACTIVITY_VIEW) -> dict:
+        return {"rows": self.rows(limit), "total": self.total, "since": self.since,
+                "source": source}
 
 
 class Latency:
@@ -563,3 +625,183 @@ def mem_state(mem: dict | None) -> tuple[int | None, bool, str]:
     state = "bad" if oom or (pct is not None and pct >= MEM_BAD) else \
         "warn" if swapping or (pct is not None and pct >= MEM_WARN) else "ok"
     return pct, oom, state
+
+
+# ── /setup-export ─────────────────────────────────────────────────────────────
+
+def _cell(value) -> str:
+    """One Markdown table cell: no pipes or line breaks break the row."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    text = " ".join(str(value).split())
+    return text.replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _table(head: list[str], rows: list[list]) -> list[str]:
+    out = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    out += ["| " + " | ".join(_cell(c) for c in r) + " |" for r in rows]
+    return out
+
+
+def _facts(pairs: list[tuple]) -> list[str]:
+    rows = [[k, v] for k, v in pairs if v not in (None, "", [], {})]
+    return _table(["", ""], rows) if rows else ["(nothing to show)"]
+
+
+def _iso(ts) -> str:
+    if not isinstance(ts, (int, float)):
+        return ""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+def _mb(n) -> str:
+    return f"{n / 2**20:,.0f} MB" if isinstance(n, (int, float)) else ""
+
+
+def _request(e: dict) -> str:
+    if e.get("kind") == "llm":
+        return f"model {e.get('method', '')} {e.get('path', '')}".strip()
+    if e.get("kind") == "web":
+        return f"{e.get('method', '')} {e.get('host', '')}{e.get('path', '')}".strip()
+    port = e.get("port")
+    return f"{e.get('method', '')} {e.get('host', '')}{f':{port}' if port else ''}".strip()
+
+
+def _outcome(e: dict) -> str:
+    if e.get("rule"):
+        return e["rule"] + (f" — {e['reason']}" if e.get("reason") else "")
+    if e.get("error"):
+        return e["error"]
+    return f"HTTP {e['status']}" if e.get("status") else ""
+
+
+def report_markdown(view: dict, activity: list[dict], settings: list[list], *,
+                    since: float | None = None, session: str = "",
+                    now: float | None = None) -> str:
+    """The Setup panel as one Markdown document: what was set up when it was
+    exported, every setting, and all the session's network activity (newest
+    first).  A pure function of its inputs."""
+    now = time.time() if now is None else now
+    box = view.get("box") or {}
+    in_box = view.get("kind") == "box"
+    m = view.get("model") or {}
+    lines = ["# momo setup report", "",
+             *_facts([("exported", _iso(now)), ("runs", "in a momo-box" if in_box else "locally"),
+                      ("workspace", (view.get("workspace") or {}).get("path")),
+                      ("session", session), ("turns", view.get("turn"))]), ""]
+
+    lines += ["## Setup", ""]
+    mach = view.get("machine") or {}
+    web = view.get("web") or {}
+    if in_box:
+        st = box.get("setup") or {}
+        src = st.get("source") or {}
+        lines += _facts([("box", st.get("name")), ("network", st.get("net")), ("image", st.get("image")),
+                         ("source", f"{src.get('name', '')}{' @ ' + src['ref'] if src.get('ref') else ''}"
+                          if src else ""),
+                         ("created", _iso(st.get("created"))), ("sync", box.get("sync_state"))])
+    else:
+        lines += _facts([("momo", f"{mach.get('host', '')} · {mach.get('os', '')} · Python {mach.get('python', '')}"),
+                         ("web UI", web.get("url")),
+                         ("isolation", "none: momo-box runs momo in a container")])
+    lines.append("")
+
+    lines += ["## Model", ""]
+    lat, ctx, perf = m.get("latency") or {}, m.get("context") or {}, m.get("perf") or {}
+    lines += _facts([("server", f"{m.get('provider', '')} · {m.get('url', '')}"),
+                     ("where", (m.get("location") or {}).get("label")), ("model", m.get("model")),
+                     ("reachable", m.get("reachable")),
+                     ("latency", f"{lat['ms']} ms" if isinstance(lat.get("ms"), (int, float)) else ""),
+                     ("context", f"{ctx.get('used', 0):,} of {ctx.get('limit', 0):,} tokens ({ctx.get('pct', 0)}%) · "
+                                 f"window {ctx.get('window', 0):,}" if ctx else ""),
+                     ("generation", f"{perf['tok_s']} tok/s (median, last 5)" if perf.get("tok_s") else ""),
+                     ("first token", f"{perf['ttft']:.2f} s" if isinstance(perf.get("ttft"), (int, float)) else ""),
+                     ("replies measured", perf.get("calls"))])
+    lines.append("")
+
+    lines += ["## Settings", "", *_table(["setting", "value", "flag"], settings), ""]
+
+    lines += ["## Network", ""]
+    n = view.get("network") or {}
+    lines += _facts([("fetch_url / web_search", n.get("web_tools")), ("confirm writes", n.get("net_confirm")),
+                     ("shell commands", "not filtered by momo" if not in_box else "through the box's network")])
+    lines.append("")
+    if n.get("mcp"):
+        lines += ["### MCP servers", "", *_table(["name", "transport", "target", "state", "tools"],
+                  [[r.get("name"), r.get("transport"), r.get("target"), r.get("state"), r.get("tools")]
+                   for r in n["mcp"]]), ""]
+    if in_box:
+        st = box.get("setup") or {}
+        al = st.get("allowlist") or {}
+        net = box.get("net") or {}
+        if al.get("rules"):
+            lines += ["### Allowlist", "", *_table(["kind", "rule", "why", "from"],
+                      [[r.get("kind") or "allowed", r.get("rule"), r.get("reason"), r.get("source")]
+                       for r in al["rules"]]), ""]
+        if net.get("hosts"):
+            lines += ["### Hosts", "", *_table(["host", "allowed", "refused", "last", "rule"],
+                      [[f"{x.get('host', '')}{':' + str(x['port']) if x.get('port') else ''}",
+                        x.get("allowed", 0), x.get("denied", 0), _iso(x.get("last_ts")), x.get("rule")]
+                       for x in net["hosts"]]), ""]
+    elif n.get("recent"):
+        lines += ["### Hosts reached", "", *_table(["host", "requests", "last", "ok"],
+                  [[r.get("host"), r.get("count"), _iso(r.get("ts")), r.get("ok")] for r in n["recent"]]), ""]
+
+    who = "the box gateway's decisions" if in_box else "momo's web tool requests (fetch_url, web_search)"
+    lines += ["## Activity", "",
+              f"{len(activity):,} request{'s' if len(activity) != 1 else ''} since {_iso(since)}, "
+              f"newest first: {who}."
+              + ("" if in_box else " Shell commands are not tracked."), ""]
+    if activity:
+        lines += _table(["time", "ok", "request", "rule / result"],
+                        [[_iso(e.get("ts")), e.get("allowed"), _request(e), _outcome(e)] for e in activity])
+    else:
+        lines.append("(none)")
+    lines.append("")
+
+    lines += ["## Sync", ""]
+    if in_box:
+        sync = box.get("sync") or {}
+        last = sync.get("last") or {}
+        lines += _facts([("state", box.get("sync_state")), ("last land", _iso(last.get("ts"))),
+                         ("branch", last.get("branch")), ("commit", str(last.get("head") or "")[:12]),
+                         ("changes", last.get("shortstat"))])
+        hist = list(reversed(sync.get("history") or []))
+        if hist:
+            lines += ["", *_table(["time", "branch", "commits", "changes"],
+                      [[_iso(r.get("ts")), r.get("branch"), r.get("commits"), r.get("shortstat")] for r in hist])]
+    else:
+        w = view.get("workspace") or {}
+        g = w.get("git") or {}
+        lg = g.get("last") or {}
+        lines += _facts([("path", w.get("path")),
+                         ("git", f"{g.get('branch')} · {g.get('changed')} changed file(s)" if g.get("repo")
+                          else "not a git repository"),
+                         ("last commit", f"{lg.get('sha')} {lg.get('subject')} ({_iso(lg.get('ts'))})" if lg else ""),
+                         ("momo's changes", f"{w.get('changes_files', 0)} file(s) in {w.get('undo_count', 0)} "
+                                            "checkpoint(s) since the last /keep")])
+    lines.append("")
+
+    if in_box:
+        t = (box.get("setup") or {}).get("toolchain") or {}
+        p = box.get("prepare") or {}
+        lines += ["## Toolchain", "", *_facts([("from", t.get("source")), ("presets", ", ".join(t.get("presets") or [])),
+                  ("base image", t.get("base")), ("packages", " ".join(t.get("packages") or [])),
+                  ("prepare", "; ".join(p.get("commands") or [])),
+                  ("prepare ran", _iso(p.get("ran"))), ("prepare stale", p.get("stale"))]), ""]
+
+    rows = view.get("safeguards") or []
+    lines += ["## Safeguards", ""]
+    lines += (_table(["ok", "guard", "what it means"], [[r.get("ok"), r.get("label"), r.get("detail")] for r in rows])
+              if rows else ["(no report)"])
+    lines.append("")
+
+    mem = view.get("memory") or {}
+    lines += ["## Memory", ""]
+    lines += (_facts([("in use", _mb(mem.get("current"))), ("cap", _mb(mem.get("max"))), ("peak", _mb(mem.get("peak"))),
+                      ("machine", _mb(mem.get("machine_total"))), ("state", mem.get("state")),
+                      ("OOM kills", mem.get("oom_kills"))])
+              if mem.get("available") else ["(not available)"])
+    return "\n".join(lines) + "\n"

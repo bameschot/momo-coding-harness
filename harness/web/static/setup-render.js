@@ -453,6 +453,33 @@ function table(head, rows, cls = "") {
   return wrap;
 }
 
+// A long table in a box of its own that scrolls; renderSetup keeps each
+// box's position (by key) across the drawer's 3 s refresh.
+function scrollBox(key, node) {
+  const box = h("div", "su-feedbox");
+  box.dataset.scrollKey = key;
+  box.append(node);
+  return box;
+}
+
+// One activity entry as the Activity table shows it (gateway, model or web tool).
+function activityRow(e) {
+  const req = e.kind === "llm" ? `model ${e.method || ""} ${e.path || ""}`
+    : e.kind === "web" ? `${e.method || ""} ${e.host || ""}${e.path || ""}`
+    : `${e.method || ""} ${e.host || ""}:${e.port || ""}`;
+  const result = e.rule ? `${e.rule}${e.reason ? ` — ${e.reason}` : ""}`
+    : e.error ? e.error : (e.status ? `HTTP ${e.status}` : "");
+  return [clock(e.ts), yesNo(e.allowed), req, result];
+}
+
+function activitySection(rows, total, since, empty) {
+  const title = total ? `Activity — ${total} since ${clock(since) || "start"}${total > rows.length ? ` (newest ${rows.length} shown; Export has all)` : ""}`
+    : "Activity";
+  return section(title, rows.length
+    ? scrollBox("activity", table(["time", "", "request", "rule / result"], rows.map(activityRow), "su-feed"))
+    : note(empty));
+}
+
 function facts(pairs) {
   const dl = h("dl", "su-facts");
   for (const [k, v] of pairs) {
@@ -523,8 +550,10 @@ function networkTab(v, now) {
         ["shell commands", "your full network: momo does not filter them"],
       ])),
       section("Hosts reached lately", recent.length
-        ? table(["host", "requests", "last", ""], recent.map((r) => [r.host, r.count, ago(r.ts, now), yesNo(r.ok)]))
+        ? scrollBox("hosts", table(["host", "requests", "last", ""], recent.map((r) => [r.host, r.count, ago(r.ts, now), yesNo(r.ok)])))
         : note("none yet")),
+      activitySection(v.activity?.rows || [], v.activity?.total || 0, v.activity?.since,
+        "none yet — fetch_url and web_search requests show here (shell commands are not tracked)"),
       section("MCP servers", (n.mcp || []).length
         ? table(["name", "transport", "target", "state", "tools"],
             n.mcp.map((r) => [r.name, r.transport, r.target, r.state, r.tools]))
@@ -570,17 +599,14 @@ function networkTab(v, now) {
         note("Allowing is up to you, on your machine: nothing in the box can widen its network.", "muted")));
     }
     out.push(section("Hosts", hosts.length
-      ? table(["host", "✓", "✕", "last", "rule"], hosts.map((x) => [
+      ? scrollBox("hosts", table(["host", "✓", "✕", "last", "rule"], hosts.map((x) => [
           `${x.host}${x.port ? `:${x.port}` : ""}`, x.allowed || 0, x.denied || 0, ago(x.last_ts, now),
-          x.rule ? `${x.rule}${x.reason ? ` — ${x.reason}` : ""}` : ""]))
+          x.rule ? `${x.rule}${x.reason ? ` — ${x.reason}` : ""}` : ""])))
       : note("no requests yet")));
-    const recent = (net.recent || []).slice(-40).reverse();
-    out.push(section("Activity", recent.length
-      ? table(["time", "", "request", "rule"], recent.map((e) => [
-          clock(e.ts), yesNo(e.allowed),
-          e.kind === "llm" ? `model ${e.method || ""} ${e.path || ""}` : `${e.method || ""} ${e.host || ""}:${e.port || ""}`,
-          e.rule ? `${e.rule}${e.reason ? ` — ${e.reason}` : ""}` : (e.status ? `HTTP ${e.status}` : "")]), "su-feed")
-      : note("nothing yet")));
+    // The session log the box's momo keeps; `momo-box dash` has only net.json's window.
+    const act = v.activity;
+    const rows = act ? act.rows || [] : (net.recent || []).slice().reverse();
+    out.push(activitySection(rows, act ? act.total || 0 : rows.length, act?.since, "nothing yet"));
   }
   return out;
 }
@@ -795,7 +821,11 @@ export function renderSetup(v, root, opts = {}) {
   for (const n of RENDER[tab](v, now)) if (n) body.append(n);
   const scroller = opts.scroller || root;
   const top = scroller.scrollTop;
+  const inner = new Map([...root.querySelectorAll("[data-scroll-key]")].map((n) => [n.dataset.scrollKey, n.scrollTop]));
   root.replaceChildren(bar, body);
+  for (const n of root.querySelectorAll("[data-scroll-key]")) {
+    if (inner.has(n.dataset.scrollKey)) n.scrollTop = inner.get(n.dataset.scrollKey);
+  }
   scroller.scrollTop = top;
   return tab;
 }

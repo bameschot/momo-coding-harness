@@ -74,6 +74,14 @@ class WebServer(unittest.TestCase):
         self.assertIn(b"PONDER", data)
         self.assertIn("-full.md", r.getheader("Content-Disposition"))
 
+    def test_setup_export_download(self):
+        r, data = self.request("GET", "/api/setup/export")
+        self.assertEqual(r.status, 200)
+        self.assertTrue(r.getheader("Content-Type").startswith("text/markdown"))
+        self.assertRegex(r.getheader("Content-Disposition"), r'attachment; filename="momo-setup-\d{8}-\d{6}\.md"')
+        self.assertIn(b"# momo setup report", data)
+        self.assertIn(b"## Activity", data)
+
     def test_static_file_revalidates_with_etag(self):
         r, body = self.request("GET", "/app.js")
         self.assertEqual(r.status, 200)

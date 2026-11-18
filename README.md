@@ -442,7 +442,7 @@ The badge in the header says where momo runs and how it is doing: `LOCAL · llam
 | Tab | Running locally | In a momo-box |
 |---|---|---|
 | **Setup** | A diagram of this machine (momo, its web UI, the workspace and its git state, MCP servers) and where the model server is | The docsite's box diagram, live: your repo and when work last landed, the box, its gateway, the model server and the allowed hosts, each with a state dot |
-| **Network** | momo's web tools (on or off), the hosts they reached lately, MCP endpoints. Shell commands are not filtered, and the tab says so | The allowlist with each rule's reason and source (yours, the repo's `network.json`, the toolchain), the instructions, the hosts refused most with a ready-to-copy `momo-box allow NAME HOST`, a per-host table and the latest decisions |
+| **Network** | momo's web tools (on or off), the hosts they reached lately, every `fetch_url`/`web_search` request since momo started (method, host and path; never the query), MCP endpoints. Shell commands are not filtered, and the tab says so | The allowlist with each rule's reason and source (yours, the repo's `network.json`, the toolchain), the instructions, the hosts refused most with a ready-to-copy `momo-box allow NAME HOST`, a per-host table and every gateway decision since momo started |
 | **Workspace / Sync** | Branch, changed files, the last commit, momo's checkpoints | The sync state, the last land (branch, commits, diffstat, files left out) and a history of lands, with the reason when one went to `-incoming` |
 | **Model** | Where the server is (same machine, your network or the internet; https or not), latency, model, context use, speed over the last replies (tokens per second, time to the first token) and the server's load: the models Ollama holds in memory, or llama.cpp's busy slots (`/slots`) | The same, with the server's real address, plus what the gateway passed and refused |
 | **Toolchain** | — | Where the toolchain came from, the base image and packages, and whether `prepare` is up to date with its input files |
@@ -456,6 +456,10 @@ The badge in the header says where momo runs and how it is doing: `LOCAL · llam
 - a graph of the last ten minutes.
 
 The badge adds `mem 85%` and turns amber at 80% of the cap or when the box swaps more than a tenth of it; it turns red at 95% or after the kernel killed a process for lack of memory (`OOM killed`).
+
+**Activity** keeps up to 5,000 requests for the session. In a box, `net.json` holds only the gateway's last 100 decisions, so momo merges each new copy into its own log, also while idle. The Hosts and Activity tables scroll inside their own boxes and keep their position when the drawer refreshes. The drawer is sent the newest 300; the export has them all.
+
+**Export** (the download button in the drawer's header, or `/setup-export [file]` from the TUI) writes a Markdown report of the setup as it is at that moment: the machine or box, the model server and its speed, every setting with its flag, the network setup (MCP servers, the allowlist and hosts in a box), the session's **whole** activity log, sync, toolchain, safeguards and memory. The web button downloads `momo-setup-<time>.md`. The command writes to `.momo/setup-<time>.md` (or `~/.momo-harness/` when `.momo/` can't be used).
 
 The latency check is a list-models request every 10 s, made only while a web page is open and never during a turn. llama.cpp's `/slots` is never asked from inside a box: on a shared server it can show other clients' prompts.
 
@@ -1329,6 +1333,8 @@ The model passes that path (or just `r1`) to **`command_output`** to look again 
 | `/run-mode` | Show the current mode |
 | `/run-mode new\|classic` | `new`: log + views + `command_output` + background commands. `classic`: return the whole output, as before. Saved in `prefs.json`; refused while a reply is running, because it changes the tool set. `on`/`off` also work. |
 | `/run-output-limit [n\|off]` | Show or set the default view's size in characters (minimum 500; default off: the whole output) |
+| `/bg` | List the background commands still running: id, uptime, command, log. The TUI status bar shows `BG: N` while any run; in the web UI the RUN chip shows `· N bg` and its popover lists them, each with a Stop button. Repainted within 5 s when one exits by itself |
+| `/bg stop <id>\|all` | Stop one background command (and everything it started), or all of them. Works while a reply is running |
 
 The same settings are in the web UI under View → Context, and on the command line as `--run-mode` and `--run-output-limit`. `/tool-result` does not cut these results, because they are sized already.
 

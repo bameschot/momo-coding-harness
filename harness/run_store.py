@@ -72,6 +72,7 @@ class RunStore:
         self._meta: dict[str, dict] = {}
         self._cache: tuple[tuple, str] | None = None    # (path, size, mtime) -> text
         self._procs: dict[str, subprocess.Popen] = {}     # run id -> live background command
+        self._started: dict[str, float] = {}              # run id -> epoch seconds it started
 
     def record(self, run_id: str, command: str, status: str) -> None:
         self._meta[run_id] = {"command": command, "status": status}
@@ -84,6 +85,7 @@ class RunStore:
     def add_background(self, run_id: str, proc: subprocess.Popen) -> None:
         with self._lock:
             self._procs[run_id] = proc
+            self._started[run_id] = time.time()
         _STORES.add(self)
 
     def running(self) -> list[str]:
@@ -96,6 +98,16 @@ class RunStore:
                     if run_id in self._meta:
                         self._meta[run_id]["status"] = f"exit code {proc.returncode}"
             return list(self._procs)
+
+    def background_view(self) -> list[dict]:
+        """The background commands still running, oldest first, as both UIs show
+        them (the status event's `background`, /bg)."""
+        ids = self.running()
+        return [{"id": run_id,
+                 "command": short_command(self._meta.get(run_id, {}).get("command", ""), 60),
+                 "started": self._started.get(run_id),
+                 "log": str(self.root / f"{run_id}.log")}
+                for run_id in sorted(ids, key=lambda r: int(r[1:]) if r[1:].isdigit() else 0)]
 
     def status(self, path: Path) -> str | None:
         """How the command behind a log ended, or "still running"."""

@@ -525,6 +525,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
         self.box_status_dir: Path | None = None
         self._box_status: setup_mod.BoxStatus | None = None
         self.perf = setup_mod.PerfRing()
+        self.box_activity = setup_mod.ActivityLog()   # the box gateway's decisions, merged
         self.latency = setup_mod.Latency()
         self._load_cache = setup_mod.Cached(setup_mod.LOAD_TTL)
         self._git_cache = setup_mod.Cached(5.0)
@@ -3584,6 +3585,8 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
             think_effective=self.effective_think(),
             think_choices=self.think_choices(),
             think_known=self.client.thinking_caps().known,
+            # _run_store, not run_store: a status snapshot must not create the run dir.
+            background=self._run_store.background_view() if self._run_store is not None else [],
             tools_off=sorted(self.disabled_tools.get(self.mode, ())),
             tools_loaded=len(self.loaded_tools),
             tools_listed=len(self._tool_catalog()),
@@ -3603,7 +3606,28 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
             return None
         if self._box_status is None:
             self._box_status = setup_mod.BoxStatus(self.box_status_dir)
-        return self._box_status.read()
+        data = self._box_status.read()
+        # net.json holds the last 100 decisions; keep the session's whole log.
+        net = data.get("net")
+        if isinstance(net, dict):
+            self.box_activity.merge(net.get("recent"))
+        return data
+
+    def activity_log(self) -> "setup_mod.ActivityLog":
+        """The session's network activity: the box gateway's log in a box (it
+        sees every request), else the web tools' own."""
+        return self.box_activity if self.box_status_dir is not None else net_mod.ACTIVITY
+
+    def setup_report(self, web: dict | None = None) -> str:
+        """/setup-export and GET /api/setup/export: the setup as it is now,
+        every setting, and the session's whole network activity, as Markdown."""
+        from . import settings as settings_mod     # it imports this module
+        view = self.setup_view(web=web, busy=True)
+        settings = [[s.pref, getattr(self, s.attr), s.flag or ""]
+                    for s in settings_mod.SETTINGS if s.attr is not None]
+        log = self.activity_log()
+        return setup_mod.report_markdown(view, log.rows(), settings, since=log.since,
+                                         session=self.session_path().stem)
 
     def _setup_status_fields(self) -> dict:
         """The header badge: local or box, a label and one state (ok, warn,
@@ -3728,6 +3752,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
             "safeguards": (setup.get("safeguards") if in_box
                            else setup_mod.local_safeguards(self, web)),
             "turn": self._turn_count,
+            "activity": self.activity_log().view("gateway" if in_box else "momo"),
             "box": None,
             "memory": self.memory_view(data),
         }

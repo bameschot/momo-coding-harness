@@ -43,6 +43,7 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from . import html_text, passages
+from . import setup_view
 
 _MAX_REDIRECTS = 5
 # Two separate budgets.  The download cap only bounds memory and time: an HTML
@@ -1086,6 +1087,14 @@ def cache_drop(n: int) -> str | None:
 # The hosts momo's web tools reached lately, for the web UI's Setup panel:
 # (time, host, ok) — ok is False for a refused or failed request.
 _RECENT_HOSTS: collections.deque = collections.deque(maxlen=50)
+# Every request, one entry each, since momo started (the Setup panel's
+# Activity table and /setup-export).
+ACTIVITY = setup_view.ActivityLog()
+
+
+def recent_activity(limit: int | None = None) -> list[dict]:
+    """The web tools' requests, newest first."""
+    return ACTIVITY.rows(limit)
 
 
 def recent_hosts() -> list[dict]:
@@ -1105,7 +1114,17 @@ def _get(url: str, **kw) -> dict | str:
     except ValueError:
         host = ""
     if host:
-        _RECENT_HOSTS.append((time.time(), host, isinstance(got, dict)))
+        ts, ok = time.time(), isinstance(got, dict)
+        _RECENT_HOSTS.append((ts, host, ok))
+        try:
+            path = urlsplit(url.strip()).path or "/"     # no query: it can hold a search
+        except ValueError:
+            path = ""
+        entry = {"ts": ts, "kind": "web", "method": str(kw.get("method") or "GET")[:10],
+                 "host": host, "path": setup_view.clean(path, 200), "allowed": ok}
+        if not ok:
+            entry["error"] = setup_view.clean(str(got), 120)
+        ACTIVITY.add(entry)
     return got
 
 

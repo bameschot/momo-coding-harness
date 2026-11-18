@@ -648,9 +648,11 @@ function applyStatus(s) {
   // Chip colours: .active = a setting you turned on, .warn = something off or
   // less safe than the default.
   const run = $("#run-badge");
-  run.textContent = s.run_confirm ? "RUN: confirm" : "RUN: auto";
-  run.classList.toggle("active", s.run_confirm);
-  run.title = s.run_confirm ? "Running commands — momo asks before each one" : "Running commands — without asking";
+  const bg = s.background || [];
+  run.textContent = (s.run_confirm ? "RUN: confirm" : "RUN: auto") + (bg.length ? ` · ${bg.length} bg` : "");
+  run.classList.toggle("active", s.run_confirm || bg.length > 0);
+  run.title = (s.run_confirm ? "Running commands — momo asks before each one" : "Running commands — without asking")
+    + (bg.length ? `\n${bg.length} in the background: ${bg.map((r) => `${r.id} ${r.command}`).join("; ")}` : "");
   const netOn = s.net_access !== "off";
   const net = $("#net-badge");
   net.classList.toggle("active", netOn && s.net_confirm);

@@ -123,6 +123,7 @@ class Controller:
         self.web_url: str | None = None  # set by main when the web server is up
         self.web_viewers = 0             # open event streams (web pages); the server counts them
         self._last_setup_check = 0.0
+        self._last_bg: tuple = ()       # background command ids at the last _bg_tick
         # Idle recap state (see _idle_tick).
         self._last_activity = time.monotonic()
         self._idle = False
@@ -275,9 +276,31 @@ class Controller:
         if h.setup_tick(probe=True):
             h.emit_status()
 
+    def _bg_tick(self):
+        """Repaint the status bars when a background command ended by itself
+        (one stopped by a tool call or /bg already sent a status event).  Only
+        poll()s, so it runs busy or idle, with or without a web page."""
+        h = self.harness
+        store = h._run_store
+        ids = tuple(store.running()) if store is not None else ()
+        if ids != self._last_bg:
+            self._last_bg = ids
+            h.emit_status()
+
     def _idle_tick(self):
         try:
             self._backend_tick()
+        except Exception:
+            pass
+        try:
+            self._bg_tick()
+        except Exception:
+            pass
+        try:
+            # A box's net.json keeps only the last 100 decisions: read it while
+            # idle too (stat-only when unchanged) so the session log misses none.
+            if self.harness.box_status_dir is not None:
+                self.harness._box_data()
         except Exception:
             pass
         try:

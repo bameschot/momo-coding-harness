@@ -24,6 +24,7 @@ Routes
   GET  /api/mcp/resources ?server= → that server's resources
   GET  /api/mcp/resource  ?server=&uri= → {name, text} to attach to a message
   POST /api/mcp/servers   {"action": "add"|"remove", "name", "entry"} → edit ~/.momo-harness/mcp.json
+  GET  /api/setup/export  the Setup panel, every setting and the session's network activity (.md)
   GET  /api/export    the conversation as a Markdown download (?full=1: the full log)
   GET  /api/files     ?path= → directory listing (read-only, confined to the workspace)
   GET  /api/file      ?path= → file contents as text (same conversion as uploads)
@@ -60,6 +61,7 @@ import socket
 import os
 import ssl
 import threading
+import time
 from dataclasses import asdict
 from functools import cache
 from http import HTTPStatus
@@ -475,6 +477,11 @@ class WebServer:
                                 "rules": len(ignore_rules.Rules.parse(text))})
                 elif path == "/api/last-user":
                     self._json(web.controller.last_user_message() or {})
+                elif path == "/api/setup/export":
+                    body = h.setup_report(web=web.setup_web()).encode("utf-8")
+                    name = f"momo-setup-{time.strftime('%Y%m%d-%H%M%S')}.md"
+                    self._send(HTTPStatus.OK, body, "text/markdown; charset=utf-8", headers={
+                        "Content-Disposition": f'attachment; filename="{name}"'})
                 elif path == "/api/export":
                     full = arg("full") == "1"
                     body = export_markdown(h, full).encode("utf-8")

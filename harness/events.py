@@ -65,6 +65,9 @@ class StatusEvent:
     loop_resets: int = 2          # /loop-guard resets: rewinds per turn before it stops
     undo_count: int = 0           # file checkpoints since the last /keep
     changes_files: int = 0        # distinct files they changed (the Changes button's badge)
+    # run_command background=true commands still running: RunStore.background_view() rows
+    # ({id, command, started, log}); the TUI's BG: N, the web RUN chip, /bg.
+    background: list = field(default_factory=list)
     net_access: str = "off"     # "off" | "on" | "local"
     net_confirm: bool = True    # ask y/N before a write request
     net_max_bytes: int = 2097152  # ceiling on one fetch_url download

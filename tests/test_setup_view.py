@@ -473,3 +473,90 @@ class SetupApi(_HarnessCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Activity(unittest.TestCase):
+    def test_merge_dedups_overlapping_windows_and_caps(self):
+        log = sv.ActivityLog(keep=4)
+        win1 = [{"ts": 1.0, "kind": "proxy", "host": "a", "port": 443, "allowed": True},
+                {"ts": 2.0, "kind": "proxy", "host": "b", "port": 443, "allowed": False}]
+        self.assertEqual(log.merge(win1), 2)
+        # The next net.json window overlaps the last one.
+        win2 = win1[1:] + [{"ts": 3.0, "kind": "llm", "method": "POST", "path": "/v1/chat", "allowed": True}]
+        self.assertEqual(log.merge(win2), 1)
+        self.assertEqual([e["ts"] for e in log.rows()], [3.0, 2.0, 1.0])     # newest first
+        log.merge([{"ts": float(t), "host": "c", "allowed": True} for t in range(4, 7)])
+        self.assertEqual(log.total, 4)
+        self.assertEqual([e["ts"] for e in log.rows()], [6.0, 5.0, 4.0, 3.0])
+        # An entry pushed out of the cap is forgotten, so it is no longer deduped.
+        self.assertEqual(log.merge(win1[:1]), 1)
+        self.assertEqual(log.rows(limit=1)[0]["ts"], 1.0)
+        self.assertEqual(log.merge("garbage"), 0)
+
+    def test_web_requests_are_logged_without_the_query(self):
+        before = net_mod.ACTIVITY.total
+        with mock.patch.object(net_mod, "_get_once", return_value={"status": 200}):
+            net_mod._get("https://example.com/search?q=secret", allow_private=False,
+                         max_bytes=10, timeout=1)
+        with mock.patch.object(net_mod, "_get_once", return_value="ERROR: refused | nope"):
+            net_mod._get("https://bad.example/x", method="POST", allow_private=False,
+                         max_bytes=10, timeout=1)
+        self.assertEqual(net_mod.ACTIVITY.total, before + 2)
+        bad, ok = net_mod.recent_activity(2)
+        self.assertEqual((ok["host"], ok["path"], ok["method"], ok["allowed"]),
+                         ("example.com", "/search", "GET", True))
+        self.assertNotIn("secret", json.dumps(ok))
+        self.assertEqual((bad["method"], bad["allowed"]), ("POST", False))
+        self.assertIn("refused", bad["error"])
+
+
+class Report(unittest.TestCase):
+    def test_sections_rows_and_escaping(self):
+        view = {"kind": "local", "machine": {"host": "mac", "os": "Darwin", "python": "3.14"},
+                "workspace": {"path": "/w", "git": {"repo": False}},
+                "network": {"web_tools": "on", "net_confirm": True, "mcp": [], "recent": []},
+                "model": {"provider": "llama.cpp", "url": "http://x", "model": "m"},
+                "safeguards": [{"ok": False, "label": "sandbox", "detail": "none"}],
+                "memory": {"available": True, "current": 2**20}, "turn": 3, "box": None}
+        rows = [{"ts": 2.0, "kind": "web", "method": "GET", "host": "b.example", "path": "/a|b",
+                 "allowed": False, "error": "ERROR: line\nbreak"},
+                {"ts": 1.0, "kind": "web", "method": "GET", "host": "a.example", "path": "/", "allowed": True}]
+        md = sv.report_markdown(view, rows, [["think_budget", 8000, "--think-budget"]],
+                                since=0.5, session="s1", now=3.0)
+        for head in ("# momo setup report", "## Setup", "## Model", "## Settings", "## Network",
+                     "## Activity", "## Sync", "## Safeguards", "## Memory"):
+            self.assertIn(head, md)
+        self.assertIn("2 requests since", md)
+        self.assertIn("GET b.example/a\\|b", md)          # a pipe can't split the row
+        self.assertIn("ERROR: line break", md)
+        self.assertIn("a.example/", md)
+        self.assertIn("| think_budget | 8000 | --think-budget |", md)
+        self.assertNotIn("## Toolchain", md)                # box only
+
+
+class ReportHarness(_HarnessCase):
+    def test_box_merges_windows_and_setup_export_writes_all(self):
+        from harness import commands
+        status = self.home / "status"
+        status.mkdir()
+        self.h.box_status_dir = status
+
+        def window(ts_list):
+            (status / "net.json").write_text(json.dumps({"schema": 1, "recent": [
+                {"ts": t, "kind": "proxy", "method": "CONNECT", "host": f"h{int(t)}.example",
+                 "port": 443, "allowed": True} for t in ts_list]}))
+        window([1.0, 2.0])
+        self.h._box_data()
+        window([2.0, 3.0, 4.0])                             # a different size: re-read
+        v = self.h.setup_view(busy=True)
+        self.assertEqual(v["activity"]["total"], 4)
+        self.assertEqual(v["activity"]["source"], "gateway")
+        self.assertEqual(v["activity"]["rows"][0]["host"], "h4.example")
+        out = commands.handle("/setup-export", self.h).output
+        self.assertIn("4 network requests", out)
+        path = Path(out.rsplit(": ", 1)[1])
+        self.assertEqual(path.parent, (self.ws / ".momo").resolve())
+        md = path.read_text()
+        for host in ("h1.example", "h2.example", "h3.example", "h4.example"):
+            self.assertIn(host, md)
+        self.assertIn("## Toolchain", md)

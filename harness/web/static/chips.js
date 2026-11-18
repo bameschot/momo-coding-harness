@@ -66,7 +66,48 @@ function renderRun(menu) {
     el("div", "note", s.run_confirm
       ? "momo asks you (y/N) before every shell command."
       : "Shell commands run without asking. Shift+P switches."),
+    ...renderBackground(s),
     foot(settingsLink("run")));
+}
+
+// How long something has been going: 45s, 12m, 3h05m.
+function uptime(epochSeconds) {
+  const s = Math.max(0, Math.round(Date.now() / 1000 - epochSeconds));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
+}
+
+// The run_command background=true commands still running (/bg), each with a Stop.
+function renderBackground(s) {
+  const rows = s.background || [];
+  if (!rows.length) return [];
+  const title = el("div", "menu-sub cache-head", "Background commands");
+  title.append(el("span", "muted", `${rows.length} running`));
+  const list = el("ol", "cache-list");
+  for (const r of rows) {
+    const row = el("li", "cache-row");
+    const text = el("div", "cache-text");
+    const cmd = el("div", "cache-url mono", r.command || "(command)");
+    cmd.title = r.log;
+    const meta = [r.id];
+    if (r.started) meta.push(`up ${uptime(r.started)}`);
+    text.append(cmd, el("div", "cache-meta muted", meta.join(" · ")));
+    const stop = el("button", "btn small", "Stop");
+    stop.type = "button";
+    stop.title = `Stop ${r.id} and everything it started (/bg stop ${r.id})`;
+    stop.onclick = () => hooks.send(`/bg stop ${r.id}`);
+    row.append(text, stop);
+    list.append(row);
+  }
+  const out = [title, list];
+  if (rows.length > 1) {
+    const all = el("button", "btn small", "Stop all");
+    all.type = "button";
+    all.onclick = () => hooks.send("/bg stop all");
+    out.push(all);
+  }
+  return out;
 }
 
 function renderNet(menu) {

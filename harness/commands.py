@@ -333,6 +333,73 @@ def _progress_note(harness: Harness, arg: str) -> CommandResult:
     return CommandResult(handled=True, output=_state())
 
 
+def _uptime(started: float | None) -> str:
+    """How long a background command has run: 45s, 12m, 3h05m."""
+    if started is None:
+        return "?"
+    secs = max(0, int(datetime.now().timestamp() - started))
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    return f"{secs // 3600}h{secs % 3600 // 60:02d}m"
+
+
+def _bg(harness: Harness, arg: str) -> CommandResult:
+    """/bg: the run_command background=true commands still running; /bg stop."""
+    store = harness._run_store          # never created here: no store, nothing running
+    rows = store.background_view() if store is not None else []
+    words = arg.split()
+    if not words or words == ["list"]:
+        if not rows:
+            note = ("" if harness.run_mode == "new"
+                    else " (background commands need /run-mode new)")
+            return CommandResult(handled=True, output="No background commands running" + note + ".")
+        lines = [f"Background commands running ({len(rows)}):"]
+        width = max(len(r["command"]) for r in rows)
+        for r in rows:
+            lines.append(f"  {r['id']:<4} {_uptime(r['started']):>6}  "
+                         f"{r['command']:<{width}}  {r['log']}")
+        lines.append("Stop one with /bg stop <id>, or all with /bg stop all.")
+        return CommandResult(handled=True, output="\n".join(lines))
+    if words[0] != "stop" or len(words) != 2:
+        return CommandResult(handled=True, output="Usage: /bg [list] | /bg stop <id>|all")
+    if not rows:
+        return CommandResult(handled=True, output="No background commands running.")
+    if words[1] == "all":
+        store.stop_all()
+        harness.emit_status()
+        ids = ", ".join(r["id"] for r in rows)
+        return CommandResult(handled=True, output=f"Stopped {len(rows)} background "
+                             f"command{'s' if len(rows) != 1 else ''}: {ids}.")
+    log = store.resolve(words[1])
+    if log is None or not store.stop(log):
+        running = ", ".join(r["id"] for r in rows)
+        return CommandResult(handled=True, output=f"{words[1]} is not a running background "
+                             f"command (running: {running}).")
+    harness.emit_status()
+    return CommandResult(handled=True, output=f"Stopped {log.stem}.")
+
+
+def _setup_export(harness: Harness, arg: str) -> CommandResult:
+    """/setup-export [filename]: the Setup panel's report, every setting and the
+    session's network activity, as Markdown in .momo/ (else ~/.momo-harness/)."""
+    name = Path(arg.strip()).name if arg.strip() else f"setup-{datetime.now():%Y%m%d-%H%M%S}.md"
+    folder = momo_dir.ensure(harness.workdir)
+    if isinstance(folder, str):                 # no usable .momo/ (read-only tree)
+        from .paths import momo_home
+        folder = momo_home()
+    out = folder / name
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(harness.setup_report(), encoding="utf-8")
+    except OSError as e:
+        return CommandResult(handled=True, output=f"ERROR: {e}")
+    n = harness.activity_log().total
+    return CommandResult(handled=True, output=f"Setup report ({n:,} network request"
+                         f"{'s' if n != 1 else ''}) written to: {out}")
+
+
 def _undo_max(harness: Harness, arg: str) -> CommandResult:
     """/undo-max [n|off]"""
     def _state() -> str:
@@ -1098,6 +1165,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
                        " (you will be asked y/N before each command)",
                        " (commands run automatically)")
 
+    if cmd == "/bg":
+        return _bg(harness, arg)
+
     if cmd == "/run-mode":
         def _mode_state() -> str:
             if harness.run_mode == "classic":
@@ -1483,6 +1553,9 @@ def handle(line: str, harness: Harness) -> CommandResult:
         except OSError as e:
             return CommandResult(handled=True, output=f"ERROR: {e}")
         return CommandResult(handled=True, output=f"Exported to: {out}")
+
+    if cmd == "/setup-export":
+        return _setup_export(harness, arg)
 
     if cmd == "/copy":
         if arg.strip() == "all":
@@ -1876,6 +1949,8 @@ Available commands:
   /run-confirm on|off Ask y/N before each run_command  (Shift+P toggles)
   /run-mode [new|classic]  new: save command output to a log, return a view
                       (tail=/grep=, command_output); classic: return it all
+  /bg                 List the background commands (run_command background=true) still running
+  /bg stop <id>|all   Stop one background command (e.g. r3), or all of them
   /run-output-limit [n|off]  Chars in run_command's default view (default off)
   /max-output-tokens [n|off]  Most tokens one model reply may take, reasoning
                       included (default 25000; stops a model stuck in a loop)
@@ -1974,6 +2049,7 @@ Available commands:
   /title [text|auto]  Show or set the session title (auto = let the model name it)
   /session-titles on|off  Model-generated session titles, refreshed when idle (default on)
   /export [filename]  Export conversation to a Markdown file
+  /setup-export [file]  Write the setup report (setup, settings, all network activity) to .momo/
   /export full [filename]  Export the full log: system prompt, thinking, tool calls, compacted history
   /copy               Copy last assistant message to clipboard
   /copy all           Copy full conversation to clipboard

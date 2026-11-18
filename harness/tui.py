@@ -1348,6 +1348,8 @@ class TUI:
             parts.append(f"TOOLS: {ev.tools_listed} on demand ({ev.tools_loaded} loaded)")
         if ev.run_confirm:
             parts.append("RUN: confirm")
+        if ev.background:           # run_command background=true still running (/bg)
+            parts.append(f"BG: {len(ev.background)}")
         if ev.net_access != "off":
             parts.append(f"NET: {ev.net_access}" + ("" if ev.net_confirm else " (writes: auto)"))
         if ev.index_enabled:
