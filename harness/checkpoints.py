@@ -303,6 +303,18 @@ class CheckpointStore:
         with self._lock:
             return len(self._turns)
 
+    def open_summary(self) -> dict | None:
+        """The checkpoint the running turn writes into: {id, files, step} (files:
+        how many it changed; step: the plan step or story, "" for a user turn),
+        or None when the turn has changed no file (the web UI's turn footer)."""
+        with self._lock:
+            t = self._open
+            if t is None or not t["files"] or not any(x is t for x in self._turns):
+                return None
+            hidden = set(self._renames(t).values())   # a rename shows once, on its destination
+            return {"id": t["id"], "files": sum(1 for k in t["files"] if k not in hidden),
+                    "step": t.get("step", "")}
+
     def files_changed(self) -> int:
         """Distinct files in the stack (the Changes button's badge)."""
         with self._lock:

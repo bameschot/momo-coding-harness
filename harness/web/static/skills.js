@@ -2,7 +2,7 @@
 // a checkbox (/load-skill, /unload-skill), its title, what it covers and what it
 // costs in the system prompt.  Active skills come first, in prompt order.
 
-import { $, el } from "./dom.js";
+import { $, el, emptyState } from "./dom.js";
 
 // What app.js supplies.
 const hooks = {
@@ -70,7 +70,7 @@ function renderList(menu) {
   const kids = [];
   if (active.length) kids.push(el("div", "menu-sub", "Active"), ...active.map(row));
   if (rest.length) kids.push(el("div", "menu-sub", active.length ? "Available" : "Skills"), ...rest.map(row));
-  if (!shown.length) kids.push(el("div", "muted small skills-none", q ? `No skill matches “${filter}”.` : "No skills found in skills/."));
+  if (!shown.length) kids.push(emptyState(q ? `No skill matches “${filter}”.` : "No skills found in skills/."));
   box.replaceChildren(...kids);
   const on = skills.filter((s) => s.active);
   const total = on.reduce((n, s) => n + s.tokens, 0);

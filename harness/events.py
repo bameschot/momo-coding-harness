@@ -150,6 +150,10 @@ class DoneEvent:
     args_tokens: int = 0       # tool calls: name and arguments
     reply_tokens: int = 0      # text without tool calls: the reply
     split_exact: bool = False
+    # The checkpoint this turn's file changes went into (0: none) and how many
+    # files it changed: the footer links to it in the Changes drawer.
+    checkpoint: int = 0
+    files_changed: int = 0
 
 @dataclass
 class AskUserEvent:

@@ -88,7 +88,7 @@ async function copy(text, btn) {
 function copyCmd(cmd) {
   const row = h("span", "su-cmd");
   row.append(h("code", "", cmd));
-  const b = h("button", "su-copy", "copy");
+  const b = h("button", "btn small quiet", "copy");
   b.type = "button";
   b.title = "Copy the command — run it on your machine, outside the box";
   b.onclick = () => copy(cmd, b);
@@ -578,8 +578,8 @@ function networkTab(v, now) {
   if (mode !== "open") {
     out.push(section(`Allowlist${al.replace_defaults ? " (the repo replaced the default registries)" : ""}`,
       rules.length ? table(["", "rule", "why", "from"], rules.map((r) => [
-        r.overridden_by ? h("span", "su-kind ko", "overridden")
-          : h("span", `su-kind k${r.kind === "+" ? "y" : r.kind === "!" ? "d" : "a"}`, KIND[r.kind] ?? r.kind),
+        r.overridden_by ? h("span", "tag outline", "overridden")
+          : h("span", `tag ${r.kind === "+" ? "info" : r.kind === "!" ? "bad" : "ok"}`, KIND[r.kind] ?? r.kind),
         r.rule, r.overridden_by ? `denied by ${r.overridden_by}${r.reason ? ` (was: ${r.reason})` : ""}` : r.reason,
         r.source]), "su-rules") : note("nothing is allowed")));
   }

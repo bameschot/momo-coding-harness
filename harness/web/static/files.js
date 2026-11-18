@@ -1,7 +1,7 @@
 // The workspace drawer: a lazily loaded file tree, and a preview with
 // highlighting (Markdown rendered) from which a file is attached or its path inserted.
 
-import { $, copyText, el, flash, formatSize, icon, loadJSON, makeResizable, saveJSON, toast } from "./dom.js";
+import { $, copyText, el, emptyState, flash, formatSize, icon, loadJSON, makeResizable, saveJSON, toast } from "./dom.js";
 import { esc, highlight, langFromPath } from "./highlight.js";
 import { addCopyButtons, renderMarkdown } from "./markdown.js";
 
@@ -146,7 +146,7 @@ async function runSearch() {
     results = (await (await fetch(`api/files/search?q=${encodeURIComponent(q)}`)).json()).results || [];
   } catch (e) { box.replaceChildren(el("div", "muted small", e.message)); return; }
   if (seq !== searchSeq) return;                 // a newer query is on its way
-  if (!results.length) { box.replaceChildren(el("div", "muted small", "No file matches.")); return; }
+  if (!results.length) { box.replaceChildren(emptyState("No file matches.")); return; }
   box.replaceChildren(...results.map((rel) => {
     const btn = el("button", "tree-row");
     btn.type = "button";

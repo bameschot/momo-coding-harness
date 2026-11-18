@@ -2,7 +2,7 @@
 // actions (view toggles, drawers, theme, settings sections), filtered as you
 // type.  `?` opens it on the keyboard-shortcut list.
 
-import { $, el } from "./dom.js";
+import { $, el, emptyState, keyLabel } from "./dom.js";
 
 // What app.js supplies.
 const hooks = {
@@ -20,8 +20,8 @@ export const SHORTCUTS = [
   ["Shift+Tab", "Next mode"],
   ["/", "Commands, in the input box"],
   ["@", "Insert a workspace path, in the input box"],
-  ["Ctrl+K  ⌘K", "This palette"],
-  ["Ctrl+F  ⌘F", "Find in the conversation (twice: the browser's find)"],
+  ["Ctrl+K", "This palette"],
+  ["Ctrl+F", "Find in the conversation (twice: the browser's find)"],
   ["Alt+↑  Alt+↓", "Previous / next message you sent"],
   ["?", "These shortcuts"],
   ["Shift+T", "Thinking shown / hidden"],
@@ -31,6 +31,10 @@ export const SHORTCUTS = [
   ["Shift+P", "Ask before each command"],
   ["Shift+E  Shift+W", "Expand / collapse all tool calls"],
   ["Shift+C", "Interrupt momo"],
+  ["Alt+S", "Sessions"],
+  ["Alt+F", "Workspace files"],
+  ["Alt+Z", "Changes (undo)"],
+  ["Alt+,", "All settings"],
 ];
 
 let rows = [];          // the selectable rows, in order: {node, run}
@@ -50,7 +54,7 @@ function item(list, label, desc, run, keys = "") {
   const node = el("div", "p-item");
   node.setAttribute("role", "option");
   node.append(el("span", "p-label", label), el("span", "p-desc", desc || ""));
-  if (keys) node.append(el("kbd", "p-keys", keys));
+  if (keys) node.append(el("kbd", "p-keys", keyLabel(keys)));
   const idx = rows.length;
   node.onmousemove = () => select(idx);
   node.onmousedown = (e) => e.preventDefault();               // keep the focus in the field
@@ -84,7 +88,7 @@ function render(query, shortcutsFirst) {
     section(list, "Keyboard shortcuts");
     for (const [keys, what] of SHORTCUTS) {
       const r = el("div", "p-item static");
-      r.append(el("kbd", "p-label", keys), el("span", "p-desc", what));
+      r.append(el("kbd", "p-label", keyLabel(keys)), el("span", "p-desc", what));
       list.append(r);
     }
   }
@@ -101,7 +105,7 @@ function render(query, shortcutsFirst) {
       item(list, c.usage, c.desc, () => (takesArg(c.usage) ? hooks.fill(`${c.cmd} `) : hooks.run(c.cmd)));
     }
   }
-  if (!rows.length && !(shortcutsFirst && !terms.length)) list.append(el("div", "p-sec", "Nothing matches"));
+  if (!rows.length && !(shortcutsFirst && !terms.length)) list.append(emptyState("Nothing matches."));
   select(0, false);          // the top stays in view (the shortcut list, when asked for)
   list.scrollTop = 0;
 }

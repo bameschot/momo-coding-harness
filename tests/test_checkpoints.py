@@ -90,6 +90,21 @@ class Recording(_Store):
         self.assertEqual(self.ops(1), [("A", "a.py")])
         self.assertEqual(self.store.files_changed(), 2)
 
+    def test_open_summary_is_the_running_turns_checkpoint(self):
+        self.begin()
+        self.assertIsNone(self.store.open_summary())          # nothing written yet
+        self.write("a.py", "x = 1\n")
+        self.write("b.py", "y = 1\n")
+        self.assertEqual(self.store.open_summary(), {"id": self.store.turns()[0]["id"], "files": 2, "step": ""})
+        self.begin()                                            # the next turn starts empty
+        self.assertIsNone(self.store.open_summary())
+
+    def test_open_summary_names_a_plan_step(self):
+        self.turn += 1
+        self.store.begin_turn(self.turn, "Add the parser", step="step 1/3")
+        self.write("p.py", "pass\n")
+        self.assertEqual(self.store.open_summary()["step"], "step 1/3")
+
     def test_commands_are_noted(self):
         self.begin()
         self.call("run_command", command="true")

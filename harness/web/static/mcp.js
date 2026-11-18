@@ -3,7 +3,7 @@
 // from GET api/mcp; changes go through /mcp commands (like typing them), except
 // adding/removing a server, which posts the config entry as JSON.
 
-import { $, confirmInline, el, toast } from "./dom.js";
+import { $, confirmInline, el, emptyState, toast } from "./dom.js";
 
 // What app.js supplies.
 const hooks = {
@@ -15,6 +15,9 @@ const hooks = {
   attach: () => {},              // add {name, text, chars} to the composer's attachments
 };
 
+// Tag colours (.tag) for a server's state and a tool's kind.
+const STATE_TAG = { ready: "ok", connecting: "warn", "needs-approval": "warn", error: "bad" };
+const TOOL_TAG = { "read-only": "ok", writes: "warn", destructive: "bad" };
 const STATE_LABEL = {
   ready: "connected", connecting: "starting…", error: "failed", disabled: "off",
   "needs-approval": "needs approval", denied: "denied",
@@ -136,7 +139,7 @@ function overviewServer(s) {
     body.append(el("div", "muted small", facts.join(" · ")));
     const tools = el("div", "mcp-tools");
     tools.append(...s.tool_list.map((t) => toolRow(t, s)));
-    if (!s.tool_list.length) tools.append(el("span", "muted small", "No tools."));
+    if (!s.tool_list.length) tools.append(emptyState("No tools."));
     body.append(tools);
   } else {
     body.append(el("div", `mcp-detail small${s.state === "error" ? " err" : ""}`, detail(s)));
@@ -171,7 +174,7 @@ export async function refreshMcpMenu() {
     children.push(el("div", "note", "MCP is off: no servers run and the model gets no MCP tools."),
                   button("Turn MCP on", () => { hooks.closeMenu(); run("/mcp on"); }, "btn primary small"));
   } else if (!v.servers.length) {
-    children.push(el("div", "note", "No servers configured yet."),
+    children.push(emptyState("No servers configured yet."),
                   button("Add a server…", () => { hooks.closeMenu(); hooks.openSettings("mcp"); }, "btn primary small"));
   } else {
     children.push(...v.servers.map(overviewServer));
@@ -210,7 +213,7 @@ function toolRow(t, s) {
   cb.onchange = () => run(`/tools ${t.name} ${cb.checked ? "on" : "off"}`);
   lab.title = t.desc + (offered ? "" : "\n\nChanges things, so it is only offered in coding mode.");
   const tag = t.read_only ? "read-only" : t.destructive ? "destructive" : "writes";
-  lab.append(cb, " ", el("span", "mono", t.tool), " ", el("span", `mcp-tag ${tag}`, tag));
+  lab.append(cb, " ", el("span", "mono", t.tool), " ", el("span", `tag ${TOOL_TAG[tag]}`, tag));
   return lab;
 }
 
@@ -223,7 +226,7 @@ async function showResources(box, s) {
     r = { error: e.message };
   }
   if (r.error) { box.replaceChildren(el("div", "mcp-detail small err", r.error)); return; }
-  if (!r.resources.length) { box.replaceChildren(el("div", "muted small", "No resources.")); return; }
+  if (!r.resources.length) { box.replaceChildren(emptyState("No resources.")); return; }
   box.replaceChildren(...r.resources.map((res) => {
     const row = el("div", "mcp-res");
     const name = el("span", "mono small", res.name);
@@ -267,7 +270,7 @@ function serverCard(s) {
 
   const sum = el("summary");
   sum.append(dot(s.state), el("strong", "mono mcp-name", s.name),
-             el("span", `mcp-pill ${s.state}`, STATE_LABEL[s.state] || s.state),
+             el("span", `tag ${STATE_TAG[s.state] || ""}`.trim(), STATE_LABEL[s.state] || s.state),
              el("span", "mcp-meta", [s.transport, s.source === "global" ? "" : s.source]
                .filter(Boolean).join(" · ")),
              el("span", "spacer"));
@@ -431,8 +434,8 @@ export async function renderMcpSettings() {
               el("span", "spacer"));
   if (v.enabled) head.append(button("Reload", () => run("/mcp reload")));
   const kids = [head];
-  if (!v.enabled) kids.push(el("div", "mcp-empty", "MCP is off — no servers run and the model gets no MCP tools."));
-  else if (!v.servers.length) kids.push(el("div", "mcp-empty", "No servers yet. Add one below, or put them in mcp.json."));
+  if (!v.enabled) kids.push(emptyState("MCP is off — no servers run and the model gets no MCP tools."));
+  else if (!v.servers.length) kids.push(emptyState("No servers yet.", "Add one below, or put them in mcp.json."));
   const list = el("div", "mcp-list");
   list.append(...v.servers.map(serverCard));
   kids.push(list);

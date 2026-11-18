@@ -2251,14 +2251,24 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
                             "prompt_cached": 0, "prompt_ms": 0.0, "eval": 0, "calls": 0,
                             "text": {k: [] for k in _OUTPUT_PARTS}}
 
-    def _done_event(self) -> DoneEvent:
-        """The DoneEvent ending a model turn, with what the turn cost."""
+    def _done_event(self, changes: bool = False) -> DoneEvent:
+        """The DoneEvent ending a model turn, with what the turn cost.  changes:
+        also the checkpoint it wrote into (one user turn; a plan run spans many)."""
         self.check_workspace_tools()         # it may have written one
         st = self._turn_stats
+        cp = None
+        if changes:
+            try:
+                cp = self.checkpoints.open_summary()
+            except Exception:                # the footer must never break a turn
+                cp = None
+            if cp and cp["step"]:            # the turn approved a plan and ran it: no one checkpoint
+                cp = None
         return DoneEvent(secs=round(time.monotonic() - st["t0"], 1), prompt_tokens=st["prompt"],
                          prompt_total=st["prompt_total"], prompt_cached=st["prompt_cached"],
                          prompt_secs=round(st["prompt_ms"] / 1000, 1), eval_tokens=st["eval"],
-                         tool_calls=st["calls"], **self._output_split(st["text"]))
+                         tool_calls=st["calls"], checkpoint=cp["id"] if cp else 0,
+                         files_changed=cp["files"] if cp else 0, **self._output_split(st["text"]))
 
     def _output_split(self, text: dict[str, list[str]]) -> dict:
         """DoneEvent's think/preamble/args/reply_tokens: the server's tokenizer
@@ -2316,7 +2326,7 @@ class Harness(CompactionMixin, PlanRunnerMixin, StoryRunnerMixin, MCPMixin, Expl
                     "not sent (↑ brings it back)."))
             self.emit_status()
             self._autosave()
-            self.event_queue.put(self._done_event())
+            self.event_queue.put(self._done_event(changes=True))
 
     def report_crash(self, where: str, exc: BaseException) -> None:
         """A worker run raised (a bug, not a tool error — those become results):

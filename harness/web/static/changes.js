@@ -3,7 +3,7 @@
 // a turn is undone (it and every later one), one file is reverted, or all of it
 // is kept.  The reports go to the transcript like /undo's.
 
-import { $, confirmInline, copyText, el, flash, icon, makeResizable, toast } from "./dom.js";
+import { $, confirmInline, copyText, el, emptyState, flash, keyLabel, icon, makeResizable, toast } from "./dom.js";
 import { diffBox } from "./diff.js";
 
 // What app.js supplies: open the (left) drawer slot, POST JSON, show a file in
@@ -46,8 +46,8 @@ function render() {
     : "";
   $("#changes-keep").disabled = !d.turns.length || hooks.busy();
   if (!d.turns.length) {
-    list.replaceChildren(el("div", "changes-empty muted",
-      "Nothing to undo — no file changes since the last keep. Files the model writes show up here, per turn."));
+    list.replaceChildren(emptyState("Nothing to undo — no file changes since the last keep.",
+      "Files the model writes show up here, per turn."));
     return;
   }
   list.replaceChildren(...(ui.view === "turns" ? d.turns.map(turnItem) : keepItems(files)));
@@ -55,6 +55,7 @@ function render() {
 
 function turnItem(t) {
   const item = el("div", "tree-item change-turn");
+  item.dataset.checkpoint = t.id;
   const open = ui.open.has(t.id);
   item.classList.toggle("open", open);
   const head = el("div", "change-turn-head");
@@ -68,7 +69,7 @@ function turnItem(t) {
   btn.title = `${what}: ${t.label}`;
   btn.append(ti, name, el("span", "tree-size", `${t.files.length} file${t.files.length !== 1 ? "s" : ""}`));
   if (t.ran_commands) {
-    const warn = el("span", "change-warn", "cmd");
+    const warn = el("span", "tag warn", "cmd");
     warn.title = "This turn ran commands: what they changed is not tracked, and undo can't take it back";
     btn.append(warn);
   }
@@ -110,7 +111,7 @@ function fileRow(f, checkpoint) {
   if (slash > 0) name.append(el("span", "muted", `  ${f.rel.slice(0, slash)}`));
   const counts = el("span", "tree-size");
   if (f.added || f.removed) counts.append(el("span", "add", `+${f.added}`), " ", el("span", "del", `−${f.removed}`));
-  if (!f.restorable) counts.append(el("span", "change-warn", "no copy"));
+  if (!f.restorable) counts.append(el("span", "tag warn", "no copy"));
   btn.title = `${OPS[f.op]}: ${f.from ? f.from + " → " : ""}${f.rel}` + (f.restorable ? "" : " — too big to save (or a folder): only an undo that moves it back restores it");
   btn.append(op, name, counts);
   btn.onclick = () => openDiff(f, checkpoint);
@@ -195,10 +196,24 @@ async function revertShown(force = false) {
 
 // ── from app.js ──────────────────────────────────────────────────────────────
 
-// The drawer was opened (optionally at one file's diff, from a diff in the chat).
-export async function openChanges(rel = null) {
+// The drawer was opened: optionally at one file's diff (a diff in the chat), or
+// at one checkpoint (a turn footer's "N files changed").
+export async function openChanges(rel = null, checkpoint = 0) {
   closeDiff();
   await load();
+  if (checkpoint && ui.data) {
+    if (!ui.data.turns.some((t) => t.id === checkpoint)) {
+      toast("That turn's changes were already undone or kept.");
+      return;
+    }
+    ui.open.add(checkpoint);
+    render();
+    const item = $("#changes-list").querySelector(`[data-checkpoint="${checkpoint}"]`);
+    item?.scrollIntoView({ block: "nearest" });
+    item?.classList.add("flash");
+    setTimeout(() => item?.classList.remove("flash"), 1400);
+    return;
+  }
   if (!rel || !ui.data) return;
   for (const t of ui.data.turns) {
     const f = t.files.find((x) => x.rel === rel);
@@ -215,7 +230,7 @@ export function applyChangesStatus(s) {
   badge.textContent = n > 99 ? "99+" : String(n);
   const label = n ? `Changes: ${n} file${n !== 1 ? "s" : ""} in ${s.undo_count} checkpoint${s.undo_count !== 1 ? "s" : ""} since the last keep`
                   : "Changes (nothing to undo)";
-  $("#changes-btn").title = label;
+  $("#changes-btn").title = `${label} (${keyLabel("Alt+Z")})`;
   $("#changes-btn").setAttribute("aria-label", label);
   const key = `${s.undo_count}/${n}`;
   if (key !== last) { last = key; changesDirty(); }

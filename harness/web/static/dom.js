@@ -106,6 +106,27 @@ export function formatCount(n) {
   return String(n);
 }
 
+// Shortcuts as this platform writes them: ⌘ and ⌥ on a Mac (every Ctrl+
+// shortcut also takes Cmd), Ctrl+ and Alt+ elsewhere.
+export const IS_MAC = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || "");   // Chrome says "macOS"
+export function keyLabel(s) {
+  return IS_MAC ? s.replace(/Ctrl\+/g, "⌘").replace(/Alt\+/g, "⌥") : s;
+}
+// The static page's <kbd> labels, the composer hint and button titles, once at start.
+export function applyKeyLabels(root = document) {
+  if (!IS_MAC) return;
+  for (const n of root.querySelectorAll("kbd, .hint")) n.textContent = keyLabel(n.textContent);
+  for (const n of root.querySelectorAll('[title*="Ctrl+"], [title*="Alt+"]')) n.title = keyLabel(n.title);
+}
+
+// An empty list or panel: one look everywhere (.empty), with an optional hint
+// line under the message.
+export function emptyState(text, hint = "") {
+  const box = el("div", "empty", text);
+  if (hint) box.append(el("div", "empty-hint", hint));
+  return box;
+}
+
 // A header status chip: a muted key and a short value in a fixed-size cell
 // (.chip.kv).  The value is cut with an ellipsis, so it also goes in the
 // accessible name; the chip's title carries the detail.

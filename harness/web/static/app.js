@@ -8,8 +8,8 @@ import { applyMcpStatus, initMcp, refreshMcpMenu } from "./mcp.js";
 import { applySkillsStatus, initSkills, refreshSkillsMenu } from "./skills.js";
 import { applySetupStatus, closeSetup, initSetup } from "./setup.js";
 import { applyCompanion, setCompanionFrames, startCompanion } from "./companion.js";
-import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, formatCount, formatSize, icon, loadJSON,
-         makeResizable, openLayer, saveJSON, setChip, toast } from "./dom.js";
+import { $, closeLayer, confirmInline, copyText, copyWithFeedback, el, emptyState, formatCount, formatSize, icon, IS_MAC, keyLabel, loadJSON,
+         makeResizable, openLayer, applyKeyLabels, saveJSON, setChip, toast } from "./dom.js";
 import { applyChangesStatus, changesDirty, initChanges, openChanges } from "./changes.js";
 import { diffBox } from "./diff.js";
 import { initFiles, openFiles, showFile } from "./files.js";
@@ -125,8 +125,36 @@ async function post(path, body = {}) {
 let pendingTools = [];
 let openAsk = null;
 let group = null;   // {el, body, calls, names: Map, files: Set, errors}
+// momo's notices before anything is typed (model, index, web URL…) fold into one
+// line; anything you submit — a message or a /command — ends the fold.
+let startup = null;   // {el, summary, body, n, first}
+let seenUser = false;
 
-function resetRenderContext() { pendingTools = []; openAsk = null; group = null; }
+function resetRenderContext() { pendingTools = []; openAsk = null; group = null; startup = null; seenUser = false; }
+
+function isStartupNotice(ev) {
+  return ev.type === "chat" && ev.role === "system" && !/^(ERROR|WARNING)/.test(ev.text)
+    && !isConfirmPrompt(ev.role, ev.text) && !lineKeyOf(ev.text);
+}
+
+// Add a notice to the startup fold; the fold itself is returned once, when made.
+function foldStartup(ev) {
+  const node = renderOne(ev);
+  const fresh = !startup;
+  if (fresh) {
+    const d = el("details", "startup");
+    const summary = el("summary");
+    const body = el("div", "startup-body");
+    d.append(summary, body);
+    startup = { el: d, summary, body, n: 0, first: ev.text.split("\n")[0] };
+  }
+  startup.body.append(node);
+  startup.n++;
+  const first = startup.first.length > 90 ? `${startup.first.slice(0, 89)}…` : startup.first;
+  startup.summary.textContent = `Session started · ${first}`
+    + (startup.n > 1 ? ` · ${startup.n} notes` : "");
+  return fresh ? startup.el : null;
+}
 
 // Tool calls, their results and diffs — and the thinking between them — collect
 // in one collapsible group per stretch of a turn; any other event ends it.
@@ -134,6 +162,8 @@ const GROUPED = new Set(["tool_call", "tool_result", "diff", "think"]);
 
 function renderEvent(ev) {
   if (!GROUPED.has(ev.type)) closeGroup();
+  if (ev.type === "user") seenUser = true;
+  if (!seenUser && isStartupNotice(ev)) return foldStartup(ev);
   const node = renderOne(ev);
   if (!node || !view.group || !GROUPED.has(ev.type)) return node;
   if (!group && ev.type === "think") return node;   // thinking before a plain reply
@@ -309,7 +339,7 @@ function toolName(name) {
   if (!m) return el("span", "tname", name);
   const span = el("span", "tname");
   span.title = name;
-  span.append(el("span", "mcp-tag", "MCP"), ` ${m[1]} › ${m[2]}`);
+  span.append(el("span", "tag info", "MCP"), ` ${m[1]} › ${m[2]}`);
   return span;
 }
 
@@ -411,6 +441,14 @@ function renderTurnMeta(ev) {
   if (ev.tool_calls) parts.push(`${ev.tool_calls} tool call${ev.tool_calls === 1 ? "" : "s"}`);
   const meta = el("div", "turn-meta", parts.join(" · "));
   meta.title = "Time for the turn · the last request's prompt → tokens generated in the turn · tool calls";
+  if (ev.files_changed) {
+    const n = ev.files_changed;
+    const link = el("button", "link-btn turn-files", `${n} file${n === 1 ? "" : "s"} changed`);
+    link.type = "button";
+    link.title = `Show checkpoint #${ev.checkpoint} in Changes, where it can be undone`;
+    link.onclick = () => showChanges(null, ev.checkpoint);
+    meta.append(" · ", link);
+  }
   return meta;
 }
 
@@ -620,8 +658,7 @@ function applyStatus(s) {
   $("#model-btn").classList.toggle("offline", offline);
   $("#model-btn").title = offline
     ? `Server not reachable at ${s.host} — showing the last known model. /host <url> points momo elsewhere.`
-    : "Switch model";
-  $("#host").textContent = `${s.provider}@${s.host.replace(/^https?:\/\//, "")}`;
+    : `Switch model — ${s.provider}@${s.host.replace(/^https?:\/\//, "")}`;
   applyChangesStatus(s);
   updateConnDot();
   $("#workdir").textContent = s.workdir;
@@ -629,6 +666,7 @@ function applyStatus(s) {
   $("#ctx-pct").textContent = `${s.ctx_pct}%`;
   $("#ctx-fill").style.width = `${Math.min(100, s.ctx_pct)}%`;
   $(".ctx").className = `ctx ${s.ctx_color}`;
+  updateDraftSize();
   if (!$("#ctx-menu").hidden) scheduleCtxRefresh();
   if (!$("#index-menu").hidden) scheduleIndexRefresh();
   if (!$("#tools-menu").hidden) scheduleToolsRefresh();
@@ -1112,7 +1150,8 @@ function renderPlan() {
     shownPlanFile = state.plan || "";
     stopPlanTimer();
     $("#plan-drawer").classList.remove("plan-wide");
-    body.innerHTML = state.plan ? renderMarkdown(state.plan) : "<p class='muted'>No plan.</p>";
+    if (state.plan) body.innerHTML = renderMarkdown(state.plan);
+    else body.replaceChildren(emptyState("No plan.", "In plan mode, describe what you want and momo proposes one."));
     addCopyButtons(body);
     if (state.plan_view) body.prepend(planViewToggle());
   }
@@ -1162,7 +1201,7 @@ function openPlanNode(key) {
 function renderSkills() {
   const box = $("#skills-list");
   const { available = [], active = [] } = state?.skills || {};
-  if (!available.length) { box.replaceChildren(el("span", "muted", "No skills found.")); return; }
+  if (!available.length) { box.replaceChildren(emptyState("No skills found.")); return; }
   box.replaceChildren(...available.map((name) => {
     const lab = el("label");
     const cb = el("input");
@@ -1225,6 +1264,7 @@ function autosize() {
   input.style.height = input.scrollHeight + "px";
   input.classList.toggle("cmd", input.value.startsWith("/"));
   saveDraft();
+  updateDraftSize();
 }
 
 // What you were typing survives a reload, per session (not while editing a
@@ -1386,7 +1426,26 @@ async function uploadOne(file) {
   renderChips();
 }
 
+// The draft's rough size (~4 characters a token, as the harness estimates),
+// message plus attachments, against the context still free.  Shown from 200
+// tokens or with an attachment; amber past half the free context, red past it.
+function updateDraftSize() {
+  const box = $("#draft-size");
+  const ready = attachments.filter((a) => a.status === "ready");
+  const tokens = Math.ceil((input.value.length + ready.reduce((n, a) => n + (a.chars || 0), 0)) / 4);
+  box.hidden = input.value.startsWith("/") || (tokens < 200 && !ready.length);
+  if (box.hidden) return;
+  const free = Math.max(0, Math.round((status.context_limit || 0) * (100 - (status.ctx_pct || 0)) / 100));
+  box.textContent = `~${fmtCount(tokens)} tokens`;
+  box.classList.toggle("warn", free > 0 && tokens > free / 2 && tokens <= free);
+  box.classList.toggle("bad", free > 0 && tokens > free);
+  box.title = !free ? "Rough size of this message (~4 characters a token)"
+    : tokens > free ? `Bigger than the ~${fmtCount(free)} tokens of context still free: older turns get compacted first`
+    : `Rough size of this message, of ~${fmtCount(free)} tokens of context still free`;
+}
+
 function renderChips() {
+  updateDraftSize();
   const box = $("#attachments");
   box.replaceChildren(...attachments.map((a) => {
     const chip = el("span", `att ${a.status}`);
@@ -1732,6 +1791,25 @@ document.addEventListener("keydown", (e) => {
   if (panel && DRAWERS[`#${panel.id}`]) DRAWERS[`#${panel.id}`]();
 });
 
+// Alt+S / Alt+F / Alt+Z / Alt+, toggle the sessions, files, changes and settings
+// drawers.  Matched on e.code: on a Mac e.key is the character Option types
+// (Option+S is "ß"), and for the same reason a Mac only takes them in a text
+// field when it is the empty composer.
+const DRAWER_KEYS = {
+  KeyS: () => $("#sessions-btn").click(),
+  KeyF: () => $("#files-btn").click(),
+  KeyZ: () => $("#changes-btn").click(),
+  Comma: () => ($("#settings-drawer").hidden ? openSettings() : DRAWERS["#settings-drawer"]()),
+};
+document.addEventListener("keydown", (e) => {
+  if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || !DRAWER_KEYS[e.code]) return;
+  const inField = e.target.matches?.("input, select, textarea");
+  if (inField && IS_MAC && !(e.target === input && !input.value)) return;
+  e.preventDefault();
+  closeMenu();
+  DRAWER_KEYS[e.code]();
+});
+
 // Shift+letter shortcuts when focus is outside the text box (TUI: chat focus).
 document.addEventListener("keydown", (e) => {
   if (e.target === input || e.target.matches?.("input, select, textarea")) return;
@@ -1874,7 +1952,8 @@ async function refreshModelMenu() {
     return;
   }
   if (menu.hidden) return;
-  const rows = [el("div", "menu-title", `Model · ${info.provider}`)];
+  const host = (status.host || "").replace(/^https?:\/\//, "");
+  const rows = [el("div", "menu-title", `Model · ${info.provider}${host ? ` · ${host}` : ""}`)];
   if (!info.can_switch) {
     rows.push(el("div", "muted small", `${info.provider} serves one model per server — restart it to change models.`));
   }
@@ -2370,9 +2449,9 @@ $("#workdir").oncontextmenu = async (e) => {
 $("#files-btn").onclick = () => { if (openDrawer("#files-drawer")) openFiles(); };
 $("#changes-btn").onclick = () => { if (openDrawer("#changes-drawer")) openChanges(); };
 // The Changes drawer open (not toggled), optionally at one file's diff.
-function showChanges(rel = null) {
+function showChanges(rel = null, checkpoint = 0) {
   if ($("#changes-drawer").hidden) openDrawer("#changes-drawer");
-  openChanges(rel);
+  openChanges(rel, checkpoint);
 }
 
 // ── settings drawer ───────────────────────────────────────────────────────────
@@ -2380,6 +2459,7 @@ function showChanges(rel = null) {
 // openSettings(section) opens the drawer at one section (chip popovers, palette).
 function openSettings(section = null) {
   closeMenu();
+  if (section && $("#settings-filter").value) { $("#settings-filter").value = ""; filterSettings(""); }
   openRight("#settings-drawer", !section);
   if (!section) return;
   const det = $("#settings-drawer").querySelector(`details[data-section="${section}"]`);
@@ -2395,10 +2475,53 @@ function openSettings(section = null) {
   const open = loadJSON("momo.settingsOpen", ["context", "run"]);
   for (const det of sections) {
     det.open = open.includes(det.dataset.section);
-    det.addEventListener("toggle", () =>
-      saveJSON("momo.settingsOpen", sections.filter((d) => d.open).map((d) => d.dataset.section)));
+    det.addEventListener("toggle", () => {
+      if ($("#settings-filter").value.trim()) return;   // the filter opens sections; don't remember those
+      saveJSON("momo.settingsOpen", sections.filter((d) => d.open).map((d) => d.dataset.section));
+    });
   }
 }
+// Settings → filter: every word must appear in a row (a label, a choice group,
+// a sub-heading and what is under it).  A section whose title matches shows
+// whole; sections with a match open, the others hide.  Clearing it puts back
+// the sections you had open.
+function filterSettings(query) {
+  const body = $("#settings-body");
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const hit = (n) => terms.every((t) => n.textContent.toLowerCase().includes(t));
+  body.querySelector(":scope > .empty")?.remove();
+  const open = loadJSON("momo.settingsOpen", ["context", "run"]);
+  let any = false;
+  for (const det of body.querySelectorAll(":scope > details[data-section]")) {
+    const kids = [...det.children].filter((c) => c.tagName !== "SUMMARY");
+    if (!terms.length) {
+      det.classList.remove("filtered-out");
+      kids.forEach((c) => c.classList.remove("filtered-out"));
+      det.open = open.includes(det.dataset.section);
+      continue;
+    }
+    const whole = hit(det.querySelector(":scope > summary"));
+    const shown = new Set();
+    let head = null, headHit = false;
+    for (const c of kids) {
+      if (c.classList.contains("menu-sub")) { head = c; headHit = hit(c); if (headHit) shown.add(c); continue; }
+      if (whole || headHit || hit(c)) { shown.add(c); if (head) shown.add(head); }
+    }
+    kids.forEach((c) => c.classList.toggle("filtered-out", !shown.has(c)));
+    det.classList.toggle("filtered-out", !shown.size);
+    if (shown.size) { det.open = true; any = true; }
+  }
+  if (terms.length && !any) body.append(emptyState(`No setting matches “${query.trim()}”.`, keyLabel("Try another word, or Ctrl+K for every command.")));
+}
+$("#settings-filter").addEventListener("input", (e) => filterSettings(e.target.value));
+$("#settings-filter").addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && e.target.value) {   // first Esc clears, the next closes the drawer
+    e.preventDefault();
+    e.stopPropagation();
+    e.target.value = "";
+    filterSettings("");
+  }
+});
 $("#settings-open").onclick = () => openSettings();
 $("#settings-close").onclick = () => DRAWERS["#settings-drawer"]();
 $("#palette-open").onclick = () => { closeMenu(); openPalette(); };
@@ -2440,7 +2563,7 @@ function renderWelcome() {
   for (const [k, what2] of [["/", "commands"], ["@", "files"], ["Shift+Tab", "next mode"],
                              ["Ctrl+K", "palette"], ["?", "shortcuts"]]) {
     if (tips.childNodes.length) tips.append(" · ");
-    tips.append(el("kbd", "", k), ` ${what2}`);
+    tips.append(el("kbd", "", keyLabel(k)), ` ${what2}`);
   }
   card.append(el("h2", "", title), el("p", "", what), ex, tips);
   transcript.prepend(card);
@@ -2572,6 +2695,7 @@ initPalette({
   run: (cmd) => send(cmd),
   fill: (text) => { input.value = text; autosize(); input.focus(); },
 });
+applyKeyLabels();
 makeResizable($("#sessions-drawer"), "right", "momo.sessionsWidth", 320);
 for (const [id, min] of [["#settings-drawer", 360], ["#prompt-drawer", 420], ["#plan-drawer", 360], ["#filter-drawer", 420], ["#setup-drawer", 420]]) {
   makeResizable($(id), "left", `momo.width.${id.slice(1)}`, min);

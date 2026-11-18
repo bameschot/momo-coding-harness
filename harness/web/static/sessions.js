@@ -2,7 +2,7 @@
 // Select mode with checkboxes) deletes saved sessions after an inline confirmation.
 // The open session can't be deleted, and the server refuses it too.
 
-import { $, confirmInline, el, icon } from "./dom.js";
+import { $, confirmInline, el, emptyState, icon } from "./dom.js";
 
 // What app.js supplies: send a line as if typed, close the drawer, POST JSON.
 const hooks = { send: async () => false, close: () => {}, post: async () => ({}) };
@@ -94,8 +94,8 @@ function renderSessions() {
   if (sessionsUI.note) items.push(el("div", "session-note", sessionsUI.note.trim()));
   const q = sessionsUI.filter.trim().toLowerCase();
   const shown = data.sessions.filter((x) => matches(x, q));
-  if (!data.sessions.length) items.push(el("div", "muted", "No saved sessions yet."));
-  else if (!shown.length) items.push(el("div", "muted", "No session matches the filter."));
+  if (!data.sessions.length) items.push(emptyState("No saved sessions yet."));
+  else if (!shown.length) items.push(emptyState("No session matches the filter."));
   let heading = null;
   for (const x of shown) {
     const group = dayGroup(x.mtime);
@@ -127,11 +127,11 @@ function renderSessions() {
       };
       item.append(row);
       if (current) {
-        const ren = iconButton("pencil", "Rename this session", "icon-btn session-del");
+        const ren = iconButton("pencil", "Rename this session", "icon-btn session-act");
         ren.onclick = () => renameInPlace(item, x.title || "");
         item.append(ren);
       } else {
-        const del = iconButton("trash", "Delete this session", "icon-btn session-del");
+        const del = iconButton("trash", "Delete this session", "icon-btn session-act session-del");
         del.onclick = async () => {
           if (await confirmInline(item, "Delete this session?")) deleteSessions([x.name]);
         };

@@ -2,7 +2,9 @@
 
 Run with HOME pointed at a scratch dir — the harness writes prefs and sessions.
 """
+import os
 import unittest
+from unittest import mock
 
 from harness.events import DoneEvent
 from harness.llm.base import ChatResponse, ToolCall
@@ -78,6 +80,27 @@ class TurnStats(HarnessCase):
         (done,) = self.done_events(sub)
         self.assertEqual(done.preamble_tokens, 0)
         self.assertGreater(done.args_tokens, 0)
+
+    def test_a_turn_that_writes_names_its_checkpoint(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            self.h.set_mode("coding")
+            self.client.replies = [
+                ChatResponse(tool_calls=[ToolCall("write_file", {"path": "a.txt", "content": "one\n"}),
+                                         ToolCall("write_file", {"path": "b.txt", "content": "two\n"})]),
+                ChatResponse(content="wrote two files")]
+            sub = self.h.event_queue.subscribe(replay=False)
+            self.h.send("write two files")
+            (done,) = self.done_events(sub)
+            newest = self.h.checkpoints.turns()[0]
+            self.assertEqual((done.checkpoint, done.files_changed), (newest["id"], 2))
+
+    def test_a_turn_that_writes_nothing_names_no_checkpoint(self):
+        self.client.replies = [ChatResponse(tool_calls=[ToolCall("list_directory", {})]),
+                               ChatResponse(content="just looked")]
+        sub = self.h.event_queue.subscribe(replay=False)
+        self.h.send("look")
+        (done,) = self.done_events(sub)
+        self.assertEqual((done.checkpoint, done.files_changed), (0, 0))
 
     def test_compaction_done_carries_no_stats(self):
         sub = self.h.event_queue.subscribe(replay=False)

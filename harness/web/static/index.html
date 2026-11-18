@@ -46,13 +46,12 @@
 <header id="status">
   <div class="status-row">
     <span class="ctl-group">
-      <button id="sessions-btn" class="icon-btn" type="button" title="Sessions" aria-label="Sessions"><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg></button>
-      <button id="files-btn" class="icon-btn" type="button" title="Workspace files" aria-label="Workspace files"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></button>
+      <button id="sessions-btn" class="icon-btn" type="button" title="Sessions (Alt+S)" aria-label="Sessions"><svg class="icon" aria-hidden="true"><use href="#i-history"/></svg></button>
+      <button id="files-btn" class="icon-btn" type="button" title="Workspace files (Alt+F)" aria-label="Workspace files"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></button>
       <button id="changes-btn" class="icon-btn" type="button" title="Changes (nothing to undo)" aria-label="Changes"><svg class="icon" aria-hidden="true"><use href="#i-changes"/></svg><span id="changes-count" class="count" hidden></span></button>
     </span>
     <span class="brand"><span id="conn-dot" class="dot" title="Disconnected"></span><span class="brand-name">momo</span></span>
     <button id="workdir" class="field muted mono collapse workdir-btn" type="button" dir="rtl" title="Workspace"></button>
-    <span id="host" class="field muted collapse"></span>
     <span class="spacer"></span>
     <span class="ctl-group">
       <button id="plan-btn" class="icon-btn" type="button" title="Plan" aria-label="Plan"><svg class="icon" aria-hidden="true"><use href="#i-plan"/></svg></button>
@@ -128,7 +127,7 @@
     <div class="menu-sub">Theme</div>
     <button id="theme-btn" class="link-btn" type="button" title="Switch theme" aria-label="Switch theme"><svg class="icon sm" aria-hidden="true"><use href="#i-contrast"/></svg> <span id="theme-label">Theme: system</span></button>
     <div class="menu-foot">
-      <button type="button" id="settings-open" class="link-btn"><svg class="icon sm" aria-hidden="true"><use href="#i-sliders"/></svg> All settings…</button>
+      <button type="button" id="settings-open" class="link-btn"><svg class="icon sm" aria-hidden="true"><use href="#i-sliders"/></svg> All settings… <kbd>Alt+,</kbd></button>
       <button type="button" id="palette-open" class="link-btn">Commands <kbd>Ctrl+K</kbd></button>
     </div>
   </div>
@@ -306,6 +305,7 @@
     <span class="spacer"></span>
     <button id="settings-close" class="icon-btn" type="button" title="Close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
+  <div class="drawer-filter"><input id="settings-filter" type="search" placeholder="Filter settings…" aria-label="Filter settings" autocomplete="off" spellcheck="false"></div>
   <div id="settings-body" class="drawer-body settings">
     <details data-section="appearance">
       <summary>Appearance</summary>
@@ -440,6 +440,7 @@
   <div id="drop-hint" class="drop-hint" hidden>Drop files to attach — text files and PDFs</div>
   <div class="composer-bar">
     <span id="busy" class="busy"></span>
+    <span id="draft-size" class="draft-size" hidden></span>
     <span class="hint muted">Enter to send · Shift+Enter newline · / commands · @ files · Ctrl+K palette · ? shortcuts</span>
     <span class="spacer"></span>
     <button id="stop" type="button" class="btn danger with-icon" hidden><svg class="icon sm" aria-hidden="true"><use href="#i-stop"/></svg> Stop</button>

@@ -242,7 +242,7 @@ function stepNode(view, step, isCur, after) {
   const h = head(open);
   h.append(el("span", "tl-dot", DOT[isCur ? "in_progress" : step.status] || "○"),
            el("span", "tl-title", `${stories ? "Phase" : "Step"} ${step.n} · ${step.title}`));
-  if (view.kind === "tdd" && step.stage !== "impl") h.append(el("span", "tl-tag", step.stage));
+  if (view.kind === "tdd" && step.stage !== "impl") h.append(el("span", "tag", step.stage));
   const meta = el("span", "tl-meta");
   if (step.progress) {
     const [done, total] = step.progress.split("/").map(Number);
